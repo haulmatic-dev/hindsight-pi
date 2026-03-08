@@ -1,0 +1,34 @@
+# Hydra Configuration
+
+# Overseer settings
+overseer:
+  poll_interval: 5s        # How often to check for ready beads
+  max_workers: 6           # Maximum parallel workers
+  default_retries: 3       # Default retry count for failed beads
+  worker_timeout: 30m      # Maximum time a worker can run
+
+# MCP Agent Mail configuration
+mcp:
+  enabled: true
+  port: 8765
+  base_url: http://127.0.0.1:8765
+
+# API Server configuration  
+api:
+  enabled: true
+  port: 8080
+
+# Project configurations (optional - auto-discovery is used if empty)
+# projects:
+#   - name: my-project
+#     path: /Users/buddhi/source-code/my-project
+#     type: single
+#     
+#   - name: microservices
+#     path: /Users/buddhi/source-code/microservices
+#     type: multi
+#     repos:
+#       - name: backend
+#         path: backend
+#       - name: frontend
+#         path: frontend
