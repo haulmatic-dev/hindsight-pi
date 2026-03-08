@@ -6,10 +6,41 @@ import (
 
 // Config represents the Hydra configuration
 type Config struct {
-	Overseer OverseerConfig  `yaml:"overseer"`
-	Projects []ProjectConfig `yaml:"projects,omitempty"`
-	MCP      MCPConfig       `yaml:"mcp"`
-	API      APIConfig       `yaml:"api"`
+	Overseer     OverseerConfig     `yaml:"overseer"`
+	Projects     []ProjectConfig    `yaml:"projects,omitempty"`
+	MCP          MCPConfig          `yaml:"mcp"`
+	API          APIConfig          `yaml:"api"`
+	Intelligence IntelligenceConfig `yaml:"intelligence"`
+}
+
+// IntelligenceConfig contains configuration for intelligence services
+type IntelligenceConfig struct {
+	CassMemory CassMemoryConfig `yaml:"cass_memory"`
+	TLDR       TLDRConfig       `yaml:"tldr"`
+	GPTCache   GPTCacheConfig   `yaml:"gptcache"`
+}
+
+// CassMemoryConfig contains cass_memory service settings
+type CassMemoryConfig struct {
+	Enabled     bool          `yaml:"enabled"`
+	QueryLimit  int           `yaml:"query_limit"`
+	HistoryDays int           `yaml:"history_days"`
+	Timeout     time.Duration `yaml:"timeout"`
+}
+
+// TLDRConfig contains TLDR service settings
+type TLDRConfig struct {
+	Enabled   bool          `yaml:"enabled"`
+	BaseURL   string        `yaml:"base_url"`
+	Timeout   time.Duration `yaml:"timeout"`
+	MaxFiles  int           `yaml:"max_files"`
+	MaxTokens int           `yaml:"max_tokens"`
+}
+
+// GPTCacheConfig contains GPTCache service settings
+type GPTCacheConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	ServerURL string `yaml:"server_url"`
 }
 
 // OverseerConfig contains overseer-specific settings
@@ -64,6 +95,25 @@ func DefaultConfig() *Config {
 		API: APIConfig{
 			Enabled: true,
 			Port:    8080,
+		},
+		Intelligence: IntelligenceConfig{
+			CassMemory: CassMemoryConfig{
+				Enabled:     true,
+				QueryLimit:  10,
+				HistoryDays: 30,
+				Timeout:     5 * time.Second,
+			},
+			TLDR: TLDRConfig{
+				Enabled:   true,
+				BaseURL:   "http://127.0.0.1:8787",
+				Timeout:   10 * time.Second,
+				MaxFiles:  50,
+				MaxTokens: 100000,
+			},
+			GPTCache: GPTCacheConfig{
+				Enabled:   true,
+				ServerURL: "http://127.0.0.1:8788",
+			},
 		},
 	}
 }

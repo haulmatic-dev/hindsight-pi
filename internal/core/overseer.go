@@ -2,19 +2,251 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/beads"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
+
+// IntelligenceBundle contains context and patterns gathered from intelligence services
+type IntelligenceBundle struct {
+	Patterns        []Pattern       `json:"patterns"`
+	ContextEntries  []ContextEntry  `json:"context_entries"`
+	ImpactAnalysis  *ImpactAnalysis `json:"impact_analysis,omitempty"`
+	ScopeValidated  bool            `json:"scope_validated"`
+	ValidationError string          `json:"validation_error,omitempty"`
+	GatheredAt      time.Time       `json:"gathered_at"`
+}
+
+// Pattern represents a learned pattern from cass_memory
+type Pattern struct {
+	ID          string    `json:"id"`
+	Type        string    `json:"type"`
+	Description string    `json:"description"`
+	Confidence  float64   `json:"confidence"`
+	Tags        []string  `json:"tags"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// ContextEntry represents a relevant historical context entry
+type ContextEntry struct {
+	ID        string    `json:"id"`
+	BeadType  string    `json:"bead_type"`
+	Files     []string  `json:"files"`
+	Summary   string    `json:"summary"`
+	Relevance float64   `json:"relevance"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ImpactAnalysis represents TLDR impact analysis results
+type ImpactAnalysis struct {
+	TargetFiles     []string   `json:"target_files"`
+	AffectedFiles   []string   `json:"affected_files"`
+	CallGraph       *CallGraph `json:"call_graph,omitempty"`
+	Complexity      int        `json:"complexity"`
+	RiskLevel       string     `json:"risk_level"`
+	Recommendations []string   `json:"recommendations"`
+}
+
+// CallGraph represents function call relationships
+type CallGraph struct {
+	Nodes []CallNode `json:"nodes"`
+	Edges []CallEdge `json:"edges"`
+}
+
+// CallNode represents a function or method in the call graph
+type CallNode struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	File     string `json:"file"`
+	NodeType string `json:"node_type"`
+}
+
+// CallEdge represents a call relationship between nodes
+type CallEdge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// CassMemoryClient provides access to cass_memory service
+type CassMemoryClient struct {
+	baseURL    string
+	httpClient *http.Client
+	queryLimit int
+}
+
+// NewCassMemoryClient creates a new cass_memory client
+func NewCassMemoryClient(baseURL string, timeout time.Duration, queryLimit int) *CassMemoryClient {
+	return &CassMemoryClient{
+		baseURL: baseURL,
+		httpClient: &http.Client{
+			Timeout: timeout,
+		},
+		queryLimit: queryLimit,
+	}
+}
+
+// QueryContext queries cass_memory for relevant context
+func (c *CassMemoryClient) QueryContext(beadType string, files []string, days int) ([]ContextEntry, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("cass_memory base URL not configured")
+	}
+
+	reqBody := map[string]interface{}{
+		"bead_type": beadType,
+		"files":     files,
+		"days":      days,
+		"limit":     c.queryLimit,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/context/query", c.baseURL)
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("cass_memory request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("cass_memory returned status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Entries []ContextEntry `json:"entries"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode cass_memory response: %w", err)
+	}
+
+	return result.Entries, nil
+}
+
+// TLDRClient provides access to TLDR impact analysis service
+type TLDRClient struct {
+	baseURL    string
+	httpClient *http.Client
+	maxFiles   int
+	maxTokens  int
+}
+
+// NewTLDRClient creates a new TLDR client
+func NewTLDRClient(baseURL string, timeout time.Duration, maxFiles, maxTokens int) *TLDRClient {
+	return &TLDRClient{
+		baseURL: baseURL,
+		httpClient: &http.Client{
+			Timeout: timeout,
+		},
+		maxFiles:  maxFiles,
+		maxTokens: maxTokens,
+	}
+}
+
+// AnalyzeImpact performs impact analysis on target files
+func (c *TLDRClient) AnalyzeImpact(projectPath string, files []string, depth int) (*ImpactAnalysis, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("TLDR base URL not configured")
+	}
+
+	// Limit files to maxFiles
+	if len(files) > c.maxFiles {
+		files = files[:c.maxFiles]
+	}
+
+	reqBody := map[string]interface{}{
+		"project_path": projectPath,
+		"files":        files,
+		"depth":        depth,
+		"max_tokens":   c.maxTokens,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/analyze/impact", c.baseURL)
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("TLDR request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("TLDR returned status %d", resp.StatusCode)
+	}
+
+	var result ImpactAnalysis
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode TLDR response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// GPTCacheClient provides access to GPTCache service
+type GPTCacheClient struct {
+	serverURL  string
+	httpClient *http.Client
+}
+
+// NewGPTCacheClient creates a new GPTCache client
+func NewGPTCacheClient(serverURL string, timeout time.Duration) *GPTCacheClient {
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	return &GPTCacheClient{
+		serverURL: serverURL,
+		httpClient: &http.Client{
+			Timeout: timeout,
+		},
+	}
+}
+
+// IsHealthy checks if the GPTCache service is available
+func (c *GPTCacheClient) IsHealthy() bool {
+	if c.serverURL == "" {
+		return false
+	}
+
+	url := fmt.Sprintf("%s/health", c.serverURL)
+	resp, err := c.httpClient.Get(url)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode == http.StatusOK
+}
 
 // Retry configuration constants
 const (
@@ -78,6 +310,10 @@ type Overseer struct {
 	retriesMu     sync.RWMutex              // Mutex for retries map
 	baseDelay     time.Duration             // Base delay for exponential backoff
 	maxDelay      time.Duration             // Maximum delay for exponential backoff
+	cassClient    *CassMemoryClient         // cass_memory client for context retrieval
+	tldrClient    *TLDRClient               // TLDR client for impact analysis
+	gptCache      *GPTCacheClient           // GPTCache client for caching
+	intelMutex    sync.RWMutex              // Mutex for intelligence clients
 }
 
 // NewOverseer creates a new overseer instance
@@ -100,6 +336,9 @@ func NewOverseer(config *Config) *Overseer {
 		maxDelay:      defaultMaxDelay,
 	}
 
+	// Initialize intelligence clients if enabled
+	o.initializeIntelligenceClients()
+
 	// Override defaults if configured
 	if config.Overseer.WorkerTimeout > 0 {
 		// WorkerTimeout can be used to derive maxDelay
@@ -110,6 +349,266 @@ func NewOverseer(config *Config) *Overseer {
 	}
 
 	return o
+}
+
+// initializeIntelligenceClients creates intelligence service clients based on config
+func (o *Overseer) initializeIntelligenceClients() {
+	o.intelMutex.Lock()
+	defer o.intelMutex.Unlock()
+
+	intellConfig := o.config.Intelligence
+
+	// Initialize cass_memory client if enabled
+	if intellConfig.CassMemory.Enabled {
+		o.cassClient = NewCassMemoryClient(
+			"http://127.0.0.1:5000", // Default cass_memory port
+			intellConfig.CassMemory.Timeout,
+			intellConfig.CassMemory.QueryLimit,
+		)
+		log.Printf("[Intelligence] cass_memory client initialized (limit: %d, timeout: %v)",
+			intellConfig.CassMemory.QueryLimit, intellConfig.CassMemory.Timeout)
+	}
+
+	// Initialize TLDR client if enabled
+	if intellConfig.TLDR.Enabled {
+		o.tldrClient = NewTLDRClient(
+			intellConfig.TLDR.BaseURL,
+			intellConfig.TLDR.Timeout,
+			intellConfig.TLDR.MaxFiles,
+			intellConfig.TLDR.MaxTokens,
+		)
+		log.Printf("[Intelligence] TLDR client initialized (baseURL: %s, maxFiles: %d)",
+			intellConfig.TLDR.BaseURL, intellConfig.TLDR.MaxFiles)
+	}
+
+	// Initialize GPTCache client if enabled
+	if intellConfig.GPTCache.Enabled {
+		o.gptCache = NewGPTCacheClient(
+			intellConfig.GPTCache.ServerURL,
+			5*time.Second,
+		)
+		log.Printf("[Intelligence] GPTCache client initialized (server: %s)",
+			intellConfig.GPTCache.ServerURL)
+	}
+}
+
+// runPreExecutionIntelligence gathers intelligence before executing a bead
+// This method is designed to be non-blocking and degrades gracefully if services are unavailable
+func (o *Overseer) runPreExecutionIntelligence(bead *types.Bead) (*IntelligenceBundle, error) {
+	startTime := time.Now()
+	bundle := &IntelligenceBundle{
+		Patterns:       make([]Pattern, 0),
+		ContextEntries: make([]ContextEntry, 0),
+		GatheredAt:     time.Now(),
+		ScopeValidated: true, // Default to true, will set to false if validation fails
+	}
+
+	beadIDStr := string(bead.ID)
+	log.Printf("[Intelligence] Starting pre-execution intelligence for bead: %s", beadIDStr)
+
+	o.intelMutex.RLock()
+	cassClient := o.cassClient
+	tldrClient := o.tldrClient
+	o.intelMutex.RUnlock()
+
+	// Extract target files from bead metadata or description
+	targetFiles := o.extractTargetFiles(bead)
+	if len(targetFiles) > 0 {
+		log.Printf("[Intelligence] Extracted %d target files for analysis", len(targetFiles))
+	}
+
+	// 1. Query cass_memory for relevant context (if enabled)
+	if cassClient != nil && o.config.Intelligence.CassMemory.Enabled {
+		ctxEntries, err := o.queryCassMemoryContext(cassClient, bead, targetFiles)
+		if err != nil {
+			// Graceful degradation: log error but continue
+			o.logGracefulDegradation("Intelligence", "cass_memory query",
+				"continuing without context", err)
+		} else {
+			bundle.ContextEntries = ctxEntries
+			log.Printf("[Intelligence] Retrieved %d context entries from cass_memory", len(ctxEntries))
+		}
+	}
+
+	// 2. Analyze impact with TLDR (if enabled and files available)
+	if tldrClient != nil && o.config.Intelligence.TLDR.Enabled && len(targetFiles) > 0 {
+		impact, err := o.analyzeImpactWithTLDR(tldrClient, bead, targetFiles)
+		if err != nil {
+			// Graceful degradation: log error but continue
+			o.logGracefulDegradation("Intelligence", "TLDR impact analysis",
+				"continuing without impact analysis", err)
+		} else {
+			bundle.ImpactAnalysis = impact
+			log.Printf("[Intelligence] TLDR impact analysis complete: %d files affected, risk: %s",
+				len(impact.AffectedFiles), impact.RiskLevel)
+		}
+	}
+
+	// 3. Validate scope against limits
+	if err := o.validateScope(bundle, targetFiles); err != nil {
+		bundle.ScopeValidated = false
+		bundle.ValidationError = err.Error()
+		log.Printf("[Intelligence] Scope validation failed for bead %s: %v", beadIDStr, err)
+	}
+
+	duration := time.Since(startTime)
+	log.Printf("[Intelligence] Pre-execution intelligence complete for %s (duration: %v, entries: %d, validated: %t)",
+		beadIDStr, duration, len(bundle.ContextEntries), bundle.ScopeValidated)
+
+	return bundle, nil
+}
+
+// queryCassMemoryContext queries cass_memory for relevant context with error handling
+func (o *Overseer) queryCassMemoryContext(client *CassMemoryClient, bead *types.Bead, files []string) ([]ContextEntry, error) {
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), o.config.Intelligence.CassMemory.Timeout)
+	defer cancel()
+
+	// Run query in goroutine to allow cancellation
+	type result struct {
+		entries []ContextEntry
+		err     error
+	}
+
+	resultChan := make(chan result, 1)
+
+	go func() {
+		entries, err := client.QueryContext(
+			bead.Type,
+			files,
+			o.config.Intelligence.CassMemory.HistoryDays,
+		)
+		resultChan <- result{entries: entries, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("cass_memory query timed out: %w", ctx.Err())
+	case res := <-resultChan:
+		return res.entries, res.err
+	}
+}
+
+// analyzeImpactWithTLDR performs impact analysis using TLDR service
+func (o *Overseer) analyzeImpactWithTLDR(client *TLDRClient, bead *types.Bead, files []string) (*ImpactAnalysis, error) {
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), o.config.Intelligence.TLDR.Timeout)
+	defer cancel()
+
+	// Find project path for the bead
+	projectPath := o.findProjectPath(bead)
+	if projectPath == "" {
+		return nil, fmt.Errorf("could not find project path for bead %s", bead.ID)
+	}
+
+	// Run analysis in goroutine to allow cancellation
+	type result struct {
+		analysis *ImpactAnalysis
+		err      error
+	}
+
+	resultChan := make(chan result, 1)
+
+	go func() {
+		// Use depth 2 for moderate analysis depth
+		analysis, err := client.AnalyzeImpact(projectPath, files, 2)
+		resultChan <- result{analysis: analysis, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("TLDR analysis timed out: %w", ctx.Err())
+	case res := <-resultChan:
+		return res.analysis, res.err
+	}
+}
+
+// extractTargetFiles extracts target file paths from bead metadata and description
+func (o *Overseer) extractTargetFiles(bead *types.Bead) []string {
+	var files []string
+	seen := make(map[string]bool)
+
+	// Check metadata for explicit file list
+	if bead.Metadata != nil {
+		if fileList, ok := bead.Metadata["files"]; ok {
+			for _, file := range strings.Split(fileList, ",") {
+				file = strings.TrimSpace(file)
+				if file != "" && !seen[file] {
+					files = append(files, file)
+					seen[file] = true
+				}
+			}
+		}
+	}
+
+	// Parse description for file references (e.g., "modify internal/core/config.go")
+	// This is a simple heuristic - can be enhanced with more sophisticated parsing
+	desc := bead.Description + " " + bead.Title
+	words := strings.Fields(desc)
+
+	for _, word := range words {
+		// Check for common file patterns
+		if strings.Contains(word, "/") || strings.Contains(word, ".go") ||
+			strings.Contains(word, ".js") || strings.Contains(word, ".ts") ||
+			strings.Contains(word, ".py") || strings.Contains(word, ".java") {
+			// Clean up the word (remove punctuation)
+			cleaned := strings.Trim(word, ".,;:!?()[]{}\"")
+			if cleaned != "" && !seen[cleaned] && len(cleaned) < 200 {
+				files = append(files, cleaned)
+				seen[cleaned] = true
+			}
+		}
+	}
+
+	return files
+}
+
+// findProjectPath finds the project path for a given bead
+func (o *Overseer) findProjectPath(bead *types.Bead) string {
+	for _, project := range o.projects {
+		if project.Name == bead.Project {
+			if bead.Repo != "" && project.Type == types.RepoTypeMulti {
+				// For multi-repo projects, return the specific repo path
+				return filepath.Join(project.Path, bead.Repo)
+			}
+			return project.Path
+		}
+	}
+	return ""
+}
+
+// validateScope validates the scope of changes against configured limits
+func (o *Overseer) validateScope(bundle *IntelligenceBundle, targetFiles []string) error {
+	config := o.config.Intelligence
+
+	// Validate file count against TLDR max files
+	if config.TLDR.Enabled && len(targetFiles) > config.TLDR.MaxFiles {
+		return fmt.Errorf("too many target files: %d exceeds limit of %d",
+			len(targetFiles), config.TLDR.MaxFiles)
+	}
+
+	// Validate impact scope if analysis available
+	if bundle.ImpactAnalysis != nil {
+		totalFiles := len(targetFiles) + len(bundle.ImpactAnalysis.AffectedFiles)
+
+		if totalFiles > config.TLDR.MaxFiles*2 {
+			return fmt.Errorf("impact scope too large: %d total files affected exceeds safe threshold",
+				totalFiles)
+		}
+
+		// Check complexity score
+		if bundle.ImpactAnalysis.Complexity > 100 {
+			return fmt.Errorf("complexity score too high: %d (max recommended: 100)",
+				bundle.ImpactAnalysis.Complexity)
+		}
+
+		// Flag high-risk changes for review
+		if bundle.ImpactAnalysis.RiskLevel == "high" {
+			log.Printf("[Intelligence] Warning: High risk level detected for change scope")
+		}
+	}
+
+	return nil
 }
 
 // shouldRetry checks if a bead should be retried based on retry count and cooldown
@@ -213,6 +712,16 @@ func (o *Overseer) logError(component, operation, beadID string, err error, seve
 func (o *Overseer) logGracefulDegradation(component, operation, action string, err error) {
 	log.Printf("[DEGRADED] [%s] %s failed but continuing | recovery=%s | error=%v",
 		component, operation, action, err)
+}
+
+// isIntelligenceEnabled checks if any intelligence services are enabled
+func (o *Overseer) isIntelligenceEnabled() bool {
+	o.intelMutex.RLock()
+	defer o.intelMutex.RUnlock()
+
+	return o.config.Intelligence.CassMemory.Enabled ||
+		o.config.Intelligence.TLDR.Enabled ||
+		o.config.Intelligence.GPTCache.Enabled
 }
 
 // Start begins the overseer's main loop
@@ -784,15 +1293,37 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		log.Printf("[Worker] Spawning worker for bead: %s (agent: %s)", beadIDStr, agentType)
 	}
 
+	// Gather pre-execution intelligence (non-blocking, graceful degradation)
+	var intelBundle *IntelligenceBundle
+	if o.isIntelligenceEnabled() {
+		intelBundle, _ = o.runPreExecutionIntelligence(&bead)
+		// Intelligence errors are logged within runPreExecutionIntelligence
+		// We continue with nil bundle if gathering fails
+	}
+
 	// Build worker command
 	cmd := exec.Command("go", "run", "cmd/worker/main.go")
-	cmd.Env = append(os.Environ(),
+	env := append(os.Environ(),
 		fmt.Sprintf("HYDRA_BEAD_ID=%s", beadIDStr),
 		fmt.Sprintf("HYDRA_PROJECT=%s", bead.Project),
 		fmt.Sprintf("HYDRA_REPO=%s", bead.Repo),
 		fmt.Sprintf("HYDRA_AGENT_TYPE=%s", agentType),
 		fmt.Sprintf("HYDRA_RETRY_COUNT=%d", retryCount),
 	)
+
+	// Pass intelligence bundle to worker if available
+	if intelBundle != nil {
+		intelJSON, err := json.Marshal(intelBundle)
+		if err == nil {
+			env = append(env, fmt.Sprintf("HYDRA_INTELLIGENCE=%s", string(intelJSON)))
+			log.Printf("[Worker] Intelligence bundle passed to worker for bead %s (%d bytes)",
+				beadIDStr, len(intelJSON))
+		} else {
+			log.Printf("[Worker] Failed to marshal intelligence bundle: %v", err)
+		}
+	}
+
+	cmd.Env = env
 
 	// Start process
 	if err := cmd.Start(); err != nil {
