@@ -7,7 +7,12 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/99designs/gqlgen/graphql/handler"
+	"github.com/99designs/gqlgen/graphql/handler/transport"
+	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+	"github.com/haulmatic-dev/hydra/graph"
 	"github.com/haulmatic-dev/hydra/internal/core"
 )
 
@@ -39,6 +44,7 @@ func NewServer(config *core.Config, overseer *core.Overseer) *Server {
 	}
 
 	s.setupRoutes()
+	s.setupGraphQL()
 
 	return s
 }
@@ -77,6 +83,41 @@ func (s *Server) setupRoutes() {
 	// TODO: Add GraphQL endpoint in Phase 1
 	// TODO: Add WebSocket endpoint for real-time updates
 	// TODO: Add SSE endpoint for log streaming
+}
+
+// setupGraphQL configures GraphQL endpoints
+func (s *Server) setupGraphQL() {
+	// Create resolver with overseer reference
+	resolver := &graph.Resolver{
+		Overseer: s.overseer,
+	}
+
+	// Create GraphQL server
+	srv := handler.NewDefaultServer(
+		graph.NewExecutableSchema(graph.Config{
+			Resolvers: resolver,
+		}),
+	)
+
+	// Add WebSocket transport for subscriptions
+	srv.AddTransport(&transport.Websocket{
+		Upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool {
+				return true // Configure for production
+			},
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
+		},
+	})
+
+	// GraphQL endpoint
+	s.router.POST("/graphql", gin.WrapH(srv))
+	s.router.GET("/graphql", gin.WrapH(srv))
+
+	// GraphQL Playground (development)
+	s.router.GET("/playground", gin.WrapH(
+		playground.Handler("Hydra GraphQL", "/graphql"),
+	))
 }
 
 // Start starts the API server

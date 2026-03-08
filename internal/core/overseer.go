@@ -1692,6 +1692,90 @@ func (o *Overseer) GetReadyBeadsFromDAG() []types.Bead {
 	return beads
 }
 
+// GetBeadDependencies returns the IDs of beads that the given bead depends on.
+// This is a thread-safe wrapper around the DAG's GetDependencies method.
+func (o *Overseer) GetBeadDependencies(beadID string) ([]string, error) {
+	o.dagMu.RLock()
+	defer o.dagMu.RUnlock()
+
+	if o.dag == nil {
+		return nil, fmt.Errorf("DAG not initialized")
+	}
+
+	return o.dag.GetDependencies(beadID)
+}
+
+// GetBeadDependents returns the IDs of beads that depend on the given bead.
+// This is a thread-safe wrapper around the DAG's GetDependents method.
+func (o *Overseer) GetBeadDependents(beadID string) ([]string, error) {
+	o.dagMu.RLock()
+	defer o.dagMu.RUnlock()
+
+	if o.dag == nil {
+		return nil, fmt.Errorf("DAG not initialized")
+	}
+
+	return o.dag.GetDependents(beadID)
+}
+
+// GetBeadFromDAG retrieves a single bead from the DAG by its ID.
+// Returns error if the bead is not found in the DAG.
+func (o *Overseer) GetBeadFromDAG(beadID string) (types.Bead, error) {
+	o.dagMu.RLock()
+	defer o.dagMu.RUnlock()
+
+	if o.dag == nil {
+		return types.Bead{}, fmt.Errorf("DAG not initialized")
+	}
+
+	node, exists := o.dag.GetNode(beadID)
+	if !exists {
+		return types.Bead{}, fmt.Errorf("bead %s not found in DAG", beadID)
+	}
+
+	return node.Bead, nil
+}
+
+// SetPollInterval updates the poll interval for the overseer
+func (o *Overseer) SetPollInterval(interval time.Duration) {
+	o.pollInterval = interval
+	log.Printf("🔧 Poll interval set to %v", interval)
+}
+
+// GetPollInterval returns the current poll interval
+func (o *Overseer) GetPollInterval() time.Duration {
+	return o.pollInterval
+}
+
+// SetRetryDelay updates the base retry delay for the overseer
+func (o *Overseer) SetRetryDelay(delay time.Duration) {
+	o.baseDelay = delay
+	log.Printf("🔧 Retry delay set to %v", delay)
+}
+
+// GetRetryDelay returns the current base retry delay
+func (o *Overseer) GetRetryDelay() time.Duration {
+	return o.baseDelay
+}
+
+// CloseBead closes a bead using the beads client
+func (o *Overseer) CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error {
+	return o.beadsClient.CloseBead(projectPath, repoName, beadID, reason)
+}
+
+// GetBeadsClient returns the beads client
+func (o *Overseer) GetBeadsClient() BeadsClient {
+	return o.beadsClient
+}
+
+// GetDAG returns the current DAG instance.
+// This provides access to the dependency graph for field resolvers.
+func (o *Overseer) GetDAG() *DAG {
+	o.dagMu.RLock()
+	defer o.dagMu.RUnlock()
+	return o.dag
+}
+
 // initializeMCP initializes the MCP client and reservation manager
 func (o *Overseer) initializeMCP() error {
 	o.mcpMu.Lock()

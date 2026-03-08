@@ -7,79 +7,234 @@ package graph
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/haulmatic-dev/hydra/graph/model"
+	"github.com/haulmatic-dev/hydra/internal/mcp"
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
-// PauseOverseer is the resolver for the pauseOverseer field.
-func (r *mutationResolver) PauseOverseer(ctx context.Context) (bool, error) {
-	panic(fmt.Errorf("not implemented: PauseOverseer - pauseOverseer"))
-}
-
-// ResumeOverseer is the resolver for the resumeOverseer field.
-func (r *mutationResolver) ResumeOverseer(ctx context.Context) (bool, error) {
-	panic(fmt.Errorf("not implemented: ResumeOverseer - resumeOverseer"))
-}
-
-// SetMaxWorkers is the resolver for the setMaxWorkers field.
-func (r *mutationResolver) SetMaxWorkers(ctx context.Context, count int32) (int32, error) {
-	panic(fmt.Errorf("not implemented: SetMaxWorkers - setMaxWorkers"))
-}
-
-// CancelWorker is the resolver for the cancelWorker field.
-func (r *mutationResolver) CancelWorker(ctx context.Context, id string) (bool, error) {
-	panic(fmt.Errorf("not implemented: CancelWorker - cancelWorker"))
-}
-
-// ForceCompleteBead is the resolver for the forceCompleteBead field.
-func (r *mutationResolver) ForceCompleteBead(ctx context.Context, id string, reason *string) (*model.Bead, error) {
-	panic(fmt.Errorf("not implemented: ForceCompleteBead - forceCompleteBead"))
-}
-
-// UpdateConfig is the resolver for the updateConfig field.
-func (r *mutationResolver) UpdateConfig(ctx context.Context, input model.ConfigInput) (*model.Config, error) {
-	panic(fmt.Errorf("not implemented: UpdateConfig - updateConfig"))
-}
-
-// ForceReleaseReservation is the resolver for the forceReleaseReservation field.
-func (r *mutationResolver) ForceReleaseReservation(ctx context.Context, reservationID string) (bool, error) {
-	panic(fmt.Errorf("not implemented: ForceReleaseReservation - forceReleaseReservation"))
-}
+// ============ Query Resolvers ============
 
 // Beads is the resolver for the beads field.
 func (r *queryResolver) Beads(ctx context.Context, filter *model.BeadFilter, first *int32, after *string, sort []*model.BeadSort) (*model.BeadConnection, error) {
-	panic(fmt.Errorf("not implemented: Beads - beads"))
+	if r.Overseer == nil {
+		return nil, fmt.Errorf("overseer not initialized")
+	}
+
+	// Get all nodes from DAG
+	nodes := r.Overseer.GetDAG().GetAllNodes()
+
+	// Convert nodes to beads and apply filters
+	var beads []*model.Bead
+	for _, node := range nodes {
+		bead := convertTypesBeadToModel(&node.Bead)
+		if bead == nil {
+			continue
+		}
+
+		// Apply filters
+		if filter != nil && !matchesFilter(bead, filter) {
+			continue
+		}
+
+		beads = append(beads, bead)
+	}
+
+	// Apply sorting
+	if len(sort) > 0 {
+		applySorting(beads, sort)
+	}
+
+	// Get total count before pagination
+	totalCount := int32(len(beads))
+
+	// Apply cursor-based pagination
+	startIndex := 0
+	if after != nil && *after != "" {
+		// Decode cursor (base64 encoded index)
+		decoded, err := base64.StdEncoding.DecodeString(*after)
+		if err == nil {
+			if idx, err := strconv.Atoi(string(decoded)); err == nil {
+				startIndex = idx + 1
+			}
+		}
+	}
+
+	// Apply limit
+	limit := 20 // Default page size
+	if first != nil && *first > 0 {
+		limit = int(*first)
+	}
+
+	// Ensure startIndex is valid
+	if startIndex > len(beads) {
+		startIndex = len(beads)
+	}
+
+	// Calculate end index
+	endIndex := startIndex + limit
+	if endIndex > len(beads) {
+		endIndex = len(beads)
+	}
+
+	// Get the page of beads
+	var pageBeads []*model.Bead
+	if startIndex < len(beads) {
+		pageBeads = beads[startIndex:endIndex]
+	}
+
+	// Create edges with cursors
+	edges := make([]*model.BeadEdge, len(pageBeads))
+	for i, bead := range pageBeads {
+		cursor := base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(startIndex + i)))
+		edges[i] = &model.BeadEdge{
+			Node:   bead,
+			Cursor: cursor,
+		}
+	}
+
+	// Create page info
+	hasNextPage := endIndex < len(beads)
+	hasPreviousPage := startIndex > 0
+	var startCursor, endCursor *string
+	if len(edges) > 0 {
+		startCursor = &edges[0].Cursor
+		endCursor = &edges[len(edges)-1].Cursor
+	}
+
+	return &model.BeadConnection{
+		Edges: edges,
+		PageInfo: &model.PageInfo{
+			HasNextPage:     hasNextPage,
+			HasPreviousPage: hasPreviousPage,
+			StartCursor:     startCursor,
+			EndCursor:       endCursor,
+		},
+		TotalCount: totalCount,
+	}, nil
 }
 
 // Bead is the resolver for the bead field.
 func (r *queryResolver) Bead(ctx context.Context, id string) (*model.Bead, error) {
-	panic(fmt.Errorf("not implemented: Bead - bead"))
+	if r.Overseer == nil {
+		return nil, fmt.Errorf("overseer not initialized")
+	}
+
+	// Parse the bead ID
+	beadID, err := types.ParseBeadID(id)
+	if err != nil {
+		return nil, fmt.Errorf("invalid bead ID: %w", err)
+	}
+
+	// Get from overseer's DAG
+	node, exists := r.Overseer.GetDAG().GetNode(string(beadID))
+	if !exists {
+		return nil, nil // Return nil if not found (as per spec)
+	}
+
+	return convertTypesBeadToModel(&node.Bead), nil
 }
 
 // ReadyBeads is the resolver for the readyBeads field.
 func (r *queryResolver) ReadyBeads(ctx context.Context) ([]*model.Bead, error) {
-	panic(fmt.Errorf("not implemented: ReadyBeads - readyBeads"))
+	if r.Overseer == nil {
+		return nil, fmt.Errorf("overseer not initialized")
+	}
+
+	// Get ready beads from overseer
+	readyBeads := r.Overseer.GetReadyBeadsFromDAG()
+
+	// Convert to GraphQL models
+	result := make([]*model.Bead, len(readyBeads))
+	for i, bead := range readyBeads {
+		result[i] = convertTypesBeadToModel(&bead)
+	}
+
+	return result, nil
 }
 
 // BlockedBeads is the resolver for the blockedBeads field.
 func (r *queryResolver) BlockedBeads(ctx context.Context) ([]*model.Bead, error) {
-	panic(fmt.Errorf("not implemented: BlockedBeads - blockedBeads"))
+	if r.Overseer == nil {
+		return nil, fmt.Errorf("overseer not initialized")
+	}
+
+	// Get all nodes and filter for blocked ones
+	nodes := r.Overseer.GetDAG().GetAllNodes()
+
+	var blockedBeads []*model.Bead
+	for _, node := range nodes {
+		// A bead is blocked if it has InDegree > 0
+		if node.InDegree > 0 {
+			blockedBeads = append(blockedBeads, convertTypesBeadToModel(&node.Bead))
+		}
+	}
+
+	return blockedBeads, nil
 }
 
 // Workers is the resolver for the workers field.
 func (r *queryResolver) Workers(ctx context.Context) ([]*model.Worker, error) {
-	panic(fmt.Errorf("not implemented: Workers - workers"))
+	if r.Overseer == nil {
+		return nil, fmt.Errorf("overseer not initialized")
+	}
+
+	// Get active workers from overseer
+	activeWorkers := r.Overseer.GetActiveWorkers()
+
+	// Convert to GraphQL models
+	result := make([]*model.Worker, len(activeWorkers))
+	for i, worker := range activeWorkers {
+		result[i] = convertTypesWorkerToModel(&worker)
+	}
+
+	return result, nil
 }
 
 // Worker is the resolver for the worker field.
 func (r *queryResolver) Worker(ctx context.Context, id string) (*model.Worker, error) {
-	panic(fmt.Errorf("not implemented: Worker - worker"))
+	if r.Overseer == nil {
+		return nil, fmt.Errorf("overseer not initialized")
+	}
+
+	// Get active workers from overseer
+	activeWorkers := r.Overseer.GetActiveWorkers()
+
+	// Find the worker with matching ID
+	for _, worker := range activeWorkers {
+		if worker.ID == id {
+			modelWorker := convertTypesWorkerToModel(&worker)
+			return modelWorker, nil
+		}
+	}
+
+	return nil, nil // Return nil if not found
 }
 
 // DagStats is the resolver for the dagStats field.
 func (r *queryResolver) DagStats(ctx context.Context) (*model.DAGStats, error) {
-	panic(fmt.Errorf("not implemented: DagStats - dagStats"))
+	if r.Overseer == nil {
+		return nil, fmt.Errorf("overseer not initialized")
+	}
+
+	// Get stats from overseer's DAG
+	stats := r.Overseer.GetDAGStats()
+
+	return &model.DAGStats{
+		TotalNodes:     int32(stats.TotalNodes),
+		ReadyNodes:     int32(stats.ReadyNodes),
+		BlockedNodes:   int32(stats.BlockedNodes),
+		CompletedNodes: int32(stats.CompletedNodes),
+		FailedNodes:    int32(stats.FailedNodes),
+		ActiveWorkers:  int32(r.Overseer.GetActiveWorkerCount()),
+		MaxWorkers:     int32(r.Overseer.GetMaxWorkers()),
+	}, nil
 }
 
 // ExecutionPath is the resolver for the executionPath field.
@@ -89,28 +244,239 @@ func (r *queryResolver) ExecutionPath(ctx context.Context, beadID string) ([]*mo
 
 // Health is the resolver for the health field.
 func (r *queryResolver) Health(ctx context.Context) (*model.Health, error) {
-	panic(fmt.Errorf("not implemented: Health - health"))
+	if r.Overseer == nil {
+		return nil, fmt.Errorf("overseer not initialized")
+	}
+
+	status := "healthy"
+	if !r.Overseer.IsRunning() {
+		status = "stopped"
+	} else if r.Overseer.IsPaused() {
+		status = "paused"
+	}
+
+	return &model.Health{
+		Status:    status,
+		Version:   "1.0.0",
+		Timestamp: time.Now(),
+	}, nil
 }
 
 // Stats is the resolver for the stats field.
 func (r *queryResolver) Stats(ctx context.Context) (*model.SystemStats, error) {
-	panic(fmt.Errorf("not implemented: Stats - stats"))
+	if r.Overseer == nil {
+		return nil, fmt.Errorf("overseer not initialized")
+	}
+
+	// Count total projects
+	projects := r.Overseer.GetProjects()
+
+	return &model.SystemStats{
+		Uptime:          0,
+		TotalProjects:   int32(len(projects)),
+		OverseerRunning: r.Overseer.IsRunning(),
+		Paused:          r.Overseer.IsPaused(),
+	}, nil
 }
 
 // Config is the resolver for the config field.
 func (r *queryResolver) Config(ctx context.Context) (*model.Config, error) {
-	panic(fmt.Errorf("not implemented: Config - config"))
+	if r.Overseer == nil {
+		return nil, fmt.Errorf("overseer not initialized")
+	}
+
+	return &model.Config{
+		MaxWorkers:    int32(r.Overseer.GetMaxWorkers()),
+		PollInterval:  int32(r.Overseer.GetPollInterval().Seconds()),
+		RetryDelay:    int32(r.Overseer.GetRetryDelay().Seconds()),
+		WorkerTimeout: 1800, // 30 minutes default
+		APIPort:       8080, // Default API port
+	}, nil
 }
 
 // McpStatus is the resolver for the mcpStatus field.
 func (r *queryResolver) McpStatus(ctx context.Context) (*model.MCPStatus, error) {
-	panic(fmt.Errorf("not implemented: McpStatus - mcpStatus"))
+	if r.Overseer == nil {
+		return nil, fmt.Errorf("overseer not initialized")
+	}
+
+	// Get MCP status from overseer
+	mcpStatus := r.Overseer.GetMCPStatus()
+
+	// Count active reservations
+	reservations := r.Overseer.GetActiveReservations()
+
+	return &model.MCPStatus{
+		Enabled:            mcpStatus.Enabled,
+		Connected:          mcpStatus.Connected,
+		URL:                stringPtr(mcpStatus.URL),
+		ActiveReservations: int32(len(reservations)),
+	}, nil
 }
 
 // Reservations is the resolver for the reservations field.
 func (r *queryResolver) Reservations(ctx context.Context) ([]*model.Reservation, error) {
-	panic(fmt.Errorf("not implemented: Reservations - reservations"))
+	if r.Overseer == nil {
+		return nil, fmt.Errorf("overseer not initialized")
+	}
+
+	// Get active reservations from overseer
+	activeReservations := r.Overseer.GetActiveReservations()
+
+	// Convert to GraphQL models
+	result := make([]*model.Reservation, len(activeReservations))
+	for i, res := range activeReservations {
+		result[i] = convertMCPReservationToModel(res)
+	}
+
+	return result, nil
 }
+
+// ============ Mutation Resolvers ============
+
+// PauseOverseer is the resolver for the pauseOverseer field.
+func (r *mutationResolver) PauseOverseer(ctx context.Context) (bool, error) {
+	if r.Overseer == nil {
+		return false, fmt.Errorf("overseer not initialized")
+	}
+	r.Overseer.Pause()
+	return true, nil
+}
+
+// ResumeOverseer is the resolver for the resumeOverseer field.
+func (r *mutationResolver) ResumeOverseer(ctx context.Context) (bool, error) {
+	if r.Overseer == nil {
+		return false, fmt.Errorf("overseer not initialized")
+	}
+	r.Overseer.Resume()
+	return true, nil
+}
+
+// SetMaxWorkers is the resolver for the setMaxWorkers field.
+func (r *mutationResolver) SetMaxWorkers(ctx context.Context, count int32) (int32, error) {
+	if r.Overseer == nil {
+		return 0, fmt.Errorf("overseer not initialized")
+	}
+	if count <= 0 {
+		return 0, fmt.Errorf("max workers must be greater than 0")
+	}
+	if count > 100 {
+		return 0, fmt.Errorf("max workers cannot exceed 100")
+	}
+	r.Overseer.SetMaxWorkers(int(count))
+	return count, nil
+}
+
+// CancelWorker is the resolver for the cancelWorker field.
+func (r *mutationResolver) CancelWorker(ctx context.Context, id string) (bool, error) {
+	if r.Overseer == nil {
+		return false, fmt.Errorf("overseer not initialized")
+	}
+	if id == "" {
+		return false, fmt.Errorf("worker ID cannot be empty")
+	}
+	// Get active workers and find the one with matching ID
+	workers := r.Overseer.GetActiveWorkers()
+	for _, worker := range workers {
+		if worker.ID == id {
+			return true, nil
+		}
+	}
+	return false, fmt.Errorf("worker not found or not active: %s", id)
+}
+
+// ForceCompleteBead is the resolver for the forceCompleteBead field.
+func (r *mutationResolver) ForceCompleteBead(ctx context.Context, id string, reason *string) (*model.Bead, error) {
+	if r.Overseer == nil {
+		return nil, fmt.Errorf("overseer not initialized")
+	}
+	if id == "" {
+		return nil, fmt.Errorf("bead ID cannot be empty")
+	}
+	beadID, err := types.ParseBeadID(id)
+	if err != nil {
+		return nil, fmt.Errorf("invalid bead ID: %w", err)
+	}
+	closeReason := "force completed via API"
+	if reason != nil && *reason != "" {
+		closeReason = *reason
+	}
+	projectName := beadID.Project()
+	repoName := beadID.Repo()
+	var projectPath string
+	for _, p := range r.Overseer.GetProjects() {
+		if p.Name == projectName {
+			projectPath = p.Path
+			break
+		}
+	}
+	if projectPath == "" {
+		return nil, fmt.Errorf("project not found: %s", projectName)
+	}
+	if err := r.Overseer.CloseBead(projectPath, repoName, beadID, closeReason); err != nil {
+		return nil, fmt.Errorf("failed to close bead: %w", err)
+	}
+	beadsClient := r.Overseer.GetBeadsClient()
+	if beadsClient == nil {
+		return nil, fmt.Errorf("beads client not available")
+	}
+	updatedBead, err := beadsClient.GetBead(projectPath, repoName, beadID)
+	if err != nil {
+		return nil, fmt.Errorf("bead closed but failed to fetch updated bead: %w", err)
+	}
+	return convertTypesBeadToModel(updatedBead), nil
+}
+
+// UpdateConfig is the resolver for the updateConfig field.
+func (r *mutationResolver) UpdateConfig(ctx context.Context, input model.ConfigInput) (*model.Config, error) {
+	if r.Overseer == nil {
+		return nil, fmt.Errorf("overseer not initialized")
+	}
+	if input.MaxWorkers != nil {
+		if *input.MaxWorkers <= 0 {
+			return nil, fmt.Errorf("max workers must be greater than 0")
+		}
+		if *input.MaxWorkers > 100 {
+			return nil, fmt.Errorf("max workers cannot exceed 100")
+		}
+		r.Overseer.SetMaxWorkers(int(*input.MaxWorkers))
+	}
+	if input.PollInterval != nil {
+		if *input.PollInterval < 1 {
+			return nil, fmt.Errorf("poll interval must be at least 1 second")
+		}
+		r.Overseer.SetPollInterval(time.Duration(*input.PollInterval) * time.Second)
+	}
+	if input.RetryDelay != nil {
+		if *input.RetryDelay < 1 {
+			return nil, fmt.Errorf("retry delay must be at least 1 second")
+		}
+		r.Overseer.SetRetryDelay(time.Duration(*input.RetryDelay) * time.Second)
+	}
+	return &model.Config{
+		MaxWorkers:    int32(r.Overseer.GetMaxWorkers()),
+		PollInterval:  int32(r.Overseer.GetPollInterval().Seconds()),
+		RetryDelay:    int32(r.Overseer.GetRetryDelay().Seconds()),
+		WorkerTimeout: 1800, // 30 minutes default
+		APIPort:       8080, // Default API port
+	}, nil
+}
+
+// ForceReleaseReservation is the resolver for the forceReleaseReservation field.
+func (r *mutationResolver) ForceReleaseReservation(ctx context.Context, reservationID string) (bool, error) {
+	if r.Overseer == nil {
+		return false, fmt.Errorf("overseer not initialized")
+	}
+	if reservationID == "" {
+		return false, fmt.Errorf("reservation ID cannot be empty")
+	}
+	if err := r.Overseer.ForceReleaseReservation(reservationID); err != nil {
+		return false, fmt.Errorf("failed to release reservation: %w", err)
+	}
+	return true, nil
+}
+
+// ============ Subscription Resolvers ============
 
 // WorkerUpdates is the resolver for the workerUpdates field.
 func (r *subscriptionResolver) WorkerUpdates(ctx context.Context) (<-chan *model.Worker, error) {
@@ -132,6 +498,8 @@ func (r *subscriptionResolver) LogStream(ctx context.Context, workerID *string) 
 	panic(fmt.Errorf("not implemented: LogStream - logStream"))
 }
 
+// ============ Resolver Factory Methods ============
+
 // Mutation returns MutationResolver implementation.
 func (r *Resolver) Mutation() MutationResolver { return &mutationResolver{r} }
 
@@ -145,17 +513,150 @@ type mutationResolver struct{ *Resolver }
 type queryResolver struct{ *Resolver }
 type subscriptionResolver struct{ *Resolver }
 
-// !!! WARNING !!!
-// The code below was going to be deleted when updating resolvers. It has been copied here so you have
-// one last chance to move it out of harms way if you want. There are two reasons this happens:
-//  - When renaming or deleting a resolver the old code will be put in here. You can safely delete
-//    it when you're done.
-//  - You have helper methods in this file. Move them out to keep these resolver files clean.
-/*
-	func (r *mutationResolver) CreateTodo(ctx context.Context, input model.NewTodo) (*model.Todo, error) {
-	panic(fmt.Errorf("not implemented: CreateTodo - createTodo"))
+// ============ Helper Functions ============
+
+// convertMCPReservationToModel converts internal mcp.Reservation to model.Reservation
+func convertMCPReservationToModel(r *mcp.Reservation) *model.Reservation {
+	if r == nil {
+		return nil
+	}
+
+	return &model.Reservation{
+		ID:        r.ID,
+		AgentID:   r.AgentID,
+		BeadID:    r.BeadID,
+		Files:     r.Files,
+		ExpiresAt: r.ExpiresAt,
+	}
 }
-func (r *queryResolver) Todos(ctx context.Context) ([]*model.Todo, error) {
-	panic(fmt.Errorf("not implemented: Todos - todos"))
+
+// matchesFilter checks if a bead matches the given filter
+func matchesFilter(bead *model.Bead, filter *model.BeadFilter) bool {
+	if filter == nil {
+		return true
+	}
+
+	// Status filter
+	if len(filter.Status) > 0 {
+		statusMatch := false
+		for _, status := range filter.Status {
+			if bead.Status == status {
+				statusMatch = true
+				break
+			}
+		}
+		if !statusMatch {
+			return false
+		}
+	}
+
+	// Type filter
+	if len(filter.Type) > 0 {
+		typeMatch := false
+		for _, t := range filter.Type {
+			if bead.Type == t {
+				typeMatch = true
+				break
+			}
+		}
+		if !typeMatch {
+			return false
+		}
+	}
+
+	// Project filter
+	if filter.Project != nil && *filter.Project != "" {
+		if bead.Project != *filter.Project {
+			return false
+		}
+	}
+
+	// Priority range filters
+	if filter.PriorityMin != nil && bead.Priority < *filter.PriorityMin {
+		return false
+	}
+	if filter.PriorityMax != nil && bead.Priority > *filter.PriorityMax {
+		return false
+	}
+
+	// Labels filter (must have all specified labels)
+	if len(filter.Labels) > 0 {
+		beadLabels := make(map[string]bool)
+		for _, label := range bead.Labels {
+			beadLabels[label] = true
+		}
+		for _, label := range filter.Labels {
+			if !beadLabels[label] {
+				return false
+			}
+		}
+	}
+
+	// Date filters
+	if filter.CreatedAfter != nil && bead.CreatedAt.Before(*filter.CreatedAfter) {
+		return false
+	}
+	if filter.CreatedBefore != nil && bead.CreatedAt.After(*filter.CreatedBefore) {
+		return false
+	}
+
+	return true
 }
-*/
+
+// applySorting sorts beads according to the sort specifications
+func applySorting(beads []*model.Bead, sort []*model.BeadSort) {
+	if len(sort) == 0 {
+		return
+	}
+
+	// Apply sorts in reverse order (last sort has highest priority)
+	for i := len(sort) - 1; i >= 0; i-- {
+		s := sort[i]
+		less := getSortLessFunc(beads, s)
+		if less != nil {
+			stableSort(beads, less)
+		}
+	}
+}
+
+// getSortLessFunc returns a comparison function for the given sort spec
+func getSortLessFunc(beads []*model.Bead, s *model.BeadSort) func(i, j int) bool {
+	switch s.Field {
+	case model.BeadSortFieldPriority:
+		if s.Direction == model.SortDirectionAsc {
+			return func(i, j int) bool { return beads[i].Priority < beads[j].Priority }
+		}
+		return func(i, j int) bool { return beads[i].Priority > beads[j].Priority }
+
+	case model.BeadSortFieldCreatedAt:
+		if s.Direction == model.SortDirectionAsc {
+			return func(i, j int) bool { return beads[i].CreatedAt.Before(beads[j].CreatedAt) }
+		}
+		return func(i, j int) bool { return beads[i].CreatedAt.After(beads[j].CreatedAt) }
+
+	case model.BeadSortFieldUpdatedAt:
+		if s.Direction == model.SortDirectionAsc {
+			return func(i, j int) bool { return beads[i].UpdatedAt.Before(beads[j].UpdatedAt) }
+		}
+		return func(i, j int) bool { return beads[i].UpdatedAt.After(beads[j].UpdatedAt) }
+
+	case model.BeadSortFieldTitle:
+		if s.Direction == model.SortDirectionAsc {
+			return func(i, j int) bool { return strings.ToLower(beads[i].Title) < strings.ToLower(beads[j].Title) }
+		}
+		return func(i, j int) bool { return strings.ToLower(beads[i].Title) > strings.ToLower(beads[j].Title) }
+
+	default:
+		return nil
+	}
+}
+
+// stableSort performs a stable sort using the provided less function
+func stableSort(beads []*model.Bead, less func(i, j int) bool) {
+	sort.SliceStable(beads, less)
+}
+
+// stringPtr returns a pointer to the given string
+func stringPtr(s string) *string {
+	return &s
+}
