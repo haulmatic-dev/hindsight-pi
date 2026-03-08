@@ -147,15 +147,17 @@ const (
 	StatusInProgress BeadStatus = "in_progress"
 	// StatusCompleted indicates the bead has been successfully completed.
 	StatusCompleted BeadStatus = "completed"
+	// StatusClosed indicates the bead has been closed (synonym for completed).
+	StatusClosed BeadStatus = "closed"
 	// StatusFailed indicates the bead has failed.
 	StatusFailed BeadStatus = "failed"
 	// StatusBlocked indicates the bead is blocked by dependencies.
 	StatusBlocked BeadStatus = "blocked"
 )
 
-// IsTerminal returns true if the status is a terminal state (completed or failed).
+// IsTerminal returns true if the status is a terminal state (completed, closed, or failed).
 func (s BeadStatus) IsTerminal() bool {
-	return s == StatusCompleted || s == StatusFailed
+	return s == StatusCompleted || s == StatusClosed || s == StatusFailed
 }
 
 // Bead represents a single task in the workflow.

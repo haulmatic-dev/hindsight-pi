@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -255,6 +256,7 @@ func (c *Client) parseBeadDetailJSON(output []byte, projectPath, repoName string
 }
 
 // CloseBead marks a bead as completed
+// Returns error if bead was skipped due to dependencies or if close failed
 func (c *Client) CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error {
 	workDir := c.getWorkDir(projectPath, repoName)
 
@@ -269,7 +271,22 @@ func (c *Client) CloseBead(projectPath, repoName string, beadID types.BeadID, re
 		return fmt.Errorf("br close %s failed: %w", beadID.String(), err)
 	}
 
-	_ = output // Close command output is typically empty on success
+	// Parse output to detect if bead was skipped due to dependencies
+	outputStr := string(output)
+	if strings.Contains(outputStr, "Warning: Skipped") || strings.Contains(outputStr, "blocked by") {
+		return fmt.Errorf("bead %s skipped due to dependencies: %s", beadID.String(), outputStr)
+	}
+
+	// Verify the bead was actually closed
+	bead, err := c.GetBead(projectPath, repoName, beadID)
+	if err != nil {
+		return fmt.Errorf("failed to verify bead %s closure: %w", beadID.String(), err)
+	}
+
+	if !bead.Status.IsTerminal() {
+		return fmt.Errorf("bead %s not closed (status: %s). May have unresolved dependencies", beadID.String(), bead.Status)
+	}
+
 	return nil
 }
 

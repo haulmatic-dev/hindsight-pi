@@ -899,10 +899,11 @@ func (o *Overseer) tick() error {
 		// Continue with existing DAG if rebuild fails
 	}
 
-	// Get ready beads from DAG (InDegree == 0)
-	readyBeads, err := o.getReadyBeadsFromDAG()
+	// Get ready beads using beadsClient (calls 'br ready' directly)
+	// This is more reliable than DAG which may have stale dependency data
+	readyBeads, err := o.getReadyBeads()
 	if err != nil {
-		return fmt.Errorf("failed to get ready beads from DAG: %w", err)
+		return fmt.Errorf("failed to get ready beads: %w", err)
 	}
 
 	// Include failed beads that are eligible for retry
@@ -1239,9 +1240,10 @@ func (o *Overseer) getReadyBeadsFromDAG() ([]types.Bead, error) {
 	return readyBeads, nil
 }
 
-// getReadyBeads retrieves beads that are ready to execute
+// getReadyBeads retrieves beads that are ready to execute using 'br ready'
+// This is more reliable than DAG as it queries the actual bead status
 func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
-	var readyBeads []types.Bead
+	var allReadyBeads []types.Bead
 
 	for _, project := range o.projects {
 		if project.Type == types.RepoTypeSingle {
@@ -1250,7 +1252,7 @@ func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
 				log.Printf("⚠️  Could not get beads for project %s: %v", project.Name, err)
 				continue
 			}
-			readyBeads = append(readyBeads, beads...)
+			allReadyBeads = append(allReadyBeads, beads...)
 		} else {
 			// Multi-repo project
 			for _, repo := range project.Repos {
@@ -1259,10 +1261,42 @@ func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
 					log.Printf("⚠️  Could not get beads for repo %s/%s: %v", project.Name, repo.Name, err)
 					continue
 				}
-				readyBeads = append(readyBeads, beads...)
+				allReadyBeads = append(allReadyBeads, beads...)
 			}
 		}
 	}
+
+	// Filter out beads that are already running or completed
+	o.workerMutex.RLock()
+	var readyBeads []types.Bead
+	for _, bead := range allReadyBeads {
+		beadIDStr := string(bead.ID)
+
+		// Filter: not already running
+		if _, isRunning := o.activeWorkers[beadIDStr]; isRunning {
+			continue
+		}
+
+		// Filter: not already completed in this session
+		if o.completed[beadIDStr] {
+			continue
+		}
+
+		// Skip approval gates
+		if bead.Type == "approval-gate" {
+			continue
+		}
+
+		readyBeads = append(readyBeads, bead)
+	}
+	o.workerMutex.RUnlock()
+
+	// Sort by priority (high to low)
+	sort.Slice(readyBeads, func(i, j int) bool {
+		return readyBeads[i].Priority > readyBeads[j].Priority
+	})
+
+	log.Printf("📋 Found %d ready beads from 'br ready' (after filtering)", len(readyBeads))
 
 	return readyBeads, nil
 }
@@ -1477,8 +1511,19 @@ func (o *Overseer) monitorWorker(worker *types.Worker, cmd *exec.Cmd) {
 	o.workerMutex.Unlock()
 
 	// Close bead via beadsClient
-	if err := o.closeWorkerBead(worker, success); err != nil {
-		o.logError("beadsClient", "CloseBead", worker.ID, err, "warn")
+	closeErr := o.closeWorkerBead(worker, success)
+	if closeErr != nil {
+		o.logError("beadsClient", "CloseBead", worker.ID, closeErr, "warn")
+
+		// If close failed due to dependencies, mark as not successful so it gets retried
+		// This handles the case where a bead was processed but couldn't be closed
+		// because its dependencies weren't resolved yet
+		if strings.Contains(closeErr.Error(), "unresolved dependencies") ||
+			strings.Contains(closeErr.Error(), "dependencies") {
+			log.Printf("[Worker] Bead %s processed but not closed due to dependencies - will retry later", worker.BeadID.String())
+			success = false
+			exitCode = 1 // Mark as failed so it gets retried
+		}
 	}
 
 	// If successful and new beads are ready, trigger immediate scheduling
