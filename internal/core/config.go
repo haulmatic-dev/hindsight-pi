@@ -1,16 +1,35 @@
 package core
 
 import (
+	"fmt"
+	"os"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Config represents the Hydra configuration
 type Config struct {
 	Overseer     OverseerConfig     `yaml:"overseer"`
-	Projects     []ProjectConfig    `yaml:"projects,omitempty"`
+	Projects     []ProjectConfig    `yaml:"projects"`
 	MCP          MCPConfig          `yaml:"mcp"`
 	API          APIConfig          `yaml:"api"`
 	Intelligence IntelligenceConfig `yaml:"intelligence"`
+}
+
+// rawConfig is used for YAML parsing to handle the nested projects structure
+type rawConfig struct {
+	Overseer     OverseerConfig     `yaml:"overseer"`
+	Projects     yaml.Node          `yaml:"projects"` // Can be array or object
+	MCP          MCPConfig          `yaml:"mcp"`
+	API          APIConfig          `yaml:"api"`
+	Intelligence IntelligenceConfig `yaml:"intelligence"`
+}
+
+// projectsListConfig handles the case where projects is an object with 'list' field
+type projectsListConfig struct {
+	AutoDiscover bool            `yaml:"auto_discover"`
+	List         []ProjectConfig `yaml:"list"`
 }
 
 // IntelligenceConfig contains configuration for intelligence services
@@ -128,9 +147,57 @@ func DefaultConfig() *Config {
 	}
 }
 
-// LoadConfig loads configuration from a file
+// LoadConfig loads configuration from a YAML file
 func LoadConfig(path string) (*Config, error) {
-	// TODO: Implement YAML parsing
-	// For now, return default config
-	return DefaultConfig(), nil
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	// Start with default config
+	config := DefaultConfig()
+
+	// Parse raw config to handle projects array vs object
+	var raw rawConfig
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("failed to parse config YAML: %w", err)
+	}
+
+	// Copy non-project fields
+	config.Overseer = raw.Overseer
+	config.MCP = raw.MCP
+	config.API = raw.API
+	config.Intelligence = raw.Intelligence
+
+	// Handle projects field - can be:
+	// 1. An array of ProjectConfig (direct list)
+	// 2. An object with 'auto_discover' and 'list' fields
+	// 3. Empty/null (use auto-discovery)
+	if !isZeroNode(raw.Projects) {
+		if raw.Projects.Kind == yaml.SequenceNode {
+			// Projects is an array
+			if err := raw.Projects.Decode(&config.Projects); err != nil {
+				return nil, fmt.Errorf("failed to parse projects array: %w", err)
+			}
+		} else if raw.Projects.Kind == yaml.MappingNode {
+			// Projects is an object - check if it's the {auto_discover, list} format
+			var projectsObj projectsListConfig
+			if err := raw.Projects.Decode(&projectsObj); err == nil && len(projectsObj.List) > 0 {
+				// It's the object format with list
+				config.Projects = projectsObj.List
+			} else {
+				// Try parsing as direct array anyway
+				if err := raw.Projects.Decode(&config.Projects); err != nil {
+					return nil, fmt.Errorf("failed to parse projects: %w", err)
+				}
+			}
+		}
+	}
+
+	return config, nil
+}
+
+// isZeroNode checks if a yaml.Node is empty/zero value
+func isZeroNode(n yaml.Node) bool {
+	return n.Kind == 0 && n.Tag == "" && len(n.Content) == 0
 }

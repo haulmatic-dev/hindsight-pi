@@ -943,6 +943,13 @@ func (o *Overseer) tick() error {
 			continue
 		}
 
+		// Skip if project path is not found (can't execute without knowing where the project is)
+		projectPath := o.findProjectPath(&bead)
+		if projectPath == "" {
+			log.Printf("⚠️  Skipping bead %s: project '%s' not configured or found", bead.ID, bead.Project)
+			continue
+		}
+
 		if err := o.spawnWorker(bead); err != nil {
 			// Record retry and log error
 			o.recordRetry(beadIDStr, err)
@@ -1342,6 +1349,8 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		fmt.Sprintf("HYDRA_REPO=%s", bead.Repo),
 		fmt.Sprintf("HYDRA_AGENT_TYPE=%s", agentType),
 		fmt.Sprintf("HYDRA_RETRY_COUNT=%d", retryCount),
+		fmt.Sprintf("HYDRA_BEAD_TITLE=%s", bead.Title),
+		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
 	)
 
 	// Pass intelligence bundle to worker if available

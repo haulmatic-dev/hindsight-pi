@@ -20,12 +20,14 @@ import (
 
 // WorkerConfig holds the worker configuration from environment variables
 type WorkerConfig struct {
-	BeadID      string
-	Project     string
-	ProjectPath string
-	Repo        string
-	AgentType   string
-	MCP         struct {
+	BeadID          string
+	Project         string
+	ProjectPath     string
+	Repo            string
+	AgentType       string
+	BeadTitle       string
+	BeadDescription string
+	MCP             struct {
 		Enabled bool
 		URL     string
 	}
@@ -97,10 +99,12 @@ func main() {
 
 	// Create bead object
 	bead := types.Bead{
-		ID:      beadID,
-		Project: config.Project,
-		Repo:    config.Repo,
-		Type:    config.AgentType,
+		ID:          beadID,
+		Project:     config.Project,
+		Repo:        config.Repo,
+		Type:        config.AgentType,
+		Title:       config.BeadTitle,
+		Description: config.BeadDescription,
 	}
 
 	// Use project path if available, otherwise fall back to project name
@@ -238,6 +242,8 @@ func parseConfig() WorkerConfig {
 	config.ProjectPath = os.Getenv("HYDRA_PROJECT_PATH")
 	config.Repo = os.Getenv("HYDRA_REPO")
 	config.AgentType = os.Getenv("HYDRA_AGENT_TYPE")
+	config.BeadTitle = os.Getenv("HYDRA_BEAD_TITLE")
+	config.BeadDescription = os.Getenv("HYDRA_BEAD_DESCRIPTION")
 	if config.AgentType == "" {
 		config.AgentType = "orchestrator"
 	}
