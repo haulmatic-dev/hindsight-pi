@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,10 +180,17 @@ func (c *TestableClient) parseListJSON(output []byte, projectPath, repoName stri
 }
 
 // CloseBead marks a bead as completed
+// Returns error if bead was skipped due to dependencies or if close failed
 func (c *TestableClient) CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error {
-	_, err := c.executor.Execute("br", "close", beadID.String(), "-m", reason)
+	output, err := c.executor.Execute("br", "close", beadID.String(), "-r", reason)
 	if err != nil {
 		return fmt.Errorf("br close %s failed: %w", beadID.String(), err)
+	}
+
+	// Parse output to detect if bead was skipped due to dependencies
+	outputStr := string(output)
+	if strings.Contains(outputStr, "Warning: Skipped") || strings.Contains(outputStr, "blocked by") {
+		return fmt.Errorf("bead %s skipped due to dependencies: %s", beadID.String(), outputStr)
 	}
 
 	return nil
@@ -895,7 +903,7 @@ func TestCloseBead_Success(t *testing.T) {
 	client := NewTestableClient(mockExec)
 
 	// Close command returns empty output on success
-	mockExec.AddResponse("br", []string{"close", "hydra-abc123", "-m", "Task completed successfully"}, []byte(""), nil)
+	mockExec.AddResponse("br", []string{"close", "hydra-abc123", "-r", "Task completed successfully"}, []byte(""), nil)
 
 	err := client.CloseBead("hydra", "", "hydra-abc123", "Task completed successfully")
 	if err != nil {
@@ -921,8 +929,8 @@ func TestCloseBead_Success(t *testing.T) {
 	if call.Args[1] != "hydra-abc123" {
 		t.Errorf("Expected second arg 'hydra-abc123', got '%s'", call.Args[1])
 	}
-	if call.Args[2] != "-m" {
-		t.Errorf("Expected third arg '-m', got '%s'", call.Args[2])
+	if call.Args[2] != "-r" {
+		t.Errorf("Expected third arg '-r', got '%s'", call.Args[2])
 	}
 	if call.Args[3] != "Task completed successfully" {
 		t.Errorf("Expected fourth arg 'Task completed successfully', got '%s'", call.Args[3])
@@ -934,7 +942,7 @@ func TestCloseBead_CLIError(t *testing.T) {
 	client := NewTestableClient(mockExec)
 
 	cliErr := errors.New("exit status 1: bead not found")
-	mockExec.AddResponse("br", []string{"close", "nonexistent-123", "-m", "completed"}, []byte{}, cliErr)
+	mockExec.AddResponse("br", []string{"close", "nonexistent-123", "-r", "completed"}, []byte{}, cliErr)
 
 	err := client.CloseBead("hydra", "", "nonexistent-123", "completed")
 
@@ -945,6 +953,44 @@ func TestCloseBead_CLIError(t *testing.T) {
 	expectedMsg := "br close nonexistent-123 failed: exit status 1: bead not found"
 	if err.Error() != expectedMsg {
 		t.Errorf("Expected error '%s', got '%s'", expectedMsg, err.Error())
+	}
+}
+
+func TestCloseBead_DetectsSkippedDueToDependencies(t *testing.T) {
+	mockExec := NewMockExecutor()
+	client := NewTestableClient(mockExec)
+
+	// Simulate output when bead is skipped due to dependencies
+	output := []byte("Warning: Skipped test-bead-123: blocked by: dependency-bead:open\n")
+	mockExec.AddResponse("br", []string{"close", "test-bead-123", "-r", "completed"}, output, nil)
+
+	err := client.CloseBead("hydra", "", "test-bead-123", "completed")
+
+	if err == nil {
+		t.Fatal("Expected error when bead is skipped, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "dependencies") && !strings.Contains(err.Error(), "skipped") {
+		t.Errorf("Expected error about dependencies or skipped, got: %v", err)
+	}
+}
+
+func TestCloseBead_DetectsBlockedByDependencies(t *testing.T) {
+	mockExec := NewMockExecutor()
+	client := NewTestableClient(mockExec)
+
+	// Alternative output format
+	output := []byte("bead test-bead-123 blocked by: other-bead:open\n")
+	mockExec.AddResponse("br", []string{"close", "test-bead-123", "-r", "completed"}, output, nil)
+
+	err := client.CloseBead("hydra", "", "test-bead-123", "completed")
+
+	if err == nil {
+		t.Fatal("Expected error when bead is blocked, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "dependencies") && !strings.Contains(err.Error(), "blocked") {
+		t.Errorf("Expected error about dependencies or blocked, got: %v", err)
 	}
 }
 
@@ -976,7 +1022,7 @@ func TestCloseBead_DifferentReasons(t *testing.T) {
 			mockExec := NewMockExecutor()
 			client := NewTestableClient(mockExec)
 
-			mockExec.AddResponse("br", []string{"close", "hydra-abc123", "-m", tc.reason}, []byte(""), nil)
+			mockExec.AddResponse("br", []string{"close", "hydra-abc123", "-r", tc.reason}, []byte(""), nil)
 
 			err := client.CloseBead("hydra", "", "hydra-abc123", tc.reason)
 			if err != nil {
