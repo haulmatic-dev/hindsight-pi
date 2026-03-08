@@ -558,7 +558,8 @@ func executeWithOpencode(
 	cmd := buildOpencodeCommand(bead, agentType, intelligenceCtx, projectPath)
 
 	log.Printf("🔧 Executing: %s %s", cmd.Path, strings.Join(cmd.Args[1:], " "))
-	streamLog(mcpClient, "info", fmt.Sprintf("Executing opencode command"))
+	log.Printf("📁 Working directory: %s", cmd.Dir)
+	streamLog(mcpClient, "info", fmt.Sprintf("Executing opencode command in %s", cmd.Dir))
 
 	// Capture output
 	var stdout, stderr bytes.Buffer
@@ -578,6 +579,16 @@ func executeWithOpencode(
 			result.ExitCode = 1
 		}
 		result.Success = false
+
+		// Log the actual error output for debugging
+		log.Printf("❌ Opencode failed with exit code %d", result.ExitCode)
+		if stdoutStr := stdout.String(); stdoutStr != "" {
+			log.Printf("📤 STDOUT:\n%s", stdoutStr)
+		}
+		if stderrStr := stderr.String(); stderrStr != "" {
+			log.Printf("📤 STDERR:\n%s", stderrStr)
+		}
+
 		return result, fmt.Errorf("opencode execution failed: %w", err)
 	}
 
@@ -587,6 +598,7 @@ func executeWithOpencode(
 }
 
 // buildOpencodeCommand builds the opencode CLI command for a bead
+// Opencode expects: opencode run <message> OR opencode <project-path>
 func buildOpencodeCommand(bead types.Bead, agentType string, intelligenceCtx *IntelligenceContext, projectPath string) *exec.Cmd {
 	// Find opencode binary
 	opencodePath := os.Getenv("HYDRA_OPCODE_PATH")
@@ -600,70 +612,44 @@ func buildOpencodeCommand(bead types.Bead, agentType string, intelligenceCtx *In
 		path = bead.Project
 	}
 
-	args := []string{
-		"--project", path,
-		"--agent", agentType,
-	}
+	// Build the prompt message from bead info
+	var promptParts []string
 
-	if bead.Repo != "" {
-		args = append(args, "--repo", bead.Repo)
-	}
+	// Start with agent type context
+	promptParts = append(promptParts, fmt.Sprintf("[%s]", agentType))
 
-	// Add bead title and description as prompts
+	// Add bead type and title
 	if bead.Title != "" {
-		args = append(args, "--prompt", bead.Title)
+		promptParts = append(promptParts, fmt.Sprintf("%s: %s", bead.Type, bead.Title))
+	} else {
+		promptParts = append(promptParts, bead.Type)
 	}
 
+	// Add description
 	if bead.Description != "" {
-		args = append(args, "--prompt", bead.Description)
+		promptParts = append(promptParts, "- "+bead.Description)
 	}
 
 	// Add target files if available
 	targetFiles := extractTargetFiles(bead)
-	for _, file := range targetFiles {
-		args = append(args, "--file", file)
+	if len(targetFiles) > 0 {
+		promptParts = append(promptParts, fmt.Sprintf("Files: %v", targetFiles))
 	}
 
-	// Add intelligence context as context hints
-	if intelligenceCtx != nil {
-		// Add patterns as context
-		for _, pattern := range intelligenceCtx.Patterns {
-			if pattern.Content != "" {
-				args = append(args, "--context", fmt.Sprintf("Pattern: %s", pattern.Content))
-			}
-		}
+	// Join all parts into single prompt
+	prompt := strings.Join(promptParts, " ")
 
-		// Add anti-patterns as warnings
-		for _, antiPattern := range intelligenceCtx.AntiPatterns {
-			if antiPattern.Content != "" {
-				args = append(args, "--context", fmt.Sprintf("Avoid: %s", antiPattern.Content))
-			}
-		}
+	// Create command with proper working directory
+	cmd := exec.Command(opencodePath, "run", prompt)
+	cmd.Dir = path
 
-		// Add related files as context
-		for _, relatedFile := range intelligenceCtx.RelatedFiles {
-			if relatedFile.File != "" {
-				args = append(args, "--context", fmt.Sprintf("Related: %s", relatedFile.File))
-			}
-		}
-	}
+	// Add environment variable for agent type
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("HYDRA_AGENT_TYPE=%s", agentType),
+		fmt.Sprintf("HYDRA_BEAD_TYPE=%s", bead.Type),
+	)
 
-	// Add mode flag based on bead type
-	switch bead.Type {
-	case "test", "test-validate":
-		args = append(args, "--mode", "test")
-	case "review":
-		args = append(args, "--mode", "review")
-	case "fix", "bug":
-		args = append(args, "--mode", "fix")
-	default:
-		args = append(args, "--mode", "implement")
-	}
-
-	// Add output format
-	args = append(args, "--format", "json")
-
-	return exec.Command(opencodePath, args...)
+	return cmd
 }
 
 // recordExecutionResult records the execution outcome to cass_memory

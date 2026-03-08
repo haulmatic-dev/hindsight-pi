@@ -1483,16 +1483,56 @@ func (o *Overseer) closeWorkerBead(worker *types.Worker, success bool) error {
 	projectName := worker.BeadID.Project()
 	repoName := worker.BeadID.Repo()
 
+	log.Printf("[closeWorkerBead] Attempting to close bead %s for project %s (repo: %s)",
+		worker.BeadID.String(), projectName, repoName)
+
 	// Find project to get the full path
 	var projectPath string
 	for _, p := range o.projects {
 		if p.Name == projectName {
 			projectPath = p.Path
+			log.Printf("[closeWorkerBead] Found project %s at path: %s", projectName, projectPath)
 			break
 		}
 	}
 
+	// Fallback: try to find project by walking configured projects
+	if projectPath == "" && o.config != nil {
+		log.Printf("[closeWorkerBead] Searching in %d configured projects", len(o.config.Projects))
+		for _, proj := range o.config.Projects {
+			if proj.Name == projectName {
+				projectPath = proj.Path
+				log.Printf("[closeWorkerBead] Found in config: %s", projectPath)
+				break
+			}
+		}
+	}
+
+	// Final fallback: try common paths
 	if projectPath == "" {
+		potentialPaths := []string{
+			filepath.Join("/tmp", projectName),
+			filepath.Join(os.Getenv("HOME"), "source-code", projectName),
+			filepath.Join(os.Getenv("HOME"), "projects", projectName),
+		}
+
+		for _, path := range potentialPaths {
+			if _, err := os.Stat(path); err == nil {
+				if _, err := os.Stat(filepath.Join(path, ".beads")); err == nil {
+					projectPath = path
+					log.Printf("[closeWorkerBead] Found in common location: %s", projectPath)
+					break
+				}
+			}
+		}
+	}
+
+	if projectPath == "" {
+		log.Printf("[closeWorkerBead] ERROR: Project %s not found in %d configured projects",
+			projectName, len(o.projects))
+		for i, p := range o.projects {
+			log.Printf("[closeWorkerBead]   Project %d: %s at %s", i, p.Name, p.Path)
+		}
 		return fmt.Errorf("project %s not found", projectName)
 	}
 
@@ -1501,6 +1541,9 @@ func (o *Overseer) closeWorkerBead(worker *types.Worker, success bool) error {
 	if !success {
 		reason = "failed"
 	}
+
+	log.Printf("[closeWorkerBead] Closing bead %s with reason: %s (path: %s)",
+		worker.BeadID.String(), reason, projectPath)
 
 	return o.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason)
 }
