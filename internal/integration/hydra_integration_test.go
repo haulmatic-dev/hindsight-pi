@@ -210,9 +210,9 @@ func (ts *TestSuite) CreateBead(t *testing.T, title, description, beadType strin
 	t.Helper()
 
 	// Build br create command
-	args := []string{"create", "-t", title}
+	args := []string{"create", title}
 	if description != "" {
-		args = append(args, "-d", description)
+		args = append(args, "--description", description)
 	}
 	if beadType != "" {
 		args = append(args, "--type", beadType)
@@ -483,7 +483,7 @@ func TestFullWorkflow_Success(t *testing.T) {
 	ts.StartOverseer(t)
 
 	// Create test bead
-	beadID := ts.CreateBead(t, "Test Bead", "Test description", "implement", 5)
+	beadID := ts.CreateBead(t, "Test Bead", "Test description", "implement", 2)
 	t.Logf("Created bead: %s", beadID)
 
 	// Trigger tick to pick up the bead
@@ -519,7 +519,7 @@ func TestFullWorkflow_WithRetry(t *testing.T) {
 
 	// Create bead that will simulate failure then success
 	// In real scenario, this would be controlled by worker behavior
-	beadID := ts.CreateBead(t, "Retry Test Bead", "Test retry logic", "implement", 10)
+	beadID := ts.CreateBead(t, "Retry Test Bead", "Test retry logic", "implement", 1)
 	t.Logf("Created bead: %s", beadID)
 
 	// Verify retry tracking mechanisms exist
@@ -541,9 +541,9 @@ func TestDependencyChain(t *testing.T) {
 	ts.StartOverseer(t)
 
 	// Create beads: A, B (depends on A), C (depends on B)
-	beadA := ts.CreateBead(t, "Bead A", "First bead", "implement", 10)
-	beadB := ts.CreateBead(t, "Bead B", "Depends on A", "implement", 9)
-	beadC := ts.CreateBead(t, "Bead C", "Depends on B", "implement", 8)
+	beadA := ts.CreateBead(t, "Bead A", "First bead", "implement", 1)
+	beadB := ts.CreateBead(t, "Bead B", "Depends on A", "implement", 2)
+	beadC := ts.CreateBead(t, "Bead C", "Depends on B", "implement", 3)
 
 	// Set up dependencies
 	ts.AddDependency(t, beadB, beadA)
@@ -589,7 +589,7 @@ func TestParallelExecution(t *testing.T) {
 	ts.StartOverseer(t)
 
 	// Create 5 independent beads
-	beadIDs := make([]types.BeadID, 5)
+	beadIDs := make([]types.BeadID, 2)
 	for i := 0; i < 5; i++ {
 		beadIDs[i] = ts.CreateBead(t,
 			fmt.Sprintf("Parallel Bead %d", i),
@@ -625,7 +625,7 @@ func TestWorkerFailure(t *testing.T) {
 	ts.StartOverseer(t)
 
 	// Create bead
-	beadID := ts.CreateBead(t, "Failure Test Bead", "Test failure handling", "implement", 10)
+	beadID := ts.CreateBead(t, "Failure Test Bead", "Test failure handling", "implement", 1)
 
 	// Verify retry configuration
 	assert.Equal(t, 2, ts.Config.Overseer.DefaultRetries, "Should have 2 retries configured")
@@ -653,7 +653,7 @@ func TestOverseerPauseResume(t *testing.T) {
 	ts.StartOverseer(t)
 
 	// Create initial bead
-	_ = ts.CreateBead(t, "Pause Test Bead", "Test pause/resume", "implement", 10)
+	_ = ts.CreateBead(t, "Pause Test Bead", "Test pause/resume", "implement", 1)
 
 	// Pause overseer
 	ts.Overseer.Pause()
@@ -667,7 +667,7 @@ func TestOverseerPauseResume(t *testing.T) {
 	assert.Equal(t, 0, ts.Overseer.GetActiveWorkerCount(), "No workers should spawn while paused")
 
 	// Create another bead while paused
-	beadID2 := ts.CreateBead(t, "Paused Bead 2", "Created while paused", "implement", 9)
+	beadID2 := ts.CreateBead(t, "Paused Bead 2", "Created while paused", "implement", 2)
 	t.Logf("Created bead while paused: %s", beadID2)
 
 	// Resume overseer
@@ -784,7 +784,7 @@ func TestGraphQLIntegration(t *testing.T) {
 	assert.False(t, ts.Overseer.IsPaused(), "Overseer should not be paused")
 
 	// Test 5: Create bead and query
-	_ = ts.CreateBead(t, "GraphQL Test Bead", "Testing GraphQL", "implement", 10)
+	_ = ts.CreateBead(t, "GraphQL Test Bead", "Testing GraphQL", "implement", 1)
 	ts.TriggerTick(t)
 
 	// Query for beads
@@ -833,7 +833,7 @@ func TestGraphQLSubscription(t *testing.T) {
 	defer conn.Close()
 
 	// Create a bead to trigger updates
-	_ = ts.CreateBead(t, "Subscription Test", "Test real-time updates", "implement", 10)
+	_ = ts.CreateBead(t, "Subscription Test", "Test real-time updates", "implement", 1)
 	ts.TriggerTick(t)
 
 	// Wait for update with timeout
@@ -885,9 +885,9 @@ func TestDAGStats(t *testing.T) {
 	ts.StartOverseer(t)
 
 	// Create beads with various states
-	_ = ts.CreateBead(t, "Stats Bead 1", "Test stats", "implement", 10)
-	bead2 := ts.CreateBead(t, "Stats Bead 2", "Test stats", "implement", 9)
-	bead3 := ts.CreateBead(t, "Stats Bead 3", "Blocked bead", "implement", 8)
+	_ = ts.CreateBead(t, "Stats Bead 1", "Test stats", "implement", 1)
+	bead2 := ts.CreateBead(t, "Stats Bead 2", "Test stats", "implement", 2)
+	bead3 := ts.CreateBead(t, "Stats Bead 3", "Blocked bead", "implement", 3)
 
 	// Create dependency to block bead3
 	ts.AddDependency(t, bead3, bead2)
@@ -917,7 +917,7 @@ func TestWorkerTracking(t *testing.T) {
 
 	// Create beads
 	for i := 0; i < 3; i++ {
-		ts.CreateBead(t, fmt.Sprintf("Worker Test %d", i), "Test worker tracking", "implement", 10)
+		ts.CreateBead(t, fmt.Sprintf("Worker Test %d", i), "Test worker tracking", "implement", 1)
 	}
 
 	// Build DAG
@@ -944,9 +944,9 @@ func TestBeadFiltering(t *testing.T) {
 	ts.StartOverseer(t)
 
 	// Create beads of different types
-	ts.CreateBead(t, "Implement Bead", "Implementation task", "implement", 10)
-	ts.CreateBead(t, "Test Bead", "Test task", "test", 9)
-	ts.CreateBead(t, "Review Bead", "Review task", "review", 8)
+	ts.CreateBead(t, "Implement Bead", "Implementation task", "implement", 1)
+	ts.CreateBead(t, "Test Bead", "Test task", "test", 2)
+	ts.CreateBead(t, "Review Bead", "Review task", "review", 3)
 	ts.CreateBead(t, "Approval Gate", "Approval required", "approval-gate", 7)
 
 	// Build DAG
@@ -1004,7 +1004,7 @@ func TestConcurrentOperations(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			ts.CreateBead(t, fmt.Sprintf("Concurrent %d", idx), "Concurrent test", "implement", 10)
+			ts.CreateBead(t, fmt.Sprintf("Concurrent %d", idx), "Concurrent test", "implement", 1)
 		}(i)
 	}
 	wg.Wait()
@@ -1058,7 +1058,7 @@ func BenchmarkOverseer(b *testing.B) {
 
 	// Create test beads
 	for i := 0; i < 100; i++ {
-		ts.CreateBead(&testing.T{}, fmt.Sprintf("Benchmark Bead %d", i), "Benchmark", "implement", 10)
+		ts.CreateBead(&testing.T{}, fmt.Sprintf("Benchmark Bead %d", i), "Benchmark", "implement", 1)
 	}
 
 	b.ResetTimer()
