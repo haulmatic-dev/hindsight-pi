@@ -196,3 +196,19 @@ func (s *Server) SetMaxWorkersHandler(c *gin.Context) {
 		"status":      "updated",
 	})
 }
+
+// GetDAGStatsHandler returns DAG statistics
+func (s *Server) GetDAGStatsHandler(c *gin.Context) {
+	stats := s.overseer.GetDAGStats()
+	c.JSON(http.StatusOK, stats)
+}
+
+// GetReadyBeadsHandler returns beads ready for execution
+func (s *Server) GetReadyBeadsHandler(c *gin.Context) {
+	beads := s.overseer.GetReadyBeadsFromDAG()
+	response := make([]BeadResponse, len(beads))
+	for i, bead := range beads {
+		response[i] = toBeadResponse(bead)
+	}
+	c.JSON(http.StatusOK, response)
+}

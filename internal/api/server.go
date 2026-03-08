@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/haulmatic-dev/hydra/internal/core"
 	"github.com/gin-gonic/gin"
+	"github.com/haulmatic-dev/hydra/internal/core"
 )
 
 // Server represents the HTTP API server
@@ -64,6 +64,10 @@ func (s *Server) setupRoutes() {
 		v1.POST("/overseer/pause", s.PauseOverseerHandler)
 		v1.POST("/overseer/resume", s.ResumeOverseerHandler)
 		v1.POST("/overseer/max-workers", s.SetMaxWorkersHandler)
+
+		// DAG endpoints
+		v1.GET("/dag/stats", s.GetDAGStatsHandler)
+		v1.GET("/dag/ready", s.GetReadyBeadsHandler)
 	}
 
 	// TODO: Add GraphQL endpoint in Phase 1
