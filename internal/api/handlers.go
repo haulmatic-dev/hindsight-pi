@@ -212,3 +212,70 @@ func (s *Server) GetReadyBeadsHandler(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, response)
 }
+
+// MCPStatusResponse represents the MCP status in API responses
+type MCPStatusResponse struct {
+	Enabled      bool      `json:"enabled"`
+	Connected    bool      `json:"connected"`
+	URL          string    `json:"url,omitempty"`
+	AgentID      string    `json:"agent_id,omitempty"`
+	Reservations int       `json:"active_reservations"`
+	Timestamp    time.Time `json:"timestamp"`
+}
+
+// ReservationResponse represents a reservation in API responses
+type ReservationResponse struct {
+	ID        string    `json:"id"`
+	BeadID    string    `json:"bead_id"`
+	Files     []string  `json:"files"`
+	AgentID   string    `json:"agent_id"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Status    string    `json:"status"`
+}
+
+// GetMCPStatusHandler returns the MCP connection status
+func (s *Server) GetMCPStatusHandler(c *gin.Context) {
+	status := s.overseer.GetMCPStatus()
+	reservations := s.overseer.GetActiveReservations()
+
+	response := MCPStatusResponse{
+		Enabled:      status.Enabled,
+		Connected:    status.Connected,
+		URL:          status.URL,
+		AgentID:      status.AgentID,
+		Reservations: len(reservations),
+		Timestamp:    time.Now(),
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// GetReservationsHandler returns all active file reservations
+func (s *Server) GetReservationsHandler(c *gin.Context) {
+	reservations := s.overseer.GetActiveReservations()
+
+	response := make([]ReservationResponse, 0, len(reservations))
+	for _, res := range reservations {
+		status := "active"
+		if res.IsExpired() {
+			status = "expired"
+		}
+
+		response = append(response, ReservationResponse{
+			ID:        res.ID,
+			BeadID:    res.BeadID,
+			Files:     res.Files,
+			AgentID:   res.AgentID,
+			CreatedAt: res.CreatedAt,
+			ExpiresAt: res.ExpiresAt,
+			Status:    status,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"reservations": response,
+		"count":        len(response),
+		"timestamp":    time.Now(),
+	})
+}

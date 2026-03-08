@@ -65,11 +65,16 @@ type RepoConfig struct {
 	Path string `yaml:"path"`
 }
 
-// MCPConfig contains MCP Agent Mail settings
+// MCPConfig contains MCP (Model Context Protocol) Agent Mail settings
 type MCPConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Port    int    `yaml:"port"`
-	BaseURL string `yaml:"base_url"`
+	Enabled              bool          `yaml:"enabled"`
+	URL                  string        `yaml:"url"`
+	Port                 int           `yaml:"port"`
+	BaseURL              string        `yaml:"base_url"`
+	ReconnectInterval    time.Duration `yaml:"reconnect_interval"`
+	MaxReconnectAttempts int           `yaml:"max_reconnect_attempts"`
+	HeartbeatInterval    time.Duration `yaml:"heartbeat_interval"`
+	FileReservationTTL   time.Duration `yaml:"file_reservation_ttl"`
 }
 
 // APIConfig contains API server settings
@@ -88,9 +93,14 @@ func DefaultConfig() *Config {
 			WorkerTimeout:  30 * time.Minute,
 		},
 		MCP: MCPConfig{
-			Enabled: true,
-			Port:    8765,
-			BaseURL: "http://127.0.0.1:8765",
+			Enabled:              true,
+			Port:                 8765,
+			BaseURL:              "http://127.0.0.1:8765",
+			URL:                  "ws://127.0.0.1:8765/ws",
+			ReconnectInterval:    5 * time.Second,
+			MaxReconnectAttempts: 10,
+			HeartbeatInterval:    30 * time.Second,
+			FileReservationTTL:   30 * time.Minute,
 		},
 		API: APIConfig{
 			Enabled: true,

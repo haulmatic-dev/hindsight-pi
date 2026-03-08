@@ -68,6 +68,10 @@ func (s *Server) setupRoutes() {
 		// DAG endpoints
 		v1.GET("/dag/stats", s.GetDAGStatsHandler)
 		v1.GET("/dag/ready", s.GetReadyBeadsHandler)
+
+		// MCP endpoints
+		v1.GET("/mcp/status", s.GetMCPStatusHandler)
+		v1.GET("/mcp/reservations", s.GetReservationsHandler)
 	}
 
 	// TODO: Add GraphQL endpoint in Phase 1

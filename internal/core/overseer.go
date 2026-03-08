@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/beads"
+	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -314,6 +315,14 @@ type Overseer struct {
 	tldrClient    *TLDRClient               // TLDR client for impact analysis
 	gptCache      *GPTCacheClient           // GPTCache client for caching
 	intelMutex    sync.RWMutex              // Mutex for intelligence clients
+
+	// MCP (Model Context Protocol) fields
+	mcpClient          *mcp.Client                 // MCP WebSocket client
+	mcpReservationMgr  *mcp.ReservationManager     // MCP reservation manager
+	mcpConfig          *MCPConfig                  // MCP configuration
+	activeReservations map[string]*mcp.Reservation // Active file reservations
+	mcpMu              sync.RWMutex                // Mutex for MCP operations
+	mcpMessageHandler  func(mcp.Message)           // Handler for incoming MCP messages
 }
 
 // NewOverseer creates a new overseer instance
@@ -338,6 +347,11 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize intelligence clients if enabled
 	o.initializeIntelligenceClients()
+
+	// Initialize MCP client if enabled
+	if config.MCP.Enabled {
+		o.initializeMCP()
+	}
 
 	// Override defaults if configured
 	if config.Overseer.WorkerTimeout > 0 {
@@ -1450,7 +1464,9 @@ func (o *Overseer) monitorWorker(worker *types.Worker, cmd *exec.Cmd) {
 		go o.triggerImmediateSchedule()
 	}
 
-	// TODO: Send completion message via MCP
+	// Send completion message via MCP
+	o.sendMCPWorkerCompletion(worker, success, exitCode, duration)
+
 	// TODO: Record results to cass_memory
 }
 
@@ -1667,4 +1683,322 @@ func (o *Overseer) GetReadyBeadsFromDAG() []types.Bead {
 	}
 
 	return beads
+}
+
+// initializeMCP initializes the MCP client and reservation manager
+func (o *Overseer) initializeMCP() error {
+	o.mcpMu.Lock()
+	defer o.mcpMu.Unlock()
+
+	if !o.config.MCP.Enabled {
+		return nil
+	}
+
+	o.mcpConfig = &o.config.MCP
+	o.activeReservations = make(map[string]*mcp.Reservation)
+
+	// Initialize reservation manager with configured TTL
+	ttl := o.config.MCP.FileReservationTTL
+	if ttl <= 0 {
+		ttl = 30 * time.Minute
+	}
+	o.mcpReservationMgr = mcp.NewReservationManager()
+
+	// Initialize WebSocket MCP client
+	agentID := fmt.Sprintf("hydra-overseer-%d", time.Now().Unix())
+	wsURL := o.config.MCP.URL
+	if wsURL == "" {
+		wsURL = fmt.Sprintf("ws://127.0.0.1:%d/ws", o.config.MCP.Port)
+	}
+
+	var err error
+	o.mcpClient, err = mcp.NewClient(wsURL, agentID)
+	if err != nil {
+		log.Printf("[MCP] Failed to create MCP client: %v", err)
+		return fmt.Errorf("failed to create MCP client: %w", err)
+	}
+
+	// Set up message handler
+	o.mcpClient.SetMessageHandler(o.handleMCPMessage)
+
+	log.Printf("[MCP] MCP client initialized (URL: %s, Agent: %s)", wsURL, agentID)
+	return nil
+}
+
+// StartMCPListener connects to the MCP server and starts listening for messages
+func (o *Overseer) StartMCPListener() error {
+	o.mcpMu.Lock()
+	defer o.mcpMu.Unlock()
+
+	if o.mcpClient == nil {
+		return fmt.Errorf("MCP client not initialized")
+	}
+
+	if err := o.mcpClient.Connect(); err != nil {
+		log.Printf("[MCP] Failed to connect: %v", err)
+		return fmt.Errorf("failed to connect to MCP server: %w", err)
+	}
+
+	// Register the overseer as an agent
+	metadata := mcp.RegistrationMetadata{
+		AgentID:   "hydra-overseer",
+		Type:      "orchestrator",
+		StartTime: time.Now(),
+		Metadata: map[string]string{
+			"role":    "overseer",
+			"version": "1.0.0",
+		},
+	}
+
+	if err := o.mcpClient.Register(metadata); err != nil {
+		log.Printf("[MCP] Failed to register: %v", err)
+		// Continue even if registration fails
+	} else {
+		log.Printf("[MCP] Successfully registered with MCP server")
+	}
+
+	return nil
+}
+
+// StopMCP disconnects from the MCP server
+func (o *Overseer) StopMCP() error {
+	o.mcpMu.Lock()
+	defer o.mcpMu.Unlock()
+
+	if o.mcpClient == nil {
+		return nil
+	}
+
+	// Deregister before disconnecting
+	if o.mcpClient.IsConnected() {
+		if err := o.mcpClient.Deregister(); err != nil {
+			log.Printf("[MCP] Failed to deregister: %v", err)
+		}
+	}
+
+	if err := o.mcpClient.Disconnect(); err != nil {
+		log.Printf("[MCP] Error during disconnect: %v", err)
+		return err
+	}
+
+	log.Printf("[MCP] Disconnected from MCP server")
+	return nil
+}
+
+// handleMCPMessage processes incoming MCP messages
+func (o *Overseer) handleMCPMessage(msg mcp.Message) {
+	log.Printf("[MCP] Received message: type=%s, from=%s", msg.Type, msg.From)
+
+	switch msg.Type {
+	case mcp.MsgTypeTaskComplete:
+		o.handleTaskCompleteMessage(&msg)
+	case mcp.MsgTypeTaskStart:
+		o.handleTaskStartMessage(&msg)
+	case mcp.MsgTypeHeartbeat:
+		// Heartbeat messages are handled automatically
+		log.Printf("[MCP] Heartbeat from %s", msg.From)
+	case mcp.MsgTypeLog:
+		o.handleLogMessage(&msg)
+	case mcp.MsgTypeFileReserved:
+		o.handleFileReservedMessage(&msg)
+	case mcp.MsgTypeFileReleased:
+		o.handleFileReleasedMessage(&msg)
+	default:
+		log.Printf("[MCP] Unknown message type: %s", msg.Type)
+	}
+}
+
+// HandleMCPMessage processes an MCP message (public API)
+func (o *Overseer) HandleMCPMessage(msg *mcp.Message) error {
+	if msg == nil {
+		return fmt.Errorf("nil message")
+	}
+	o.handleMCPMessage(*msg)
+	return nil
+}
+
+// handleTaskCompleteMessage processes task completion messages from workers
+func (o *Overseer) handleTaskCompleteMessage(msg *mcp.Message) {
+	beadID, ok := msg.Payload["bead_id"].(string)
+	if !ok || beadID == "" {
+		log.Printf("[MCP] Task complete message missing bead_id")
+		return
+	}
+
+	status, _ := msg.Payload["status"].(string)
+	exitCode := 0
+	if code, ok := msg.Payload["exit_code"].(float64); ok {
+		exitCode = int(code)
+	}
+
+	log.Printf("[MCP] Task complete: bead=%s, status=%s, exit_code=%d", beadID, status, exitCode)
+
+	// Trigger scheduling cycle for next tasks
+	go o.triggerImmediateSchedule()
+}
+
+// handleTaskStartMessage processes task start messages
+func (o *Overseer) handleTaskStartMessage(msg *mcp.Message) {
+	beadID, ok := msg.Payload["bead_id"].(string)
+	if !ok || beadID == "" {
+		return
+	}
+
+	log.Printf("[MCP] Task started: bead=%s, agent=%s", beadID, msg.From)
+}
+
+// handleLogMessage processes log messages from agents
+func (o *Overseer) handleLogMessage(msg *mcp.Message) {
+	level, _ := msg.Payload["level"].(string)
+	message, _ := msg.Payload["message"].(string)
+	beadID, _ := msg.Payload["bead_id"].(string)
+
+	log.Printf("[MCP Log] [%s] [bead=%s] %s", level, beadID, message)
+}
+
+// handleFileReservedMessage processes file reservation messages
+func (o *Overseer) handleFileReservedMessage(msg *mcp.Message) {
+	beadID, _ := msg.Payload["bead_id"].(string)
+	filePath, _ := msg.Payload["file_path"].(string)
+
+	log.Printf("[MCP] File reserved: bead=%s, file=%s", beadID, filePath)
+}
+
+// handleFileReleasedMessage processes file release messages
+func (o *Overseer) handleFileReleasedMessage(msg *mcp.Message) {
+	beadID, _ := msg.Payload["bead_id"].(string)
+	filePath, _ := msg.Payload["file_path"].(string)
+	committed, _ := msg.Payload["committed"].(bool)
+
+	log.Printf("[MCP] File released: bead=%s, file=%s, committed=%v", beadID, filePath, committed)
+}
+
+// GetActiveReservations returns all active file reservations
+func (o *Overseer) GetActiveReservations() []*mcp.Reservation {
+	o.mcpMu.RLock()
+	defer o.mcpMu.RUnlock()
+
+	if o.mcpReservationMgr == nil {
+		return nil
+	}
+
+	allRes := o.mcpReservationMgr.GetAllReservations()
+	var active []*mcp.Reservation
+	for _, res := range allRes {
+		if !res.IsExpired() {
+			active = append(active, res)
+		}
+	}
+
+	return active
+}
+
+// ForceReleaseReservation forcibly releases a reservation by ID
+func (o *Overseer) ForceReleaseReservation(reservationID string) error {
+	o.mcpMu.Lock()
+	defer o.mcpMu.Unlock()
+
+	if o.mcpReservationMgr == nil {
+		return fmt.Errorf("reservation manager not initialized")
+	}
+
+	o.mcpReservationMgr.RemoveReservation(reservationID)
+	log.Printf("[MCP] Force released reservation: %s", reservationID)
+	return nil
+}
+
+// BroadcastToWorkers sends a broadcast message to all connected workers
+func (o *Overseer) BroadcastToWorkers(msgType string, payload map[string]interface{}) error {
+	o.mcpMu.RLock()
+	client := o.mcpClient
+	o.mcpMu.RUnlock()
+
+	if client == nil {
+		return fmt.Errorf("MCP client not initialized")
+	}
+
+	if !client.IsConnected() {
+		return fmt.Errorf("MCP client not connected")
+	}
+
+	if err := client.Broadcast(msgType, payload); err != nil {
+		return fmt.Errorf("failed to broadcast message: %w", err)
+	}
+
+	log.Printf("[MCP] Broadcast message sent: type=%s", msgType)
+	return nil
+}
+
+// SendLogToMCP sends a log message to the MCP server
+func (o *Overseer) SendLogToMCP(level, message string) error {
+	o.mcpMu.RLock()
+	client := o.mcpClient
+	o.mcpMu.RUnlock()
+
+	if client == nil || !client.IsConnected() {
+		return fmt.Errorf("MCP client not available")
+	}
+
+	return client.SendLog(level, message)
+}
+
+// GetMCPStatus returns the current MCP connection status
+func (o *Overseer) GetMCPStatus() mcp.ClientStatus {
+	o.mcpMu.RLock()
+	defer o.mcpMu.RUnlock()
+
+	if o.mcpClient == nil {
+		return mcp.ClientStatus{
+			Enabled:   o.config.MCP.Enabled,
+			Connected: false,
+		}
+	}
+
+	return o.mcpClient.GetStatus()
+}
+
+// IsMCPConnected returns whether the MCP client is connected
+func (o *Overseer) IsMCPConnected() bool {
+	o.mcpMu.RLock()
+	defer o.mcpMu.RUnlock()
+
+	if o.mcpClient == nil {
+		return false
+	}
+
+	return o.mcpClient.IsConnected()
+}
+
+// sendMCPWorkerCompletion sends a task completion message via MCP
+func (o *Overseer) sendMCPWorkerCompletion(worker *types.Worker, success bool, exitCode int, duration time.Duration) {
+	o.mcpMu.RLock()
+	client := o.mcpClient
+	o.mcpMu.RUnlock()
+
+	if client == nil || !client.IsConnected() {
+		return
+	}
+
+	status := "success"
+	if !success {
+		if o.getRetryCount(worker.ID) >= o.config.Overseer.DefaultRetries {
+			status = "failure"
+		} else {
+			status = "partial"
+		}
+	}
+
+	payload := map[string]interface{}{
+		"bead_id":    worker.ID,
+		"status":     status,
+		"exit_code":  exitCode,
+		"duration":   duration.String(),
+		"agent_type": string(worker.AgentType),
+	}
+
+	if err := client.Broadcast(mcp.MsgTypeTaskComplete, payload); err != nil {
+		log.Printf("[MCP] Failed to send task completion: %v", err)
+	} else {
+		log.Printf("[MCP] Task completion broadcast: bead=%s, status=%s", worker.ID, status)
+	}
 }
