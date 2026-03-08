@@ -877,7 +877,7 @@ func closeBeadFromWorker(bead types.Bead, projectPath, repoName, reason string) 
 
 	// Try to close using br CLI directly
 	// The br CLI needs to be run from the project directory
-	cmd := exec.Command("br", "close", beadID, "-m", reason)
+	cmd := exec.Command("br", "close", beadID, "-r", reason)
 	cmd.Dir = projectPath
 
 	output, err := cmd.CombinedOutput()

@@ -1380,12 +1380,13 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 
 	// Create worker record
 	worker := &types.Worker{
-		ID:        beadIDStr,
-		BeadID:    bead.ID,
-		PID:       cmd.Process.Pid,
-		AgentType: agentType,
-		StartTime: time.Now(),
-		Status:    "running",
+		ID:          beadIDStr,
+		BeadID:      bead.ID,
+		PID:         cmd.Process.Pid,
+		AgentType:   agentType,
+		StartTime:   time.Now(),
+		Status:      "running",
+		ProjectPath: projectPath,
 	}
 
 	// Track worker
@@ -1507,13 +1508,21 @@ func (o *Overseer) closeWorkerBead(worker *types.Worker, success bool) error {
 	log.Printf("[closeWorkerBead] Attempting to close bead %s for project %s (repo: %s)",
 		worker.BeadID.String(), projectName, repoName)
 
-	// Find project to get the full path
+	// First: use the project path stored in the worker record
 	var projectPath string
-	for _, p := range o.projects {
-		if p.Name == projectName {
-			projectPath = p.Path
-			log.Printf("[closeWorkerBead] Found project %s at path: %s", projectName, projectPath)
-			break
+	if worker.ProjectPath != "" {
+		projectPath = worker.ProjectPath
+		log.Printf("[closeWorkerBead] Using project path from worker record: %s", projectPath)
+	}
+
+	// Fallback: find project by name
+	if projectPath == "" {
+		for _, p := range o.projects {
+			if p.Name == projectName {
+				projectPath = p.Path
+				log.Printf("[closeWorkerBead] Found project %s at path: %s", projectName, projectPath)
+				break
+			}
 		}
 	}
 
@@ -1529,21 +1538,18 @@ func (o *Overseer) closeWorkerBead(worker *types.Worker, success bool) error {
 		}
 	}
 
-	// Final fallback: try common paths
-	if projectPath == "" {
-		potentialPaths := []string{
-			filepath.Join("/tmp", projectName),
-			filepath.Join(os.Getenv("HOME"), "source-code", projectName),
-			filepath.Join(os.Getenv("HOME"), "projects", projectName),
-		}
-
-		for _, path := range potentialPaths {
-			if _, err := os.Stat(path); err == nil {
-				if _, err := os.Stat(filepath.Join(path, ".beads")); err == nil {
-					projectPath = path
-					log.Printf("[closeWorkerBead] Found in common location: %s", projectPath)
-					break
-				}
+	// Final fallback: search configured projects for any valid beads directory
+	// This handles cases where bead.Project differs from configured project name
+	if projectPath == "" && len(o.projects) > 0 {
+		log.Printf("[closeWorkerBead] Searching configured projects for bead %s", worker.BeadID.String())
+		for _, proj := range o.projects {
+			// Check if this project has a .beads directory
+			beadsDir := filepath.Join(proj.Path, ".beads")
+			if _, err := os.Stat(beadsDir); err == nil {
+				// Found a valid beads project - use it
+				projectPath = proj.Path
+				log.Printf("[closeWorkerBead] Using configured project: %s at %s", proj.Name, projectPath)
+				break
 			}
 		}
 	}

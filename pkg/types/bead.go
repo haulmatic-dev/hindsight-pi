@@ -243,12 +243,13 @@ func DetermineAgentTypes(beadType string) []AgentType {
 
 // Worker represents an active worker process.
 type Worker struct {
-	ID        string    `json:"id"`
-	BeadID    BeadID    `json:"bead_id"`
-	PID       int       `json:"pid"`
-	AgentType AgentType `json:"agent_type"`
-	StartTime time.Time `json:"start_time"`
-	Status    string    `json:"status"`
+	ID          string    `json:"id"`
+	BeadID      BeadID    `json:"bead_id"`
+	PID         int       `json:"pid"`
+	AgentType   AgentType `json:"agent_type"`
+	StartTime   time.Time `json:"start_time"`
+	Status      string    `json:"status"`
+	ProjectPath string    `json:"project_path"` // Path to project (for closing beads)
 }
 
 // LegacyBeadID represents the old BeadID structure for backward compatibility.

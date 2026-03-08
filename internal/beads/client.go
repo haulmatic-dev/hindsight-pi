@@ -258,7 +258,7 @@ func (c *Client) parseBeadDetailJSON(output []byte, projectPath, repoName string
 func (c *Client) CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error {
 	workDir := c.getWorkDir(projectPath, repoName)
 
-	cmd := exec.Command("br", "close", beadID.String(), "-m", reason)
+	cmd := exec.Command("br", "close", beadID.String(), "-r", reason)
 	cmd.Dir = workDir
 
 	output, err := cmd.Output()
