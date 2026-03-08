@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/buddhi/hydra/internal/beads"
-	"github.com/buddhi/hydra/pkg/types"
+	"github.com/haulmatic-dev/hydra/internal/beads"
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // Overseer is the main scheduler daemon
@@ -21,8 +21,11 @@ type Overseer struct {
 	activeWorkers map[string]*types.Worker
 	workerMutex   sync.RWMutex
 	running       bool
+	paused        bool
+	pauseMutex    sync.RWMutex
 	pollInterval  time.Duration
 	maxWorkers    int
+	maxWorkersMux sync.RWMutex
 	beadsClient   *beads.Client
 }
 
@@ -175,12 +178,18 @@ func (o *Overseer) inspectProject(path, name string) (*types.Project, error) {
 
 // tick performs one iteration of the scheduling loop
 func (o *Overseer) tick() error {
+	// Check if paused
+	if o.IsPaused() {
+		return nil
+	}
+
 	// Get active worker count
 	o.workerMutex.RLock()
 	activeCount := len(o.activeWorkers)
 	o.workerMutex.RUnlock()
 
-	availableSlots := o.maxWorkers - activeCount
+	maxWorkers := o.GetMaxWorkers()
+	availableSlots := maxWorkers - activeCount
 	if availableSlots <= 0 {
 		return nil
 	}
@@ -195,7 +204,7 @@ func (o *Overseer) tick() error {
 		return nil
 	}
 
-	log.Printf("📊 Active workers: %d/%d, Ready beads: %d", activeCount, o.maxWorkers, len(readyBeads))
+	log.Printf("📊 Active workers: %d/%d, Ready beads: %d", activeCount, maxWorkers, len(readyBeads))
 
 	// Spawn workers for ready beads
 	for _, bead := range readyBeads {
@@ -338,4 +347,71 @@ func (o *Overseer) monitorWorker(worker *types.Worker, cmd *exec.Cmd) {
 
 	// TODO: Send completion message via MCP
 	// TODO: Record results to cass_memory
+}
+
+// GetActiveWorkerCount returns the number of currently active workers
+func (o *Overseer) GetActiveWorkerCount() int {
+	o.workerMutex.RLock()
+	defer o.workerMutex.RUnlock()
+	return len(o.activeWorkers)
+}
+
+// GetActiveWorkers returns a slice of all active workers
+func (o *Overseer) GetActiveWorkers() []types.Worker {
+	o.workerMutex.RLock()
+	defer o.workerMutex.RUnlock()
+
+	workers := make([]types.Worker, 0, len(o.activeWorkers))
+	for _, worker := range o.activeWorkers {
+		workers = append(workers, *worker)
+	}
+	return workers
+}
+
+// GetProjects returns the list of discovered projects
+func (o *Overseer) GetProjects() []types.Project {
+	return o.projects
+}
+
+// IsRunning returns whether the overseer is currently running
+func (o *Overseer) IsRunning() bool {
+	return o.running
+}
+
+// IsPaused returns whether the overseer is paused
+func (o *Overseer) IsPaused() bool {
+	o.pauseMutex.RLock()
+	defer o.pauseMutex.RUnlock()
+	return o.paused
+}
+
+// Pause stops the overseer from spawning new workers
+func (o *Overseer) Pause() {
+	o.pauseMutex.Lock()
+	defer o.pauseMutex.Unlock()
+	o.paused = true
+	log.Println("⏸️  Overseer paused")
+}
+
+// Resume allows the overseer to spawn workers again
+func (o *Overseer) Resume() {
+	o.pauseMutex.Lock()
+	defer o.pauseMutex.Unlock()
+	o.paused = false
+	log.Println("▶️  Overseer resumed")
+}
+
+// SetMaxWorkers updates the maximum number of concurrent workers
+func (o *Overseer) SetMaxWorkers(count int) {
+	o.maxWorkersMux.Lock()
+	defer o.maxWorkersMux.Unlock()
+	o.maxWorkers = count
+	log.Printf("🔧 Max workers set to %d", count)
+}
+
+// GetMaxWorkers returns the current maximum worker count
+func (o *Overseer) GetMaxWorkers() int {
+	o.maxWorkersMux.RLock()
+	defer o.maxWorkersMux.RUnlock()
+	return o.maxWorkers
 }

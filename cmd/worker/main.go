@@ -5,8 +5,6 @@ import (
 	"log"
 	"os"
 	"time"
-
-	"github.com/buddhi/hydra/pkg/types"
 )
 
 func main() {

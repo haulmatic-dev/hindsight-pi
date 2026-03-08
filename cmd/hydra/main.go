@@ -9,7 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/buddhi/hydra/internal/core"
+	"github.com/haulmatic-dev/hydra/internal/api"
+	"github.com/haulmatic-dev/hydra/internal/core"
 )
 
 func main() {
@@ -37,6 +38,9 @@ func main() {
 	// Create overseer
 	overseer := core.NewOverseer(config)
 
+	// Create API server
+	apiServer := api.NewServer(config, overseer)
+
 	// Setup signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -46,11 +50,20 @@ func main() {
 
 	go func() {
 		<-sigChan
-		fmt.Println("\n🛑 Received shutdown signal, stopping overseer...")
+		fmt.Println("\n🛑 Received shutdown signal, stopping Hydra...")
 		cancel()
 	}()
 
-	// Start overseer
+	// Start API server in goroutine
+	if apiServer != nil {
+		go func() {
+			if err := apiServer.Start(ctx); err != nil {
+				log.Printf("API server error: %v", err)
+			}
+		}()
+	}
+
+	// Start overseer (blocking)
 	if err := overseer.Start(ctx); err != nil {
 		log.Fatalf("Overseer failed: %v", err)
 	}
