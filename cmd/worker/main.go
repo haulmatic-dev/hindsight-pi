@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -190,6 +191,21 @@ func main() {
 
 	// Notify task completion
 	notifyTaskComplete(mcpClient, bead, status, duration, exitCode)
+
+	// STEP 5: Close the bead using beads CLI (best-effort)
+	// This makes the worker self-contained and resilient to overseer failures
+	closeReason := "completed"
+	if exitCode != 0 {
+		closeReason = "failed"
+	}
+
+	if err := closeBeadFromWorker(bead, projectPath, config.Repo, closeReason); err != nil {
+		log.Printf("[WARN] Failed to close bead from worker (non-fatal): %v", err)
+		// Don't fail the worker just because we couldn't close the bead
+		// The overseer can handle this asynchronously
+	} else {
+		log.Printf("✅ Successfully closed bead %s with status: %s", beadID, closeReason)
+	}
 
 	streamLog(mcpClient, "info", fmt.Sprintf("Worker completed for bead %s with status %s", beadID, status))
 
@@ -822,4 +838,49 @@ func streamLog(client *mcp.Client, level, message string) {
 		// Silent fail - logging shouldn't break execution
 		log.Printf("[DEBUG] Failed to stream log: %v", err)
 	}
+}
+
+// closeBeadFromWorker closes the bead using the beads CLI directly from the worker
+// This makes the worker self-contained and resilient to overseer failures
+func closeBeadFromWorker(bead types.Bead, projectPath, repoName, reason string) error {
+	// Use the beads CLI to close the bead
+	// Command: br close <bead-id> -m <reason>
+
+	beadID := bead.ID.String()
+
+	log.Printf("🔒 Closing bead from worker: %s (reason: %s)", beadID, reason)
+	log.Printf("   Project: %s, Path: %s, Repo: %s", bead.Project, projectPath, repoName)
+
+	// First, try to use the beads client directly if we can get the project path
+	if projectPath == "" {
+		// Try to construct path from project name
+		projectPath = filepath.Join(os.Getenv("HOME"), "source-code", bead.Project)
+		if _, err := os.Stat(projectPath); os.IsNotExist(err) {
+			// Try /tmp as fallback
+			projectPath = filepath.Join("/tmp", bead.Project)
+		}
+		log.Printf("   Using fallback project path: %s", projectPath)
+	}
+
+	// Check if path exists
+	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
+		log.Printf("   [WARN] Project path does not exist: %s", projectPath)
+		// Don't fail - the overseer will handle this asynchronously
+		return fmt.Errorf("project path not found: %s", projectPath)
+	}
+
+	// Try to close using br CLI directly
+	// The br CLI needs to be run from the project directory
+	cmd := exec.Command("br", "close", beadID, "-m", reason)
+	cmd.Dir = projectPath
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("   [WARN] Failed to close bead via br CLI: %v", err)
+		log.Printf("   Output: %s", string(output))
+		return fmt.Errorf("br close failed: %w", err)
+	}
+
+	log.Printf("   Successfully closed bead via br CLI")
+	return nil
 }
