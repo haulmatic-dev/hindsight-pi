@@ -1321,8 +1321,20 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		projectPath = bead.Project // Fallback to project name
 	}
 
-	// Build worker command
-	cmd := exec.Command("go", "run", "cmd/worker/main.go")
+	// Build worker command - use compiled binary if available, otherwise fallback to go run
+	workerBinary := os.Getenv("HYDRA_WORKER_BINARY")
+	if workerBinary == "" {
+		workerBinary = filepath.Join(os.Getenv("HYDRA_HOME"), "bin", "worker")
+	}
+
+	// Check if compiled binary exists, otherwise use go run
+	var cmd *exec.Cmd
+	if _, err := os.Stat(workerBinary); err == nil {
+		cmd = exec.Command(workerBinary)
+	} else {
+		// Fallback to go run
+		cmd = exec.Command("go", "run", "cmd/worker/main.go")
+	}
 	env := append(os.Environ(),
 		fmt.Sprintf("HYDRA_BEAD_ID=%s", beadIDStr),
 		fmt.Sprintf("HYDRA_PROJECT=%s", bead.Project),

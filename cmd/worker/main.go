@@ -598,7 +598,7 @@ func executeWithOpencode(
 }
 
 // buildOpencodeCommand builds the opencode CLI command for a bead
-// Opencode expects: opencode run <message> OR opencode <project-path>
+// Opencode run syntax: echo "prompt" | opencode run --format json --dir <path>
 func buildOpencodeCommand(bead types.Bead, agentType string, intelligenceCtx *IntelligenceContext, projectPath string) *exec.Cmd {
 	// Find opencode binary
 	opencodePath := os.Getenv("HYDRA_OPCODE_PATH")
@@ -615,9 +615,6 @@ func buildOpencodeCommand(bead types.Bead, agentType string, intelligenceCtx *In
 	// Build the prompt message from bead info
 	var promptParts []string
 
-	// Start with agent type context
-	promptParts = append(promptParts, fmt.Sprintf("[%s]", agentType))
-
 	// Add bead type and title
 	if bead.Title != "" {
 		promptParts = append(promptParts, fmt.Sprintf("%s: %s", bead.Type, bead.Title))
@@ -627,23 +624,28 @@ func buildOpencodeCommand(bead types.Bead, agentType string, intelligenceCtx *In
 
 	// Add description
 	if bead.Description != "" {
-		promptParts = append(promptParts, "- "+bead.Description)
+		promptParts = append(promptParts, bead.Description)
 	}
 
 	// Add target files if available
 	targetFiles := extractTargetFiles(bead)
 	if len(targetFiles) > 0 {
-		promptParts = append(promptParts, fmt.Sprintf("Files: %v", targetFiles))
+		promptParts = append(promptParts, fmt.Sprintf("Files to modify: %v", targetFiles))
 	}
 
 	// Join all parts into single prompt
 	prompt := strings.Join(promptParts, " ")
 
-	// Create command with proper working directory
-	cmd := exec.Command(opencodePath, "run", prompt)
-	cmd.Dir = path
+	// Build command: echo "prompt" | opencode run --format json --dir <path>
+	// We use bash to pipe the prompt to opencode
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(
+		"echo %q | %s run --format json --dir %q",
+		prompt,
+		opencodePath,
+		path,
+	))
 
-	// Add environment variable for agent type
+	// Add environment variables
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("HYDRA_AGENT_TYPE=%s", agentType),
 		fmt.Sprintf("HYDRA_BEAD_TYPE=%s", bead.Type),
