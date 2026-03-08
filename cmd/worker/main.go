@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
+	"math/rand"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/intelligence"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -23,6 +27,45 @@ type WorkerConfig struct {
 		Enabled bool
 		URL     string
 	}
+}
+
+// RetryPolicy defines the retry strategy for execution
+type RetryPolicy struct {
+	MaxRetries      int
+	BaseDelay       time.Duration
+	MaxDelay        time.Duration
+	ExponentialBase float64
+}
+
+// DefaultRetryPolicy returns a sensible default retry policy
+func DefaultRetryPolicy() RetryPolicy {
+	return RetryPolicy{
+		MaxRetries:      3,
+		BaseDelay:       2 * time.Second,
+		MaxDelay:        60 * time.Second,
+		ExponentialBase: 2.0,
+	}
+}
+
+// ExecutionResult represents the outcome of executing a bead
+type ExecutionResult struct {
+	Success      bool
+	ExitCode     int
+	Output       string
+	Error        string
+	Duration     time.Duration
+	Attempts     int
+	AgentType    string
+	Intelligence *IntelligenceContext
+}
+
+// IntelligenceContext holds pre-execution intelligence
+type IntelligenceContext struct {
+	Patterns     []intelligence.Bullet
+	AntiPatterns []intelligence.Bullet
+	Impact       *intelligence.TLDRImpactResponse
+	RelatedFiles []intelligence.TLDRSemanticResult
+	CassContext  *intelligence.CassContextResponse
 }
 
 var (
@@ -88,36 +131,71 @@ func main() {
 
 	// Record start time
 	startTime := time.Now()
-	exitCode := 0
-	success := true
 
-	// TODO:
-	// 1. Query cass_memory for patterns
-	// 2. Use llm-tldr to understand codebase
-	// 3. Determine agent type from bead
-	// 4. Execute with opencode
-	// 5. Record results to cass_memory
-	// 6. Send completion message via MCP
+	// STEP 1: Determine agent type intelligently
+	determinedAgentType := determineAgentType(bead)
+	log.Printf("📋 Determined agent type: %s", determinedAgentType)
+	streamLog(mcpClient, "info", fmt.Sprintf("Using agent type: %s", determinedAgentType))
 
-	// Simulate work for now
-	time.Sleep(2 * time.Second)
+	// STEP 2: Gather pre-execution intelligence
+	log.Printf("🧠 Gathering pre-execution intelligence...")
+	streamLog(mcpClient, "info", "Gathering pre-execution intelligence...")
+
+	intelligenceCtx, err := gatherPreExecutionIntelligence(bead)
+	if err != nil {
+		log.Printf("[WARN] Failed to gather intelligence: %v", err)
+		streamLog(mcpClient, "warn", fmt.Sprintf("Intelligence gathering failed: %v", err))
+		// Continue with empty intelligence context for graceful degradation
+		intelligenceCtx = &IntelligenceContext{}
+	} else {
+		log.Printf("✅ Intelligence gathered: %d patterns, %d anti-patterns, %d related files",
+			len(intelligenceCtx.Patterns), len(intelligenceCtx.AntiPatterns), len(intelligenceCtx.RelatedFiles))
+		streamLog(mcpClient, "info", fmt.Sprintf("Intelligence: %d patterns found", len(intelligenceCtx.Patterns)))
+	}
+
+	// STEP 3: Execute with retry policy
+	retryPolicy := DefaultRetryPolicy()
+	log.Printf("⚙️ Executing with retry policy (max %d retries)...", retryPolicy.MaxRetries)
+	streamLog(mcpClient, "info", fmt.Sprintf("Starting execution (max %d retries)", retryPolicy.MaxRetries))
+
+	result, err := executeWithRetry(bead, determinedAgentType, intelligenceCtx, mcpClient, retryPolicy)
 
 	// Calculate duration
 	duration := time.Since(startTime)
+	result.Duration = duration
 
 	// Determine status
 	status := "success"
-	if !success {
+	exitCode := 0
+	if err != nil || !result.Success {
 		status = "failure"
 		exitCode = 1
+		if result != nil {
+			exitCode = result.ExitCode
+		}
 	}
+
+	// STEP 4: Record execution results
+	log.Printf("📝 Recording execution results...")
+	streamLog(mcpClient, "info", fmt.Sprintf("Recording results (status: %s)", status))
+
+	recordExecutionResult(bead, result, intelligenceCtx, mcpClient)
 
 	// Notify task completion
 	notifyTaskComplete(mcpClient, bead, status, duration, exitCode)
 
 	streamLog(mcpClient, "info", fmt.Sprintf("Worker completed for bead %s with status %s", beadID, status))
 
-	log.Printf("✅ Worker completed for bead: %s (status: %s, duration: %v)", beadID, status, duration)
+	if result != nil && result.Output != "" {
+		log.Printf("📄 Execution output:\n%s", result.Output)
+	}
+
+	if result != nil && result.Error != "" {
+		log.Printf("❌ Execution error:\n%s", result.Error)
+	}
+
+	log.Printf("✅ Worker completed for bead: %s (status: %s, duration: %v, attempts: %d)",
+		beadID, status, duration, result.Attempts)
 
 	// Exit with appropriate code
 	os.Exit(exitCode)
@@ -265,6 +343,429 @@ func parseCommaSeparated(s string) []string {
 		}
 	}
 	return result
+}
+
+// determineAgentType intelligently determines the best agent type for a bead
+func determineAgentType(bead types.Bead) string {
+	// First, check if agent type is explicitly set in metadata
+	if bead.Metadata != nil {
+		if agentType, ok := bead.Metadata["agent_type"]; ok && agentType != "" {
+			return agentType
+		}
+	}
+
+	// Use bead type to determine agent type via AgentTypeMap
+	agentTypes := types.DetermineAgentTypes(bead.Type)
+	if len(agentTypes) > 0 {
+		return string(agentTypes[0])
+	}
+
+	// Default to orchestrator
+	return "orchestrator"
+}
+
+// gatherPreExecutionIntelligence gathers intelligence from cass_memory and TLDR
+func gatherPreExecutionIntelligence(bead types.Bead) (*IntelligenceContext, error) {
+	ctx := &IntelligenceContext{
+		Patterns:     []intelligence.Bullet{},
+		AntiPatterns: []intelligence.Bullet{},
+		RelatedFiles: []intelligence.TLDRSemanticResult{},
+	}
+
+	// Build task query from bead description and title
+	taskQuery := bead.Title
+	if bead.Description != "" {
+		taskQuery = fmt.Sprintf("%s %s", bead.Title, bead.Description)
+	}
+
+	// Query cass_memory for patterns and anti-patterns
+	cassClient := intelligence.NewCassMemoryClient()
+	if cassClient.IsEnabled() {
+		cassCtx, err := cassClient.Context(taskQuery)
+		if err != nil {
+			log.Printf("[WARN] Failed to query cass_memory: %v", err)
+		} else {
+			ctx.CassContext = cassCtx
+			ctx.Patterns = cassCtx.Data.RelevantBullets
+			ctx.AntiPatterns = cassCtx.Data.AntiPatterns
+		}
+	} else {
+		log.Println("ℹ️ cass_memory client not enabled, skipping pattern lookup")
+	}
+
+	// Query TLDR for impact analysis and related files
+	tldrClient := intelligence.NewTLDRClient("")
+	if tldrClient.IsAvailable() {
+		// Get target files for impact analysis
+		targetFiles := extractTargetFiles(bead)
+
+		if len(targetFiles) > 0 {
+			// Analyze first target file for impact
+			impact, err := tldrClient.ImpactAnalysis(targetFiles[0], 2)
+			if err != nil {
+				log.Printf("[WARN] Failed to get impact analysis: %v", err)
+			} else {
+				ctx.Impact = impact
+			}
+		}
+
+		// Perform semantic search for related files
+		semanticResults, err := tldrClient.SemanticSearch(taskQuery)
+		if err != nil {
+			log.Printf("[WARN] Failed semantic search: %v", err)
+		} else {
+			ctx.RelatedFiles = semanticResults.Results
+		}
+	} else {
+		log.Println("ℹ️ TLDR daemon not available, skipping impact analysis")
+	}
+
+	return ctx, nil
+}
+
+// executeWithRetry executes the bead with exponential backoff retry logic
+func executeWithRetry(
+	bead types.Bead,
+	agentType string,
+	intelligenceCtx *IntelligenceContext,
+	mcpClient *mcp.Client,
+	policy RetryPolicy,
+) (*ExecutionResult, error) {
+	var lastErr error
+	var result *ExecutionResult
+
+	for attempt := 0; attempt <= policy.MaxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := calculateBackoff(attempt, policy)
+			log.Printf("⏳ Retry %d/%d: waiting %v before next attempt...", attempt, policy.MaxRetries, backoff)
+			streamLog(mcpClient, "info", fmt.Sprintf("Retry %d/%d: waiting %v", attempt, policy.MaxRetries, backoff))
+			time.Sleep(backoff)
+		}
+
+		log.Printf("🔄 Execution attempt %d/%d", attempt+1, policy.MaxRetries+1)
+		streamLog(mcpClient, "info", fmt.Sprintf("Execution attempt %d/%d", attempt+1, policy.MaxRetries+1))
+
+		result, lastErr = executeWithOpencode(bead, agentType, intelligenceCtx, mcpClient)
+		result.Attempts = attempt + 1
+
+		if lastErr == nil && result.Success {
+			log.Printf("✅ Execution succeeded on attempt %d", attempt+1)
+			streamLog(mcpClient, "info", fmt.Sprintf("Execution succeeded on attempt %d", attempt+1))
+			return result, nil
+		}
+
+		if lastErr != nil {
+			log.Printf("❌ Execution failed on attempt %d: %v", attempt+1, lastErr)
+			streamLog(mcpClient, "error", fmt.Sprintf("Execution failed (attempt %d): %v", attempt+1, lastErr))
+		}
+
+		if result != nil && !result.Success {
+			log.Printf("❌ Execution returned non-success on attempt %d (exit code: %d)", attempt+1, result.ExitCode)
+			streamLog(mcpClient, "error", fmt.Sprintf("Execution failed (attempt %d, exit: %d)", attempt+1, result.ExitCode))
+		}
+
+		// Check if we should retry
+		if !shouldRetry(lastErr, attempt, policy) {
+			log.Printf("🛑 Not retrying: error not retryable or max retries reached")
+			streamLog(mcpClient, "warn", "Not retrying: error not retryable or max retries reached")
+			break
+		}
+	}
+
+	// All retries exhausted
+	if lastErr != nil {
+		return result, fmt.Errorf("execution failed after %d attempts: %w", result.Attempts, lastErr)
+	}
+
+	return result, fmt.Errorf("execution failed after %d attempts", result.Attempts)
+}
+
+// shouldRetry determines if an error should be retried
+func shouldRetry(err error, attempt int, policy RetryPolicy) bool {
+	// Don't retry if we've exhausted all retries
+	if attempt >= policy.MaxRetries {
+		return false
+	}
+
+	if err == nil {
+		return false
+	}
+
+	// Don't retry certain error types
+	errStr := err.Error()
+	nonRetryableErrors := []string{
+		"permission denied",
+		"not found",
+		"invalid",
+		"unauthorized",
+		"authentication failed",
+		"bad request",
+	}
+
+	for _, nonRetryable := range nonRetryableErrors {
+		if strings.Contains(strings.ToLower(errStr), nonRetryable) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// calculateBackoff calculates the delay before the next retry attempt
+func calculateBackoff(attempt int, policy RetryPolicy) time.Duration {
+	if attempt <= 0 {
+		return 0
+	}
+
+	// Calculate exponential backoff: baseDelay * (exponentialBase ^ attempt)
+	backoff := float64(policy.BaseDelay) * math.Pow(policy.ExponentialBase, float64(attempt-1))
+
+	// Add jitter (±25%) to prevent thundering herd
+	jitter := backoff * 0.25 * (2*rand.Float64() - 1)
+	backoff += jitter
+
+	// Cap at max delay
+	if backoff > float64(policy.MaxDelay) {
+		backoff = float64(policy.MaxDelay)
+	}
+
+	return time.Duration(backoff)
+}
+
+// executeWithOpencode executes the opencode CLI with the given bead and intelligence
+func executeWithOpencode(
+	bead types.Bead,
+	agentType string,
+	intelligenceCtx *IntelligenceContext,
+	mcpClient *mcp.Client,
+) (*ExecutionResult, error) {
+	result := &ExecutionResult{
+		Success:   false,
+		AgentType: agentType,
+	}
+
+	// Build opencode command
+	cmd := buildOpencodeCommand(bead, agentType, intelligenceCtx)
+
+	log.Printf("🔧 Executing: %s %s", cmd.Path, strings.Join(cmd.Args[1:], " "))
+	streamLog(mcpClient, "info", fmt.Sprintf("Executing opencode command"))
+
+	// Capture output
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	// Execute command
+	err := cmd.Run()
+
+	result.Output = stdout.String()
+	result.Error = stderr.String()
+
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			result.ExitCode = exitErr.ExitCode()
+		} else {
+			result.ExitCode = 1
+		}
+		result.Success = false
+		return result, fmt.Errorf("opencode execution failed: %w", err)
+	}
+
+	result.ExitCode = 0
+	result.Success = true
+	return result, nil
+}
+
+// buildOpencodeCommand builds the opencode CLI command for a bead
+func buildOpencodeCommand(bead types.Bead, agentType string, intelligenceCtx *IntelligenceContext) *exec.Cmd {
+	// Find opencode binary
+	opencodePath := os.Getenv("HYDRA_OPCODE_PATH")
+	if opencodePath == "" {
+		opencodePath = "opencode"
+	}
+
+	args := []string{
+		"--project", bead.Project,
+		"--agent", agentType,
+	}
+
+	if bead.Repo != "" {
+		args = append(args, "--repo", bead.Repo)
+	}
+
+	// Add bead title and description as prompts
+	if bead.Title != "" {
+		args = append(args, "--prompt", bead.Title)
+	}
+
+	if bead.Description != "" {
+		args = append(args, "--prompt", bead.Description)
+	}
+
+	// Add target files if available
+	targetFiles := extractTargetFiles(bead)
+	for _, file := range targetFiles {
+		args = append(args, "--file", file)
+	}
+
+	// Add intelligence context as context hints
+	if intelligenceCtx != nil {
+		// Add patterns as context
+		for _, pattern := range intelligenceCtx.Patterns {
+			if pattern.Content != "" {
+				args = append(args, "--context", fmt.Sprintf("Pattern: %s", pattern.Content))
+			}
+		}
+
+		// Add anti-patterns as warnings
+		for _, antiPattern := range intelligenceCtx.AntiPatterns {
+			if antiPattern.Content != "" {
+				args = append(args, "--context", fmt.Sprintf("Avoid: %s", antiPattern.Content))
+			}
+		}
+
+		// Add related files as context
+		for _, relatedFile := range intelligenceCtx.RelatedFiles {
+			if relatedFile.File != "" {
+				args = append(args, "--context", fmt.Sprintf("Related: %s", relatedFile.File))
+			}
+		}
+	}
+
+	// Add mode flag based on bead type
+	switch bead.Type {
+	case "test", "test-validate":
+		args = append(args, "--mode", "test")
+	case "review":
+		args = append(args, "--mode", "review")
+	case "fix", "bug":
+		args = append(args, "--mode", "fix")
+	default:
+		args = append(args, "--mode", "implement")
+	}
+
+	// Add output format
+	args = append(args, "--format", "json")
+
+	return exec.Command(opencodePath, args...)
+}
+
+// recordExecutionResult records the execution outcome to cass_memory
+func recordExecutionResult(
+	bead types.Bead,
+	result *ExecutionResult,
+	intelligenceCtx *IntelligenceContext,
+	mcpClient *mcp.Client,
+) {
+	if result == nil {
+		log.Println("[WARN] Cannot record nil result")
+		return
+	}
+
+	// Initialize cass_memory client
+	cassClient := intelligence.NewCassMemoryClient()
+	if !cassClient.IsEnabled() {
+		log.Println("ℹ️ cass_memory not enabled, skipping result recording")
+		return
+	}
+
+	// Determine status for recording
+	status := "failure"
+	if result.Success {
+		status = "success"
+	}
+
+	// Build success/failure pattern
+	pattern := buildSuccessPattern(bead, result)
+	if pattern == "" {
+		log.Println("[WARN] Empty pattern generated, skipping recording")
+		return
+	}
+
+	// Get category for agent type
+	category := intelligence.GetCategoryForAgentType(result.AgentType)
+
+	// Add pattern to cass_memory
+	if err := cassClient.AddPattern(pattern, category); err != nil {
+		log.Printf("[WARN] Failed to record pattern: %v", err)
+		streamLog(mcpClient, "warn", fmt.Sprintf("Failed to record pattern: %v", err))
+	} else {
+		log.Printf("✅ Recorded %s pattern to cass_memory (category: %s)", status, category)
+		streamLog(mcpClient, "info", fmt.Sprintf("Recorded %s pattern to cass_memory", status))
+	}
+
+	// Record outcome for any matched patterns
+	if intelligenceCtx != nil && intelligenceCtx.CassContext != nil {
+		var ruleIDs []string
+		for _, bullet := range intelligenceCtx.CassContext.Data.RelevantBullets {
+			if bullet.ID != "" {
+				ruleIDs = append(ruleIDs, bullet.ID)
+			}
+		}
+
+		if len(ruleIDs) > 0 {
+			if err := cassClient.RecordOutcome(status, ruleIDs, result.Duration); err != nil {
+				log.Printf("[WARN] Failed to record outcome: %v", err)
+			} else {
+				log.Printf("✅ Recorded outcome for %d rules", len(ruleIDs))
+			}
+		}
+	}
+}
+
+// buildSuccessPattern builds a success pattern string from the execution result
+func buildSuccessPattern(bead types.Bead, result *ExecutionResult) string {
+	if bead.Title == "" {
+		return ""
+	}
+
+	var parts []string
+
+	// Base pattern from bead title
+	parts = append(parts, bead.Title)
+
+	// Add agent type
+	if result.AgentType != "" {
+		parts = append(parts, fmt.Sprintf("[Agent: %s]", result.AgentType))
+	}
+
+	// Add result status
+	if result.Success {
+		parts = append(parts, "→ SUCCESS")
+	} else {
+		parts = append(parts, "→ FAILURE")
+	}
+
+	// Add key output summary if available
+	if result.Output != "" {
+		// Truncate output to first line or 100 chars
+		summary := result.Output
+		if idx := strings.Index(summary, "\n"); idx > 0 {
+			summary = summary[:idx]
+		}
+		if len(summary) > 100 {
+			summary = summary[:100] + "..."
+		}
+		if summary != "" {
+			parts = append(parts, fmt.Sprintf("Output: %s", summary))
+		}
+	}
+
+	// Add error summary if failed
+	if !result.Success && result.Error != "" {
+		summary := result.Error
+		if idx := strings.Index(summary, "\n"); idx > 0 {
+			summary = summary[:idx]
+		}
+		if len(summary) > 100 {
+			summary = summary[:100] + "..."
+		}
+		if summary != "" {
+			parts = append(parts, fmt.Sprintf("Error: %s", summary))
+		}
+	}
+
+	return strings.Join(parts, " | ")
 }
 
 // notifyTaskComplete sends task completion notification via MCP

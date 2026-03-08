@@ -305,3 +305,18 @@ func BeadIDFromLegacyParams(projectPath, repoName string, number int) BeadID {
 	id := strconv.Itoa(number)
 	return NewBeadID(project, repoName, id)
 }
+
+// IsTestBead returns true if the bead type indicates testing work.
+func IsTestBead(beadType string) bool {
+	return beadType == "test" || beadType == "test-validate"
+}
+
+// IsFixBead returns true if the bead type indicates bug fixing work.
+func IsFixBead(beadType string) bool {
+	return beadType == "fix" || beadType == "bug"
+}
+
+// IsReviewBead returns true if the bead type indicates code review work.
+func IsReviewBead(beadType string) bool {
+	return beadType == "review"
+}
