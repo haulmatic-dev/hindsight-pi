@@ -249,7 +249,256 @@ hydra logs <bead-id>       # Show logs
 
 ---
 
-## 5. Technical Specifications
+## 5. Error Handling & Retry Strategy
+
+### 5.1 Error Classification
+
+**Transient Errors (Retryable):**
+- Network timeouts (MCP, cass_memory, llm-tldr)
+- Temporary resource unavailability
+- Process spawn failures (rate limiting)
+- Database locks (beads)
+
+**Permanent Errors (Non-Retryable):**
+- Invalid bead configuration
+- Missing dependencies
+- Permission denied
+- Invalid agent type
+- Bead not found
+
+### 5.2 Retry Policy
+
+```yaml
+retry:
+  max_attempts: 3                    # Maximum retry attempts
+  backoff_strategy: exponential      # exponential, linear, fixed
+  initial_delay: 1s                  # First retry delay
+  max_delay: 30s                     # Maximum delay between retries
+  jitter: true                       # Add randomness to prevent thundering herd
+```
+
+**Retry Logic:**
+1. First attempt: Immediate execution
+2. Second attempt: After 1s + jitter
+3. Third attempt: After 2s + jitter
+4. Fourth+ attempt: After 4s + jitter (capped at max_delay)
+
+### 5.3 Circuit Breaker Pattern
+
+For external services (MCP, cass_memory, llm-tldr):
+
+```go
+type CircuitBreaker struct {
+    Name            string        // Service name
+    FailureThreshold int          // Failures before opening
+    SuccessThreshold int          // Successes before closing
+    Timeout         time.Duration // Reset timeout
+    State           State         // Closed, Open, HalfOpen
+}
+
+// States:
+// Closed: Normal operation, requests pass through
+// Open: Service unhealthy, requests fail fast
+// HalfOpen: Testing if service recovered
+```
+
+**Configuration:**
+```yaml
+circuit_breakers:
+  mcp:
+    failure_threshold: 5
+    success_threshold: 3
+    timeout: 30s
+  cass_memory:
+    failure_threshold: 3
+    success_threshold: 2
+    timeout: 10s
+  llm_tldr:
+    failure_threshold: 3
+    success_threshold: 2
+    timeout: 10s
+```
+
+### 5.4 Error Propagation
+
+**Worker Level:**
+- Worker process returns exit code 0 for success, non-zero for failure
+- Logs written to stdout/stderr (captured by overseer)
+- Completion message sent via MCP with error details
+
+**Overseer Level:**
+- Detects worker failure via process exit code
+- Updates bead status to `failed`
+- Records failure in cass_memory (anti-pattern)
+- Triggers retry if retry count < max_attempts
+- Creates follow-up bead if retries exhausted
+
+**API Level:**
+- GraphQL errors include structured error codes
+- Clients receive detailed error messages
+- SSE streams error events
+
+### 5.5 Dead Letter Queue (DLQ)
+
+Failed beads that exceed retry limits:
+- Moved to DLQ for manual inspection
+- Preserved with full context (logs, error, retry history)
+- Can be manually retried or archived
+- DLQ persistence: SQLite database
+
+---
+
+## 6. Database Schema
+
+Hydra uses SQLite for internal state management:
+
+### 6.1 workers Table
+```sql
+CREATE TABLE workers (
+    id TEXT PRIMARY KEY,              -- Worker UUID
+    bead_id TEXT NOT NULL,            -- Reference to bead
+    project TEXT NOT NULL,            -- Project name
+    repo TEXT,                        -- Repo name (nullable for single repo)
+    agent_type TEXT NOT NULL,         -- Agent type
+    pid INTEGER NOT NULL,             -- Process ID
+    status TEXT NOT NULL,             -- running, completed, failed
+    start_time DATETIME NOT NULL,     -- Spawn timestamp
+    end_time DATETIME,                -- Completion timestamp
+    exit_code INTEGER,                -- Process exit code
+    error_message TEXT,               -- Error details if failed
+    retry_count INTEGER DEFAULT 0,    -- Number of retries
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### 6.2 executions Table
+```sql
+CREATE TABLE executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker_id TEXT NOT NULL,          -- Reference to worker
+    bead_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,         -- Attempt number
+    status TEXT NOT NULL,             -- success, failed
+    duration_ms INTEGER,              -- Execution time
+    logs TEXT,                        -- Compressed logs
+    error_details TEXT,               -- JSON error details
+    cass_memory_entries INTEGER,      -- Number of patterns recorded
+    started_at DATETIME NOT NULL,
+    completed_at DATETIME,
+    FOREIGN KEY (worker_id) REFERENCES workers(id)
+);
+```
+
+### 6.3 metrics Table
+```sql
+CREATE TABLE metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    metric_name TEXT NOT NULL,        -- e.g., workers_active, success_rate
+    metric_value REAL NOT NULL,
+    project TEXT,                     -- Optional project filter
+    labels TEXT                       -- JSON additional labels
+);
+
+-- Indexes
+CREATE INDEX idx_workers_bead ON workers(bead_id);
+CREATE INDEX idx_workers_status ON workers(status);
+CREATE INDEX idx_executions_worker ON executions(worker_id);
+CREATE INDEX idx_metrics_name_time ON metrics(metric_name, timestamp);
+```
+
+### 6.4 dlq Table (Dead Letter Queue)
+```sql
+CREATE TABLE dlq (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bead_id TEXT NOT NULL,
+    project TEXT NOT NULL,
+    repo TEXT,
+    error_type TEXT NOT NULL,
+    error_message TEXT NOT NULL,
+    retry_count INTEGER NOT NULL,
+    last_error_at DATETIME NOT NULL,
+    context TEXT,                     -- JSON full context
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    resolved BOOLEAN DEFAULT FALSE,
+    resolved_at DATETIME
+);
+```
+
+---
+
+## 7. Security Model
+
+### 7.1 Threat Model
+
+**Assets:**
+- Worker processes (ephemeral)
+- File system (projects/repos)
+- MCP Agent Mail (communication)
+- cass_memory (patterns/history)
+- Internal SQLite database
+
+**Threats:**
+1. Unauthorized worker execution
+2. File system traversal (escape workspace)
+3. MCP message injection
+4. Resource exhaustion (DoS)
+5. Secret leakage in logs
+
+### 7.2 Security Controls
+
+**Worker Isolation:**
+- Workers run as separate processes
+- Limited filesystem access (chroot recommended for production)
+- No network access except via MCP
+- Environment variables sanitized (no secrets)
+
+**File System Security:**
+```yaml
+security:
+  allowed_paths:
+    - "~/source-code/"              # Only allow project directories
+  denied_patterns:
+    - "*.env*"                       # No environment files
+    - "*.key"                        # No key files
+    - ".ssh/*"                       # No SSH keys
+  max_file_size: 100MB              # Prevent huge file processing
+```
+
+**MCP Security:**
+- Message signing (optional)
+- Rate limiting per agent
+- Validate sender identity
+- Audit log for sensitive operations
+
+**Secrets Management:**
+- Never log secrets (automatic redaction)
+- Use environment variables for API keys
+- Support for secret management systems (HashiCorp Vault, AWS Secrets Manager)
+
+### 7.3 Authentication & Authorization
+
+**Phase 1 (Current):**
+- No authentication (single-user development)
+- File system permissions enforced by OS
+
+**Phase 2 (Future):**
+- API key authentication for GraphQL API
+- Role-based access control (RBAC)
+- Audit logging
+
+### 7.4 Audit Logging
+
+All security-relevant events logged:
+- Worker spawn/terminate
+- File reservations (attempted, granted, denied)
+- MCP authentication failures
+- API access attempts
+
+---
+
+## 8. Technical Specifications
 
 ### 5.1 Technology Stack
 - **Language**: Go 1.23+
@@ -327,7 +576,677 @@ projects:
 
 ---
 
-## 6. Implementation Phases
+## 9. GraphQL Schema
+
+### 9.1 Types
+
+```graphql
+# Core Types
+type Bead {
+  id: ID!
+  project: String!
+  repo: String
+  number: Int!
+  title: String!
+  description: String
+  type: String!
+  status: BeadStatus!
+  dependencies: [Bead!]!
+  dependents: [Bead!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  completedAt: DateTime
+  metadata: JSON
+}
+
+enum BeadStatus {
+  OPEN
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  BLOCKED
+  APPROVAL_PENDING
+}
+
+type Worker {
+  id: ID!
+  bead: Bead!
+  agentType: String!
+  pid: Int!
+  status: WorkerStatus!
+  startTime: DateTime!
+  endTime: DateTime
+  duration: Int # milliseconds
+  logs: [LogEntry!]!
+}
+
+enum WorkerStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+type LogEntry {
+  timestamp: DateTime!
+  level: LogLevel!
+  message: String!
+}
+
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+}
+
+type Project {
+  name: String!
+  path: String!
+  type: RepoType!
+  repos: [Repo!]!
+  beads(status: BeadStatus): [Bead!]!
+  stats: ProjectStats!
+}
+
+enum RepoType {
+  SINGLE
+  MULTI
+}
+
+type Repo {
+  name: String!
+  path: String!
+  beads(status: BeadStatus): [Bead!]!
+}
+
+type ProjectStats {
+  totalBeads: Int!
+  completedBeads: Int!
+  failedBeads: Int!
+  activeWorkers: Int!
+  successRate: Float!
+  avgDuration: Int! # milliseconds
+}
+
+type SystemStats {
+  activeWorkers: Int!
+  maxWorkers: Int!
+  totalProjects: Int!
+  totalBeads: Int!
+  queueDepth: Int! # Ready beads waiting
+  uptime: Int! # seconds
+  memoryUsage: Int! # bytes
+  cpuUsage: Float! # percentage
+}
+
+type Error {
+  code: String!
+  message: String!
+  details: JSON
+}
+
+# Input Types
+input QueueBeadInput {
+  beadId: ID!
+  priority: Int
+}
+
+input SetMaxWorkersInput {
+  count: Int!
+}
+```
+
+### 9.2 Queries
+
+```graphql
+type Query {
+  # Bead queries
+  bead(id: ID!): Bead
+  beads(
+    project: String
+    repo: String
+    status: BeadStatus
+    type: String
+    limit: Int = 100
+    offset: Int = 0
+  ): [Bead!]!
+  
+  # Worker queries
+  worker(id: ID!): Worker
+  workers(
+    project: String
+    status: WorkerStatus
+  ): [Worker!]!
+  activeWorkers: [Worker!]!
+  
+  # Project queries
+  project(name: String!): Project
+  projects: [Project!]!
+  
+  # Stats
+  stats: SystemStats!
+  projectStats(project: String!): ProjectStats!
+  
+  # Workflow
+  workflow(project: String!, repo: String): Workflow
+  dependencyGraph(beadId: ID!): DependencyGraph
+}
+
+type Workflow {
+  beads: [Bead!]!
+  criticalPath: [Bead!]!
+  estimatedCompletion: DateTime
+}
+
+type DependencyGraph {
+  nodes: [Bead!]!
+  edges: [DependencyEdge!]!
+}
+
+type DependencyEdge {
+  from: ID!
+  to: ID!
+  type: DependencyType!
+}
+
+enum DependencyType {
+  DEPENDS_ON
+  BLOCKS
+  PARALLEL
+}
+```
+
+### 9.3 Mutations
+
+```graphql
+type Mutation {
+  # Bead control
+  queueBead(input: QueueBeadInput!): Bead!
+  cancelBead(id: ID!): Bead!
+  retryBead(id: ID!): Bead!
+  
+  # Worker control
+  cancelWorker(id: ID!): Worker!
+  killWorker(id: ID!, force: Boolean = false): Worker!
+  
+  # Overseer control
+  pauseOverseer: Boolean!
+  resumeOverseer: Boolean!
+  setMaxWorkers(input: SetMaxWorkersInput!): SystemStats!
+  
+  # Configuration
+  reloadConfig: Boolean!
+  
+  # DLQ management
+  retryDLQEntry(id: ID!): Bead!
+  archiveDLQEntry(id: ID!): Boolean!
+  clearDLQ: Int! # Returns number cleared
+}
+```
+
+### 9.4 Subscriptions
+
+```graphql
+type Subscription {
+  # Bead updates
+  beadUpdates(
+    project: String
+    repo: String
+  ): BeadUpdate!
+  
+  # Worker updates
+  workerUpdates: WorkerUpdate!
+  
+  # Logs
+  logs(
+    workerId: ID
+    beadId: ID
+    level: LogLevel = INFO
+  ): LogEntry!
+  
+  # System stats
+  statsUpdates(interval: Int = 5000): SystemStats!
+  
+  # Error events
+  errors: Error!
+}
+
+type BeadUpdate {
+  type: UpdateType!
+  bead: Bead!
+  previousStatus: BeadStatus
+}
+
+type WorkerUpdate {
+  type: UpdateType!
+  worker: Worker!
+}
+
+enum UpdateType {
+  CREATED
+  UPDATED
+  DELETED
+}
+```
+
+---
+
+## 10. Deployment Guide
+
+### 10.1 Prerequisites
+
+**System Requirements:**
+- Go 1.23 or higher
+- SQLite 3
+- 2GB RAM minimum (4GB recommended)
+- 1GB disk space
+- Linux/macOS/Windows
+
+**External Services:**
+- MCP Agent Mail (Port 8765)
+- cass_memory (CLI available)
+- llm-tldr (Port 8767)
+- GPTCache (if enabled)
+
+### 10.2 Installation
+
+**From Source:**
+```bash
+# Clone repository
+git clone https://github.com/buddhi/hydra.git
+cd hydra
+
+# Build
+make build
+
+# Install binary (optional)
+sudo cp bin/hydra /usr/local/bin/
+```
+
+**Configuration:**
+```bash
+# Create config directory
+mkdir -p ~/.config/hydra
+
+# Copy example config
+cp hydra.yaml.example ~/.config/hydra/hydra.yaml
+
+# Edit configuration
+nano ~/.config/hydra/hydra.yaml
+```
+
+### 10.3 Running Hydra
+
+**Development Mode:**
+```bash
+# Start with debug logging
+./bin/hydra -debug
+
+# Start with custom config
+./bin/hydra -config /path/to/hydra.yaml
+```
+
+**Production Mode:**
+```bash
+# Using systemd (Linux)
+sudo systemctl enable hydra
+sudo systemctl start hydra
+
+# Using launchd (macOS)
+# See scripts/hydra.plist
+
+# Using PM2
+pm2 start bin/hydra --name hydra
+pm2 save
+pm2 startup
+```
+
+### 10.4 Monitoring & Logging
+
+**Log Configuration:**
+```yaml
+logging:
+  level: info           # debug, info, warn, error
+  format: json          # json, text
+  output: stdout        # stdout, file, both
+  file_path: /var/log/hydra/hydra.log
+  max_size: 100MB       # Rotate when exceeded
+  max_backups: 5        # Keep 5 rotated files
+  max_age: 30           # Delete after 30 days
+```
+
+**Health Check Endpoint:**
+```bash
+# HTTP health check
+curl http://localhost:8080/health
+
+# Response:
+# {
+#   "status": "healthy",
+#   "version": "1.0.0",
+#   "uptime": 3600,
+#   "active_workers": 3,
+#   "queue_depth": 5
+# }
+```
+
+### 10.5 Backup & Recovery
+
+**What to Backup:**
+- `~/.config/hydra/hydra.yaml` - Configuration
+- `~/.config/hydra/hydra.db` - SQLite database (workers, executions)
+- Project beads databases (`.beads/beads.db`)
+- cass_memory database (`~/.cass/memory.db`)
+
+**Backup Script:**
+```bash
+#!/bin/bash
+# backup-hydra.sh
+
+BACKUP_DIR="/backup/hydra/$(date +%Y%m%d)"
+mkdir -p $BACKUP_DIR
+
+cp ~/.config/hydra/hydra.yaml $BACKUP_DIR/
+cp ~/.config/hydra/hydra.db $BACKUP_DIR/
+cp ~/.cass/memory.db $BACKUP_DIR/
+
+# Compress
+tar -czf $BACKUP_DIR.tar.gz $BACKUP_DIR
+rm -rf $BACKUP_DIR
+
+echo "Backup created: $BACKUP_DIR.tar.gz"
+```
+
+### 10.6 Updating Hydra
+
+**Zero-Downtime Update:**
+1. Start new Hydra instance on different port
+2. Wait for it to be ready (health check)
+3. Switch load balancer to new instance
+4. Gracefully stop old instance
+5. Update port to default
+
+**Standard Update:**
+```bash
+# Stop current instance
+pkill hydra
+
+# Backup
+cp ~/.config/hydra/hydra.db ~/.config/hydra/hydra.db.bak
+
+# Pull updates
+git pull origin main
+
+# Rebuild
+make build
+
+# Restart
+./bin/hydra
+```
+
+---
+
+## 11. Testing Strategy
+
+### 11.1 Test Levels
+
+**Unit Tests (80%+ Coverage):**
+- Individual functions/methods
+- Mocked dependencies
+- Fast execution (<1s per test)
+- Run in CI/CD pipeline
+
+**Integration Tests:**
+- Component interactions
+- Database operations
+- MCP client communication
+- Test with real (but isolated) dependencies
+
+**E2E Tests:**
+- Full workflow testing
+- Spawn real workers
+- Test with real projects
+- Validate end-to-end behavior
+
+**Load Tests:**
+- Simulate high worker count
+- Measure throughput
+- Identify bottlenecks
+- Test recovery from failures
+
+### 11.2 Test Organization
+
+```
+hydra/
+├── internal/
+│   ├── core/
+│   │   ├── overseer.go
+│   │   ├── overseer_test.go       # Unit tests
+│   │   └── overseer_integration_test.go
+│   └── ...
+├── tests/
+│   ├── integration/
+│   │   ├── beads_client_test.go
+│   │   ├── mcp_client_test.go
+│   │   └── worker_test.go
+│   ├── e2e/
+│   │   ├── workflow_test.go
+│   │   └── recovery_test.go
+│   └── fixtures/
+│       └── test_project/           # Test project for E2E
+└── testutil/
+    ├── mocks/                      # Mock implementations
+    └── helpers.go                  # Test helpers
+```
+
+### 11.3 Unit Testing Guidelines
+
+**Naming:**
+- `TestFunctionName` - Basic functionality
+- `TestFunctionName_Scenario` - Specific scenario
+- `TestFunctionName_Error` - Error cases
+
+**Example:**
+```go
+func TestOverseer_SpawnWorker_Success(t *testing.T) {
+    // Arrange
+    overseer := NewOverseer(testConfig())
+    bead := testBead()
+    
+    // Act
+    worker, err := overseer.spawnWorker(bead)
+    
+    // Assert
+    require.NoError(t, err)
+    assert.NotNil(t, worker)
+    assert.Equal(t, bead.ID, worker.BeadID)
+}
+
+func TestOverseer_SpawnWorker_MaxWorkers(t *testing.T) {
+    // Test max worker limit
+}
+```
+
+**Mocking:**
+```go
+// Mock MCP client
+type MockMCPClient struct {
+    mock.Mock
+}
+
+func (m *MockMCPClient) SendMessage(msg Message) error {
+    args := m.Called(msg)
+    return args.Error(0)
+}
+```
+
+### 11.4 Integration Testing
+
+**Test Database:**
+- Use in-memory SQLite for tests
+- Reset state between tests
+- Parallel test execution safe
+
+**Test Services:**
+- Start mock MCP server on random port
+- Use test cass_memory database
+- Mock llm-tldr responses
+
+**Example:**
+```go
+func TestBeadsClient_Integration(t *testing.T) {
+    // Setup test project
+    testProject := createTestProject(t)
+    defer cleanupTestProject(t, testProject)
+    
+    // Create test beads
+    createTestBead(t, testProject, "test-bead-1")
+    
+    // Test client
+    client := NewClient()
+    beads, err := client.GetReadyBeads(testProject.Path, "")
+    
+    // Assert
+    require.NoError(t, err)
+    assert.Len(t, beads, 1)
+    assert.Equal(t, "test-bead-1", beads[0].Title)
+}
+```
+
+### 11.5 E2E Testing
+
+**Workflow Tests:**
+```go
+func TestE2E_Workflow_SingleBead(t *testing.T) {
+    // Setup
+    overseer := startTestOverseer(t)
+    defer overseer.Stop()
+    
+    project := createTestProject(t)
+    bead := createTestBead(t, project, "implement", map[string]string{
+        "test": "true",
+    })
+    
+    // Execute
+    err := overseer.triggerBead(bead.ID)
+    require.NoError(t, err)
+    
+    // Wait for completion
+    waitForBeadCompletion(t, bead.ID, 30*time.Second)
+    
+    // Assert
+    completedBead := getBead(t, bead.ID)
+    assert.Equal(t, types.StatusCompleted, completedBead.Status)
+}
+```
+
+**Test Scenarios:**
+1. Single bead execution
+2. Dependency chain execution
+3. Parallel bead execution
+4. Approval gate workflow
+5. Retry after failure
+6. Worker cancellation
+7. System recovery after crash
+
+### 11.6 Performance Testing
+
+**Load Test Scenarios:**
+```go
+func BenchmarkOverseer_SpawnWorkers(b *testing.B) {
+    overseer := NewOverseer(testConfig())
+    beads := generateTestBeads(b.N)
+    
+    b.ResetTimer()
+    for i := 0; i < b.N; i++ {
+        overseer.spawnWorker(beads[i])
+    }
+}
+
+func TestLoad_MaxWorkers(t *testing.T) {
+    overseer := startTestOverseer(t)
+    
+    // Create 100 beads
+    beads := createTestBeads(t, 100)
+    
+    // All should complete within timeout
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+    defer cancel()
+    
+    err := overseer.ProcessAll(ctx, beads)
+    require.NoError(t, err)
+}
+```
+
+### 11.7 CI/CD Integration
+
+**GitHub Actions:**
+```yaml
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.23'
+      - run: go test -v ./... -coverprofile=coverage.out
+      - run: go tool cover -func=coverage.out
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    services:
+      mcp-agent-mail:
+        image: mcp-agent-mail:latest
+        ports:
+          - 8765:8765
+    steps:
+      - uses: actions/checkout@v3
+      - run: make test-integration
+
+  e2e-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: make test-e2e
+```
+
+### 11.8 Test Data Management
+
+**Test Projects:**
+- `tests/fixtures/simple-project/` - Single repo
+- `tests/fixtures/multi-repo/` - Multiple repos
+- `tests/fixtures/large-project/` - Many beads for load tests
+
+**Data Builders:**
+```go
+func NewBeadBuilder() *BeadBuilder {
+    return &BeadBuilder{}
+}
+
+func (b *BeadBuilder) WithTitle(title string) *BeadBuilder {
+    b.title = title
+    return b
+}
+
+func (b *BeadBuilder) WithDependencies(deps ...string) *BeadBuilder {
+    b.dependencies = deps
+    return b
+}
+
+func (b *BeadBuilder) Build() types.Bead {
+    return types.Bead{...}
+}
+```
+
+---
+
+## 12. Implementation Phases
 
 ### Phase 1: Foundation (Current)
 **Status:** In Progress
@@ -400,7 +1319,7 @@ projects:
 
 ---
 
-## 7. Success Criteria
+## 13. Success Criteria
 
 **Functional:**
 - ✅ Spawns workers for ready beads automatically
@@ -424,7 +1343,7 @@ projects:
 
 ---
 
-## 8. Open Questions
+## 14. Open Questions
 
 1. **Human Approval Flow**: Should approval gates show a prompt in CLI, or just wait for `br close`?
 
@@ -438,7 +1357,7 @@ projects:
 
 ---
 
-## 9. Appendix
+## 15. Appendix
 
 ### A. Bead ID Format
 - Single repo: `{project-name}-{number}` (e.g., `my-project-123`)
