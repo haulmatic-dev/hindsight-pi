@@ -123,3 +123,105 @@ func (e *InvalidStateError) Error() string {
 func (e *InvalidStateError) Unwrap() error {
 	return nil
 }
+
+// RetryExhaustedError represents an error when a bead has exhausted all retry attempts.
+type RetryExhaustedError struct {
+	// BeadID is the identifier of the bead that exhausted retries
+	BeadID string
+
+	// Attempts is the number of retry attempts made
+	Attempts int
+
+	// LastError is the last error that caused the retry
+	LastError error
+}
+
+// Error returns a formatted error message for the RetryExhaustedError.
+// Format: "bead {id} exhausted {attempts} retry attempts: {error}"
+func (e *RetryExhaustedError) Error() string {
+	return fmt.Sprintf("bead %s exhausted %d retry attempts: %v", e.BeadID, e.Attempts, e.LastError)
+}
+
+// Unwrap returns the last error to support error chaining.
+func (e *RetryExhaustedError) Unwrap() error {
+	return e.LastError
+}
+
+// BeadFetchError represents an error when fetching bead information fails.
+type BeadFetchError struct {
+	// Op is the operation being performed (e.g., "list", "get")
+	Op string
+
+	// Project is the project name
+	Project string
+
+	// Repo is the repository name (may be empty)
+	Repo string
+
+	// Err is the underlying error
+	Err error
+}
+
+// Error returns a formatted error message for the BeadFetchError.
+func (e *BeadFetchError) Error() string {
+	if e.Repo != "" {
+		return fmt.Sprintf("bead %s failed for %s/%s: %v", e.Op, e.Project, e.Repo, e.Err)
+	}
+	return fmt.Sprintf("bead %s failed for %s: %v", e.Op, e.Project, e.Err)
+}
+
+// Unwrap returns the underlying error to support error chaining.
+func (e *BeadFetchError) Unwrap() error {
+	return e.Err
+}
+
+// WorkerSpawnError represents an error when spawning a worker fails.
+type WorkerSpawnError struct {
+	// BeadID is the identifier of the bead for which the worker failed
+	BeadID string
+
+	// AgentType is the agent type that was requested
+	AgentType string
+
+	// Err is the underlying error
+	Err error
+}
+
+// Error returns a formatted error message for the WorkerSpawnError.
+func (e *WorkerSpawnError) Error() string {
+	return fmt.Sprintf("failed to spawn %s worker for bead %s: %v", e.AgentType, e.BeadID, e.Err)
+}
+
+// Unwrap returns the underlying error to support error chaining.
+func (e *WorkerSpawnError) Unwrap() error {
+	return e.Err
+}
+
+// GracefulDegradationError represents a non-fatal error that the overseer
+// can recover from and continue operating.
+type GracefulDegradationError struct {
+	// Component is the component that experienced the error
+	Component string
+
+	// Operation is the operation that failed
+	Operation string
+
+	// Err is the underlying error
+	Err error
+
+	// Action describes the recovery action taken
+	Action string
+}
+
+// Error returns a formatted error message for the GracefulDegradationError.
+func (e *GracefulDegradationError) Error() string {
+	if e.Action != "" {
+		return fmt.Sprintf("[%s] %s failed: %v (recovery: %s)", e.Component, e.Operation, e.Err, e.Action)
+	}
+	return fmt.Sprintf("[%s] %s failed: %v", e.Component, e.Operation, e.Err)
+}
+
+// Unwrap returns the underlying error to support error chaining.
+func (e *GracefulDegradationError) Unwrap() error {
+	return e.Err
+}

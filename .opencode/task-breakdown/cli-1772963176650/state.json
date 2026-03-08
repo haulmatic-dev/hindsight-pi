@@ -1,0 +1,978 @@
+{
+  "sessionId": "cli-1772963176650",
+  "startedAt": "2026-03-08T09:46:16.654Z",
+  "currentStep": "completed",
+  "prdPath": "/Users/buddhi/source-code/personal/hydra/docs/PRD/beads-client-dag-20260308.md",
+  "prdContent": "# Product Requirements Document: Beads Client and Dependency Resolver\n\n## 1. Executive Summary\n\nThis PRD defines the implementation requirements for completing the Hydra orchestrator's **Beads Client** and **Dependency Resolver (DAG)** components. These are Phase 1 deliverables that enable proper task scheduling with dependency tracking.\n\n**Business Value:**\n- Enable parallel execution of independent tasks\n- Prevent downstream tasks from starting before dependencies complete\n- Detect and report circular dependencies\n- Support complex workflow patterns (fan-out, fan-in)\n\n**Scope:**\n- Complete beads client with JSON parsing\n- Implement DAG-based dependency resolution\n- Integrate with existing overseer polling loop\n- Add comprehensive testing\n\n## 2. User Stories\n\n### US-001: Parse Full Bead Details\n**As a** task scheduler  \n**I want** to parse complete bead information from the `br` CLI  \n**So that** I can understand task requirements, dependencies, and metadata\n\n**Acceptance Criteria:**\n- Parse bead ID, title, description, type from `br show` JSON output\n- Extract dependency list with IDs and status\n- Handle both single-repo and multi-repo projects\n- Support all bead types (task, bug, feature, etc.)\n\n### US-002: Build Dependency Graph\n**As a** workflow orchestrator  \n**I want** to build a DAG from bead dependencies  \n**So that** I can determine execution order and identify ready tasks\n\n**Acceptance Criteria:**\n- Build graph from all beads and their dependencies\n- Support up to 1000 beads per project\n- Calculate in-degree for each bead\n- Track which beads are blocked vs ready\n\n### US-003: Detect Circular Dependencies\n**As a** system operator  \n**I want** to detect circular dependencies in the workflow  \n**So that** I can prevent infinite loops and report configuration errors\n\n**Acceptance Criteria:**\n- Detect cycles during DAG construction\n- Report the exact cycle path (e.g., A → B → C → A)\n- Log error and skip affected beads\n- Continue processing other valid beads\n\n### US-004: Parallel Task Execution\n**As a** developer  \n**I want** independent tasks to execute in parallel  \n**So that** overall workflow completion time is minimized\n\n**Acceptance Criteria:**\n- Execute beads with in-degree 0 simultaneously\n- Respect max worker limit (default 6)\n- Honor priority ordering when selecting from ready pool\n- Track worker status via API\n\n### US-005: Dynamic Unblocking\n**As a** task scheduler  \n**I want** dependent tasks to become ready when dependencies complete  \n**So that** the workflow progresses automatically without manual intervention\n\n**Acceptance Criteria:**\n- Reduce in-degree when dependency completes\n- Trigger immediate scheduling check (don't wait for poll interval)\n- Handle partial failures (retry failed beads independently)\n- Update DAG state atomically\n\n## 3. Functional Requirements\n\n### FR-001a: FR-001: Complete Beads Client JSON Parsing (Part 1/4)\n\nAcceptance Criteria:\n- Use `--json` flag for all commands (`br ready`, `br show`, `br list`)\n- Define Go structs matching JSON schema from `br schema`\n- Parse fields: id, title, description, status, priority, issue_type, labels, dependencies\n\n### FR-001b: FR-001: Complete Beads Client JSON Parsing (Part 2/4)\n\nAcceptance Criteria:\n- Handle time fields (created_at, updated_at) with proper timezone handling\n- Support dependency arrays with full dependency objects\n- `GetReadyBeads()` parses JSON output correctly\n\n### FR-001c: FR-001: Complete Beads Client JSON Parsing (Part 3/4)\n\nAcceptance Criteria:\n- `GetBeadDetails()` returns full bead with dependencies\n- `ListBeads()` supports pagination (if applicable)\n- All bead types are supported\n\n### FR-001d: FR-001: Complete Beads Client JSON Parsing (Part 4/4)\n\nAcceptance Criteria:\n- Error handling includes CLI error messages\n### FR-002a: FR-002: DAG Data Structure (Part 1/6)\n\nAcceptance Criteria:\n- Create `internal/core/dag.go` with DAG struct\n- Use adjacency list representation for O(1) edge lookups\n- Support concurrent reads (RWMutex for thread safety)\n\n### FR-002b: FR-002: DAG Data Structure (Part 2/6)\n\nAcceptance Criteria:\n- Store bead metadata alongside graph structure\n- Track execution state (pending, running, completed, failed)\n- `AddNode(bead)` - Add bead to graph\n\n### FR-002c: FR-002: DAG Data Structure (Part 3/6)\n\nAcceptance Criteria:\n- `AddEdge(from, to)` - Add dependency edge\n- `GetReadyNodes()` - Return beads with in-degree 0\n- `MarkCompleted(id)` - Mark bead done, reduce dependents' in-degree\n\n### FR-002d: FR-002: DAG Data Structure (Part 4/6)\n\nAcceptance Criteria:\n- `TopologicalSort()` - Return execution order (Kahn's algorithm)\n- `DetectCycle()` - Detect and return cycle path\n- DAG supports 1000+ nodes efficiently\n\n### FR-002e: FR-002: DAG Data Structure (Part 5/6)\n\nAcceptance Criteria:\n- In-degree calculation is accurate\n- Thread-safe for concurrent access\n- Memory usage is O(V + E)\n\n### FR-002f: FR-002: DAG Data Structure (Part 6/6)\n\nAcceptance Criteria:\n- Cycle detection runs in O(V + E)\n### FR-003a: FR-003: Dependency Resolution Integration (Part 1/7)\n\nAcceptance Criteria:\n- Build/refresh DAG on each poll cycle from `br list --json`\n- Query DAG for ready beads instead of `br ready`\n- Filter out already running beads\n\n### FR-003b: FR-003: Dependency Resolution Integration (Part 2/7)\n\nAcceptance Criteria:\n- Sort ready beads by priority (high to low)\n- Respect max workers limit\n- Check if overseer is paused\n\n### FR-003c: FR-003: Dependency Resolution Integration (Part 3/7)\n\nAcceptance Criteria:\n- Get active worker count and available slots\n- Fetch all beads via `br list --json`\n- Build/refresh DAG\n\n### FR-003d: FR-003: Dependency Resolution Integration (Part 4/7)\n\nAcceptance Criteria:\n- Detect cycles (log and skip affected)\n- Get ready beads from DAG (in-degree == 0)\n- Filter out running, approval-gates, failed\n\n### FR-003e: FR-003: Dependency Resolution Integration (Part 5/7)\n\nAcceptance Criteria:\n- Sort by priority\n- Spawn workers for top-N beads\n- DAG is rebuilt on each poll cycle\n\n### FR-003f: FR-003: Dependency Resolution Integration (Part 6/7)\n\nAcceptance Criteria:\n- Only ready beads (all deps completed) are spawned\n- Ready beads sorted by priority\n- Cycle detection prevents infinite loops\n\n### FR-003g: FR-003: Dependency Resolution Integration (Part 7/7)\n\nAcceptance Criteria:\n- Integration doesn't break existing API endpoints\n### FR-004a: FR-004: Worker Completion Handling (Part 1/6)\n\nAcceptance Criteria:\n- On worker success: Mark bead completed in DAG\n- On worker failure: Mark bead failed, don't unblock dependents\n- Trigger next poll cycle immediately (bypass 5s interval)\n\n### FR-004b: FR-004: Worker Completion Handling (Part 2/6)\n\nAcceptance Criteria:\n- Handle partial failures (some deps fail, others succeed)\n- Support retry logic (configurable max retries)\n- Worker process exits\n\n### FR-004c: FR-004: Worker Completion Handling (Part 3/6)\n\nAcceptance Criteria:\n- MonitorWorker determines success/failure\n- Update DAG node status\n- If success: Reduce in-degree of all dependents\n\n### FR-004d: FR-004: Worker Completion Handling (Part 4/6)\n\nAcceptance Criteria:\n- If new beads become ready: Trigger scheduling\n- Update REST API stats\n- Log completion with duration\n\n### FR-004e: FR-004: Worker Completion Handling (Part 5/6)\n\nAcceptance Criteria:\n- DAG updated when worker completes\n- Dependents unblocked only on success\n- Immediate scheduling check triggered\n\n### FR-004f: FR-004: Worker Completion Handling (Part 6/6)\n\nAcceptance Criteria:\n- Retry count tracked per bead\n- Failed beads don't block forever (configurable timeout)\n### FR-005a: FR-005: Error Handling and Recovery (Part 1/4)\n\nAcceptance Criteria:\n- Custom error types: DAGError, CycleError, CLIError\n- Cycle detection prevents invalid graph state\n- CLI failures include command output in error\n\n### FR-005b: FR-005: Error Handling and Recovery (Part 2/4)\n\nAcceptance Criteria:\n- Retry with exponential backoff for transient failures\n- Graceful degradation (continue with partial data)\n- All errors implement error interface with context\n\n### FR-005c: FR-005: Error Handling and Recovery (Part 3/4)\n\nAcceptance Criteria:\n- Cycle errors include full path\n- CLI errors include stdout/stderr\n- Transient errors trigger retry\n\n### FR-005d: FR-005: Error Handling and Recovery (Part 4/4)\n\nAcceptance Criteria:\n- Fatal errors don't crash overseer\n### FR-006a: FR-006: Testing Strategy (Part 1/6)\n\nAcceptance Criteria:\n- JSON parsing for various bead formats\n- DAG construction with different topologies\n- Cycle detection (positive and negative cases)\n\n### FR-006b: FR-006: Testing Strategy (Part 2/6)\n\nAcceptance Criteria:\n- Topological sort validation\n- Error handling paths\n- End-to-end with mock `br` CLI\n\n### FR-006c: FR-006: Testing Strategy (Part 3/6)\n\nAcceptance Criteria:\n- DAG integration with overseer\n- Concurrent worker spawning\n- Error recovery scenarios\n\n### FR-006d: FR-006: Testing Strategy (Part 4/6)\n\nAcceptance Criteria:\n- DAG construction with 1000 nodes\n- Cycle detection performance\n- Ready bead query performance\n\n### FR-006e: FR-006: Testing Strategy (Part 5/6)\n\nAcceptance Criteria:\n- >80% code coverage\n- All edge cases tested\n- Race detector passes\n\n### FR-006f: FR-006: Testing Strategy (Part 6/6)\n\nAcceptance Criteria:\n- Benchmarks establish performance baselines\n## 4. Non-Functional Requirements\n\n### NFR-001: Performance\n\n**Metrics:**\n- DAG construction: <100ms for 1000 beads\n- Cycle detection: <50ms for 1000 beads\n- Ready bead query: <10ms\n- JSON parsing: <5ms per bead\n- Memory: <10MB for 1000 beads\n\n### NFR-002: Scalability\n\n**Limits:**\n- Support up to 10,000 beads per project\n- Support up to 100 projects\n- Max 50 concurrent workers (configurable)\n- Poll interval configurable (default 5s)\n\n### NFR-003: Reliability\n\n**Requirements:**\n- Zero downtime during DAG updates\n- Graceful handling of `br` CLI failures\n- Automatic retry for transient errors\n- No data loss on worker crashes\n\n### NFR-004: Observability\n\n**Requirements:**\n- Structured logging for all operations\n- Metrics: dag_build_duration, cycle_detected, ready_beads_count\n- Trace IDs for workflow tracking\n- REST API exposes DAG state\n\n## 5. Technical Considerations\n\n### Architecture\n\n**New Files:**\n- `internal/core/dag.go` - DAG implementation\n- `internal/core/errors.go` - Custom error types\n- `internal/beads/client_test.go` - Client tests\n- `internal/core/dag_test.go` - DAG tests\n\n**Modified Files:**\n- `internal/beads/client.go` - Replace parsers with JSON\n- `internal/core/overseer.go` - Integrate DAG\n- `pkg/types/bead.go` - Add JSON tags, fix ParseBeadID\n\n### Data Models\n\n**BeadJSON (from CLI):**\n```go\ntype BeadJSON struct {\n    ID          string    `json:\"id\"`\n    Title       string    `json:\"title\"`\n    Description string    `json:\"description\"`\n    Status      string    `json:\"status\"`\n    Priority    int       `json:\"priority\"`\n    IssueType   string    `json:\"issue_type\"`\n    Labels      []string  `json:\"labels\"`\n    CreatedAt   time.Time `json:\"created_at\"`\n    UpdatedAt   time.Time `json:\"updated_at\"`\n    Dependencies []struct {\n        ID     string `json:\"id\"`\n        Status string `json:\"status\"`\n    } `json:\"dependencies\"`\n}\n```\n\n**DAGNode:**\n```go\ntype DAGNode struct {\n    Bead       types.Bead\n    InDegree   int\n    OutEdges   []string // IDs of dependent beads\n    Status     types.BeadStatus\n}\n```\n\n### Dependencies\n\n**Add:**\n- `golang.org/x/sync/errgroup` - For concurrent validation (optional)\n\n**Use Existing:**\n- Standard library: `encoding/json`, `sync`, `context`\n- Gin for API (already integrated)\n\n## 6. Risks and Mitigation\n\n| Risk | Impact | Mitigation |\n|------|--------|------------|\n| Beads CLI format changes | High | Use `--json` flag, version detection |\n| Circular dependencies in production | Medium | Detection + logging, skip affected |\n| Memory pressure with large graphs | Medium | Pagination, lazy loading |\n| Race conditions in DAG | High | RWMutex, proper locking order |\n| Performance degradation | Low | Benchmarks, profiling, optimization |\n\n## 7. MoSCoW Prioritization\n\n### Must Have\n- FR-001: JSON parsing for all CLI commands\n- FR-002: DAG data structure\n- FR-003: Dependency resolution integration\n- FR-004: Worker completion handling\n- FR-005: Basic error handling\n\n### Should Have\n- FR-006: Comprehensive testing (>80% coverage)\n- Cycle error reporting with full path\n- Retry logic with exponential backoff\n- Metrics and observability\n\n### Could Have\n- GraphQL API for DAG queries\n- Visualization endpoint\n- Historical DAG analysis\n- Performance optimizations\n\n### Won't Have\n- Graph database backend\n- Distributed DAG across multiple instances\n- Real-time collaborative editing\n- Machine learning for optimization\n\n## 8. Success Metrics\n\n**Functional:**\n- 100% of ready beads correctly identified\n- 0% false positives (blocked beads marked ready)\n- <100ms DAG rebuild time for 1000 beads\n- 100% cycle detection accuracy\n\n**Performance:**\n- <5% overhead compared to current implementation\n- Memory usage <20MB for typical workloads\n- API response time <50ms for stats endpoint\n\n**Quality:**\n- >80% test coverage\n- Zero race conditions (verified with -race)\n- Zero memory leaks (verified with pprof)\n\n## 9. Research Insights\n\n### Codebase Findings\n- Beads CLI supports `--json` flag (use this, not text parsing)\n- Bead IDs are strings (e.g., `hydra-zxc`), not sequential numbers\n- Current `parseBeadDetails()` and `parseListOutput()` are stubbed\n- Overseer already has polling loop and worker management\n\n### Best Practices\n- Use Kahn's algorithm for topological sort (O(V+E))\n- Validate DAG on construction, not execution\n- Use adjacency list representation\n- Implement cycle detection with DFS\n\n### Domain Insights\n- Software workflows have sequential, parallel, fan-out, fan-in patterns\n- Human approval gates pause workflow\n- Retry logic essential for transient failures\n- Observability critical for debugging dependencies\n\n## 10. Implementation Phases\n\n### Phase 1: Foundation (Week 1)\n- Update BeadID type to string\n- Implement JSON parsing for all CLI commands\n- Add comprehensive tests for parsing\n\n### Phase 2: DAG Implementation (Week 2)\n- Create DAG data structure\n- Implement graph operations (add, remove, sort)\n- Add cycle detection\n- Unit tests for DAG\n\n### Phase 3: Integration (Week 3)\n- Integrate DAG with overseer\n- Modify polling loop to use DAG\n- Handle worker completion\n- Integration tests\n\n### Phase 4: Polish (Week 4)\n- Error handling improvements\n- Performance optimization\n- Metrics and logging\n- Documentation\n",
+  "parsedPRD": {
+    "title": "Parsed PRD",
+    "requirements": [
+      {
+        "id": "REQ-001",
+        "originalId": "US-001",
+        "title": "Parse Full Bead Details",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-002",
+        "originalId": "US-002",
+        "title": "Build Dependency Graph",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-003",
+        "originalId": "US-003",
+        "title": "Detect Circular Dependencies",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-004",
+        "originalId": "US-004",
+        "title": "Parallel Task Execution",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-005",
+        "originalId": "US-005",
+        "title": "Dynamic Unblocking",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-006",
+        "originalId": "FR-001A",
+        "title": "FR-001: Complete Beads Client JSON Parsing (Part 1/4)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-007",
+        "originalId": "FR-001B",
+        "title": "FR-001: Complete Beads Client JSON Parsing (Part 2/4)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-008",
+        "originalId": "FR-001C",
+        "title": "FR-001: Complete Beads Client JSON Parsing (Part 3/4)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-009",
+        "originalId": "FR-001D",
+        "title": "FR-001: Complete Beads Client JSON Parsing (Part 4/4)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-010",
+        "originalId": "FR-002A",
+        "title": "FR-002: DAG Data Structure (Part 1/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-011",
+        "originalId": "FR-002B",
+        "title": "FR-002: DAG Data Structure (Part 2/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-012",
+        "originalId": "FR-002C",
+        "title": "FR-002: DAG Data Structure (Part 3/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-013",
+        "originalId": "FR-002D",
+        "title": "FR-002: DAG Data Structure (Part 4/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-014",
+        "originalId": "FR-002E",
+        "title": "FR-002: DAG Data Structure (Part 5/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-015",
+        "originalId": "FR-002F",
+        "title": "FR-002: DAG Data Structure (Part 6/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-016",
+        "originalId": "FR-003A",
+        "title": "FR-003: Dependency Resolution Integration (Part 1/7)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-017",
+        "originalId": "FR-003B",
+        "title": "FR-003: Dependency Resolution Integration (Part 2/7)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-018",
+        "originalId": "FR-003C",
+        "title": "FR-003: Dependency Resolution Integration (Part 3/7)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-019",
+        "originalId": "FR-003D",
+        "title": "FR-003: Dependency Resolution Integration (Part 4/7)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-020",
+        "originalId": "FR-003E",
+        "title": "FR-003: Dependency Resolution Integration (Part 5/7)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-021",
+        "originalId": "FR-003F",
+        "title": "FR-003: Dependency Resolution Integration (Part 6/7)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-022",
+        "originalId": "FR-003G",
+        "title": "FR-003: Dependency Resolution Integration (Part 7/7)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-023",
+        "originalId": "FR-004A",
+        "title": "FR-004: Worker Completion Handling (Part 1/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-024",
+        "originalId": "FR-004B",
+        "title": "FR-004: Worker Completion Handling (Part 2/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-025",
+        "originalId": "FR-004C",
+        "title": "FR-004: Worker Completion Handling (Part 3/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-026",
+        "originalId": "FR-004D",
+        "title": "FR-004: Worker Completion Handling (Part 4/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-027",
+        "originalId": "FR-004E",
+        "title": "FR-004: Worker Completion Handling (Part 5/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-028",
+        "originalId": "FR-004F",
+        "title": "FR-004: Worker Completion Handling (Part 6/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-029",
+        "originalId": "FR-005A",
+        "title": "FR-005: Error Handling and Recovery (Part 1/4)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-030",
+        "originalId": "FR-005B",
+        "title": "FR-005: Error Handling and Recovery (Part 2/4)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-031",
+        "originalId": "FR-005C",
+        "title": "FR-005: Error Handling and Recovery (Part 3/4)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-032",
+        "originalId": "FR-005D",
+        "title": "FR-005: Error Handling and Recovery (Part 4/4)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-033",
+        "originalId": "FR-006A",
+        "title": "FR-006: Testing Strategy (Part 1/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-034",
+        "originalId": "FR-006B",
+        "title": "FR-006: Testing Strategy (Part 2/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-035",
+        "originalId": "FR-006C",
+        "title": "FR-006: Testing Strategy (Part 3/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-036",
+        "originalId": "FR-006D",
+        "title": "FR-006: Testing Strategy (Part 4/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-037",
+        "originalId": "FR-006E",
+        "title": "FR-006: Testing Strategy (Part 5/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-038",
+        "originalId": "FR-006F",
+        "title": "FR-006: Testing Strategy (Part 6/6)",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-039",
+        "originalId": "NFR-001",
+        "title": "Performance",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-040",
+        "originalId": "NFR-002",
+        "title": "Scalability",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-041",
+        "originalId": "NFR-003",
+        "title": "Reliability",
+        "acceptanceCriteria": []
+      },
+      {
+        "id": "REQ-042",
+        "originalId": "NFR-004",
+        "title": "Observability",
+        "acceptanceCriteria": []
+      }
+    ]
+  },
+  "taskGraph": null,
+  "idMapping": {
+    "approvalGate": "hydra-3ff",
+    "implement-req-001": "hydra-11q",
+    "implement-req-001-red": "hydra-bqd",
+    "implement-req-001-green": "hydra-2es",
+    "implement-req-001-refactor": "hydra-236",
+    "implement-req-001-syntax": "hydra-1vw",
+    "implement-req-002": "hydra-2p7",
+    "implement-req-002-red": "hydra-329",
+    "implement-req-002-green": "hydra-2d1",
+    "implement-req-002-refactor": "hydra-1c7",
+    "implement-req-002-syntax": "hydra-38r",
+    "implement-req-003": "hydra-1el",
+    "implement-req-003-red": "hydra-27z",
+    "implement-req-003-green": "hydra-2nz",
+    "implement-req-003-refactor": "hydra-26k",
+    "implement-req-003-syntax": "hydra-37d",
+    "implement-req-004": "hydra-2z1",
+    "implement-req-004-red": "hydra-3mr",
+    "implement-req-004-green": "hydra-6zv",
+    "implement-req-004-refactor": "hydra-3p9",
+    "implement-req-004-syntax": "hydra-1vt",
+    "implement-req-005": "hydra-124",
+    "implement-req-005-red": "hydra-2cy",
+    "implement-req-005-green": "hydra-24u",
+    "implement-req-005-refactor": "hydra-sb4",
+    "implement-req-005-syntax": "hydra-e8a",
+    "implement-req-006": "hydra-33u",
+    "implement-req-006-red": "hydra-3h2",
+    "implement-req-006-green": "hydra-1d0",
+    "implement-req-006-refactor": "hydra-30c",
+    "implement-req-006-syntax": "hydra-27l",
+    "implement-req-007": "hydra-1ow",
+    "implement-req-007-red": "hydra-1q0",
+    "implement-req-007-green": "hydra-23j",
+    "implement-req-007-refactor": "hydra-2hs",
+    "implement-req-007-syntax": "hydra-bly",
+    "implement-req-008": "hydra-20s",
+    "implement-req-008-red": "hydra-2bh",
+    "implement-req-008-green": "hydra-3vf",
+    "implement-req-008-refactor": "hydra-2j2",
+    "implement-req-008-syntax": "hydra-1o7",
+    "implement-req-009": "hydra-b89",
+    "implement-req-009-red": "hydra-1b7",
+    "implement-req-009-green": "hydra-3li",
+    "implement-req-009-refactor": "hydra-1qc",
+    "implement-req-009-syntax": "hydra-1y1",
+    "implement-req-010": "hydra-3o1",
+    "implement-req-010-red": "hydra-16l",
+    "implement-req-010-green": "hydra-roc",
+    "implement-req-010-refactor": "hydra-1f9",
+    "implement-req-010-syntax": "hydra-1i4",
+    "implement-req-011": "hydra-2ld",
+    "implement-req-011-red": "hydra-19w",
+    "implement-req-011-green": "hydra-2lk",
+    "implement-req-011-refactor": "hydra-2bm",
+    "implement-req-011-syntax": "hydra-nwg",
+    "implement-req-012": "hydra-1ch",
+    "implement-req-012-red": "hydra-1am",
+    "implement-req-012-green": "hydra-2kc",
+    "implement-req-012-refactor": "hydra-v6x",
+    "implement-req-012-syntax": "hydra-2bu",
+    "implement-req-013": "hydra-343",
+    "implement-req-013-red": "hydra-3m5",
+    "implement-req-013-green": "hydra-u63",
+    "implement-req-013-refactor": "hydra-3tg",
+    "implement-req-013-syntax": "hydra-91b",
+    "implement-req-014": "hydra-103",
+    "implement-req-014-red": "hydra-46n",
+    "implement-req-014-green": "hydra-2f4",
+    "implement-req-014-refactor": "hydra-idx",
+    "implement-req-014-syntax": "hydra-f4y",
+    "implement-req-015": "hydra-1an",
+    "implement-req-015-red": "hydra-2pv",
+    "implement-req-015-green": "hydra-msa",
+    "implement-req-015-refactor": "hydra-35b",
+    "implement-req-015-syntax": "hydra-ydi",
+    "implement-req-016": "hydra-98e",
+    "implement-req-016-red": "hydra-1wo",
+    "implement-req-016-green": "hydra-203",
+    "implement-req-016-refactor": "hydra-2o5",
+    "implement-req-016-syntax": "hydra-2rc",
+    "implement-req-017": "hydra-139",
+    "implement-req-017-red": "hydra-1wz",
+    "implement-req-017-green": "hydra-27b",
+    "implement-req-017-refactor": "hydra-p6k",
+    "implement-req-017-syntax": "hydra-3mu",
+    "implement-req-018": "hydra-2nd",
+    "implement-req-018-red": "hydra-2ky",
+    "implement-req-018-green": "hydra-q0h",
+    "implement-req-018-refactor": "hydra-13f",
+    "implement-req-018-syntax": "hydra-wgz",
+    "implement-req-019": "hydra-1gk",
+    "implement-req-019-red": "hydra-27v",
+    "implement-req-019-green": "hydra-3b0",
+    "implement-req-019-refactor": "hydra-2zx",
+    "implement-req-019-syntax": "hydra-3cn",
+    "implement-req-020": "hydra-pa8",
+    "implement-req-020-red": "hydra-3qu",
+    "implement-req-020-green": "hydra-ebm",
+    "implement-req-020-refactor": "hydra-i1r",
+    "implement-req-020-syntax": "hydra-3av",
+    "implement-req-021": "hydra-1x1",
+    "implement-req-021-red": "hydra-3hv",
+    "implement-req-021-green": "hydra-29y",
+    "implement-req-021-refactor": "hydra-2r7",
+    "implement-req-021-syntax": "hydra-plf",
+    "implement-req-022": "hydra-2n6",
+    "implement-req-022-red": "hydra-3eb",
+    "implement-req-022-green": "hydra-3dv",
+    "implement-req-022-refactor": "hydra-38w",
+    "implement-req-022-syntax": "hydra-2fa",
+    "implement-req-023": "hydra-22b",
+    "implement-req-023-red": "hydra-1xf",
+    "implement-req-023-green": "hydra-17m",
+    "implement-req-023-refactor": "hydra-o3p",
+    "implement-req-023-syntax": "hydra-fpn",
+    "implement-req-024": "hydra-2nb",
+    "implement-req-024-red": "hydra-2fn",
+    "implement-req-024-green": "hydra-24x",
+    "implement-req-024-refactor": "hydra-1ip",
+    "implement-req-024-syntax": "hydra-2rr",
+    "implement-req-025": "hydra-1l6",
+    "implement-req-025-red": "hydra-3ix",
+    "implement-req-025-green": "hydra-np7",
+    "implement-req-025-refactor": "hydra-10u",
+    "implement-req-025-syntax": "hydra-2tp",
+    "implement-req-026": "hydra-1lj",
+    "implement-req-026-red": "hydra-a1p",
+    "implement-req-026-green": "hydra-2cz",
+    "implement-req-026-refactor": "hydra-nd1",
+    "implement-req-026-syntax": "hydra-1u7",
+    "implement-req-027": "hydra-2zd",
+    "implement-req-027-red": "hydra-3g0",
+    "implement-req-027-green": "hydra-zjc",
+    "implement-req-027-refactor": "hydra-181",
+    "implement-req-027-syntax": "hydra-2v4",
+    "implement-req-028": "hydra-31q",
+    "implement-req-028-red": "hydra-3ds",
+    "implement-req-028-green": "hydra-2oq",
+    "implement-req-028-refactor": "hydra-2pl",
+    "implement-req-028-syntax": "hydra-mt5",
+    "implement-req-029": "hydra-2xj",
+    "implement-req-029-red": "hydra-1ac",
+    "implement-req-029-green": "hydra-3m2",
+    "implement-req-029-refactor": "hydra-2u2",
+    "implement-req-029-syntax": "hydra-3ge",
+    "implement-req-030": "hydra-3im",
+    "implement-req-030-red": "hydra-34c",
+    "implement-req-030-green": "hydra-2w6",
+    "implement-req-030-refactor": "hydra-10l",
+    "implement-req-030-syntax": "hydra-1pp",
+    "implement-req-031": "hydra-5ch",
+    "implement-req-031-red": "hydra-3kg",
+    "implement-req-031-green": "hydra-3ol",
+    "implement-req-031-refactor": "hydra-384",
+    "implement-req-031-syntax": "hydra-13c",
+    "implement-req-032": "hydra-1xm",
+    "implement-req-032-red": "hydra-1fl",
+    "implement-req-032-green": "hydra-3j6",
+    "implement-req-032-refactor": "hydra-7nq",
+    "implement-req-032-syntax": "hydra-1hn",
+    "implement-req-033": "hydra-3r9",
+    "implement-req-033-red": "hydra-bt6o",
+    "implement-req-033-green": "hydra-3i7k",
+    "implement-req-033-refactor": "hydra-3fnh",
+    "implement-req-033-syntax": "hydra-2lxr",
+    "implement-req-034": "hydra-342m",
+    "implement-req-034-red": "hydra-244r",
+    "implement-req-034-green": "hydra-2gp4",
+    "implement-req-034-refactor": "hydra-3sm8",
+    "implement-req-034-syntax": "hydra-3b58",
+    "implement-req-035": "hydra-1mn9",
+    "implement-req-035-red": "hydra-4zit",
+    "implement-req-035-green": "hydra-9cql",
+    "implement-req-035-refactor": "hydra-1jc9",
+    "implement-req-035-syntax": "hydra-n45d",
+    "implement-req-036": "hydra-14ys",
+    "implement-req-036-red": "hydra-3ty4",
+    "implement-req-036-green": "hydra-1osv",
+    "implement-req-036-refactor": "hydra-o45w",
+    "implement-req-036-syntax": "hydra-2502",
+    "implement-req-037": "hydra-em3w",
+    "implement-req-037-red": "hydra-izf4",
+    "implement-req-037-green": "hydra-3ifu",
+    "implement-req-037-refactor": "hydra-pw9z",
+    "implement-req-037-syntax": "hydra-221s",
+    "implement-req-038": "hydra-24w5",
+    "implement-req-038-red": "hydra-xtom",
+    "implement-req-038-green": "hydra-1fha",
+    "implement-req-038-refactor": "hydra-25md",
+    "implement-req-038-syntax": "hydra-2skc",
+    "implement-req-039": "hydra-1j8i",
+    "implement-req-039-red": "hydra-2yik",
+    "implement-req-039-green": "hydra-3e5y",
+    "implement-req-039-refactor": "hydra-2wf1",
+    "implement-req-039-syntax": "hydra-1v5f",
+    "implement-req-040": "hydra-2aog",
+    "implement-req-040-red": "hydra-31sm",
+    "implement-req-040-green": "hydra-2bpd",
+    "implement-req-040-refactor": "hydra-1r3a",
+    "implement-req-040-syntax": "hydra-318f",
+    "implement-req-041": "hydra-1r4s",
+    "implement-req-041-red": "hydra-toqp",
+    "implement-req-041-green": "hydra-3crp",
+    "implement-req-041-refactor": "hydra-1vi3",
+    "implement-req-041-syntax": "hydra-3lay",
+    "implement-req-042": "hydra-2p6p",
+    "implement-req-042-red": "hydra-1yy1",
+    "implement-req-042-green": "hydra-3kx2",
+    "implement-req-042-refactor": "hydra-1jt2",
+    "implement-req-042-syntax": "hydra-3tob",
+    "lint-gate": "hydra-1hkd"
+  },
+  "validationIssues": [],
+  "errors": [],
+  "retryCount": {},
+  "tddState": {
+    "redPhase": false,
+    "greenPhase": false,
+    "refactorPhase": false,
+    "testsWritten": [],
+    "testsPassing": [],
+    "currentPhase": "none"
+  },
+  "analysis": {
+    "featureName": "Product Requirements Document: Beads Client and Dependency Resolver",
+    "requirements": [
+      {
+        "id": "REQ-001",
+        "title": "Parse Full Bead Details",
+        "description": "**As a** task scheduler\n**I want** to parse complete bead information from the `br` CLI\n**So that** I can understand task requirements, dependencies, and metadata\n**Acceptance Criteria:**\n- Parse bead ID, title, description, type from `br show` JSON output\n- Extract dependency list with IDs and status\n- Handle both single-repo and multi-repo projects\n- Support all bead types (task, bug, feature, etc.)",
+        "acceptanceCriteria": [],
+        "estimatedHours": 2.5,
+        "type": "User Story"
+      },
+      {
+        "id": "REQ-002",
+        "title": "Build Dependency Graph",
+        "description": "**As a** workflow orchestrator\n**I want** to build a DAG from bead dependencies\n**So that** I can determine execution order and identify ready tasks\n**Acceptance Criteria:**\n- Build graph from all beads and their dependencies\n- Support up to 1000 beads per project\n- Calculate in-degree for each bead\n- Track which beads are blocked vs ready",
+        "acceptanceCriteria": [],
+        "estimatedHours": 2.5,
+        "type": "User Story"
+      },
+      {
+        "id": "REQ-003",
+        "title": "Detect Circular Dependencies",
+        "description": "**As a** system operator\n**I want** to detect circular dependencies in the workflow\n**So that** I can prevent infinite loops and report configuration errors\n**Acceptance Criteria:**\n- Detect cycles during DAG construction\n- Report the exact cycle path (e.g., A → B → C → A)\n- Log error and skip affected beads\n- Continue processing other valid beads",
+        "acceptanceCriteria": [],
+        "estimatedHours": 2,
+        "type": "User Story"
+      },
+      {
+        "id": "REQ-004",
+        "title": "Parallel Task Execution",
+        "description": "**As a** developer\n**I want** independent tasks to execute in parallel\n**So that** overall workflow completion time is minimized\n**Acceptance Criteria:**\n- Execute beads with in-degree 0 simultaneously\n- Respect max worker limit (default 6)\n- Honor priority ordering when selecting from ready pool\n- Track worker status via API",
+        "acceptanceCriteria": [],
+        "estimatedHours": 3,
+        "type": "User Story"
+      },
+      {
+        "id": "REQ-005",
+        "title": "Dynamic Unblocking",
+        "description": "**As a** task scheduler\n**I want** dependent tasks to become ready when dependencies complete\n**So that** the workflow progresses automatically without manual intervention\n**Acceptance Criteria:**\n- Reduce in-degree when dependency completes\n- Trigger immediate scheduling check (don't wait for poll interval)\n- Handle partial failures (retry failed beads independently)\n- Update DAG state atomically\n## 3. Functional Requirements",
+        "acceptanceCriteria": [],
+        "estimatedHours": 2.5,
+        "type": "User Story"
+      },
+      {
+        "id": "REQ-006",
+        "title": "FR-001: Complete Beads Client JSON Parsing (Part 1/4)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Use `--json` flag for all commands (`br ready`, `br show`, `br list`)",
+          "Define Go structs matching JSON schema from `br schema`",
+          "Parse fields: id, title, description, status, priority, issue_type, labels, dependencies"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-007",
+        "title": "FR-001: Complete Beads Client JSON Parsing (Part 2/4)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Handle time fields (created_at, updated_at) with proper timezone handling",
+          "Support dependency arrays with full dependency objects",
+          "`GetReadyBeads()` parses JSON output correctly"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-008",
+        "title": "FR-001: Complete Beads Client JSON Parsing (Part 3/4)",
+        "description": "",
+        "acceptanceCriteria": [
+          "`GetBeadDetails()` returns full bead with dependencies",
+          "`ListBeads()` supports pagination (if applicable)",
+          "All bead types are supported"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-009",
+        "title": "FR-001: Complete Beads Client JSON Parsing (Part 4/4)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Error handling includes CLI error messages"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-010",
+        "title": "FR-002: DAG Data Structure (Part 1/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Create `internal/core/dag.go` with DAG struct",
+          "Use adjacency list representation for O(1) edge lookups",
+          "Support concurrent reads (RWMutex for thread safety)"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-011",
+        "title": "FR-002: DAG Data Structure (Part 2/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Store bead metadata alongside graph structure",
+          "Track execution state (pending, running, completed, failed)",
+          "`AddNode(bead)` - Add bead to graph"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-012",
+        "title": "FR-002: DAG Data Structure (Part 3/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "`AddEdge(from, to)` - Add dependency edge",
+          "`GetReadyNodes()` - Return beads with in-degree 0",
+          "`MarkCompleted(id)` - Mark bead done, reduce dependents' in-degree"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-013",
+        "title": "FR-002: DAG Data Structure (Part 4/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "`TopologicalSort()` - Return execution order (Kahn's algorithm)",
+          "`DetectCycle()` - Detect and return cycle path",
+          "DAG supports 1000+ nodes efficiently"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-014",
+        "title": "FR-002: DAG Data Structure (Part 5/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "In-degree calculation is accurate",
+          "Thread-safe for concurrent access",
+          "Memory usage is O(V + E)"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-015",
+        "title": "FR-002: DAG Data Structure (Part 6/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Cycle detection runs in O(V + E)"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-016",
+        "title": "FR-003: Dependency Resolution Integration (Part 1/7)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Build/refresh DAG on each poll cycle from `br list --json`",
+          "Query DAG for ready beads instead of `br ready`",
+          "Filter out already running beads"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-017",
+        "title": "FR-003: Dependency Resolution Integration (Part 2/7)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Sort ready beads by priority (high to low)",
+          "Respect max workers limit",
+          "Check if overseer is paused"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-018",
+        "title": "FR-003: Dependency Resolution Integration (Part 3/7)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Get active worker count and available slots",
+          "Fetch all beads via `br list --json`",
+          "Build/refresh DAG"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-019",
+        "title": "FR-003: Dependency Resolution Integration (Part 4/7)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Detect cycles (log and skip affected)",
+          "Get ready beads from DAG (in-degree == 0)",
+          "Filter out running, approval-gates, failed"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-020",
+        "title": "FR-003: Dependency Resolution Integration (Part 5/7)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Sort by priority",
+          "Spawn workers for top-N beads",
+          "DAG is rebuilt on each poll cycle"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-021",
+        "title": "FR-003: Dependency Resolution Integration (Part 6/7)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Only ready beads (all deps completed) are spawned",
+          "Ready beads sorted by priority",
+          "Cycle detection prevents infinite loops"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-022",
+        "title": "FR-003: Dependency Resolution Integration (Part 7/7)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Integration doesn't break existing API endpoints"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-023",
+        "title": "FR-004: Worker Completion Handling (Part 1/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "On worker success: Mark bead completed in DAG",
+          "On worker failure: Mark bead failed, don't unblock dependents",
+          "Trigger next poll cycle immediately (bypass 5s interval)"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-024",
+        "title": "FR-004: Worker Completion Handling (Part 2/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Handle partial failures (some deps fail, others succeed)",
+          "Support retry logic (configurable max retries)",
+          "Worker process exits"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-025",
+        "title": "FR-004: Worker Completion Handling (Part 3/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "MonitorWorker determines success/failure",
+          "Update DAG node status",
+          "If success: Reduce in-degree of all dependents"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-026",
+        "title": "FR-004: Worker Completion Handling (Part 4/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "If new beads become ready: Trigger scheduling",
+          "Update REST API stats",
+          "Log completion with duration"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-027",
+        "title": "FR-004: Worker Completion Handling (Part 5/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "DAG updated when worker completes",
+          "Dependents unblocked only on success",
+          "Immediate scheduling check triggered"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-028",
+        "title": "FR-004: Worker Completion Handling (Part 6/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Retry count tracked per bead",
+          "Failed beads don't block forever (configurable timeout)"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-029",
+        "title": "FR-005: Error Handling and Recovery (Part 1/4)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Custom error types: DAGError, CycleError, CLIError",
+          "Cycle detection prevents invalid graph state",
+          "CLI failures include command output in error"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-030",
+        "title": "FR-005: Error Handling and Recovery (Part 2/4)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Retry with exponential backoff for transient failures",
+          "Graceful degradation (continue with partial data)",
+          "All errors implement error interface with context"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-031",
+        "title": "FR-005: Error Handling and Recovery (Part 3/4)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Cycle errors include full path",
+          "CLI errors include stdout/stderr",
+          "Transient errors trigger retry"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-032",
+        "title": "FR-005: Error Handling and Recovery (Part 4/4)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Fatal errors don't crash overseer"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-033",
+        "title": "FR-006: Testing Strategy (Part 1/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "JSON parsing for various bead formats",
+          "DAG construction with different topologies",
+          "Cycle detection (positive and negative cases)"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-034",
+        "title": "FR-006: Testing Strategy (Part 2/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "Topological sort validation",
+          "Error handling paths",
+          "End-to-end with mock `br` CLI"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-035",
+        "title": "FR-006: Testing Strategy (Part 3/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "DAG integration with overseer",
+          "Concurrent worker spawning",
+          "Error recovery scenarios"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-036",
+        "title": "FR-006: Testing Strategy (Part 4/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          "DAG construction with 1000 nodes",
+          "Cycle detection performance",
+          "Ready bead query performance"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-037",
+        "title": "FR-006: Testing Strategy (Part 5/6)",
+        "description": "",
+        "acceptanceCriteria": [
+          ">80% code coverage",
+          "All edge cases tested",
+          "Race detector passes"
+        ],
+        "estimatedHours": 2,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-038",
+        "title": "FR-006: Testing Strategy (Part 6/6)",
+        "description": "## 4. Non-Functional Requirements",
+        "acceptanceCriteria": [
+          "Benchmarks establish performance baselines"
+        ],
+        "estimatedHours": 2.5,
+        "type": "FR"
+      },
+      {
+        "id": "REQ-039",
+        "title": "Performance",
+        "description": "**Metrics:**\n- DAG construction: <100ms for 1000 beads\n- Cycle detection: <50ms for 1000 beads\n- Ready bead query: <10ms\n- JSON parsing: <5ms per bead\n- Memory: <10MB for 1000 beads",
+        "acceptanceCriteria": [],
+        "estimatedHours": 2,
+        "type": "NFR"
+      },
+      {
+        "id": "REQ-040",
+        "title": "Scalability",
+        "description": "**Limits:**\n- Support up to 10,000 beads per project\n- Support up to 100 projects\n- Max 50 concurrent workers (configurable)\n- Poll interval configurable (default 5s)",
+        "acceptanceCriteria": [],
+        "estimatedHours": 2,
+        "type": "NFR"
+      },
+      {
+        "id": "REQ-041",
+        "title": "Reliability",
+        "description": "**Requirements:**\n- Zero downtime during DAG updates\n- Graceful handling of `br` CLI failures\n- Automatic retry for transient errors\n- No data loss on worker crashes",
+        "acceptanceCriteria": [],
+        "estimatedHours": 2.5,
+        "type": "NFR"
+      },
+      {
+        "id": "REQ-042",
+        "title": "Observability",
+        "description": "**Requirements:**\n- Structured logging for all operations\n- Metrics: dag_build_duration, cycle_detected, ready_beads_count\n- Trace IDs for workflow tracking\n- REST API exposes DAG state\n## 5. Technical Considerations\n### Architecture\n**New Files:**\n- `internal/core/dag.go` - DAG implementation\n- `internal/core/errors.go` - Custom error types\n- `internal/beads/client_test.go` - Client tests\n- `internal/core/dag_test.go` - DAG tests\n**Modified Files:**\n- `internal/beads/client.go` - Replace parsers with JSON\n- `internal/core/overseer.go` - Integrate DAG\n- `pkg/types/bead.go` - Add JSON tags, fix ParseBeadID\n### Data Models\n**BeadJSON (from CLI):**\n```go\ntype BeadJSON struct {\nID          string    `json:\"id\"`\nTitle       string    `json:\"title\"`\nDescription string    `json:\"description\"`\nStatus      string    `json:\"status\"`\nPriority    int       `json:\"priority\"`\nIssueType   string    `json:\"issue_type\"`\nLabels      []string  `json:\"labels\"`\nCreatedAt   time.Time `json:\"created_at\"`\nUpdatedAt   time.Time `json:\"updated_at\"`\nDependencies []struct {\nID     string `json:\"id\"`\nStatus string `json:\"status\"`\n} `json:\"dependencies\"`\n}\n```\n**DAGNode:**\n```go\ntype DAGNode struct {\nBead       types.Bead\nInDegree   int\nOutEdges   []string // IDs of dependent beads\nStatus     types.BeadStatus\n}\n```\n### Dependencies\n**Add:**\n- `golang.org/x/sync/errgroup` - For concurrent validation (optional)\n**Use Existing:**\n- Standard library: `encoding/json`, `sync`, `context`\n- Gin for API (already integrated)\n## 6. Risks and Mitigation\n| Risk | Impact | Mitigation |\n|------|--------|------------|\n| Beads CLI format changes | High | Use `--json` flag, version detection |\n| Circular dependencies in production | Medium | Detection + logging, skip affected |\n| Memory pressure with large graphs | Medium | Pagination, lazy loading |\n| Race conditions in DAG | High | RWMutex, proper locking order |\n| Performance degradation | Low | Benchmarks, profiling, optimization |\n## 7. MoSCoW Prioritization\n### Must Have\n- FR-001: JSON parsing for all CLI commands\n- FR-002: DAG data structure\n- FR-003: Dependency resolution integration\n- FR-004: Worker completion handling\n- FR-005: Basic error handling\n### Should Have\n- FR-006: Comprehensive testing (>80% coverage)\n- Cycle error reporting with full path\n- Retry logic with exponential backoff\n- Metrics and observability\n### Could Have\n- GraphQL API for DAG queries\n- Visualization endpoint\n- Historical DAG analysis\n- Performance optimizations\n### Won't Have\n- Graph database backend\n- Distributed DAG across multiple instances\n- Real-time collaborative editing\n- Machine learning for optimization\n## 8. Success Metrics\n**Functional:**\n- 100% of ready beads correctly identified\n- 0% false positives (blocked beads marked ready)\n- <100ms DAG rebuild time for 1000 beads\n- 100% cycle detection accuracy\n**Performance:**\n- <5% overhead compared to current implementation\n- Memory usage <20MB for typical workloads\n- API response time <50ms for stats endpoint\n**Quality:**\n- >80% test coverage\n- Zero race conditions (verified with -race)\n- Zero memory leaks (verified with pprof)\n## 9. Research Insights\n### Codebase Findings\n- Beads CLI supports `--json` flag (use this, not text parsing)\n- Bead IDs are strings (e.g., `hydra-zxc`), not sequential numbers\n- Current `parseBeadDetails()` and `parseListOutput()` are stubbed\n- Overseer already has polling loop and worker management\n### Best Practices\n- Use Kahn's algorithm for topological sort (O(V+E))\n- Validate DAG on construction, not execution\n- Use adjacency list representation\n- Implement cycle detection with DFS\n### Domain Insights\n- Software workflows have sequential, parallel, fan-out, fan-in patterns\n- Human approval gates pause workflow\n- Retry logic essential for transient failures\n- Observability critical for debugging dependencies\n## 10. Implementation Phases\n### Phase 1: Foundation (Week 1)\n- Update BeadID type to string\n- Implement JSON parsing for all CLI commands\n- Add comprehensive tests for parsing\n### Phase 2: DAG Implementation (Week 2)\n- Create DAG data structure\n- Implement graph operations (add, remove, sort)\n- Add cycle detection\n- Unit tests for DAG\n### Phase 3: Integration (Week 3)\n- Integrate DAG with overseer\n- Modify polling loop to use DAG\n- Handle worker completion\n- Integration tests\n### Phase 4: Polish (Week 4)\n- Error handling improvements\n- Performance optimization\n- Metrics and logging\n- Documentation",
+        "acceptanceCriteria": [],
+        "estimatedHours": 6,
+        "type": "NFR"
+      }
+    ],
+    "dependencies": {
+      "REQ-042": [
+        "REQ-010",
+        "REQ-011",
+        "REQ-012",
+        "REQ-013",
+        "REQ-014",
+        "REQ-015",
+        "REQ-016",
+        "REQ-017",
+        "REQ-018",
+        "REQ-019",
+        "REQ-020",
+        "REQ-021",
+        "REQ-022",
+        "REQ-023",
+        "REQ-024",
+        "REQ-025",
+        "REQ-026",
+        "REQ-027",
+        "REQ-028",
+        "REQ-039"
+      ]
+    },
+    "hasNFRs": true,
+    "hasUserStories": true
+  }
+}

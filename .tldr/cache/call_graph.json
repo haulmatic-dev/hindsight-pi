@@ -1,0 +1,74 @@
+{
+  "edges": [
+    {
+      "from_file": "internal/beads/client.go",
+      "from_func": "Client.GetReadyBeads",
+      "to_file": "internal/beads/client.go",
+      "to_func": "parseReadyOutput"
+    },
+    {
+      "from_file": "internal/beads/client.go",
+      "from_func": "Client.ListBeads",
+      "to_file": "internal/beads/client.go",
+      "to_func": "parseListOutput"
+    },
+    {
+      "from_file": "internal/core/overseer.go",
+      "from_func": "Overseer.tick",
+      "to_file": "internal/core/overseer.go",
+      "to_func": "getReadyBeads"
+    },
+    {
+      "from_file": "internal/core/config.go",
+      "from_func": "LoadConfig",
+      "to_file": "internal/core/config.go",
+      "to_func": "DefaultConfig"
+    },
+    {
+      "from_file": "internal/core/overseer.go",
+      "from_func": "Overseer.discoverProjects",
+      "to_file": "internal/core/overseer.go",
+      "to_func": "inspectProject"
+    },
+    {
+      "from_file": "internal/beads/client.go",
+      "from_func": "Client.GetBead",
+      "to_file": "internal/beads/client.go",
+      "to_func": "parseBeadDetails"
+    },
+    {
+      "from_file": "internal/core/overseer.go",
+      "from_func": "Overseer.Start",
+      "to_file": "internal/core/overseer.go",
+      "to_func": "tick"
+    },
+    {
+      "from_file": "internal/core/overseer.go",
+      "from_func": "Overseer.Start",
+      "to_file": "internal/core/overseer.go",
+      "to_func": "discoverProjects"
+    },
+    {
+      "from_file": "internal/core/overseer.go",
+      "from_func": "Overseer.tick",
+      "to_file": "internal/core/overseer.go",
+      "to_func": "spawnWorker"
+    },
+    {
+      "from_file": "internal/core/overseer.go",
+      "from_func": "Overseer.spawnWorker",
+      "to_file": "internal/core/overseer.go",
+      "to_func": "monitorWorker"
+    },
+    {
+      "from_file": "internal/core/overseer.go",
+      "from_func": "Overseer.spawnWorker",
+      "to_file": "internal/core/overseer.go",
+      "to_func": "Start"
+    }
+  ],
+  "languages": [
+    "go"
+  ],
+  "timestamp": 1772960236.462848
+}

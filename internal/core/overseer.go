@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -15,6 +16,48 @@ import (
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
+// Retry configuration constants
+const (
+	defaultMaxRetries    = 3
+	defaultBaseDelay     = 5 * time.Second
+	defaultMaxDelay      = 5 * time.Minute
+	defaultRetryCooldown = 10 * time.Second
+)
+
+// beadRetryInfo tracks retry state for a bead
+type beadRetryInfo struct {
+	count     int
+	lastError time.Time
+	lastErr   error
+}
+
+// calculateBackoff calculates exponential backoff delay with jitter protection
+// Formula: baseDelay * 2^attempt, capped at maxDelay
+func calculateBackoff(attempt int, baseDelay, maxDelay time.Duration) time.Duration {
+	if attempt <= 0 {
+		return baseDelay
+	}
+
+	// Calculate exponential delay: baseDelay * 2^attempt
+	delay := baseDelay * time.Duration(1<<uint(attempt))
+
+	// Cap at maxDelay
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+
+	return delay
+}
+
+// BeadsClient defines the interface for beads operations
+// This allows for mocking in tests
+type BeadsClient interface {
+	ListBeads(projectPath, repoName string) ([]types.Bead, error)
+	GetBead(projectPath, repoName string, beadID types.BeadID) (*types.Bead, error)
+	CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error
+	GetReadyBeads(projectPath, repoName string) ([]types.Bead, error)
+}
+
 // Overseer is the main scheduler daemon
 type Overseer struct {
 	config        *Config
@@ -27,15 +70,24 @@ type Overseer struct {
 	pollInterval  time.Duration
 	maxWorkers    int
 	maxWorkersMux sync.RWMutex
-	beadsClient   *beads.Client
+	beadsClient   BeadsClient
 	dag           *DAG
 	dagMu         sync.RWMutex
-	completed     map[string]bool // Track completed beads for this session
+	completed     map[string]bool           // Track completed beads for this session
+	retries       map[string]*beadRetryInfo // Track retry state for failed beads
+	retriesMu     sync.RWMutex              // Mutex for retries map
+	baseDelay     time.Duration             // Base delay for exponential backoff
+	maxDelay      time.Duration             // Maximum delay for exponential backoff
 }
 
 // NewOverseer creates a new overseer instance
 func NewOverseer(config *Config) *Overseer {
-	return &Overseer{
+	maxRetries := config.Overseer.DefaultRetries
+	if maxRetries <= 0 {
+		maxRetries = defaultMaxRetries
+	}
+
+	o := &Overseer{
 		config:        config,
 		activeWorkers: make(map[string]*types.Worker),
 		pollInterval:  config.Overseer.PollInterval,
@@ -43,7 +95,124 @@ func NewOverseer(config *Config) *Overseer {
 		beadsClient:   beads.NewClient(),
 		dag:           NewDAG(),
 		completed:     make(map[string]bool),
+		retries:       make(map[string]*beadRetryInfo),
+		baseDelay:     defaultBaseDelay,
+		maxDelay:      defaultMaxDelay,
 	}
+
+	// Override defaults if configured
+	if config.Overseer.WorkerTimeout > 0 {
+		// WorkerTimeout can be used to derive maxDelay
+		o.maxDelay = config.Overseer.WorkerTimeout / 6 // Reasonable fraction
+		if o.maxDelay > defaultMaxDelay {
+			o.maxDelay = defaultMaxDelay
+		}
+	}
+
+	return o
+}
+
+// shouldRetry checks if a bead should be retried based on retry count and cooldown
+func (o *Overseer) shouldRetry(beadID string) bool {
+	o.retriesMu.RLock()
+	defer o.retriesMu.RUnlock()
+
+	retryInfo, exists := o.retries[beadID]
+	if !exists {
+		// No retries yet, allow first attempt
+		return true
+	}
+
+	maxRetries := o.config.Overseer.DefaultRetries
+	if maxRetries <= 0 {
+		maxRetries = defaultMaxRetries
+	}
+
+	// Check if we've exceeded max retries
+	if retryInfo.count >= maxRetries {
+		log.Printf("[Retry] Bead %s exhausted all %d retry attempts", beadID, maxRetries)
+		return false
+	}
+
+	// Check if enough time has passed since last attempt (cooldown + exponential backoff)
+	backoff := calculateBackoff(retryInfo.count, o.baseDelay, o.maxDelay)
+	minInterval := defaultRetryCooldown + backoff
+	elapsed := time.Since(retryInfo.lastError)
+
+	if elapsed < minInterval {
+		log.Printf("[Retry] Bead %s in cooldown period (%v remaining)", beadID, minInterval-elapsed)
+		return false
+	}
+
+	return true
+}
+
+// recordRetry records a retry attempt for a bead
+func (o *Overseer) recordRetry(beadID string, err error) {
+	o.retriesMu.Lock()
+	defer o.retriesMu.Unlock()
+
+	if info, exists := o.retries[beadID]; exists {
+		info.count++
+		info.lastError = time.Now()
+		info.lastErr = err
+		log.Printf("[Retry] Bead %s retry attempt %d recorded: %v", beadID, info.count, err)
+	} else {
+		o.retries[beadID] = &beadRetryInfo{
+			count:     1,
+			lastError: time.Now(),
+			lastErr:   err,
+		}
+		log.Printf("[Retry] Bead %s first retry recorded: %v", beadID, err)
+	}
+}
+
+// clearRetry removes retry tracking for a bead (called on success)
+func (o *Overseer) clearRetry(beadID string) {
+	o.retriesMu.Lock()
+	defer o.retriesMu.Unlock()
+
+	if _, exists := o.retries[beadID]; exists {
+		delete(o.retries, beadID)
+		log.Printf("[Retry] Bead %s retry state cleared after successful execution", beadID)
+	}
+}
+
+// getRetryCount returns the current retry count for a bead
+func (o *Overseer) getRetryCount(beadID string) int {
+	o.retriesMu.RLock()
+	defer o.retriesMu.RUnlock()
+
+	if info, exists := o.retries[beadID]; exists {
+		return info.count
+	}
+	return 0
+}
+
+// logError logs an error with structured context information
+func (o *Overseer) logError(component, operation, beadID string, err error, severity string) {
+	retryCount := o.getRetryCount(beadID)
+
+	switch severity {
+	case "fatal":
+		log.Printf("[FATAL] [%s] %s failed | bead=%s | retries=%d | error=%v",
+			component, operation, beadID, retryCount, err)
+	case "error":
+		log.Printf("[ERROR] [%s] %s failed | bead=%s | retries=%d | error=%v",
+			component, operation, beadID, retryCount, err)
+	case "warn", "warning":
+		log.Printf("[WARN] [%s] %s issue | bead=%s | retries=%d | error=%v",
+			component, operation, beadID, retryCount, err)
+	default:
+		log.Printf("[INFO] [%s] %s | bead=%s | retries=%d | error=%v",
+			component, operation, beadID, retryCount, err)
+	}
+}
+
+// logGracefulDegradation logs a non-fatal error that the system recovered from
+func (o *Overseer) logGracefulDegradation(component, operation, action string, err error) {
+	log.Printf("[DEGRADED] [%s] %s failed but continuing | recovery=%s | error=%v",
+		component, operation, action, err)
 }
 
 // Start begins the overseer's main loop
@@ -202,7 +371,8 @@ func (o *Overseer) tick() error {
 
 	// Build/refresh DAG from all beads
 	if err := o.buildDAG(); err != nil {
-		log.Printf("⚠️  Failed to build DAG: %v", err)
+		// Graceful degradation: log error and continue with existing DAG
+		o.logGracefulDegradation("Overseer", "buildDAG", "using existing DAG", err)
 		// Continue with existing DAG if rebuild fails
 	}
 
@@ -212,16 +382,36 @@ func (o *Overseer) tick() error {
 		return fmt.Errorf("failed to get ready beads from DAG: %w", err)
 	}
 
-	if len(readyBeads) == 0 {
+	// Include failed beads that are eligible for retry
+	retryBeads := o.getRetryEligibleBeads(readyBeads)
+
+	if len(retryBeads) == 0 {
 		return nil
 	}
 
-	log.Printf("📊 Active workers: %d/%d, Ready beads from DAG: %d", activeCount, maxWorkers, len(readyBeads))
+	// Count retry beads separately for logging
+	originalCount := len(readyBeads)
+	retryCount := len(retryBeads) - originalCount
+
+	if retryCount > 0 {
+		log.Printf("📊 Active workers: %d/%d, Ready beads: %d (original: %d, retries: %d)",
+			activeCount, maxWorkers, len(retryBeads), originalCount, retryCount)
+	} else {
+		log.Printf("📊 Active workers: %d/%d, Ready beads from DAG: %d", activeCount, maxWorkers, len(retryBeads))
+	}
 
 	// Spawn workers for ready beads
-	for _, bead := range readyBeads {
+	for _, bead := range retryBeads {
 		if availableSlots <= 0 {
 			break
+		}
+
+		beadIDStr := string(bead.ID)
+
+		// Check if this is a retry and log appropriately
+		if retryInfo, exists := o.retries[beadIDStr]; exists {
+			log.Printf("[Retry] Attempting retry %d/%d for bead %s",
+				retryInfo.count+1, o.config.Overseer.DefaultRetries, bead.ID)
 		}
 
 		// Skip approval gates (require manual br close)
@@ -231,14 +421,89 @@ func (o *Overseer) tick() error {
 		}
 
 		if err := o.spawnWorker(bead); err != nil {
-			log.Printf("❌ Failed to spawn worker for bead %s: %v", bead.ID, err)
+			// Record retry and log error
+			o.recordRetry(beadIDStr, err)
+			o.logError("Overseer", "spawnWorker", beadIDStr, err, "error")
 			continue
 		}
 
+		// Clear retry state on successful spawn
+		o.clearRetry(beadIDStr)
 		availableSlots--
 	}
 
 	return nil
+}
+
+// getRetryEligibleBeads returns beads that are eligible for retry
+// It filters the ready beads and adds any failed beads that should be retried
+func (o *Overseer) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead {
+	o.retriesMu.RLock()
+	defer o.retriesMu.RUnlock()
+
+	if len(o.retries) == 0 {
+		return readyBeads
+	}
+
+	// Create a map of already ready beads for deduplication
+	readyMap := make(map[string]types.Bead, len(readyBeads))
+	for _, bead := range readyBeads {
+		readyMap[string(bead.ID)] = bead
+	}
+
+	// Check failed beads for retry eligibility
+	for beadID, retryInfo := range o.retries {
+		// Skip if already in ready pool
+		if _, exists := readyMap[beadID]; exists {
+			continue
+		}
+
+		maxRetries := o.config.Overseer.DefaultRetries
+		if maxRetries <= 0 {
+			maxRetries = defaultMaxRetries
+		}
+
+		// Check if retries exhausted
+		if retryInfo.count >= maxRetries {
+			log.Printf("[Retry] Bead %s exhausted all %d retry attempts, skipping", beadID, maxRetries)
+			continue
+		}
+
+		// Check cooldown period
+		backoff := calculateBackoff(retryInfo.count, o.baseDelay, o.maxDelay)
+		minInterval := defaultRetryCooldown + backoff
+		if time.Since(retryInfo.lastError) < minInterval {
+			continue
+		}
+
+		// Try to fetch the bead from the DAG
+		if bead, err := o.getBeadFromDAG(beadID); err == nil {
+			readyBeads = append(readyBeads, bead)
+			log.Printf("[Retry] Bead %s added to retry queue (attempt %d/%d)",
+				beadID, retryInfo.count+1, maxRetries)
+		} else {
+			log.Printf("[Retry] Could not fetch bead %s for retry: %v", beadID, err)
+		}
+	}
+
+	return readyBeads
+}
+
+// getBeadFromDAG retrieves a bead from the DAG by ID
+func (o *Overseer) getBeadFromDAG(beadID string) (types.Bead, error) {
+	o.dagMu.RLock()
+	defer o.dagMu.RUnlock()
+
+	// Try to find the bead in the DAG
+	// This is a simplified implementation - in production, the DAG might have
+	// a direct lookup method
+	for _, node := range o.dag.GetReadyNodes() {
+		if string(node.Bead.ID) == beadID {
+			return node.Bead, nil
+		}
+	}
+
+	return types.Bead{}, fmt.Errorf("bead %s not found in DAG", beadID)
 }
 
 // buildDAG fetches all beads from all projects and builds/refreshs the DAG
@@ -246,25 +511,47 @@ func (o *Overseer) buildDAG() error {
 	o.dagMu.Lock()
 	defer o.dagMu.Unlock()
 
+	// If DAG is nil, create a new one (graceful degradation)
+	if o.dag == nil {
+		log.Printf("[DAG] DAG was nil, creating new instance")
+		o.dag = NewDAG()
+	}
+
 	// Clear existing DAG
 	o.dag.Clear()
 
 	var allBeads []types.Bead
+	var fetchErrors []error
 
 	// Fetch all beads from all projects
 	for _, project := range o.projects {
 		if project.Type == types.RepoTypeSingle {
 			beads, err := o.beadsClient.ListBeads(project.Path, "")
 			if err != nil {
-				log.Printf("⚠️  Could not list beads for project %s: %v", project.Name, err)
+				// Graceful degradation: log error and continue
+				fetchErr := &BeadFetchError{
+					Op:      "list",
+					Project: project.Name,
+					Err:     err,
+				}
+				o.logGracefulDegradation("beadsClient", "ListBeads",
+					fmt.Sprintf("skipping project %s", project.Name), fetchErr)
+				fetchErrors = append(fetchErrors, fetchErr)
 				continue
 			}
+
 			// Fetch full details for each bead to get dependencies
 			for _, bead := range beads {
 				fullBead, err := o.beadsClient.GetBead(project.Path, "", bead.ID)
 				if err != nil {
-					log.Printf("⚠️  Could not get full details for bead %s: %v", bead.ID, err)
-					// Use the bead from list (may not have dependencies)
+					// Graceful degradation: use list bead if details fetch fails
+					fetchErr := &BeadFetchError{
+						Op:      "get",
+						Project: project.Name,
+						Err:     err,
+					}
+					o.logGracefulDegradation("beadsClient", "GetBead",
+						fmt.Sprintf("using list data for %s", bead.ID), fetchErr)
 					allBeads = append(allBeads, bead)
 				} else {
 					allBeads = append(allBeads, *fullBead)
@@ -275,15 +562,32 @@ func (o *Overseer) buildDAG() error {
 			for _, repo := range project.Repos {
 				beads, err := o.beadsClient.ListBeads(project.Path, repo.Name)
 				if err != nil {
-					log.Printf("⚠️  Could not list beads for repo %s/%s: %v", project.Name, repo.Name, err)
+					// Graceful degradation: log error and continue
+					fetchErr := &BeadFetchError{
+						Op:      "list",
+						Project: project.Name,
+						Repo:    repo.Name,
+						Err:     err,
+					}
+					o.logGracefulDegradation("beadsClient", "ListBeads",
+						fmt.Sprintf("skipping repo %s/%s", project.Name, repo.Name), fetchErr)
+					fetchErrors = append(fetchErrors, fetchErr)
 					continue
 				}
+
 				// Fetch full details for each bead to get dependencies
 				for _, bead := range beads {
 					fullBead, err := o.beadsClient.GetBead(project.Path, repo.Name, bead.ID)
 					if err != nil {
-						log.Printf("⚠️  Could not get full details for bead %s: %v", bead.ID, err)
-						// Use the bead from list (may not have dependencies)
+						// Graceful degradation: use list bead if details fetch fails
+						fetchErr := &BeadFetchError{
+							Op:      "get",
+							Project: project.Name,
+							Repo:    repo.Name,
+							Err:     err,
+						}
+						o.logGracefulDegradation("beadsClient", "GetBead",
+							fmt.Sprintf("using list data for %s", bead.ID), fetchErr)
 						allBeads = append(allBeads, bead)
 					} else {
 						allBeads = append(allBeads, *fullBead)
@@ -293,48 +597,66 @@ func (o *Overseer) buildDAG() error {
 		}
 	}
 
-	log.Printf("🔄 Building DAG with %d beads", len(allBeads))
+	log.Printf("[DAG] Building DAG with %d beads (from %d projects)", len(allBeads), len(o.projects))
 
 	// Add all beads as nodes to the DAG
+	nodeErrors := 0
 	for _, bead := range allBeads {
 		if err := o.dag.AddNode(bead); err != nil {
-			if err == ErrNodeAlreadyExists {
-				log.Printf("⚠️  Duplicate bead in DAG: %s", bead.ID)
+			if errors.Is(err, ErrNodeAlreadyExists) {
+				log.Printf("[DAG] Duplicate bead skipped: %s", bead.ID)
 				continue
 			}
-			log.Printf("⚠️  Failed to add bead %s to DAG: %v", bead.ID, err)
+			o.logError("DAG", "AddNode", string(bead.ID), err, "warn")
+			nodeErrors++
 		}
 	}
 
 	// Add edges for dependencies
+	edgeErrors := 0
 	for _, bead := range allBeads {
 		beadID := string(bead.ID)
 		for _, depID := range bead.Dependencies {
 			depIDStr := string(depID)
 			if err := o.dag.AddEdge(beadID, depIDStr); err != nil {
-				switch err {
-				case ErrNodeNotFound:
-					log.Printf("⚠️  Dependency %s not found for bead %s (may be in different project)", depIDStr, beadID)
-				case ErrSelfReference:
-					log.Printf("⚠️  Bead %s has self-reference dependency", beadID)
-				case ErrEdgeCreatesCycle:
-					log.Printf("❌ Adding dependency %s -> %s would create a cycle", depIDStr, beadID)
+				switch {
+				case errors.Is(err, ErrNodeNotFound):
+					log.Printf("[DAG] Dependency not found: %s -> %s (may be in different project)", depIDStr, beadID)
+				case errors.Is(err, ErrSelfReference):
+					log.Printf("[DAG] Self-reference detected in bead %s, skipping edge", beadID)
+				case errors.Is(err, ErrEdgeCreatesCycle):
+					log.Printf("[DAG] Cycle would be created: %s -> %s, skipping edge", depIDStr, beadID)
 				default:
-					log.Printf("⚠️  Failed to add edge %s -> %s: %v", depIDStr, beadID, err)
+					o.logError("DAG", "AddEdge", beadID, err, "warn")
 				}
-				// Continue even if edge creation fails
+				edgeErrors++
+				// Continue even if edge creation fails (graceful degradation)
 			}
 		}
 	}
 
 	// Detect and log cycles
 	if cycle, err := o.dag.DetectCycle(); err != nil {
-		log.Printf("❌ Error detecting cycles in DAG: %v", err)
+		o.logError("DAG", "DetectCycle", "", err, "error")
 	} else if cycle != nil {
-		log.Printf("❌ Cycle detected in DAG: %v", cycle)
+		log.Printf("[DAG] Cycle detected: %v", cycle)
 	}
 
-	log.Printf("✅ DAG built: %d nodes, %d blocked", o.dag.GetNodeCount(), o.dag.GetBlockedCount())
+	stats := DAGStats{
+		TotalNodes:     o.dag.GetNodeCount(),
+		ReadyNodes:     len(o.dag.GetReadyNodes()),
+		BlockedNodes:   o.dag.GetBlockedCount(),
+		CompletedNodes: o.dag.GetCompletedCount(),
+		FailedNodes:    o.dag.GetFailedCount(),
+	}
+
+	log.Printf("[DAG] Build complete: %+v (fetch errors: %d, node errors: %d, edge errors: %d)",
+		stats, len(fetchErrors), nodeErrors, edgeErrors)
+
+	// Return error only if we couldn't fetch any beads at all
+	if len(allBeads) == 0 && len(fetchErrors) > 0 {
+		return fmt.Errorf("failed to fetch any beads: %d fetch errors occurred", len(fetchErrors))
+	}
 
 	return nil
 }
@@ -423,19 +745,44 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 	o.workerMutex.RLock()
 	if _, exists := o.activeWorkers[beadIDStr]; exists {
 		o.workerMutex.RUnlock()
+		o.logError("spawnWorker", "duplicate_check", beadIDStr, fmt.Errorf("worker already exists"), "warn")
 		return fmt.Errorf("worker already exists for bead %s", beadIDStr)
 	}
 	o.workerMutex.RUnlock()
 
+	// Check if bead has exhausted retries
+	if retryInfo, exists := o.retries[beadIDStr]; exists {
+		maxRetries := o.config.Overseer.DefaultRetries
+		if maxRetries <= 0 {
+			maxRetries = defaultMaxRetries
+		}
+		if retryInfo.count >= maxRetries {
+			err := &RetryExhaustedError{
+				BeadID:    beadIDStr,
+				Attempts:  retryInfo.count,
+				LastError: retryInfo.lastErr,
+			}
+			o.logError("spawnWorker", "retry_exhausted", beadIDStr, err, "error")
+			return err
+		}
+	}
+
 	// Determine agent type
 	agentTypes := types.DetermineAgentTypes(bead.Type)
 	if len(agentTypes) == 0 {
-		return fmt.Errorf("no agent type found for bead type: %s", bead.Type)
+		err := fmt.Errorf("no agent type found for bead type: %s", bead.Type)
+		o.logError("spawnWorker", "agent_type", beadIDStr, err, "error")
+		return err
 	}
 
 	agentType := agentTypes[0] // Use primary agent
 
-	log.Printf("🚀 Spawning worker for bead: %s (agent: %s)", beadIDStr, agentType)
+	retryCount := o.getRetryCount(beadIDStr)
+	if retryCount > 0 {
+		log.Printf("[Worker] Spawning retry worker for bead: %s (attempt %d, agent: %s)", beadIDStr, retryCount+1, agentType)
+	} else {
+		log.Printf("[Worker] Spawning worker for bead: %s (agent: %s)", beadIDStr, agentType)
+	}
 
 	// Build worker command
 	cmd := exec.Command("go", "run", "cmd/worker/main.go")
@@ -444,11 +791,18 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		fmt.Sprintf("HYDRA_PROJECT=%s", bead.Project),
 		fmt.Sprintf("HYDRA_REPO=%s", bead.Repo),
 		fmt.Sprintf("HYDRA_AGENT_TYPE=%s", agentType),
+		fmt.Sprintf("HYDRA_RETRY_COUNT=%d", retryCount),
 	)
 
 	// Start process
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start worker: %w", err)
+		spawnErr := &WorkerSpawnError{
+			BeadID:    beadIDStr,
+			AgentType: string(agentType),
+			Err:       err,
+		}
+		o.logError("spawnWorker", "process_start", beadIDStr, spawnErr, "error")
+		return spawnErr
 	}
 
 	// Create worker record
@@ -493,29 +847,52 @@ func (o *Overseer) monitorWorker(worker *types.Worker, cmd *exec.Cmd) {
 	// Update DAG node status based on completion result
 	var newlyReady []string
 	if success {
-		log.Printf("✅ Worker completed: %s (duration: %v)", worker.ID, duration)
+		log.Printf("[Worker] Completed: %s (duration: %v)", worker.ID, duration)
 		worker.Status = "completed"
+
+		// Clear retry state on success
+		o.clearRetry(worker.ID)
 
 		// Mark as completed in DAG - this reduces InDegree of dependents
 		o.dagMu.Lock()
 		ready, err := o.dag.MarkCompleted(worker.ID)
 		o.dagMu.Unlock()
 		if err != nil {
-			log.Printf("⚠️  Failed to mark bead %s as completed in DAG: %v", worker.ID, err)
+			o.logError("DAG", "MarkCompleted", worker.ID, err, "warn")
 		} else {
 			newlyReady = ready
 			if len(ready) > 0 {
-				log.Printf("📥 DAG: %d dependents now ready for bead %s", len(ready), worker.ID)
+				log.Printf("[DAG] %d dependents now ready after %s completion", len(ready), worker.ID)
 			}
 		}
 	} else {
-		log.Printf("❌ Worker failed: %s (exit code: %d, duration: %v)", worker.ID, exitCode, duration)
-		worker.Status = "failed"
+		// Log worker failure with structured error
+		workerErr := fmt.Errorf("worker exited with code %d", exitCode)
+		o.recordRetry(worker.ID, workerErr)
+
+		retryCount := o.getRetryCount(worker.ID)
+		maxRetries := o.config.Overseer.DefaultRetries
+		if maxRetries <= 0 {
+			maxRetries = defaultMaxRetries
+		}
+
+		if retryCount >= maxRetries {
+			// Exhausted retries, log as error
+			log.Printf("[Worker] Failed permanently: %s (exit code: %d, duration: %v, retries: %d/%d)",
+				worker.ID, exitCode, duration, retryCount, maxRetries)
+			worker.Status = "failed"
+		} else {
+			// Will retry, log as warning
+			backoff := calculateBackoff(retryCount, o.baseDelay, o.maxDelay)
+			log.Printf("[Worker] Failed but will retry: %s (exit code: %d, duration: %v, retry %d/%d, backoff: %v)",
+				worker.ID, exitCode, duration, retryCount, maxRetries, backoff)
+			worker.Status = "retry_pending"
+		}
 
 		// Mark as failed in DAG - dependents remain blocked
 		o.dagMu.Lock()
 		if err := o.dag.MarkFailed(worker.ID); err != nil {
-			log.Printf("⚠️  Failed to mark bead %s as failed in DAG: %v", worker.ID, err)
+			o.logError("DAG", "MarkFailed", worker.ID, err, "warn")
 		}
 		o.dagMu.Unlock()
 	}
@@ -527,12 +904,18 @@ func (o *Overseer) monitorWorker(worker *types.Worker, cmd *exec.Cmd) {
 
 	// Close bead via beadsClient
 	if err := o.closeWorkerBead(worker, success); err != nil {
-		log.Printf("⚠️  Failed to close bead %s: %v", worker.ID, err)
+		o.logError("beadsClient", "CloseBead", worker.ID, err, "warn")
 	}
 
 	// If successful and new beads are ready, trigger immediate scheduling
 	if success && len(newlyReady) > 0 {
-		log.Printf("🚀 Triggering immediate scheduling for %d newly ready beads", len(newlyReady))
+		log.Printf("[Scheduler] Triggering immediate scheduling for %d newly ready beads", len(newlyReady))
+		go o.triggerImmediateSchedule()
+	}
+
+	// If failed but retries remain, trigger scheduling for retry candidates
+	if !success && o.getRetryCount(worker.ID) < o.config.Overseer.DefaultRetries {
+		log.Printf("[Scheduler] Triggering scheduling to attempt retry for %s", worker.ID)
 		go o.triggerImmediateSchedule()
 	}
 
