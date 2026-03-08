@@ -2,10 +2,8 @@
 package core
 
 import (
-	"container/list"
 	"errors"
 	"fmt"
-	"sort"
 	"sync"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -111,157 +109,7 @@ func (d *DAG) AddNode(bead types.Bead) error {
 	return nil
 }
 
-// AddNodeWithID adds a new node to the DAG with a specific ID.
-// This is a lower-level method that allows specifying the node ID independently
-// of the bead's ID. Use AddNode() for the standard case.
-//
-// Parameters:
-//   - id: The ID to use for the node.
-//   - bead: The bead data to associate with the node.
-//
-// Returns:
-//   - *Node: The created node.
-//
-// Example:
-//
-//	node := dag.AddNodeWithID("custom-id", bead)
-func (d *DAG) AddNodeWithID(id string, bead types.Bead) *Node {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	node := &Node{
-		Bead:     bead,
-		InDegree: 0,
-		OutEdges: make([]string, 0),
-		Status:   types.StatusOpen,
-	}
-	d.nodes[id] = node
-	return node
-}
-
-// AddEdge creates a dependency edge where 'from' depends on 'to'.
-// This means 'to' must complete before 'from' can start.
-//
-// Parameters:
-//   - from: The ID of the dependent bead (the one that waits).
-//   - to: The ID of the prerequisite bead (the one that must complete first).
-//
-// Returns:
-//   - ErrNodeNotFound if either node doesn't exist.
-//   - ErrSelfReference if from and to are the same.
-//   - ErrEdgeCreatesCycle if adding this edge would create a cycle.
-//   - nil if the edge was added successfully.
-//
-// Example:
-//
-//	// "project-456" depends on "project-123" completing first
-//	err := dag.AddEdge("project-456", "project-123")
-func (d *DAG) AddEdge(from, to string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	// Validate nodes exist
-	fromNode, fromExists := d.nodes[from]
-	if !fromExists {
-		return fmt.Errorf("%w: 'from' node %s", ErrNodeNotFound, from)
-	}
-
-	toNode, toExists := d.nodes[to]
-	if !toExists {
-		return fmt.Errorf("%w: 'to' node %s", ErrNodeNotFound, to)
-	}
-
-	// Prevent self-references
-	if from == to {
-		return ErrSelfReference
-	}
-
-	// Check if edge already exists
-	for _, existing := range toNode.OutEdges {
-		if existing == from {
-			return nil // Edge already exists, no error
-		}
-	}
-
-	// Check for cycles using DFS before adding the edge
-	if d.wouldCreateCycle(to, from) {
-		return ErrEdgeCreatesCycle
-	}
-
-	// Add the edge (from depends on to)
-	// Update InDegree of the dependent node
-	fromNode.InDegree++
-
-	// Add 'from' to the OutEdges of 'to'
-	toNode.OutEdges = append(toNode.OutEdges, from)
-
-	return nil
-}
-
-// wouldCreateCycle checks if adding an edge from 'from' to 'to' would create a cycle.
-// This is a helper method that must be called with the write lock held.
-//
-// Parameters:
-//   - from: The source node of the potential edge (the prerequisite).
-//   - to: The target node of the potential edge (the dependent).
-//
-// Returns:
-//   - true if adding the edge would create a cycle, false otherwise.
-func (d *DAG) wouldCreateCycle(from, to string) bool {
-	// If we can reach 'from' from 'to', adding an edge to->from creates a cycle
-	visited := make(map[string]bool)
-	return d.canReach(to, from, visited)
-}
-
-// canReach performs a depth-first search to determine if target is reachable from start.
-// This is a helper method that must be called with the write lock held.
-//
-// Parameters:
-//   - start: The node to start searching from.
-//   - target: The node to search for.
-//   - visited: A map tracking visited nodes to prevent infinite recursion.
-//
-// Returns:
-//   - true if target is reachable from start, false otherwise.
-func (d *DAG) canReach(start, target string, visited map[string]bool) bool {
-	if start == target {
-		return true
-	}
-
-	if visited[start] {
-		return false
-	}
-	visited[start] = true
-
-	node, exists := d.nodes[start]
-	if !exists {
-		return false
-	}
-
-	for _, neighbor := range node.OutEdges {
-		if d.canReach(neighbor, target, visited) {
-			return true
-		}
-	}
-
-	return false
-}
-
 // GetNode retrieves a node by its ID.
-//
-// Parameters:
-//   - id: The string ID of the node to retrieve.
-//
-// Returns:
-//   - *Node: The node if found.
-//   - bool: true if the node exists, false otherwise.
-//
-// Example:
-//
-//	node, exists := dag.GetNode("project-123")
-//	if exists {
-//	    fmt.Println(node.Bead.Title)
-//	}
 func (d *DAG) GetNode(id string) (*Node, bool) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -270,19 +118,7 @@ func (d *DAG) GetNode(id string) (*Node, bool) {
 	return node, exists
 }
 
-// HasNode checks if a node with the given ID exists in the DAG.
-//
-// Parameters:
-//   - id: The string ID to check for.
-//
-// Returns:
-//   - bool: true if the node exists, false otherwise.
-//
-// Example:
-//
-//	if dag.HasNode("project-123") {
-//	    // Process the node
-//	}
+// HasNode checks if a node exists in the DAG.
 func (d *DAG) HasNode(id string) bool {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -291,19 +127,84 @@ func (d *DAG) HasNode(id string) bool {
 	return exists
 }
 
-// GetReadyNodes returns all nodes that have no incomplete dependencies (InDegree == 0)
-// and have StatusOpen status. These are the nodes that can be executed immediately.
-// Uses RLock for thread-safe read access.
-//
-// Returns:
-//   - []*Node: A slice of nodes that are ready for execution.
-//
-// Example:
-//
-//	ready := dag.GetReadyNodes()
-//	for _, node := range ready {
-//	    fmt.Printf("Node %s is ready to execute\n", node.Bead.ID)
-//	}
+// AddEdge adds a dependency edge from 'from' to 'to' (from depends on to).
+// This updates the InDegree of the 'to' node.
+// Returns ErrEdgeCreatesCycle if the edge would create a cycle.
+func (d *DAG) AddEdge(from, to string) error {
+	if from == to {
+		return ErrSelfReference
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Check if edge would create cycle
+	if d.wouldCreateCycle(from, to) {
+		return ErrEdgeCreatesCycle
+	}
+
+	return d.addEdgeInternal(from, to)
+}
+
+// addEdgeInternal adds an edge without cycle detection.
+// Used internally and for testing purposes.
+// Must be called with the lock already held.
+// Edge direction: 'from' depends on 'to' (from -> to means from is blocked by to)
+func (d *DAG) addEdgeInternal(from, to string) error {
+	fromNode, fromExists := d.nodes[from]
+	if !fromExists {
+		return fmt.Errorf("from node %s not found: %w", from, ErrNodeNotFound)
+	}
+
+	toNode, toExists := d.nodes[to]
+	if !toExists {
+		return fmt.Errorf("to node %s not found: %w", to, ErrNodeNotFound)
+	}
+
+	// Add the edge: 'from' depends on 'to'
+	// 'to' enables 'from', so 'to' gets OutEdge, 'from' increments InDegree
+	toNode.OutEdges = append(toNode.OutEdges, from)
+	fromNode.InDegree++
+
+	return nil
+}
+
+// wouldCreateCycle checks if adding an edge from 'from' to 'to' would create a cycle.
+// Edge direction: from depends on to (to enables from, stored as to.OutEdges = append(to.OutEdges, from))
+// This means: if 'from' can already reach 'to', adding edge from->to would create a cycle.
+// This is a helper method that must be called with the lock held.
+func (d *DAG) wouldCreateCycle(from, to string) bool {
+	visited := make(map[string]bool)
+	return d.canReachWithVisited(from, to, visited)
+}
+
+// canReachWithVisited checks if there's a path from 'from' to 'to' using DFS.
+// This is a helper method that must be called with the lock held.
+func (d *DAG) canReachWithVisited(from, to string, visited map[string]bool) bool {
+	if from == to {
+		return true
+	}
+
+	if visited[from] {
+		return false
+	}
+	visited[from] = true
+
+	node, exists := d.nodes[from]
+	if !exists {
+		return false
+	}
+
+	for _, dependentID := range node.OutEdges {
+		if d.canReachWithVisited(dependentID, to, visited) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// GetReadyNodes returns all nodes that are ready to execute (InDegree == 0).
 func (d *DAG) GetReadyNodes() []*Node {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -314,240 +215,15 @@ func (d *DAG) GetReadyNodes() []*Node {
 			ready = append(ready, node)
 		}
 	}
-	return ready
-}
-
-// GetReadyNodeIDs returns all node IDs that have no incomplete dependencies (InDegree == 0).
-// This method returns all nodes with InDegree == 0 regardless of status.
-//
-// Returns:
-//   - []string: A slice of node IDs that are ready for execution.
-//
-// Example:
-//
-//	ready := dag.GetReadyNodeIDs()
-//	for _, id := range ready {
-//	    fmt.Printf("Node %s is ready\n", id)
-//	}
-func (d *DAG) GetReadyNodeIDs() []string {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	ready := make([]string, 0)
-	for id, node := range d.nodes {
-		if node.InDegree == 0 {
-			ready = append(ready, id)
-		}
-	}
 
 	return ready
-}
-
-// TopologicalSort returns a valid execution order for all nodes in the DAG.
-// Nodes are ordered such that all dependencies come before the nodes that depend on them.
-// Uses Kahn's algorithm for topological sorting.
-//
-// Returns:
-//   - []string: A slice of node IDs in topological order.
-//   - error: CycleError if the graph contains a cycle, nil otherwise.
-//
-// Example:
-//
-//	order, err := dag.TopologicalSort()
-//	if err != nil {
-//	    log.Fatal("Graph contains a cycle:", err)
-//	}
-//	for _, id := range order {
-//	    fmt.Printf("Execute: %s\n", id)
-//	}
-func (d *DAG) TopologicalSort() ([]string, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	if len(d.nodes) == 0 {
-		return []string{}, nil
-	}
-
-	// Step 1: Calculate in-degree for all nodes
-	inDegree := make(map[string]int, len(d.nodes))
-	for id := range d.nodes {
-		inDegree[id] = 0
-	}
-
-	// For each edge u -> v, increment in-degree of v
-	for _, node := range d.nodes {
-		for _, dependentID := range node.OutEdges {
-			inDegree[dependentID]++
-		}
-	}
-
-	// Step 2: Queue nodes with in-degree 0
-	queue := list.New()
-	for id, degree := range inDegree {
-		if degree == 0 {
-			queue.PushBack(id)
-		}
-	}
-
-	// Step 3: Process queue
-	result := make([]string, 0, len(d.nodes))
-
-	for queue.Len() > 0 {
-		// Dequeue
-		elem := queue.Front()
-		nodeID := elem.Value.(string)
-		queue.Remove(elem)
-
-		result = append(result, nodeID)
-
-		// For each dependent, decrement in-degree
-		node := d.nodes[nodeID]
-		for _, dependentID := range node.OutEdges {
-			inDegree[dependentID]--
-			if inDegree[dependentID] == 0 {
-				queue.PushBack(dependentID)
-			}
-		}
-	}
-
-	// Step 4: Check for cycle
-	if len(result) != len(d.nodes) {
-		// Find cycle for error message
-		cycle, _ := d.detectCycleDFS()
-		return nil, &CycleError{Path: cycle}
-	}
-
-	return result, nil
-}
-
-// TopologicalSortWithPriority returns a topologically sorted list of node IDs,
-// sorted by priority (highest first) within each dependency level.
-//
-// Returns:
-//   - []string: A slice of node IDs in topological order with priority ordering.
-//   - error: CycleError if the graph contains a cycle, nil otherwise.
-//
-// Example:
-//
-//	order, err := dag.TopologicalSortWithPriority()
-func (d *DAG) TopologicalSortWithPriority() ([]string, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	if len(d.nodes) == 0 {
-		return []string{}, nil
-	}
-
-	// Step 1: Calculate in-degree for all nodes
-	inDegree := make(map[string]int, len(d.nodes))
-	for id := range d.nodes {
-		inDegree[id] = 0
-	}
-
-	for _, node := range d.nodes {
-		for _, dependentID := range node.OutEdges {
-			inDegree[dependentID]++
-		}
-	}
-
-	// Step 2: Use a priority queue (sorted by priority descending)
-	type readyNode struct {
-		id       string
-		priority int
-	}
-
-	// Collect nodes with in-degree 0
-	ready := make([]readyNode, 0)
-	for id, degree := range inDegree {
-		if degree == 0 {
-			node := d.nodes[id]
-			ready = append(ready, readyNode{id: id, priority: node.Bead.Priority})
-		}
-	}
-
-	// Sort by priority descending (higher priority first)
-	sort.Slice(ready, func(i, j int) bool {
-		return ready[i].priority > ready[j].priority
-	})
-
-	// Step 3: Process levels
-	result := make([]string, 0, len(d.nodes))
-
-	for len(ready) > 0 {
-		// Take the highest priority node
-		current := ready[0]
-		ready = ready[1:]
-
-		result = append(result, current.id)
-
-		// Process dependents
-		node := d.nodes[current.id]
-		newReady := make([]readyNode, 0)
-		for _, dependentID := range node.OutEdges {
-			inDegree[dependentID]--
-			if inDegree[dependentID] == 0 {
-				depNode := d.nodes[dependentID]
-				newReady = append(newReady, readyNode{id: dependentID, priority: depNode.Bead.Priority})
-			}
-		}
-
-		// Merge new ready nodes and sort
-		ready = append(ready, newReady...)
-		sort.Slice(ready, func(i, j int) bool {
-			return ready[i].priority > ready[j].priority
-		})
-	}
-
-	// Step 4: Check for cycle
-	if len(result) != len(d.nodes) {
-		cycle, _ := d.detectCycleDFS()
-		return nil, &CycleError{Path: cycle}
-	}
-
-	return result, nil
-}
-
-// DetectCycle uses DFS with three-color marking to detect cycles.
-// Returns cycle path if found, nil if no cycle.
-// Time complexity: O(V + E), Space complexity: O(V)
-//
-// Returns:
-//   - []string: The cycle path if found, nil otherwise.
-//   - error: Any error that occurred during detection.
-func (d *DAG) DetectCycle() ([]string, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	return d.detectCycleDFS()
-}
-
-// detectCycleDFS performs DFS-based cycle detection with three colors.
-// This is a helper method that must be called with the read lock held.
-func (d *DAG) detectCycleDFS() ([]string, error) {
-	colors := make(map[string]Color, len(d.nodes))
-	parent := make(map[string]string, len(d.nodes))
-
-	// Initialize all nodes as White
-	for id := range d.nodes {
-		colors[id] = White
-	}
-
-	// For each unvisited node, perform DFS
-	for id := range d.nodes {
-		if colors[id] == White {
-			if cycle := d.dfsVisit(id, colors, parent); cycle != nil {
-				return cycle, nil
-			}
-		}
-	}
-
-	return nil, nil
 }
 
 // dfsVisit visits a node and its descendants using DFS.
 // This is a helper method that must be called with the read lock held.
-func (d *DAG) dfsVisit(nodeID string, colors map[string]Color, parent map[string]string) []string {
+func (d *DAG) dfsVisit(nodeID string, colors map[string]Color, parent map[string]string, stack *[]string) []string {
 	colors[nodeID] = Gray
+	*stack = append(*stack, nodeID)
 
 	// Visit all dependents
 	node := d.nodes[nodeID]
@@ -555,19 +231,46 @@ func (d *DAG) dfsVisit(nodeID string, colors map[string]Color, parent map[string
 		parent[dependentID] = nodeID
 
 		if colors[dependentID] == Gray {
-			// Found a cycle - reconstruct path
-			return d.reconstructCyclePath(dependentID, nodeID, parent)
+			// Found a cycle - reconstruct path from the Gray node to current end
+			return d.reconstructCyclePathFromStack(*stack, dependentID)
 		}
 
 		if colors[dependentID] == White {
-			if cycle := d.dfsVisit(dependentID, colors, parent); cycle != nil {
+			if cycle := d.dfsVisit(dependentID, colors, parent, stack); cycle != nil {
 				return cycle
 			}
 		}
 	}
 
+	// Remove from stack when done
+	*stack = (*stack)[:len(*stack)-1]
 	colors[nodeID] = Black
 	return nil
+}
+
+// reconstructCyclePathFromStack reconstructs the cycle path from the DFS stack.
+// It finds the cycle start node in the stack and returns the path from that node
+// through the stack to the end, closing the cycle.
+func (d *DAG) reconstructCyclePathFromStack(stack []string, cycleStart string) []string {
+	// Find the index of cycleStart in the stack
+	startIdx := -1
+	for i, node := range stack {
+		if node == cycleStart {
+			startIdx = i
+			break
+		}
+	}
+
+	if startIdx == -1 {
+		// Should not happen, but return empty if cycleStart not found
+		return []string{cycleStart}
+	}
+
+	// Extract the cycle path: from cycleStart to end of stack, then back to cycleStart
+	cycle := make([]string, 0, len(stack)-startIdx+1)
+	cycle = append(cycle, stack[startIdx:]...)
+	cycle = append(cycle, cycleStart) // Close the cycle
+	return cycle
 }
 
 // reconstructCyclePath reconstructs the cycle path from start to end.
@@ -604,6 +307,70 @@ func (d *DAG) Validate() error {
 		return &CycleError{Path: cycle}
 	}
 	return nil
+}
+
+// DetectCycle detects if the DAG contains any cycles using DFS.
+//
+// Returns:
+//   - []string: The cycle path if a cycle is detected (e.g., ["A", "B", "C", "A"]).
+//   - error: CycleError if a cycle is found, nil otherwise.
+//
+// The algorithm uses three-color marking:
+//   - White: Unvisited
+//   - Gray: Currently being processed (in recursion stack)
+//   - Black: Finished processing
+//
+// Time Complexity: O(V + E) where V is the number of vertices and E is the number of edges.
+// Space Complexity: O(V) for the recursion stack and color map.
+func (d *DAG) DetectCycle() ([]string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if len(d.nodes) == 0 {
+		return nil, nil
+	}
+
+	// Three-color marking for cycle detection
+	colors := make(map[string]Color, len(d.nodes))
+	for id := range d.nodes {
+		colors[id] = White
+	}
+
+	parent := make(map[string]string)
+
+	// For each unvisited node, perform DFS
+	for id := range d.nodes {
+		if colors[id] == White {
+			stack := []string{}
+			if cycle := d.dfsVisit(id, colors, parent, &stack); cycle != nil {
+				return cycle, &CycleError{Path: cycle}
+			}
+		}
+	}
+
+	return nil, nil
+}
+
+// detectCycleInternal performs cycle detection without acquiring locks.
+// Must be called with read lock already held.
+func (d *DAG) detectCycleInternal() ([]string, error) {
+	colors := make(map[string]Color, len(d.nodes))
+	for id := range d.nodes {
+		colors[id] = White
+	}
+
+	parent := make(map[string]string)
+
+	for id := range d.nodes {
+		if colors[id] == White {
+			stack := []string{}
+			if cycle := d.dfsVisit(id, colors, parent, &stack); cycle != nil {
+				return cycle, &CycleError{Path: cycle}
+			}
+		}
+	}
+
+	return nil, nil
 }
 
 // HasCycle checks if the DAG contains any cycles.
@@ -948,6 +715,114 @@ func (d *DAG) GetDependents(id string) ([]string, error) {
 	copy(dependents, node.OutEdges)
 
 	return dependents, nil
+}
+
+// TopologicalSort performs a topological sort using Kahn's algorithm.
+// Returns node IDs in dependency order (dependencies before dependents).
+// Time: O(V+E), Space: O(V)
+func (d *DAG) TopologicalSort() ([]string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if len(d.nodes) == 0 {
+		return []string{}, nil
+	}
+
+	// Copy in-degrees
+	inDegree := make(map[string]int, len(d.nodes))
+	for id, node := range d.nodes {
+		inDegree[id] = node.InDegree
+	}
+
+	// Queue nodes with in-degree 0
+	queue := make([]string, 0)
+	for id, degree := range inDegree {
+		if degree == 0 {
+			queue = append(queue, id)
+		}
+	}
+
+	result := make([]string, 0, len(d.nodes))
+
+	// Process nodes
+	for len(queue) > 0 {
+		nodeID := queue[0]
+		queue = queue[1:]
+		result = append(result, nodeID)
+
+		node := d.nodes[nodeID]
+		for _, dependentID := range node.OutEdges {
+			inDegree[dependentID]--
+			if inDegree[dependentID] == 0 {
+				queue = append(queue, dependentID)
+			}
+		}
+	}
+
+	// Check for cycle
+	if len(result) != len(d.nodes) {
+		cycle, _ := d.detectCycleInternal()
+		return nil, &CycleError{Path: cycle}
+	}
+
+	return result, nil
+}
+
+// TopologicalSortWithPriority performs topological sort with priority ordering.
+// At each level, selects highest priority nodes first.
+func (d *DAG) TopologicalSortWithPriority() ([]string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if len(d.nodes) == 0 {
+		return []string{}, nil
+	}
+
+	inDegree := make(map[string]int, len(d.nodes))
+	for id, node := range d.nodes {
+		inDegree[id] = node.InDegree
+	}
+
+	result := make([]string, 0, len(d.nodes))
+	processed := make(map[string]bool)
+
+	for len(result) < len(d.nodes) {
+		// Find ready nodes
+		ready := make([]*Node, 0)
+		for id, degree := range inDegree {
+			if degree == 0 && !processed[id] {
+				if node, exists := d.nodes[id]; exists {
+					ready = append(ready, node)
+				}
+			}
+		}
+
+		if len(ready) == 0 {
+			cycle, _ := d.detectCycleInternal()
+			return nil, &CycleError{Path: cycle}
+		}
+
+		// Sort by priority (highest first)
+		for i := 0; i < len(ready)-1; i++ {
+			for j := i + 1; j < len(ready); j++ {
+				if ready[j].Bead.Priority > ready[i].Bead.Priority {
+					ready[i], ready[j] = ready[j], ready[i]
+				}
+			}
+		}
+
+		// Process highest priority
+		node := ready[0]
+		nodeID := node.Bead.ID.String()
+		result = append(result, nodeID)
+		processed[nodeID] = true
+
+		for _, dependentID := range node.OutEdges {
+			inDegree[dependentID]--
+		}
+	}
+
+	return result, nil
 }
 
 // GetExecutionOrder returns nodes in priority order within topological order.
