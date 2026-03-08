@@ -1315,11 +1315,18 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		// We continue with nil bundle if gathering fails
 	}
 
+	// Find project path
+	projectPath := o.findProjectPath(&bead)
+	if projectPath == "" {
+		projectPath = bead.Project // Fallback to project name
+	}
+
 	// Build worker command
 	cmd := exec.Command("go", "run", "cmd/worker/main.go")
 	env := append(os.Environ(),
 		fmt.Sprintf("HYDRA_BEAD_ID=%s", beadIDStr),
 		fmt.Sprintf("HYDRA_PROJECT=%s", bead.Project),
+		fmt.Sprintf("HYDRA_PROJECT_PATH=%s", projectPath),
 		fmt.Sprintf("HYDRA_REPO=%s", bead.Repo),
 		fmt.Sprintf("HYDRA_AGENT_TYPE=%s", agentType),
 		fmt.Sprintf("HYDRA_RETRY_COUNT=%d", retryCount),

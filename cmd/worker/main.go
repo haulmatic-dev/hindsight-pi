@@ -19,11 +19,12 @@ import (
 
 // WorkerConfig holds the worker configuration from environment variables
 type WorkerConfig struct {
-	BeadID    string
-	Project   string
-	Repo      string
-	AgentType string
-	MCP       struct {
+	BeadID      string
+	Project     string
+	ProjectPath string
+	Repo        string
+	AgentType   string
+	MCP         struct {
 		Enabled bool
 		URL     string
 	}
@@ -101,8 +102,14 @@ func main() {
 		Type:    config.AgentType,
 	}
 
+	// Use project path if available, otherwise fall back to project name
+	projectPath := config.ProjectPath
+	if projectPath == "" {
+		projectPath = config.Project
+	}
+
 	log.Printf("🚀 Worker starting for bead: %s", beadID)
-	log.Printf("   Project: %s, Repo: %s, Agent: %s", config.Project, config.Repo, config.AgentType)
+	log.Printf("   Project: %s (path: %s), Repo: %s, Agent: %s", config.Project, projectPath, config.Repo, config.AgentType)
 	log.Printf("   Agent ID: %s", agentID)
 
 	// Initialize MCP client
@@ -155,10 +162,10 @@ func main() {
 
 	// STEP 3: Execute with retry policy
 	retryPolicy := DefaultRetryPolicy()
-	log.Printf("⚙️ Executing with retry policy (max %d retries)...", retryPolicy.MaxRetries)
+	log.Printf("⚙️  Executing with retry policy (max %d retries)...", retryPolicy.MaxRetries)
 	streamLog(mcpClient, "info", fmt.Sprintf("Starting execution (max %d retries)", retryPolicy.MaxRetries))
 
-	result, err := executeWithRetry(bead, determinedAgentType, intelligenceCtx, mcpClient, retryPolicy)
+	result, err := executeWithRetry(bead, determinedAgentType, intelligenceCtx, mcpClient, retryPolicy, projectPath)
 
 	// Calculate duration
 	duration := time.Since(startTime)
@@ -212,6 +219,7 @@ func parseConfig() WorkerConfig {
 
 	config.BeadID = os.Getenv("HYDRA_BEAD_ID")
 	config.Project = os.Getenv("HYDRA_PROJECT")
+	config.ProjectPath = os.Getenv("HYDRA_PROJECT_PATH")
 	config.Repo = os.Getenv("HYDRA_REPO")
 	config.AgentType = os.Getenv("HYDRA_AGENT_TYPE")
 	if config.AgentType == "" {
@@ -430,6 +438,7 @@ func executeWithRetry(
 	intelligenceCtx *IntelligenceContext,
 	mcpClient *mcp.Client,
 	policy RetryPolicy,
+	projectPath string,
 ) (*ExecutionResult, error) {
 	var lastErr error
 	var result *ExecutionResult
@@ -445,7 +454,7 @@ func executeWithRetry(
 		log.Printf("🔄 Execution attempt %d/%d", attempt+1, policy.MaxRetries+1)
 		streamLog(mcpClient, "info", fmt.Sprintf("Execution attempt %d/%d", attempt+1, policy.MaxRetries+1))
 
-		result, lastErr = executeWithOpencode(bead, agentType, intelligenceCtx, mcpClient)
+		result, lastErr = executeWithOpencode(bead, agentType, intelligenceCtx, mcpClient, projectPath)
 		result.Attempts = attempt + 1
 
 		if lastErr == nil && result.Success {
@@ -538,6 +547,7 @@ func executeWithOpencode(
 	agentType string,
 	intelligenceCtx *IntelligenceContext,
 	mcpClient *mcp.Client,
+	projectPath string,
 ) (*ExecutionResult, error) {
 	result := &ExecutionResult{
 		Success:   false,
@@ -545,7 +555,7 @@ func executeWithOpencode(
 	}
 
 	// Build opencode command
-	cmd := buildOpencodeCommand(bead, agentType, intelligenceCtx)
+	cmd := buildOpencodeCommand(bead, agentType, intelligenceCtx, projectPath)
 
 	log.Printf("🔧 Executing: %s %s", cmd.Path, strings.Join(cmd.Args[1:], " "))
 	streamLog(mcpClient, "info", fmt.Sprintf("Executing opencode command"))
@@ -577,15 +587,21 @@ func executeWithOpencode(
 }
 
 // buildOpencodeCommand builds the opencode CLI command for a bead
-func buildOpencodeCommand(bead types.Bead, agentType string, intelligenceCtx *IntelligenceContext) *exec.Cmd {
+func buildOpencodeCommand(bead types.Bead, agentType string, intelligenceCtx *IntelligenceContext, projectPath string) *exec.Cmd {
 	// Find opencode binary
 	opencodePath := os.Getenv("HYDRA_OPCODE_PATH")
 	if opencodePath == "" {
 		opencodePath = "opencode"
 	}
 
+	// Use project path if provided, otherwise fall back to project name
+	path := projectPath
+	if path == "" {
+		path = bead.Project
+	}
+
 	args := []string{
-		"--project", bead.Project,
+		"--project", path,
 		"--agent", agentType,
 	}
 
