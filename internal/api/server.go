@@ -120,6 +120,11 @@ func (s *Server) setupGraphQL() {
 	))
 }
 
+// Router returns the underlying gin router for testing purposes
+func (s *Server) Router() *gin.Engine {
+	return s.router
+}
+
 // Start starts the API server
 func (s *Server) Start(ctx context.Context) error {
 	if s == nil {
