@@ -1,0 +1,34 @@
+overseer:
+  poll_interval: 10s
+  max_workers: 3
+  default_retries: 2
+  retry_delay: 5s
+  worker_timeout: 10m
+  resource_monitoring:
+    enabled: true
+    max_cpu_percent: 70
+    max_memory_percent: 70
+
+api:
+  enabled: false
+
+projects:
+  auto_discover: false
+  list:
+    - name: hydra
+      path: /Users/buddhi/source-code/personal/hydra
+      type: single
+
+intelligence:
+  cass_memory:
+    enabled: true
+  tldr:
+    enabled: true
+  gptcache:
+    enabled: true
+
+mcp:
+  enabled: true
+  url: http://127.0.0.1:8765
+  port: 8765
+  heartbeat_interval: 30s
