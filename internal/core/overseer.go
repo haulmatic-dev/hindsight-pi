@@ -317,7 +317,7 @@ type Overseer struct {
 	intelMutex    sync.RWMutex              // Mutex for intelligence clients
 
 	// MCP (Model Context Protocol) fields
-	mcpClient          *mcp.Client                 // MCP WebSocket client
+	mcpClient          *mcp.HTTPClient             // MCP HTTP client (Streamable HTTP)
 	mcpReservationMgr  *mcp.ReservationManager     // MCP reservation manager
 	mcpConfig          *MCPConfig                  // MCP configuration
 	activeReservations map[string]*mcp.Reservation // Active file reservations
@@ -350,7 +350,9 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize MCP client if enabled
 	if config.MCP.Enabled {
-		o.initializeMCP()
+		if err := o.initializeMCP(); err != nil {
+			log.Printf("[MCP] Failed to initialize MCP: %v", err)
+		}
 	}
 
 	// Override defaults if configured
@@ -1910,15 +1912,21 @@ func (o *Overseer) initializeMCP() error {
 	}
 	o.mcpReservationMgr = mcp.NewReservationManager()
 
-	// Initialize WebSocket MCP client
+	// Initialize HTTP MCP client (MCP Agent Mail uses Streamable HTTP, not WebSocket)
 	agentID := fmt.Sprintf("hydra-overseer-%d", time.Now().Unix())
-	wsURL := o.config.MCP.URL
-	if wsURL == "" {
-		wsURL = fmt.Sprintf("ws://127.0.0.1:%d/ws", o.config.MCP.Port)
+	httpURL := o.config.MCP.URL
+	if httpURL == "" {
+		httpURL = fmt.Sprintf("http://127.0.0.1:%d", o.config.MCP.Port)
 	}
+	// Convert ws:// to http:// if needed
+	if strings.HasPrefix(httpURL, "ws://") {
+		httpURL = "http://" + strings.TrimPrefix(httpURL, "ws://")
+	}
+	// Remove /ws suffix if present
+	httpURL = strings.TrimSuffix(httpURL, "/ws")
 
 	var err error
-	o.mcpClient, err = mcp.NewClient(wsURL, agentID)
+	o.mcpClient, err = mcp.NewHTTPClient(httpURL, agentID)
 	if err != nil {
 		log.Printf("[MCP] Failed to create MCP client: %v", err)
 		return fmt.Errorf("failed to create MCP client: %w", err)
@@ -1927,15 +1935,20 @@ func (o *Overseer) initializeMCP() error {
 	// Set up message handler
 	o.mcpClient.SetMessageHandler(o.handleMCPMessage)
 
-	log.Printf("[MCP] MCP client initialized (URL: %s, Agent: %s)", wsURL, agentID)
+	// Start the MCP listener (connects to WebSocket server)
+	if err := o.StartMCPListener(); err != nil {
+		log.Printf("[MCP] Failed to start MCP listener: %v", err)
+		return fmt.Errorf("failed to start MCP listener: %w", err)
+	}
+
+	log.Printf("[MCP] MCP client initialized (URL: %s, Agent: %s)", httpURL, agentID)
 	return nil
 }
 
 // StartMCPListener connects to the MCP server and starts listening for messages
+// Note: Caller must hold o.mcpMu lock before calling this function
 func (o *Overseer) StartMCPListener() error {
-	o.mcpMu.Lock()
-	defer o.mcpMu.Unlock()
-
+	// Note: mcpMu lock should be held by caller (initializeMCP)
 	if o.mcpClient == nil {
 		return fmt.Errorf("MCP client not initialized")
 	}
@@ -1977,7 +1990,7 @@ func (o *Overseer) StopMCP() error {
 
 	// Deregister before disconnecting
 	if o.mcpClient.IsConnected() {
-		if err := o.mcpClient.Deregister(); err != nil {
+		if err := o.mcpClient.Deregister(mcp.RegistrationMetadata{}); err != nil {
 			log.Printf("[MCP] Failed to deregister: %v", err)
 		}
 	}
@@ -2145,7 +2158,7 @@ func (o *Overseer) SendLogToMCP(level, message string) error {
 		return fmt.Errorf("MCP client not available")
 	}
 
-	return client.SendLog(level, message)
+	return client.SendLog("", level, message)
 }
 
 // GetMCPStatus returns the current MCP connection status
