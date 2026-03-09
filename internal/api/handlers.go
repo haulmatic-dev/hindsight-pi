@@ -1,10 +1,13 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/haulmatic-dev/hydra/internal/bv"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -278,4 +281,114 @@ func (s *Server) GetReservationsHandler(c *gin.Context) {
 		"count":        len(response),
 		"timestamp":    time.Now(),
 	})
+}
+
+// getBVInsights retrieves insights from the BV client with graceful fallback.
+// Returns an empty InsightsResponse if BV is unavailable or returns an error.
+func (s *Server) getBVInsights(project string) (*bv.InsightsResponse, error) {
+	bvClient := s.overseer.GetBVClient()
+	if bvClient == nil {
+		return &bv.InsightsResponse{}, nil
+	}
+
+	insights, err := bvClient.GetInsights(project)
+	if err != nil {
+		// Graceful degradation: return empty response on error
+		return &bv.InsightsResponse{}, nil
+	}
+	return insights, nil
+}
+
+// calculateDataHash generates a hash based on project and current date.
+func calculateDataHash(project string) string {
+	hash := sha256.New()
+	hash.Write([]byte(project))
+	hash.Write([]byte(time.Now().Format("2006-01-02")))
+	return hex.EncodeToString(hash.Sum(nil))[:16]
+}
+
+// buildGraphMetrics extracts metrics from insights into the response format.
+func buildGraphMetrics(insights *bv.InsightsResponse, project string) bv.GraphMetricsResponse {
+	pageRank := make(map[string]float64)
+	betweenness := make(map[string]float64)
+	criticalPath := []string{}
+
+	// Extract metrics from bottlenecks (high betweenness)
+	for _, b := range insights.Bottlenecks {
+		betweenness[b.BeadID] = float64(b.BlockedCount) * 0.1
+		if b.BlockedCount > 0 {
+			criticalPath = append(criticalPath, b.BeadID)
+		}
+	}
+
+	// Extract metrics from keystones (high impact)
+	for _, k := range insights.Keystones {
+		pageRank[k.BeadID] = float64(k.ImpactScore) * 0.01
+	}
+
+	return bv.GraphMetricsResponse{
+		DataHash:     calculateDataHash(project),
+		Timestamp:    time.Now(),
+		Project:      project,
+		TotalBeads:   insights.TotalBeads,
+		PageRank:     pageRank,
+		Betweenness:  betweenness,
+		Cycles:       insights.Cycles,
+		CriticalPath: criticalPath,
+	}
+}
+
+// GetGraphMetricsHandler returns graph analytics (PageRank, betweenness, critical path)
+func (s *Server) GetGraphMetricsHandler(c *gin.Context) {
+	project := s.resolveProject(c.Query("project"))
+
+	insights, _ := s.getBVInsights(project)
+
+	response := buildGraphMetrics(insights, project)
+	c.JSON(http.StatusOK, response)
+}
+
+// resolveProject returns the project from query param or the first configured project.
+func (s *Server) resolveProject(project string) string {
+	if project != "" {
+		return project
+	}
+	projects := s.overseer.GetProjects()
+	if len(projects) > 0 {
+		return projects[0].Path
+	}
+	return ""
+}
+
+// buildBottlenecksResponse converts insights into the bottlenecks response format.
+func buildBottlenecksResponse(insights *bv.InsightsResponse, project string) bv.BottlenecksResponse {
+	bottlenecks := make([]bv.BottleneckDetails, 0, len(insights.Bottlenecks))
+	for _, b := range insights.Bottlenecks {
+		bottlenecks = append(bottlenecks, bv.BottleneckDetails{
+			BeadID:          b.BeadID,
+			Title:           b.Title,
+			Betweenness:     float64(b.BlockedCount) * 0.1,
+			BlockedCount:    b.BlockedCount,
+			DependencyDepth: b.DependencyDepth,
+			Priority:        b.Priority,
+		})
+	}
+
+	return bv.BottlenecksResponse{
+		DataHash:    calculateDataHash(project),
+		Timestamp:   time.Now(),
+		Project:     project,
+		Bottlenecks: bottlenecks,
+		Count:       len(bottlenecks),
+	}
+}
+
+// GetGraphBottlenecksHandler returns high-betweenness beads (bottlenecks)
+func (s *Server) GetGraphBottlenecksHandler(c *gin.Context) {
+	project := s.resolveProject(c.Query("project"))
+
+	insights, _ := s.getBVInsights(project)
+
+	response := buildBottlenecksResponse(insights, project)
+	c.JSON(http.StatusOK, response)
 }

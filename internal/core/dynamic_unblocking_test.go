@@ -209,7 +209,7 @@ func TestDynamicUnblocking_FailureDoesNotUnblock(t *testing.T) {
 	}
 
 	// Verify B is not in ready list
-	ready, _ := test.overseer.getReadyBeadsFromDAG()
+	ready := test.overseer.GetReadyBeadsFromDAG()
 	for _, bead := range ready {
 		if bead.ID == "test-project-B" {
 			t.Error("B should not be ready after A failed")
@@ -237,7 +237,7 @@ func TestDynamicUnblocking_ImmediateSchedulingTrigger(t *testing.T) {
 	}
 
 	// Verify only A is ready initially
-	ready, _ := test.overseer.getReadyBeadsFromDAG()
+	ready := test.overseer.GetReadyBeadsFromDAG()
 	if len(ready) != 1 || ready[0].ID != "test-project-A" {
 		t.Errorf("Expected only A to be ready initially, got %v", ready)
 	}
@@ -249,7 +249,7 @@ func TestDynamicUnblocking_ImmediateSchedulingTrigger(t *testing.T) {
 	}
 
 	// Verify B is now ready (unblocked)
-	ready, _ = test.overseer.getReadyBeadsFromDAG()
+	ready = test.overseer.GetReadyBeadsFromDAG()
 	if len(ready) != 1 || ready[0].ID != "test-project-B" {
 		t.Errorf("Expected B to be ready after A completed, got %v", ready)
 	}
@@ -505,7 +505,7 @@ func TestDynamicUnblocking_GetRetryEligibleBeads(t *testing.T) {
 	}
 
 	// Get initial ready beads
-	readyBeads, _ := test.overseer.getReadyBeadsFromDAG()
+	readyBeads := test.overseer.GetReadyBeadsFromDAG()
 	if len(readyBeads) != 1 {
 		t.Fatalf("Expected 1 ready bead, got %d", len(readyBeads))
 	}

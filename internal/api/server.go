@@ -78,6 +78,10 @@ func (s *Server) setupRoutes() {
 		// MCP endpoints
 		v1.GET("/mcp/status", s.GetMCPStatusHandler)
 		v1.GET("/mcp/reservations", s.GetReservationsHandler)
+
+		// Graph Metrics endpoints (FR-006)
+		v1.GET("/graph/metrics", s.GetGraphMetricsHandler)
+		v1.GET("/graph/bottlenecks", s.GetGraphBottlenecksHandler)
 	}
 
 	// TODO: Add GraphQL endpoint in Phase 1

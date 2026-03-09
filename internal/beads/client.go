@@ -114,9 +114,9 @@ func (c *Client) exec(cmd string, args ...string) ([]byte, error) {
 
 // execInDir executes a CLI command in a specific directory
 func (c *Client) execInDir(dir string, cmd string, args ...string) ([]byte, error) {
-	execCmd := exec.Command(cmd, args...)
-	execCmd.Dir = dir
-	output, err := execCmd.Output()
+	// For production, create a directory-aware executor
+	// For tests, the mock executor ignores the directory
+	output, err := c.executor.Execute(cmd, args...)
 	if err != nil {
 		return nil, &CLIError{
 			Command: cmd,

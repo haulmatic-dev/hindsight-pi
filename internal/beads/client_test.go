@@ -131,7 +131,7 @@ func TestGetReadyBeads_Success(t *testing.T) {
 
 	mockExec.AddResponse("br", []string{"ready", "--json"}, jsonData, nil)
 
-	beads, err := client.GetReadyBeads("/projects/hydra", "")
+	beads, err := client.GetReadyBeads("hydra", "/projects/hydra", "")
 	if err != nil {
 		t.Fatalf("GetReadyBeads failed: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestGetReadyBeads_CLIError(t *testing.T) {
 	cliErr := errors.New("exit status 1: bead not found")
 	mockExec.AddResponse("br", []string{"ready", "--json"}, []byte{}, cliErr)
 
-	beads, err := client.GetReadyBeads("/projects/hydra", "")
+	beads, err := client.GetReadyBeads("hydra", "/projects/hydra", "")
 
 	// Verify error is returned
 	if err == nil {
@@ -223,7 +223,7 @@ func TestGetReadyBeads_InvalidJSON(t *testing.T) {
 	// Return invalid JSON
 	mockExec.AddResponse("br", []string{"ready", "--json"}, []byte("invalid json"), nil)
 
-	beads, err := client.GetReadyBeads("/projects/hydra", "")
+	beads, err := client.GetReadyBeads("hydra", "/projects/hydra", "")
 
 	// Verify error is returned
 	if err == nil {
@@ -248,7 +248,7 @@ func TestGetReadyBeads_EmptyResult(t *testing.T) {
 	// Return empty array
 	mockExec.AddResponse("br", []string{"ready", "--json"}, []byte("[]"), nil)
 
-	beads, err := client.GetReadyBeads("/projects/hydra", "")
+	beads, err := client.GetReadyBeads("hydra", "/projects/hydra", "")
 	if err != nil {
 		t.Fatalf("GetReadyBeads failed for empty result: %v", err)
 	}

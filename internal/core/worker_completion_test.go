@@ -166,11 +166,11 @@ func TestWorkerCompletion_SuccessfulCompletion(t *testing.T) {
 	overseer.activeWorkers[worker.ID] = worker
 	overseer.workerMutex.Unlock()
 
-	// Simulate worker completion by directly calling closeWorkerBead
-	err := overseer.closeWorkerBead(worker, true)
+	// Simulate worker completion by directly calling closeBead
+	err := overseer.closeBead(worker, true)
 
 	if err != nil {
-		t.Fatalf("closeWorkerBead failed: %v", err)
+		t.Fatalf("closeBead failed: %v", err)
 	}
 
 	// Verify CloseBead was called with correct parameters
@@ -232,10 +232,10 @@ func TestWorkerCompletion_FailedCompletion(t *testing.T) {
 	overseer.workerMutex.Unlock()
 
 	// Simulate failed worker completion
-	err := overseer.closeWorkerBead(worker, false)
+	err := overseer.closeBead(worker, false)
 
 	if err != nil {
-		t.Fatalf("closeWorkerBead failed: %v", err)
+		t.Fatalf("closeBead failed: %v", err)
 	}
 
 	// Verify CloseBead was called with "failed" reason
@@ -258,7 +258,7 @@ func TestWorkerCompletion_FailedCompletion(t *testing.T) {
 	}
 }
 
-// TestWorkerCompletion_ProjectPathResolution tests that closeWorkerBead correctly
+// TestWorkerCompletion_ProjectPathResolution tests that closeBead correctly
 // resolves the project path from various sources
 func TestWorkerCompletion_ProjectPathResolution(t *testing.T) {
 	tests := []struct {
@@ -317,10 +317,10 @@ func TestWorkerCompletion_ProjectPathResolution(t *testing.T) {
 			}
 			mockBeads.addBead(bead)
 
-			// Call closeWorkerBead
-			err := overseer.closeWorkerBead(tt.worker, true)
+			// Call closeBead
+			err := overseer.closeBead(tt.worker, true)
 			if err != nil {
-				t.Fatalf("closeWorkerBead failed: %v", err)
+				t.Fatalf("closeBead failed: %v", err)
 			}
 
 			// Verify the correct project path was used
@@ -368,7 +368,7 @@ func TestWorkerCompletion_CloseErrorHandling(t *testing.T) {
 	}
 
 	// Attempt to close - should return error
-	err := overseer.closeWorkerBead(worker, true)
+	err := overseer.closeBead(worker, true)
 
 	if err == nil {
 		t.Fatal("Expected error when closing bead fails, got nil")
@@ -416,7 +416,7 @@ func TestWorkerCompletion_DependencyErrorDetection(t *testing.T) {
 	}
 
 	// Attempt to close B - should detect dependency error
-	err := overseer.closeWorkerBead(workerB, true)
+	err := overseer.closeBead(workerB, true)
 
 	if err == nil {
 		t.Fatal("Expected dependency error, got nil")
@@ -467,9 +467,10 @@ func TestWorkerCompletion_RetryTrackingOnFailure(t *testing.T) {
 		t.Errorf("Expected retry count of 1 after failure, got %d", retryCount)
 	}
 
-	// Verify shouldRetry returns true (retry eligible)
-	if !overseer.shouldRetry(worker.ID) {
-		t.Error("Expected worker to be eligible for retry")
+	// After just recording a retry, shouldRetry returns false due to cooldown period
+	// This is expected behavior - we don't want to retry immediately
+	if overseer.shouldRetry(worker.ID) {
+		t.Error("Expected worker to NOT be eligible for retry immediately (cooldown period)")
 	}
 
 	// Record more retries up to max
@@ -740,7 +741,7 @@ func TestWorkerCompletion_ConcurrentCompletions(t *testing.T) {
 			// Add small delay to increase chance of concurrency issues
 			time.Sleep(time.Duration(index) * 10 * time.Millisecond)
 
-			if err := overseer.closeWorkerBead(worker, true); err != nil {
+			if err := overseer.closeBead(worker, true); err != nil {
 				errors <- err
 			}
 		}(i)
@@ -782,7 +783,7 @@ func TestWorkerCompletion_UnknownProject(t *testing.T) {
 	}
 
 	// Attempt to close with unknown project
-	err := overseer.closeWorkerBead(worker, true)
+	err := overseer.closeBead(worker, true)
 
 	if err == nil {
 		t.Fatal("Expected error when project not found, got nil")
@@ -818,14 +819,14 @@ func TestWorkerCompletion_MultipleCloseAttempts(t *testing.T) {
 
 	// First attempt - inject temporary error
 	mockBeads.setCloseError("test-project-multi", errors.New("temporary error"))
-	err1 := overseer.closeWorkerBead(worker, true)
+	err1 := overseer.closeBead(worker, true)
 	if err1 == nil {
 		t.Fatal("Expected error on first attempt")
 	}
 
 	// Second attempt - success
 	mockBeads.setCloseError("test-project-multi", nil)
-	err2 := overseer.closeWorkerBead(worker, true)
+	err2 := overseer.closeBead(worker, true)
 	if err2 != nil {
 		t.Fatalf("Expected success on second attempt, got: %v", err2)
 	}

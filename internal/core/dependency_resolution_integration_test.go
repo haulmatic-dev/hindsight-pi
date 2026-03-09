@@ -1,7 +1,6 @@
 package core
 
 import (
-	"context"
 	"sync"
 	"testing"
 	"time"
@@ -46,11 +45,11 @@ func TestDependencyResolution_BeadsClientToDAGFlow(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	// Initially only hydra-001 should be ready
-	readyBeads, err := mockClient.GetReadyBeads(context.Background())
+	readyBeads, err := mockClient.GetReadyBeads("test-project", "/test/project", "test-repo")
 	if err != nil {
 		t.Fatalf("GetReadyBeads() error = %v", err)
 	}
@@ -118,7 +117,7 @@ func TestDependencyResolution_CrossProjectDependencies(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -210,7 +209,7 @@ func TestDependencyResolution_DiamondPattern(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -275,7 +274,7 @@ func TestDependencyResolution_MultipleDependencyLevels(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -358,7 +357,7 @@ func TestDependencyResolution_MixedStatuses(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -421,7 +420,7 @@ func TestDependencyResolution_ComplexGraph(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -493,7 +492,7 @@ func TestDependencyResolution_ConcurrentMarking(t *testing.T) {
 	beads = append(beads, finalBead)
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -568,11 +567,11 @@ func TestDependencyResolution_BeadsClientIntegration(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	// Test GetReadyBeads through the client
-	ready, err := mockClient.GetReadyBeads(context.Background())
+	ready, err := mockClient.GetReadyBeads("test-project", "/test/project", "test-repo")
 	if err != nil {
 		t.Fatalf("GetReadyBeads() error = %v", err)
 	}
@@ -582,7 +581,7 @@ func TestDependencyResolution_BeadsClientIntegration(t *testing.T) {
 	}
 
 	// Mark one as completed through client
-	err = mockClient.CloseBead(context.Background(), "bci-001", "completed")
+	err = mockClient.CloseBead("/test/project", "test-repo", types.BeadID("bci-001"), "completed")
 	if err != nil {
 		t.Fatalf("CloseBead() error = %v", err)
 	}
@@ -593,7 +592,7 @@ func TestDependencyResolution_BeadsClientIntegration(t *testing.T) {
 	mockClient.beads["bci-001"] = bead
 
 	// bci-003 should now be ready
-	ready, err = mockClient.GetReadyBeads(context.Background())
+	ready, err = mockClient.GetReadyBeads("test-project", "/test/project", "test-repo")
 	if err != nil {
 		t.Fatalf("GetReadyBeads() error = %v", err)
 	}
@@ -620,7 +619,7 @@ func TestDependencyResolution_PartialCompletion(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -676,7 +675,7 @@ func TestDependencyResolution_CycleDetection(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -689,8 +688,6 @@ func TestDependencyResolution_CycleDetection(t *testing.T) {
 
 // TestDependencyResolution_EmptyGraph verifies behavior with empty graph
 func TestDependencyResolution_EmptyGraph(t *testing.T) {
-	mockClient := newMockBeadsClient()
-
 	builder := NewDependencyGraph()
 	err := builder.BuildFromBeads([]types.Bead{})
 	if err != nil {
@@ -727,7 +724,7 @@ func TestDependencyResolution_SingleBead(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -778,7 +775,7 @@ func TestDependencyResolution_MissingDependencies(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -808,7 +805,7 @@ func TestDependencyResolution_StatsAccuracy(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -865,7 +862,7 @@ func TestDependencyResolution_TopologicalOrder(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -945,7 +942,7 @@ func TestDependencyResolution_PerformanceLargeGraph(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -986,7 +983,7 @@ func TestDependencyResolution_ResetAndRebuild(t *testing.T) {
 	}
 
 	for _, bead := range beads1 {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -1014,7 +1011,7 @@ func TestDependencyResolution_ResetAndRebuild(t *testing.T) {
 	}
 
 	for _, bead := range beads2 {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	err = builder.BuildFromBeads(beads2)
@@ -1045,7 +1042,7 @@ func TestDependencyResolution_ConcurrentReadWrite(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -1077,7 +1074,7 @@ func TestDependencyResolution_ConcurrentReadWrite(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 100; i++ {
 			_ = builder.GetReadyBeads()
-			_ = builder.GetTopologicalOrder()
+			_, _ = builder.GetTopologicalOrder()
 			time.Sleep(time.Millisecond)
 		}
 		done <- true
@@ -1123,7 +1120,7 @@ func TestDependencyResolution_ValidateAfterBuild(t *testing.T) {
 	}
 
 	for _, bead := range validBeads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -1149,7 +1146,7 @@ func TestDependencyResolution_SelfReference(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()
@@ -1171,7 +1168,7 @@ func TestDependencyResolution_DuplicateBeads(t *testing.T) {
 	}
 
 	for _, bead := range beads {
-		mockClient.beads[bead.ID] = bead
+		mockClient.beads[string(bead.ID)] = bead
 	}
 
 	builder := NewDependencyGraph()

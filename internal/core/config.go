@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -210,4 +211,138 @@ func LoadConfig(path string) (*Config, error) {
 // isZeroNode checks if a yaml.Node is empty/zero value
 func isZeroNode(n yaml.Node) bool {
 	return n.Kind == 0 && n.Tag == "" && len(n.Content) == 0
+}
+
+// Clone creates a deep copy of the Config
+func (c *Config) Clone() *Config {
+	if c == nil {
+		return nil
+	}
+
+	cloned := &Config{
+		Overseer:     c.Overseer,
+		MCP:          c.MCP,
+		API:          c.API,
+		Intelligence: c.Intelligence,
+	}
+
+	// Deep copy Projects slice
+	if c.Projects != nil {
+		cloned.Projects = make([]ProjectConfig, len(c.Projects))
+		copy(cloned.Projects, c.Projects)
+	}
+
+	return cloned
+}
+
+// ValidationError represents a single validation error
+type ValidationError struct {
+	Field   string
+	Message string
+}
+
+func (v ValidationError) Error() string {
+	return fmt.Sprintf("%s: %s", v.Field, v.Message)
+}
+
+// ValidationErrors holds multiple validation errors
+type ValidationErrors []ValidationError
+
+func (v ValidationErrors) Error() string {
+	if len(v) == 0 {
+		return "no validation errors"
+	}
+	if len(v) == 1 {
+		return v[0].Error()
+	}
+
+	var messages []string
+	for _, err := range v {
+		messages = append(messages, err.Error())
+	}
+	return fmt.Sprintf("%d validation errors:\n  - %s", len(v), strings.Join(messages, "\n  - "))
+}
+
+// IsValid returns true if there are no validation errors
+func (v ValidationErrors) IsValid() bool {
+	return len(v) == 0
+}
+
+// ValidateConfig validates the config and returns all validation errors
+func ValidateConfig(cfg *Config) ValidationErrors {
+	var errors ValidationErrors
+
+	if cfg == nil {
+		errors = append(errors, ValidationError{
+			Field:   "config",
+			Message: "config is nil",
+		})
+		return errors
+	}
+
+	if len(cfg.Projects) == 0 {
+		errors = append(errors, ValidationError{
+			Field:   "projects",
+			Message: "no projects configured",
+		})
+	}
+
+	// Validate overseer settings
+	if cfg.Overseer.MaxWorkers < 1 {
+		errors = append(errors, ValidationError{
+			Field:   "overseer.max_workers",
+			Message: "max_workers must be at least 1",
+		})
+	}
+
+	if cfg.Overseer.PollInterval < 1*time.Second {
+		errors = append(errors, ValidationError{
+			Field:   "overseer.poll_interval",
+			Message: "poll_interval must be at least 1 second",
+		})
+	}
+
+	// Validate project paths
+	for i, proj := range cfg.Projects {
+		if proj.Path == "" {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("projects[%d].path", i),
+				Message: "project path is required",
+			})
+		}
+		if proj.Name == "" {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("projects[%d].name", i),
+				Message: "project name is required",
+			})
+		}
+	}
+
+	return errors
+}
+
+// ValidateConfigSingleError validates the config and returns a single error if any validation fails.
+func ValidateConfigSingleError(cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+
+	errors := ValidateConfig(cfg)
+	if !errors.IsValid() {
+		return errors
+	}
+	return nil
+}
+
+// ConfigValidator validates configuration files (deprecated: use ValidateConfig or ExtendedValidator)
+type ConfigValidator struct{}
+
+// NewConfigValidator creates a new config validator (deprecated: use ValidateConfig or ExtendedValidator)
+func NewConfigValidator() *ConfigValidator {
+	return &ConfigValidator{}
+}
+
+// Validate checks if the config is valid (deprecated: use ValidateConfig or ExtendedValidator.Validate)
+func (v *ConfigValidator) Validate(cfg *Config) error {
+	return ValidateConfigSingleError(cfg)
 }

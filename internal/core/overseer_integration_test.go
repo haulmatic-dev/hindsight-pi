@@ -104,7 +104,7 @@ func (m *mockBeadsClient) CloseBead(projectPath, repoName string, beadID types.B
 	return nil
 }
 
-func (m *mockBeadsClient) GetReadyBeads(projectPath, repoName string) ([]types.Bead, error) {
+func (m *mockBeadsClient) GetReadyBeads(projectName, projectPath, repoName string) ([]types.Bead, error) {
 	if m.listErr != nil {
 		return nil, m.listErr
 	}
@@ -113,7 +113,7 @@ func (m *mockBeadsClient) GetReadyBeads(projectPath, repoName string) ([]types.B
 	defer m.mu.RUnlock()
 
 	// Extract project name from path (basename)
-	projectName := filepath.Base(projectPath)
+	projectName = filepath.Base(projectPath)
 
 	var result []types.Bead
 	for _, bead := range m.beads {
@@ -339,22 +339,19 @@ func TestOverseer_GetReadyBeadsFromDAG(t *testing.T) {
 	}
 
 	// Step 1: Initially, only A should be ready (InDegree 0)
-	ready, err := test.overseer.getReadyBeadsFromDAG()
-	if err != nil {
-		t.Fatalf("getReadyBeadsFromDAG() error = %v", err)
-	}
+	ready := test.overseer.GetReadyBeadsFromDAG()
 	if len(ready) != 1 || ready[0].ID != "test-project-A" {
 		t.Errorf("Expected only bead A to be ready, got: %v", ready)
 	}
 
 	// Step 2: Mark A as completed
-	_, err = test.overseer.dag.MarkCompleted("test-project-A")
+	_, err := test.overseer.dag.MarkCompleted("test-project-A")
 	if err != nil {
 		t.Fatalf("MarkCompleted(A) error = %v", err)
 	}
 
 	// Step 3: B should now be ready
-	ready, err = test.overseer.getReadyBeadsFromDAG()
+	ready = test.overseer.GetReadyBeadsFromDAG()
 	if err != nil {
 		t.Fatalf("getReadyBeadsFromDAG() error = %v", err)
 	}
@@ -369,7 +366,7 @@ func TestOverseer_GetReadyBeadsFromDAG(t *testing.T) {
 	}
 
 	// Step 5: C should now be ready
-	ready, err = test.overseer.getReadyBeadsFromDAG()
+	ready = test.overseer.GetReadyBeadsFromDAG()
 	if err != nil {
 		t.Fatalf("getReadyBeadsFromDAG() error = %v", err)
 	}
@@ -384,7 +381,7 @@ func TestOverseer_GetReadyBeadsFromDAG(t *testing.T) {
 	}
 
 	// Step 7: No beads should be ready now
-	ready, err = test.overseer.getReadyBeadsFromDAG()
+	ready = test.overseer.GetReadyBeadsFromDAG()
 	if err != nil {
 		t.Fatalf("getReadyBeadsFromDAG() error = %v", err)
 	}
@@ -416,10 +413,7 @@ func TestOverseer_PriorityOrdering(t *testing.T) {
 	}
 
 	// Get ready beads
-	ready, err := test.overseer.getReadyBeadsFromDAG()
-	if err != nil {
-		t.Fatalf("getReadyBeadsFromDAG() error = %v", err)
-	}
+	ready := test.overseer.GetReadyBeadsFromDAG()
 
 	if len(ready) != 4 {
 		t.Fatalf("Expected 4 ready beads, got %d", len(ready))
@@ -564,10 +558,7 @@ func TestOverseer_WorkerSpawning(t *testing.T) {
 			test.mockSpawner.setActiveCount(tt.activeWorkers)
 
 			// Get ready beads
-			ready, err := test.overseer.getReadyBeadsFromDAG()
-			if err != nil {
-				t.Fatalf("getReadyBeadsFromDAG() error = %v", err)
-			}
+			ready := test.overseer.GetReadyBeadsFromDAG()
 
 			// Calculate available slots
 			availableSlots := tt.maxWorkers - tt.activeWorkers
@@ -732,7 +723,7 @@ func TestOverseer_WorkerCompletion(t *testing.T) {
 				}
 
 				// Get ready beads - should not include blocked ones
-				ready, err := test.overseer.getReadyBeadsFromDAG()
+				ready := test.overseer.GetReadyBeadsFromDAG()
 				if err != nil {
 					t.Fatalf("getReadyBeadsFromDAG() error = %v", err)
 				}
@@ -901,10 +892,7 @@ func TestOverseer_ApprovalGateFiltering(t *testing.T) {
 	}
 
 	// Get ready beads
-	ready, err := test.overseer.getReadyBeadsFromDAG()
-	if err != nil {
-		t.Fatalf("getReadyBeadsFromDAG() error = %v", err)
-	}
+	ready := test.overseer.GetReadyBeadsFromDAG()
 
 	// Verify approval gate is filtered out
 	if len(ready) != 2 {
@@ -948,10 +936,7 @@ func TestOverseer_ConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := test.overseer.getReadyBeadsFromDAG()
-			if err != nil {
-				errors <- err
-			}
+			test.overseer.GetReadyBeadsFromDAG()
 		}()
 	}
 
@@ -996,10 +981,7 @@ func TestOverseer_CompletedBeadsFiltering(t *testing.T) {
 	}
 
 	// Get ready beads
-	ready, err := test.overseer.getReadyBeadsFromDAG()
-	if err != nil {
-		t.Fatalf("getReadyBeadsFromDAG() error = %v", err)
-	}
+	ready := test.overseer.GetReadyBeadsFromDAG()
 
 	// Only open beads should be ready
 	if len(ready) != 1 {
@@ -1031,7 +1013,7 @@ func TestOverseer_SessionCompletedTracking(t *testing.T) {
 	}
 
 	// Verify bead is ready initially
-	ready, _ := test.overseer.getReadyBeadsFromDAG()
+	ready := test.overseer.GetReadyBeadsFromDAG()
 	if len(ready) != 1 {
 		t.Fatalf("Expected 1 ready bead initially, got %d", len(ready))
 	}
@@ -1040,7 +1022,7 @@ func TestOverseer_SessionCompletedTracking(t *testing.T) {
 	test.overseer.completed["test-project-track"] = true
 
 	// Verify bead is no longer in ready list
-	ready, _ = test.overseer.getReadyBeadsFromDAG()
+	ready = test.overseer.GetReadyBeadsFromDAG()
 	for _, b := range ready {
 		if b.ID == "test-project-track" {
 			t.Error("Completed bead should not appear in ready list")
