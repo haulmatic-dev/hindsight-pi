@@ -6,7 +6,7 @@
 [![Status](https://img.shields.io/badge/status-production-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)]()
 
-Hydra is an intelligent orchestration system that manages ephemeral workers to process software engineering tasks (represented as "beads"). It coordinates AI agents through the [MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) protocol and optimizes resource usage based on system load.
+Hydra is an intelligent orchestration system that manages ephemeral workers to process software engineering tasks (represented as "beads"). It spawns workers to do specific, atomic tasks. Charon manages dead and zombie processes and guides them to underworld.
 
 ## Our Philosophy
 
@@ -220,14 +220,6 @@ mcp:
   heartbeat_interval: 30s
 ```
 
-## 📈 Performance
-
-| Metric | Value |
-|--------|-------|
-| Processing Rate | ~3 beads/minute |
-| Success Rate | 73% (89/122 beads) |
-| Peak Workers | 30 active processes |
-| Resource Usage | Monitored at 70% threshold |
 
 ## 🤝 Contributing
 
@@ -242,13 +234,6 @@ See [Contributing Guide](docs/development/contributing-guide-20260309.md) for de
 ## 📄 License
 
 MIT License - see [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- [MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) - Agent coordination protocol
-- [Opencode](https://opencode.ai) - AI-powered CLI for code generation
-- [Beads](https://github.com/haulmatic-dev/beads) - Task management system
-
 ---
 
 ## Why Hydra?
