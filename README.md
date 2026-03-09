@@ -12,7 +12,7 @@ Hydra is an intelligent orchestration system that manages ephemeral workers to p
 
 **The Lernaean Approach to Software Development**
 
-In Greek mythology, the Hydra was a serpentine water monster with multiple heads. Cut off one head, and two more would grow back. While we don't recommend cutting off developers' heads (HR would have issues with that), we embrace the spirit: **when one agent finishes its task, another immediately spawns to take the next one**.
+When one agent finishes its task, another immediately spawns to take the next one.
 
 Hydra is built on three core beliefs:
 
