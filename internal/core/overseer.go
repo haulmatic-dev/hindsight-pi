@@ -976,6 +976,12 @@ func (o *Overseer) tick() error {
 			continue
 		}
 
+		// Skip approval beads that are in progress (waiting for user approval)
+		if bead.Type == "approval" && bead.Status == types.StatusInProgress {
+			log.Printf("⏸️  Skipping approval bead (waiting for user approval): %s", bead.ID)
+			continue
+		}
+
 		// Skip if project path is not found (can't execute without knowing where the project is)
 		projectPath := o.findProjectPath(&bead)
 		if projectPath == "" {
@@ -1275,6 +1281,11 @@ func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
 
 		// Skip approval gates
 		if bead.Type == "approval-gate" {
+			continue
+		}
+
+		// Skip approval beads that are in progress (waiting for user approval)
+		if bead.Type == "approval" && bead.Status == types.StatusInProgress {
 			continue
 		}
 
@@ -1754,6 +1765,12 @@ func (o *Overseer) shouldSpawnWorker(node *Node) bool {
 
 	if node.Bead.Type == "approval-gate" {
 		log.Printf("⏸️  Skipping approval gate: %s", beadID)
+		return false
+	}
+
+	// Skip approval beads that are in progress (waiting for user approval)
+	if node.Bead.Type == "approval" && node.Bead.Status == types.StatusInProgress {
+		log.Printf("⏸️  Skipping approval bead (waiting for user approval): %s", beadID)
 		return false
 	}
 
