@@ -64,10 +64,20 @@ type GPTCacheConfig struct {
 
 // OverseerConfig contains overseer-specific settings
 type OverseerConfig struct {
-	PollInterval   time.Duration `yaml:"poll_interval"`
-	MaxWorkers     int           `yaml:"max_workers"`
-	DefaultRetries int           `yaml:"default_retries"`
-	WorkerTimeout  time.Duration `yaml:"worker_timeout"`
+	PollInterval       time.Duration            `yaml:"poll_interval"`
+	MaxWorkers         int                      `yaml:"max_workers"`
+	DefaultRetries     int                      `yaml:"default_retries"`
+	MaxRetries         int                      `yaml:"max_retries"`
+	WorkerTimeout      time.Duration            `yaml:"worker_timeout"`
+	RetryDelay         time.Duration            `yaml:"retry_delay"`
+	ResourceMonitoring ResourceMonitoringConfig `yaml:"resource_monitoring"`
+}
+
+// ResourceMonitoringConfig contains resource monitoring settings
+type ResourceMonitoringConfig struct {
+	Enabled          bool    `yaml:"enabled"`
+	MaxCPUPercent    float64 `yaml:"max_cpu_percent"`
+	MaxMemoryPercent float64 `yaml:"max_memory_percent"`
 }
 
 // ProjectConfig represents a project configuration
