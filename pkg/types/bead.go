@@ -323,3 +323,17 @@ func IsFixBead(beadType string) bool {
 func IsReviewBead(beadType string) bool {
 	return beadType == "review"
 }
+
+// WorkerStatus represents the current state of a worker.
+type WorkerStatus string
+
+const (
+	// WorkerStatusRunning indicates the worker is currently executing.
+	WorkerStatusRunning WorkerStatus = "running"
+	// WorkerStatusCompleted indicates the worker finished successfully.
+	WorkerStatusCompleted WorkerStatus = "completed"
+	// WorkerStatusFailed indicates the worker failed permanently.
+	WorkerStatusFailed WorkerStatus = "failed"
+	// WorkerStatusRetryPending indicates the worker failed but will be retried.
+	WorkerStatusRetryPending WorkerStatus = "retry_pending"
+)
