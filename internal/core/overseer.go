@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/beads"
+	"github.com/haulmatic-dev/hydra/internal/bv"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -336,6 +337,7 @@ type Overseer struct {
 	cassClient    *CassMemoryClient         // cass_memory client for context retrieval
 	tldrClient    *TLDRClient               // TLDR client for impact analysis
 	gptCache      *GPTCacheClient           // GPTCache client for caching
+	bvClient      *bv.Client                // BV client for graph analytics
 	intelMutex    sync.RWMutex              // Mutex for intelligence clients
 
 	// MCP (Model Context Protocol) fields
@@ -348,6 +350,12 @@ type Overseer struct {
 
 	// Resource monitoring for adaptive scaling
 	resourceMonitor *ResourceMonitor // Monitors CPU/Memory usage
+
+	// Orphan process janitor for cleaning up orphaned opencode processes
+	orphanJanitor *Charon // Cleans up orphaned opencode processes
+
+	// Worker tracker for persistent PID tracking
+	workerTracker *WorkerTracker // Tracks worker PIDs to identify Hydra workers
 }
 
 // NewOverseer creates a new overseer instance
@@ -363,6 +371,7 @@ func NewOverseer(config *Config) *Overseer {
 		pollInterval:  config.Overseer.PollInterval,
 		maxWorkers:    config.Overseer.MaxWorkers,
 		beadsClient:   beads.NewClient(),
+		bvClient:      bv.NewClient(),
 		spawner:       &defaultWorkerSpawner{},
 		dag:           NewDAG(),
 		completed:     make(map[string]bool),
@@ -384,6 +393,23 @@ func NewOverseer(config *Config) *Overseer {
 	// Initialize resource monitor with 70% limits (0 means no limit)
 	o.resourceMonitor = NewResourceMonitor(70.0, 70.0)
 	log.Printf("[ResourceMonitor] Initialized with CPU: 70%%, Memory: 70%% limits")
+
+	// Initialize worker tracker for PID tracking
+	workerTracker, err := NewWorkerTracker(".")
+	if err != nil {
+		log.Printf("[Overseer] Warning: failed to initialize worker tracker: %v", err)
+		// Continue without tracker - Charon will just have limited visibility
+	} else {
+		o.workerTracker = workerTracker
+		log.Printf("[WorkerTracker] Initialized")
+	}
+
+	// Initialize orphan process janitor with worker timeout for stuck worker detection
+	workerTimeout := 5 * time.Minute // Default 5 minutes
+	if config.Overseer.WorkerTimeout > 0 {
+		workerTimeout = config.Overseer.WorkerTimeout
+	}
+	o.orphanJanitor = NewCharon(o.beadsClient.(*beads.Client), o.workerTracker, workerTimeout)
 
 	// Override defaults if configured
 	if config.Overseer.WorkerTimeout > 0 {
@@ -774,6 +800,12 @@ func (o *Overseer) isIntelligenceEnabled() bool {
 func (o *Overseer) Start(ctx context.Context) error {
 	log.Println("🚀 Starting Hydra overseer...")
 
+	// Start orphan process janitor
+	if o.orphanJanitor != nil {
+		o.orphanJanitor.Start()
+		log.Println("🧹 Orphan janitor started")
+	}
+
 	// Discover projects
 	if err := o.discoverProjects(); err != nil {
 		return fmt.Errorf("failed to discover projects: %w", err)
@@ -789,6 +821,10 @@ func (o *Overseer) Start(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			o.running = false
+			// Stop orphan janitor
+			if o.orphanJanitor != nil {
+				o.orphanJanitor.Stop()
+			}
 			return nil
 		case <-ticker.C:
 			if err := o.tick(); err != nil {
@@ -1398,6 +1434,7 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		cmd = exec.Command("go", "run", "cmd/worker/main.go")
 	}
 	env := append(os.Environ(),
+		"HYDRA_WORKER=true", // Clear identifier that this is a Hydra-spawned worker
 		fmt.Sprintf("HYDRA_BEAD_ID=%s", beadIDStr),
 		fmt.Sprintf("HYDRA_PROJECT=%s", bead.Project),
 		fmt.Sprintf("HYDRA_PROJECT_PATH=%s", projectPath),
@@ -1444,6 +1481,13 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		ProjectPath: projectPath,
 	}
 
+	// Track worker PID for orphan detection
+	if o.workerTracker != nil {
+		if err := o.workerTracker.TrackWorker(cmd.Process.Pid, beadIDStr, projectPath); err != nil {
+			log.Printf("[Overseer] Warning: failed to track worker PID %d: %v", cmd.Process.Pid, err)
+		}
+	}
+
 	// Monitor in goroutine
 	go o.monitorWorker(worker, cmd)
 
@@ -1482,7 +1526,15 @@ func (o *Overseer) waitForWorker(worker *types.Worker, cmd *exec.Cmd) workerComp
 	}
 
 	o.removeActiveWorker(worker.ID)
-	closeErr := o.finalizeBead(worker, success)
+
+	// Mark worker as completed in tracker
+	if o.workerTracker != nil {
+		if err := o.workerTracker.MarkWorkerCompleted(worker.PID, exitCode); err != nil {
+			log.Printf("[Overseer] Warning: failed to mark worker PID %d completed: %v", worker.PID, err)
+		}
+	}
+
+	closeErr := o.closeBead(worker, success)
 
 	return workerCompletion{
 		worker:     worker,
@@ -1613,12 +1665,13 @@ func (o *Overseer) scheduleAfterCompletion(worker *types.Worker, success bool, n
 	}
 }
 
-// finalizeBead closes the bead via beadsClient based on worker completion
-func (o *Overseer) finalizeBead(worker *types.Worker, success bool) error {
+// closeBead closes the bead via beadsClient based on worker completion status.
+// It determines the appropriate status reason and handles project path resolution.
+func (o *Overseer) closeBead(worker *types.Worker, success bool) error {
 	projectName := worker.BeadID.Project()
 	repoName := worker.BeadID.Repo()
 
-	log.Printf("[finalizeBead] Closing bead %s (project: %s, repo: %s)",
+	log.Printf("[closeBead] Closing bead %s (project: %s, repo: %s)",
 		worker.BeadID.String(), projectName, repoName)
 
 	projectPath := o.resolveProjectPath(worker, projectName)
@@ -1626,8 +1679,8 @@ func (o *Overseer) finalizeBead(worker *types.Worker, success bool) error {
 		return fmt.Errorf("project %s not found", projectName)
 	}
 
-	reason := o.getCloseReason(success)
-	log.Printf("[finalizeBead] Closing with reason: %s (path: %s)", reason, projectPath)
+	reason := statusReason(success)
+	log.Printf("[closeBead] Closing with reason: %s (path: %s)", reason, projectPath)
 
 	return o.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason)
 }
@@ -1673,18 +1726,13 @@ func hasBeadsDirectory(projectPath string) bool {
 	return err == nil
 }
 
-// getCloseReason returns the appropriate close reason based on success
-func (o *Overseer) getCloseReason(success bool) string {
+// statusReason returns the appropriate status string based on success.
+// This is a pure function with no dependencies on Overseer state.
+func statusReason(success bool) string {
 	if success {
 		return "completed"
 	}
 	return "failed"
-}
-
-// closeWorkerBead is an alias for finalizeBead for backward compatibility
-// Deprecated: Use finalizeBead instead
-func (o *Overseer) closeWorkerBead(worker *types.Worker, success bool) error {
-	return o.finalizeBead(worker, success)
 }
 
 // triggerImmediateSchedule spawns workers for ready beads without waiting for next poll
@@ -1960,9 +2008,229 @@ func (o *Overseer) CloseBead(projectPath, repoName string, beadID types.BeadID, 
 	return o.beadsClient.CloseBead(projectPath, repoName, beadID, reason)
 }
 
+// RefreshToolClients reinitializes tool clients based on detected config changes
+// This method is thread-safe and can be called when configuration changes
+func (o *Overseer) RefreshToolClients(changes []ToolConfigChange) {
+	for _, change := range changes {
+		o.applyToolConfigChange(change)
+	}
+}
+
+// applyToolConfigChange applies a single tool configuration change
+func (o *Overseer) applyToolConfigChange(change ToolConfigChange) {
+	switch change.Tool {
+	case ToolCassMemory:
+		o.refreshCassMemoryClient(change)
+	case ToolTLDR:
+		o.refreshTLDRClient(change)
+	case ToolGPTCache:
+		o.refreshGPTCacheClient(change)
+	case ToolMCP:
+		o.refreshMCPClient(change)
+	}
+}
+
+// refreshCassMemoryClient reinitializes the cass_memory client
+func (o *Overseer) refreshCassMemoryClient(change ToolConfigChange) {
+	o.intelMutex.Lock()
+	defer o.intelMutex.Unlock()
+
+	config := o.config.Intelligence.CassMemory
+
+	if !config.Enabled {
+		// Disable the client
+		if o.cassClient != nil {
+			o.cassClient = nil
+			log.Printf("[Intelligence] cass_memory client disabled")
+		}
+		return
+	}
+
+	// Reinitialize the client with new settings
+	o.cassClient = NewCassMemoryClient(
+		"http://127.0.0.1:5000",
+		config.Timeout,
+		config.QueryLimit,
+	)
+
+	if change.EnabledBefore && change.EnabledAfter {
+		log.Printf("[Intelligence] cass_memory client reinitialized (timeout: %v, limit: %d)",
+			config.Timeout, config.QueryLimit)
+	} else {
+		log.Printf("[Intelligence] cass_memory client initialized (timeout: %v, limit: %d)",
+			config.Timeout, config.QueryLimit)
+	}
+}
+
+// refreshTLDRClient reinitializes the TLDR client
+func (o *Overseer) refreshTLDRClient(change ToolConfigChange) {
+	o.intelMutex.Lock()
+	defer o.intelMutex.Unlock()
+
+	config := o.config.Intelligence.TLDR
+
+	if !config.Enabled {
+		// Disable the client
+		if o.tldrClient != nil {
+			o.tldrClient = nil
+			log.Printf("[Intelligence] TLDR client disabled")
+		}
+		return
+	}
+
+	// Reinitialize the client with new settings
+	o.tldrClient = NewTLDRClient(
+		config.BaseURL,
+		config.Timeout,
+		config.MaxFiles,
+		config.MaxTokens,
+	)
+
+	if change.EnabledBefore && change.EnabledAfter {
+		log.Printf("[Intelligence] TLDR client reinitialized (baseURL: %s, timeout: %v)",
+			config.BaseURL, config.Timeout)
+	} else {
+		log.Printf("[Intelligence] TLDR client initialized (baseURL: %s, timeout: %v)",
+			config.BaseURL, config.Timeout)
+	}
+}
+
+// refreshGPTCacheClient reinitializes the GPTCache client
+func (o *Overseer) refreshGPTCacheClient(change ToolConfigChange) {
+	o.intelMutex.Lock()
+	defer o.intelMutex.Unlock()
+
+	config := o.config.Intelligence.GPTCache
+
+	if !config.Enabled {
+		// Disable the client
+		if o.gptCache != nil {
+			o.gptCache = nil
+			log.Printf("[Intelligence] GPTCache client disabled")
+		}
+		return
+	}
+
+	// Reinitialize the client with new settings
+	o.gptCache = NewGPTCacheClient(
+		config.ServerURL,
+		5*time.Second,
+	)
+
+	if change.EnabledBefore && change.EnabledAfter {
+		log.Printf("[Intelligence] GPTCache client reinitialized (server: %s)",
+			config.ServerURL)
+	} else {
+		log.Printf("[Intelligence] GPTCache client initialized (server: %s)",
+			config.ServerURL)
+	}
+}
+
+// refreshMCPClient reinitializes the MCP client
+func (o *Overseer) refreshMCPClient(change ToolConfigChange) {
+	o.mcpMu.Lock()
+	defer o.mcpMu.Unlock()
+
+	config := o.config.MCP
+
+	// Stop existing client if running
+	if o.mcpClient != nil && o.mcpClient.IsConnected() {
+		if err := o.StopMCP(); err != nil {
+			log.Printf("[MCP] Error stopping existing client: %v", err)
+		}
+	}
+
+	if !config.Enabled {
+		o.mcpClient = nil
+		o.mcpReservationMgr = nil
+		o.activeReservations = nil
+		log.Printf("[MCP] MCP client disabled")
+		return
+	}
+
+	// Reinitialize MCP with new config
+	o.mcpConfig = &config
+	o.activeReservations = make(map[string]*mcp.Reservation)
+
+	// Initialize reservation manager with configured TTL
+	ttl := config.FileReservationTTL
+	if ttl <= 0 {
+		ttl = 30 * time.Minute
+	}
+	o.mcpReservationMgr = mcp.NewReservationManager()
+
+	// Initialize HTTP MCP client
+	agentID := fmt.Sprintf("hydra-overseer-%d", time.Now().Unix())
+	httpURL := config.URL
+	if httpURL == "" {
+		httpURL = fmt.Sprintf("http://127.0.0.1:%d", config.Port)
+	}
+	// Convert ws:// to http:// if needed
+	if strings.HasPrefix(httpURL, "ws://") {
+		httpURL = "http://" + strings.TrimPrefix(httpURL, "ws://")
+	}
+	// Remove /ws suffix if present
+	httpURL = strings.TrimSuffix(httpURL, "/ws")
+
+	var err error
+	o.mcpClient, err = mcp.NewHTTPClient(httpURL, agentID)
+	if err != nil {
+		log.Printf("[MCP] Failed to recreate MCP client: %v", err)
+		return
+	}
+
+	// Set up message handler
+	o.mcpClient.SetMessageHandler(o.handleMCPMessage)
+
+	// Start the MCP listener
+	if err := o.StartMCPListener(); err != nil {
+		log.Printf("[MCP] Failed to restart MCP listener: %v", err)
+		return
+	}
+
+	if change.EnabledBefore && change.EnabledAfter {
+		log.Printf("[MCP] MCP client reinitialized (URL: %s)", httpURL)
+	} else {
+		log.Printf("[MCP] MCP client initialized (URL: %s)", httpURL)
+	}
+}
+
+// UpdateConfig updates the overseer's configuration and refreshes affected clients
+// This method should be called when the config file changes
+func (o *Overseer) UpdateConfig(newConfig *Config) {
+	if newConfig == nil {
+		log.Printf("[Overseer] Cannot update with nil config")
+		return
+	}
+
+	// Detect which tool configs have changed
+	detector := NewConfigChangeDetector()
+	changes := detector.DetectChanges(o.config, newConfig)
+
+	if len(changes) == 0 {
+		log.Printf("[Overseer] No tool configuration changes detected")
+		return
+	}
+
+	log.Printf("[Overseer] Detected %d tool configuration changes", len(changes))
+
+	// Update the config reference
+	o.config = newConfig
+
+	// Refresh affected clients
+	o.RefreshToolClients(changes)
+}
+
 // GetBeadsClient returns the beads client
 func (o *Overseer) GetBeadsClient() BeadsClient {
 	return o.beadsClient
+}
+
+// GetBVClient returns the BV client for graph analytics
+func (o *Overseer) GetBVClient() *bv.Client {
+	o.intelMutex.RLock()
+	defer o.intelMutex.RUnlock()
+	return o.bvClient
 }
 
 // GetDAG returns the current DAG instance.

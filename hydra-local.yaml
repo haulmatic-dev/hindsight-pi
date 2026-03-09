@@ -23,6 +23,7 @@ intelligence:
     enabled: true
   tldr:
     enabled: true
+    max_files: 20  # Allow up to 20 files for intelligence gathering
   gptcache:
     enabled: true
 

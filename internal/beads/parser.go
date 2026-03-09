@@ -39,7 +39,7 @@ type ReadyBead struct {
 
 // Dependency represents a bead dependency relationship
 type Dependency struct {
-	ID          int64     `json:"id"`
+	ID          string    `json:"id"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	IssueID     string    `json:"issue_id"`

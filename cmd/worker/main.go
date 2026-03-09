@@ -792,13 +792,16 @@ func buildOpencodeCommand(bead types.Bead, agentType string, intelligenceCtx *In
 	// Join all parts into single prompt
 	prompt := strings.Join(promptParts, " ")
 
-	// Build command: echo "prompt" | opencode run --format json --dir <path>
+	// Build command: echo "prompt" | opencode run --format json --dir <path> --title <name>
 	// We use bash to pipe the prompt to opencode
+	// Use bead ID as the title so we can identify which worker is working on which bead
+	title := fmt.Sprintf("Hydra:%s", bead.ID)
 	cmd := exec.Command("bash", "-c", fmt.Sprintf(
-		"echo %q | %s run --format json --dir %q",
+		"echo %q | %s run --format json --dir %q --title %q",
 		prompt,
 		opencodePath,
 		path,
+		title,
 	))
 
 	// Create new process group so we can kill the entire tree (bash + opencode + children)
