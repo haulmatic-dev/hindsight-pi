@@ -198,8 +198,8 @@ func TestDynamicUnblocking_FailureDoesNotUnblock(t *testing.T) {
 
 	// Verify A is marked as failed
 	nodeA, _ := test.overseer.dag.GetNode("test-project-A")
-	if nodeA.Status != types.StatusFailed {
-		t.Errorf("Expected A status to be failed, got %v", nodeA.Status)
+	if nodeA.Status() != types.StatusFailed {
+		t.Errorf("Expected A status to be failed, got %v", nodeA.Status())
 	}
 
 	// Verify B is still blocked
@@ -616,8 +616,8 @@ func TestDynamicUnblocking_ConcurrentCompletion(t *testing.T) {
 	// Verify all are completed
 	for _, id := range []string{"test-project-A", "test-project-B", "test-project-C"} {
 		node, _ := test.overseer.dag.GetNode(id)
-		if node.Status != types.StatusCompleted {
-			t.Errorf("Expected %s status to be completed, got %v", id, node.Status)
+		if node.Status() != types.StatusCompleted {
+			t.Errorf("Expected %s status to be completed, got %v", id, node.Status())
 		}
 	}
 }

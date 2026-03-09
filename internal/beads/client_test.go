@@ -3,198 +3,12 @@ package beads
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
-
-// CLIExecutor is the interface for executing CLI commands
-type CLIExecutor interface {
-	Execute(name string, arg ...string) ([]byte, error)
-}
-
-// defaultExecutor implements CLIExecutor using actual exec.Command
-type defaultExecutor struct{}
-
-func (e *defaultExecutor) Execute(name string, arg ...string) ([]byte, error) {
-	// This will be used by the actual client
-	// For testing, we use the mockExecutor
-	return nil, fmt.Errorf("default executor should not be called in tests")
-}
-
-// TestableClient is a beads client that can use a custom CLI executor
-type TestableClient struct {
-	executor CLIExecutor
-}
-
-// NewTestableClient creates a new testable beads client with a custom executor
-func NewTestableClient(executor CLIExecutor) *TestableClient {
-	return &TestableClient{executor: executor}
-}
-
-// GetReadyBeads retrieves beads that are ready to execute (dependencies satisfied)
-func (c *TestableClient) GetReadyBeads(projectPath, repoName string) ([]types.Bead, error) {
-	output, err := c.executor.Execute("br", "ready", "--json")
-	if err != nil {
-		return nil, fmt.Errorf("br ready --json failed: %w", err)
-	}
-
-	return c.parseReadyJSON(output, projectPath, repoName)
-}
-
-// parseReadyJSON parses the JSON output of 'br ready --json'
-func (c *TestableClient) parseReadyJSON(output []byte, projectPath, repoName string) ([]types.Bead, error) {
-	var readyBeads []ReadyBead
-	if err := json.Unmarshal(output, &readyBeads); err != nil {
-		return nil, fmt.Errorf("failed to parse ready beads JSON: %w", err)
-	}
-
-	beads := make([]types.Bead, len(readyBeads))
-	for i, rb := range readyBeads {
-		beads[i] = types.Bead{
-			ID:          types.BeadID(rb.ID),
-			Title:       rb.Title,
-			Description: dereferenceString(rb.Description),
-			Type:        rb.IssueType,
-			Status:      types.BeadStatus(rb.Status),
-			Project:     projectPath,
-			Repo:        repoName,
-			Labels:      nil, // Not available in ReadyBead
-			Priority:    int(rb.Priority),
-			CreatedAt:   rb.CreatedAt,
-			UpdatedAt:   rb.UpdatedAt,
-			Metadata: map[string]string{
-				"bead_id": rb.ID,
-			},
-		}
-	}
-
-	return beads, nil
-}
-
-// GetBead retrieves full details of a bead by its string ID
-func (c *TestableClient) GetBead(projectPath, repoName string, beadID types.BeadID) (*types.Bead, error) {
-	output, err := c.executor.Execute("br", "show", beadID.String(), "--json")
-	if err != nil {
-		return nil, fmt.Errorf("br show %s --json failed: %w", beadID.String(), err)
-	}
-
-	return c.parseBeadDetailJSON(output, projectPath, repoName)
-}
-
-// parseBeadDetailJSON parses the JSON output of 'br show <id> --json'
-func (c *TestableClient) parseBeadDetailJSON(output []byte, projectPath, repoName string) (*types.Bead, error) {
-	var details []BeadDetail
-	if err := json.Unmarshal(output, &details); err != nil {
-		return nil, fmt.Errorf("failed to parse bead detail JSON: %w", err)
-	}
-
-	if len(details) == 0 {
-		return nil, fmt.Errorf("no bead details found in response")
-	}
-
-	detail := details[0]
-
-	// Convert dependencies - extract the DependsOnID from each dependency
-	dependencies := make([]types.BeadID, 0, len(detail.Dependencies))
-	for _, dep := range detail.Dependencies {
-		dependencies = append(dependencies, types.BeadID(dep.DependsOnID))
-	}
-
-	bead := &types.Bead{
-		ID:           types.BeadID(detail.ID),
-		Title:        detail.Title,
-		Description:  dereferenceString(detail.Description),
-		Type:         detail.IssueType,
-		Status:       types.BeadStatus(detail.Status),
-		Dependencies: dependencies,
-		Project:      projectPath,
-		Repo:         repoName,
-		Labels:       detail.Labels,
-		Priority:     int(detail.Priority),
-		CreatedAt:    detail.CreatedAt,
-		UpdatedAt:    detail.UpdatedAt,
-		CompletedAt:  detail.ClosedAt,
-		Metadata: map[string]string{
-			"bead_id": detail.ID,
-		},
-	}
-
-	// Add optional metadata
-	if detail.CloseReason != nil {
-		bead.Metadata["close_reason"] = *detail.CloseReason
-	}
-	if detail.CreatedBy != nil {
-		bead.Metadata["created_by"] = *detail.CreatedBy
-	}
-	if detail.SourceRepo != nil {
-		bead.Metadata["source_repo"] = *detail.SourceRepo
-	}
-
-	return bead, nil
-}
-
-// ListBeads lists all beads in a project/repo
-func (c *TestableClient) ListBeads(projectPath, repoName string) ([]types.Bead, error) {
-	output, err := c.executor.Execute("br", "list", "--json")
-	if err != nil {
-		return nil, fmt.Errorf("br list --json failed: %w", err)
-	}
-
-	return c.parseListJSON(output, projectPath, repoName)
-}
-
-// parseListJSON parses the JSON output of 'br list --json'
-func (c *TestableClient) parseListJSON(output []byte, projectPath, repoName string) ([]types.Bead, error) {
-	var beadsWithCounts []BeadWithCounts
-	if err := json.Unmarshal(output, &beadsWithCounts); err != nil {
-		return nil, fmt.Errorf("failed to parse list JSON: %w", err)
-	}
-
-	beads := make([]types.Bead, len(beadsWithCounts))
-	for i, bwc := range beadsWithCounts {
-		beads[i] = types.Bead{
-			ID:          types.BeadID(bwc.ID),
-			Title:       bwc.Title,
-			Description: dereferenceString(bwc.Description),
-			Type:        bwc.IssueType,
-			Status:      types.BeadStatus(bwc.Status),
-			Project:     projectPath,
-			Repo:        repoName,
-			Labels:      bwc.Labels,
-			Priority:    int(bwc.Priority),
-			CreatedAt:   bwc.CreatedAt,
-			UpdatedAt:   bwc.UpdatedAt,
-			Metadata: map[string]string{
-				"bead_id":          bwc.ID,
-				"dependency_count": fmt.Sprintf("%d", bwc.DependencyCount),
-				"dependent_count":  fmt.Sprintf("%d", bwc.DependentCount),
-			},
-		}
-	}
-
-	return beads, nil
-}
-
-// CloseBead marks a bead as completed
-// Returns error if bead was skipped due to dependencies or if close failed
-func (c *TestableClient) CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error {
-	output, err := c.executor.Execute("br", "close", beadID.String(), "-r", reason)
-	if err != nil {
-		return fmt.Errorf("br close %s failed: %w", beadID.String(), err)
-	}
-
-	// Parse output to detect if bead was skipped due to dependencies
-	outputStr := string(output)
-	if strings.Contains(outputStr, "Warning: Skipped") || strings.Contains(outputStr, "blocked by") {
-		return fmt.Errorf("bead %s skipped due to dependencies: %s", beadID.String(), outputStr)
-	}
-
-	return nil
-}
 
 // mockResponse represents a mocked CLI response
 type mockResponse struct {
@@ -266,9 +80,14 @@ func createTestTime(year, month, day int) time.Time {
 	return time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
 }
 
+// strPtr creates a pointer to a string (helper for tests)
+func strPtr(s string) *string {
+	return &s
+}
+
 func TestGetReadyBeads_Success(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	// Create test data
 	createdAt := createTestTime(2025, 1, 15)
@@ -277,27 +96,31 @@ func TestGetReadyBeads_Success(t *testing.T) {
 
 	readyBeads := []ReadyBead{
 		{
-			ID:          "hydra-abc123",
-			Title:       "Implement feature X",
-			Description: &description,
-			Status:      "open",
-			Priority:    1,
-			IssueType:   "implement",
-			CreatedAt:   createdAt,
-			UpdatedAt:   updatedAt,
-			CreatedBy:   strPtr("user@example.com"),
-			Assignee:    strPtr("developer@example.com"),
-			Owner:       strPtr("team-lead@example.com"),
-			Notes:       strPtr("Some notes"),
+			BeadCore: BeadCore{
+				ID:          "hydra-abc123",
+				Title:       "Implement feature X",
+				Description: &description,
+				Status:      "open",
+				Priority:    1,
+				IssueType:   "implement",
+				CreatedAt:   createdAt,
+				UpdatedAt:   updatedAt,
+			},
+			CreatedBy: strPtr("user@example.com"),
+			Assignee:  strPtr("developer@example.com"),
+			Owner:     strPtr("team-lead@example.com"),
+			Notes:     strPtr("Some notes"),
 		},
 		{
-			ID:        "hydra-def456",
-			Title:     "Fix bug Y",
-			Status:    "open",
-			Priority:  2,
-			IssueType: "fix",
-			CreatedAt: createdAt,
-			UpdatedAt: updatedAt,
+			BeadCore: BeadCore{
+				ID:        "hydra-def456",
+				Title:     "Fix bug Y",
+				Status:    "open",
+				Priority:  2,
+				IssueType: "fix",
+				CreatedAt: createdAt,
+				UpdatedAt: updatedAt,
+			},
 		},
 	}
 
@@ -369,7 +192,7 @@ func TestGetReadyBeads_Success(t *testing.T) {
 
 func TestGetReadyBeads_CLIError(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	// Simulate CLI error with stderr
 	cliErr := errors.New("exit status 1: bead not found")
@@ -395,7 +218,7 @@ func TestGetReadyBeads_CLIError(t *testing.T) {
 
 func TestGetReadyBeads_InvalidJSON(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	// Return invalid JSON
 	mockExec.AddResponse("br", []string{"ready", "--json"}, []byte("invalid json"), nil)
@@ -420,7 +243,7 @@ func TestGetReadyBeads_InvalidJSON(t *testing.T) {
 
 func TestGetReadyBeads_EmptyResult(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	// Return empty array
 	mockExec.AddResponse("br", []string{"ready", "--json"}, []byte("[]"), nil)
@@ -441,7 +264,7 @@ func TestGetReadyBeads_EmptyResult(t *testing.T) {
 
 func TestGetBead_Success(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	createdAt := createTestTime(2025, 1, 15)
 	updatedAt := createTestTime(2025, 1, 20)
@@ -453,7 +276,7 @@ func TestGetBead_Success(t *testing.T) {
 
 	beadDetail := []BeadDetail{
 		{
-			BeadJSON: BeadJSON{
+			BeadCore: BeadCore{
 				ID:          "hydra-abc123",
 				Title:       "Complete implementation",
 				Description: &description,
@@ -463,27 +286,27 @@ func TestGetBead_Success(t *testing.T) {
 				Labels:      []string{"urgent", "backend"},
 				CreatedAt:   createdAt,
 				UpdatedAt:   updatedAt,
-				Dependencies: []Dependency{
-					{
-						CreatedAt:   createdAt,
-						DependsOnID: "hydra-dep001",
-						IssueID:     "hydra-abc123",
-						Type:        "blocks",
-					},
-					{
-						CreatedAt:   createdAt,
-						DependsOnID: "hydra-dep002",
-						IssueID:     "hydra-abc123",
-						Type:        "relates_to",
-						Metadata:    strPtr("{\"related_field\": \"value\"}"),
-					},
-				},
-				CloseReason: &closeReason,
-				ClosedAt:    &closedAt,
-				CreatedBy:   &createdBy,
-				SourceRepo:  &sourceRepo,
 			},
-			Dependents: []DependentWithMetadata{
+			Dependencies: []Dependency{
+				{
+					CreatedAt:   createdAt,
+					DependsOnID: "hydra-dep001",
+					IssueID:     "hydra-abc123",
+					Type:        "blocks",
+				},
+				{
+					CreatedAt:   createdAt,
+					DependsOnID: "hydra-dep002",
+					IssueID:     "hydra-abc123",
+					Type:        "relates_to",
+					Metadata:    strPtr("{\"related_field\": \"value\"}"),
+				},
+			},
+			CloseReason: &closeReason,
+			ClosedAt:    &closedAt,
+			CreatedBy:   &createdBy,
+			SourceRepo:  &sourceRepo,
+			Dependents: []DependentInfo{
 				{
 					ID:             "hydra-child001",
 					Title:          "Dependent task",
@@ -492,7 +315,7 @@ func TestGetBead_Success(t *testing.T) {
 					DependencyType: "blocked_by",
 				},
 			},
-			Events: []Event{
+			Events: []BeadEvent{
 				{
 					ID:        1,
 					IssueID:   "hydra-abc123",
@@ -586,7 +409,7 @@ func TestGetBead_Success(t *testing.T) {
 
 func TestGetBead_NotFound(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	// Simulate not found error
 	cliErr := errors.New("exit status 1: bead not found")
@@ -612,7 +435,7 @@ func TestGetBead_NotFound(t *testing.T) {
 
 func TestGetBead_EmptyResponse(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	// Return empty array
 	mockExec.AddResponse("br", []string{"show", "hydra-abc123", "--json"}, []byte("[]"), nil)
@@ -635,7 +458,7 @@ func TestGetBead_EmptyResponse(t *testing.T) {
 
 func TestGetBead_InvalidJSON(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	mockExec.AddResponse("br", []string{"show", "hydra-abc123", "--json"}, []byte("not valid json"), nil)
 
@@ -657,24 +480,24 @@ func TestGetBead_InvalidJSON(t *testing.T) {
 
 func TestGetBead_NoDependencies(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	createdAt := createTestTime(2025, 1, 15)
 	updatedAt := createTestTime(2025, 1, 20)
 
 	beadDetail := []BeadDetail{
 		{
-			BeadJSON: BeadJSON{
-				ID:           "hydra-nodeps",
-				Title:        "Bead with no dependencies",
-				Status:       "open",
-				Priority:     1,
-				IssueType:    "test",
-				CreatedAt:    createdAt,
-				UpdatedAt:    updatedAt,
-				Dependencies: []Dependency{}, // Empty dependencies
-				Labels:       []string{},
+			BeadCore: BeadCore{
+				ID:        "hydra-nodeps",
+				Title:     "Bead with no dependencies",
+				Status:    "open",
+				Priority:  1,
+				IssueType: "test",
+				CreatedAt: createdAt,
+				UpdatedAt: updatedAt,
+				Labels:    []string{},
 			},
+			Dependencies: []Dependency{}, // Empty dependencies
 		},
 	}
 
@@ -697,16 +520,16 @@ func TestGetBead_NoDependencies(t *testing.T) {
 
 func TestListBeads_Success(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	createdAt := createTestTime(2025, 1, 15)
 	updatedAt := createTestTime(2025, 1, 20)
 	description1 := "First bead description"
 	description2 := "Second bead description"
 
-	beadsWithCounts := []BeadWithCounts{
+	beadsWithCounts := []BeadSummary{
 		{
-			BeadJSON: BeadJSON{
+			BeadCore: BeadCore{
 				ID:          "hydra-abc123",
 				Title:       "First bead",
 				Description: &description1,
@@ -721,7 +544,7 @@ func TestListBeads_Success(t *testing.T) {
 			DependentCount:  1,
 		},
 		{
-			BeadJSON: BeadJSON{
+			BeadCore: BeadCore{
 				ID:          "hydra-def456",
 				Title:       "Second bead",
 				Description: &description2,
@@ -736,7 +559,7 @@ func TestListBeads_Success(t *testing.T) {
 			DependentCount:  0,
 		},
 		{
-			BeadJSON: BeadJSON{
+			BeadCore: BeadCore{
 				ID:        "hydra-ghi789",
 				Title:     "Third bead",
 				Status:    "completed",
@@ -836,7 +659,7 @@ func TestListBeads_Success(t *testing.T) {
 
 func TestListBeads_CLIError(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	cliErr := errors.New("exit status 1: database locked")
 	mockExec.AddResponse("br", []string{"list", "--json"}, []byte{}, cliErr)
@@ -859,7 +682,7 @@ func TestListBeads_CLIError(t *testing.T) {
 
 func TestListBeads_EmptyResult(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	mockExec.AddResponse("br", []string{"list", "--json"}, []byte("[]"), nil)
 
@@ -878,7 +701,7 @@ func TestListBeads_EmptyResult(t *testing.T) {
 
 func TestListBeads_InvalidJSON(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	mockExec.AddResponse("br", []string{"list", "--json"}, []byte("{invalid"), nil)
 
@@ -888,7 +711,7 @@ func TestListBeads_InvalidJSON(t *testing.T) {
 		t.Fatal("Expected error for invalid JSON, got nil")
 	}
 
-	expectedMsg := "failed to parse list JSON"
+	expectedMsg := "failed to parse bead list JSON"
 	if err.Error()[:len(expectedMsg)] != expectedMsg {
 		t.Errorf("Expected JSON parsing error, got: %v", err)
 	}
@@ -900,10 +723,37 @@ func TestListBeads_InvalidJSON(t *testing.T) {
 
 func TestCloseBead_Success(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
-	// Close command returns empty output on success
+	// Setup mock responses:
+	// 1. Close command returns success
+	// 2. GetBead returns the bead with completed status (for verification)
+	createdAt := createTestTime(2025, 1, 15)
+	updatedAt := createTestTime(2025, 1, 20)
+	closedAt := createTestTime(2025, 1, 25)
+	closeReason := "Task completed successfully"
+
+	beadDetail := []BeadDetail{
+		{
+			BeadCore: BeadCore{
+				ID:        "hydra-abc123",
+				Title:     "Test bead",
+				Status:    "completed",
+				Priority:  1,
+				IssueType: "implement",
+				CreatedAt: createdAt,
+				UpdatedAt: updatedAt,
+				Labels:    []string{},
+			},
+			ClosedAt:    &closedAt,
+			CloseReason: &closeReason,
+		},
+	}
+
+	jsonData, _ := json.Marshal(beadDetail)
+
 	mockExec.AddResponse("br", []string{"close", "hydra-abc123", "-r", "Task completed successfully"}, []byte(""), nil)
+	mockExec.AddResponse("br", []string{"show", "hydra-abc123", "--json"}, jsonData, nil)
 
 	err := client.CloseBead("hydra", "", "hydra-abc123", "Task completed successfully")
 	if err != nil {
@@ -912,10 +762,11 @@ func TestCloseBead_Success(t *testing.T) {
 
 	// Verify correct command and arguments were passed
 	calls := mockExec.GetCalls()
-	if len(calls) != 1 {
-		t.Fatalf("Expected 1 call, got %d", len(calls))
+	if len(calls) != 2 {
+		t.Fatalf("Expected 2 calls (close + verify), got %d", len(calls))
 	}
 
+	// First call should be close
 	call := calls[0]
 	if call.Name != "br" {
 		t.Errorf("Expected command 'br', got '%s'", call.Name)
@@ -939,7 +790,7 @@ func TestCloseBead_Success(t *testing.T) {
 
 func TestCloseBead_CLIError(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	cliErr := errors.New("exit status 1: bead not found")
 	mockExec.AddResponse("br", []string{"close", "nonexistent-123", "-r", "completed"}, []byte{}, cliErr)
@@ -950,7 +801,7 @@ func TestCloseBead_CLIError(t *testing.T) {
 		t.Fatal("Expected error, got nil")
 	}
 
-	expectedMsg := "br close nonexistent-123 failed: exit status 1: bead not found"
+	expectedMsg := "close failed for bead nonexistent-123: br close nonexistent-123 -r completed failed: exit status 1: bead not found"
 	if err.Error() != expectedMsg {
 		t.Errorf("Expected error '%s', got '%s'", expectedMsg, err.Error())
 	}
@@ -958,7 +809,7 @@ func TestCloseBead_CLIError(t *testing.T) {
 
 func TestCloseBead_DetectsSkippedDueToDependencies(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	// Simulate output when bead is skipped due to dependencies
 	output := []byte("Warning: Skipped test-bead-123: blocked by: dependency-bead:open\n")
@@ -977,7 +828,7 @@ func TestCloseBead_DetectsSkippedDueToDependencies(t *testing.T) {
 
 func TestCloseBead_DetectsBlockedByDependencies(t *testing.T) {
 	mockExec := NewMockExecutor()
-	client := NewTestableClient(mockExec)
+	client := NewClientWithExecutor(mockExec)
 
 	// Alternative output format
 	output := []byte("bead test-bead-123 blocked by: other-bead:open\n")
@@ -1020,9 +871,34 @@ func TestCloseBead_DifferentReasons(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			mockExec := NewMockExecutor()
-			client := NewTestableClient(mockExec)
+			client := NewClientWithExecutor(mockExec)
+
+			// Setup mock for both close and verification
+			createdAt := createTestTime(2025, 1, 15)
+			updatedAt := createTestTime(2025, 1, 20)
+			closedAt := createTestTime(2025, 1, 25)
+
+			beadDetail := []BeadDetail{
+				{
+					BeadCore: BeadCore{
+						ID:        "hydra-abc123",
+						Title:     "Test bead",
+						Status:    "completed",
+						Priority:  1,
+						IssueType: "implement",
+						CreatedAt: createdAt,
+						UpdatedAt: updatedAt,
+						Labels:    []string{},
+					},
+					ClosedAt:    &closedAt,
+					CloseReason: &tc.reason,
+				},
+			}
+
+			jsonData, _ := json.Marshal(beadDetail)
 
 			mockExec.AddResponse("br", []string{"close", "hydra-abc123", "-r", tc.reason}, []byte(""), nil)
+			mockExec.AddResponse("br", []string{"show", "hydra-abc123", "--json"}, jsonData, nil)
 
 			err := client.CloseBead("hydra", "", "hydra-abc123", tc.reason)
 			if err != nil {
@@ -1030,8 +906,8 @@ func TestCloseBead_DifferentReasons(t *testing.T) {
 			}
 
 			calls := mockExec.GetCalls()
-			if len(calls) != 1 {
-				t.Fatalf("Expected 1 call, got %d", len(calls))
+			if len(calls) != 2 {
+				t.Fatalf("Expected 2 calls, got %d", len(calls))
 			}
 
 			if calls[0].Args[3] != tc.reason {
@@ -1041,7 +917,41 @@ func TestCloseBead_DifferentReasons(t *testing.T) {
 	}
 }
 
-// Helper function to create string pointers
-func strPtr(s string) *string {
-	return &s
+func TestCloseBead_VerificationFails_WhenNotTerminalStatus(t *testing.T) {
+	mockExec := NewMockExecutor()
+	client := NewClientWithExecutor(mockExec)
+
+	// Setup: close succeeds but verification shows non-terminal status
+	createdAt := createTestTime(2025, 1, 15)
+	updatedAt := createTestTime(2025, 1, 20)
+
+	beadDetail := []BeadDetail{
+		{
+			BeadCore: BeadCore{
+				ID:        "hydra-abc123",
+				Title:     "Test bead",
+				Status:    "open", // Non-terminal status
+				Priority:  1,
+				IssueType: "implement",
+				CreatedAt: createdAt,
+				UpdatedAt: updatedAt,
+				Labels:    []string{},
+			},
+		},
+	}
+
+	jsonData, _ := json.Marshal(beadDetail)
+
+	mockExec.AddResponse("br", []string{"close", "hydra-abc123", "-r", "completed"}, []byte(""), nil)
+	mockExec.AddResponse("br", []string{"show", "hydra-abc123", "--json"}, jsonData, nil)
+
+	err := client.CloseBead("hydra", "", "hydra-abc123", "completed")
+
+	if err == nil {
+		t.Fatal("Expected error when verification fails, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "not closed") {
+		t.Errorf("Expected error about bead not being closed, got: %v", err)
+	}
 }

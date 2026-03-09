@@ -703,8 +703,8 @@ func TestOverseer_WorkerCompletion(t *testing.T) {
 
 				// Verify completed status
 				node, _ := test.overseer.dag.GetNode(tt.completeBead)
-				if node.Status != types.StatusCompleted {
-					t.Errorf("Expected %s status to be completed, got %v", tt.completeBead, node.Status)
+				if node.Status() != types.StatusCompleted {
+					t.Errorf("Expected %s status to be completed, got %v", tt.completeBead, node.Status())
 				}
 			} else {
 				// Test failure
@@ -715,8 +715,8 @@ func TestOverseer_WorkerCompletion(t *testing.T) {
 
 				// Verify failed status
 				node, _ := test.overseer.dag.GetNode(tt.completeBead)
-				if node.Status != types.StatusFailed {
-					t.Errorf("Expected %s status to be failed, got %v", tt.completeBead, node.Status)
+				if node.Status() != types.StatusFailed {
+					t.Errorf("Expected %s status to be failed, got %v", tt.completeBead, node.Status())
 				}
 
 				// Verify dependents are still blocked
