@@ -912,6 +912,569 @@ func sanitizePath(basePath, userPath string) (string, error) {
 
 ---
 
+## 13. Dynamic Project Discovery
+
+### 13.1 Overview
+
+Hydra supports continuous project discovery with automatic detection of new projects and repositories. The overseer polls the filesystem every 30 seconds to discover projects, repos, and handle deletions dynamically without requiring a restart.
+
+### 13.2 Requirements
+
+**FR-DPD-001: Continuous Project Discovery (30s Interval)**
+- Poll configured discovery paths every 30 seconds
+- Auto-discover repos within projects (1 level deep)
+- Detect new projects and repositories
+- Remove projects/repos that no longer exist
+- Log all discoveries
+- No impact on bead polling (5s continues independently)
+
+**FR-DPD-002: Project Structure Discovery**
+- Projects discovered by scanning `~/source-code/` (configurable)
+- Repos discovered by checking for `.beads/beads.db` files
+- Single level nesting: projects contain repos
+- No nested repos (e.g., no repos inside repos)
+
+**FR-DPD-003: Repository Naming**
+- Use folder name as repository identifier
+- Example: `api-gateway-x1f32` (full name from beads.db)
+- Project: `tms`, Repo: `api-gateway-x1f32`
+
+### 13.4 Configuration Schema
+
+```yaml
+# hydra.yaml
+overseer:
+  poll_interval: 5s                    # Bead polling
+  project_discovery_interval: 30s      # Project discovery
+  
+  # Discovery settings
+  discovery:
+    paths:                             # Paths to scan for projects
+      - ~/source-code/
+    auto_discover: true                # Enable auto-discovery
+    depth: 1                           # Recursion depth for repo discovery
+
+projects:
+  # Explicit projects (merged with discovered)
+  - name: tms
+    path: /Users/buddhi/source-code/tms
+    type: multi
+    # repos auto-discovered
+```
+
+### 13.5 Implementation Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│              Overseer (Enhanced)                     │
+├─────────────────────────────────────────────────────┤
+│                                                      │
+│  Existing (5s):           NEW (30s):                 │
+│  ┌──────────────┐        ┌──────────────────┐       │
+│  │  beadTicker  │        │ projectTicker    │       │
+│  │  (poll beads)│        │ (discover proj)  │       │
+│  └──────────────┘        └──────────────────┘       │
+│                                                      │
+└─────────────────────────────────────────────────────┘
+```
+
+**Discovery Flow:**
+1. Every 30s: Scan discovery paths for project directories
+2. For each project: Scan subdirectories for `.beads/beads.db`
+3. Compare with existing projects/repos in memory
+4. Add new projects/repos to overseer
+5. Remove deleted projects/repos
+6. Log all changes
+
+### 13.6 Project Discovery Logic
+
+```go
+func (o *Overseer) discoverProjects() error {
+    discovered := make(map[string]*Project)
+    
+    for _, discoveryPath := range o.config.Discovery.Paths {
+        entries, err := os.ReadDir(discoveryPath)
+        if err != nil {
+            log.Printf("Warning: Cannot read discovery path %s: %v", discoveryPath, err)
+            continue
+        }
+        
+        for _, entry := range entries {
+            if !entry.IsDir() {
+                continue
+            }
+            
+            projectPath := filepath.Join(discoveryPath, entry.Name())
+            project := o.inspectProject(projectPath, entry.Name())
+            
+            if project != nil {
+                discovered[project.Name] = project
+            }
+        }
+    }
+    
+    // Merge with existing projects
+    o.mergeProjects(discovered)
+    return nil
+}
+
+func (o *Overseer) inspectProject(projectPath, projectName string) *Project {
+    // Check if project root has beads (single repo)
+    if hasBeads(projectPath) {
+        return &Project{
+            Name: projectName,
+            Path: projectPath,
+            Type: "single",
+            Repos: []Repo{{Name: projectName, Path: projectPath}},
+        }
+    }
+    
+    // Check subdirectories for repos (multi-repo)
+    var repos []Repo
+    entries, _ := os.ReadDir(projectPath)
+    for _, entry := range entries {
+        if !entry.IsDir() {
+            continue
+        }
+        
+        repoPath := filepath.Join(projectPath, entry.Name())
+        if hasBeads(repoPath) {
+            repos = append(repos, Repo{
+                Name: entry.Name(),
+                Path: repoPath,
+            })
+        }
+    }
+    
+    if len(repos) > 0 {
+        return &Project{
+            Name: projectName,
+            Path: projectPath,
+            Type: "multi",
+            Repos: repos,
+        }
+    }
+    
+    return nil
+}
+```
+
+### 13.7 Merge Strategy
+
+**Explicit + Auto-Discovered:**
+- Explicit projects from config are loaded first
+- Auto-discovered projects are merged
+- Explicit settings override auto-discovered
+- New discoveries added to the list
+- Deleted projects removed from the list
+
+```go
+func (o *Overseer) mergeProjects(discovered map[string]*Project) {
+    // Track changes for logging
+    var added, removed []string
+    
+    // Remove projects that no longer exist
+    for name, existing := range o.projects {
+        if _, found := discovered[name]; !found {
+            // Check if it's explicit in config (don't remove)
+            if !existing.IsExplicit {
+                delete(o.projects, name)
+                removed = append(removed, name)
+            }
+        }
+    }
+    
+    // Add new projects
+    for name, project := range discovered {
+        if _, exists := o.projects[name]; !exists {
+            o.projects[name] = project
+            added = append(added, name)
+        }
+    }
+    
+    // Log changes
+    if len(added) > 0 {
+        log.Printf("Discovered new projects: %v", added)
+    }
+    if len(removed) > 0 {
+        log.Printf("Removed deleted projects: %v", removed)
+    }
+}
+```
+
+### 13.8 Example Project Structures
+
+**Example 1: Microservices Project**
+```
+/Users/buddhi/source-code/tms/
+├── api-gateway/
+│   └── .beads/beads.db           # Discovered: repo "api-gateway"
+├── user-service/
+│   └── .beads/beads.db           # Discovered: repo "user-service"
+├── order-service/
+│   └── .beads/beads.db           # Discovered: repo "order-service"
+└── shared-libs/
+    └── (no .beads - ignored)
+```
+
+**Example 2: Mixed Project**
+```
+/Users/buddhi/source-code/s2p/
+├── backend/
+│   └── .beads/beads.db           # Discovered: repo "backend"
+├── frontend/
+│   └── .beads/beads.db           # Discovered: repo "frontend"
+└── mobile-app/
+    └── .beads/beads.db           # Discovered: repo "mobile-app"
+```
+
+**Example 3: Web + Backend**
+```
+/Users/buddhi/source-code/webapp/
+├── web-frontend/
+│   └── .beads/beads.db           # Discovered: repo "web-frontend"
+└── api-server/
+    └── .beads/beads.db           # Discovered: repo "api-server"
+```
+
+### 13.9 Logging & Observability
+
+**Discovery Logs:**
+```
+INFO  [2026-03-08T10:00:00Z] Starting project discovery
+INFO  [2026-03-08T10:00:01Z] Discovered new project: tms (3 repos)
+INFO  [2026-03-08T10:00:01Z]   - api-gateway
+INFO  [2026-03-08T10:00:01Z]   - user-service
+INFO  [2026-03-08T10:00:01Z]   - order-service
+INFO  [2026-03-08T10:00:02Z] Discovered new project: s2p (2 repos)
+WARN  [2026-03-08T10:30:00Z] Project removed: legacy-project (directory deleted)
+INFO  [2026-03-08T10:30:00Z] New repo discovered in tms: payment-service
+```
+
+**Metrics:**
+```
+hydra_projects_total{source="discovered"} 5
+hydra_projects_total{source="explicit"} 2
+hydra_repos_total{project="tms"} 3
+hydra_discoveries_total{type="project",operation="added"} 2
+hydra_discoveries_total{type="repo",operation="added"} 5
+```
+
+---
+
+## 14. Hot Reload Configuration
+
+### 14.1 Overview
+
+Hydra supports hot reloading of configuration without requiring a restart. The overseer watches `hydra.yaml` for changes and updates settings dynamically, including ticker intervals, tool configurations, and discovery settings.
+
+### 14.2 Requirements
+
+**FR-HR-001: File Watching**
+- Watch `hydra.yaml` for changes using fsnotify
+- Support multiple watch paths (configurable)
+- Debounce rapid successive changes (2s default)
+- Cross-platform support (Linux, macOS, Windows)
+
+**FR-HR-002: Configuration Reload**
+- Reload configuration without restart
+- Validate new configuration before applying
+- Gracefully handle invalid configs (keep previous)
+- Update active components dynamically
+
+**FR-HR-003: Dynamic Component Updates**
+- Update ticker intervals (bead polling, project discovery)
+- Update external tool settings (BV, PT, UBS, CASS)
+- Update discovery paths
+- Update MCP settings
+- Changes take effect immediately
+
+**FR-HR-004: Safety**
+- Validate configuration before applying
+- Rollback on validation failure
+- Log all reload attempts (success and failure)
+- Never crash on invalid config
+
+### 14.3 Configuration Schema
+
+```yaml
+# hydra.yaml
+overseer:
+  poll_interval: 5s
+  project_discovery_interval: 30s
+  
+  # Hot reload settings
+  hot_reload:
+    enabled: true
+    watch_paths:                       # Files to watch
+      - ./hydra.yaml
+    debounce: 2s                       # Debounce changes
+    validate_before_apply: true        # Safety check
+    
+  # Discovery settings
+  discovery:
+    paths:
+      - ~/source-code/
+    auto_discover: true
+```
+
+### 14.4 Implementation Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Overseer (Hot Reload)                     │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌─────────────────────┐                                    │
+│  │  fsnotify.Watcher   │                                    │
+│  │  - Watch hydra.yaml │                                    │
+│  │  - Debounce 2s      │                                    │
+│  └──────────┬──────────┘                                    │
+│             │                                                │
+│             ▼                                                │
+│  ┌─────────────────────┐                                    │
+│  │  Config Reload      │                                    │
+│  │  1. Load new config │                                    │
+│  │  2. Validate        │                                    │
+│  │  3. Compare changes │                                    │
+│  │  4. Apply updates   │                                    │
+│  │  5. Update tickers  │                                    │
+│  └─────────────────────┘                                    │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 14.5 Implementation Details
+
+**Config Watcher:**
+```go
+type ConfigWatcher struct {
+    watcher    *fsnotify.Watcher
+    paths      []string
+    debounce   time.Duration
+    onChange   func()
+    stopChan   chan struct{}
+}
+
+func NewConfigWatcher(paths []string, debounce time.Duration, onChange func()) (*ConfigWatcher, error) {
+    watcher, err := fsnotify.NewWatcher()
+    if err != nil {
+        return nil, err
+    }
+    
+    for _, path := range paths {
+        if err := watcher.Add(path); err != nil {
+            return nil, err
+        }
+    }
+    
+    return &ConfigWatcher{
+        watcher:  watcher,
+        paths:    paths,
+        debounce: debounce,
+        onChange: onChange,
+        stopChan: make(chan struct{}),
+    }, nil
+}
+
+func (cw *ConfigWatcher) Start() {
+    var debounceTimer *time.Timer
+    
+    for {
+        select {
+        case event, ok := <-cw.watcher.Events:
+            if !ok {
+                return
+            }
+            
+            if event.Op&fsnotify.Write == fsnotify.Write {
+                // Debounce rapid changes
+                if debounceTimer != nil {
+                    debounceTimer.Stop()
+                }
+                debounceTimer = time.AfterFunc(cw.debounce, func() {
+                    log.Printf("Config file changed: %s", event.Name)
+                    cw.onChange()
+                })
+            }
+            
+        case err, ok := <-cw.watcher.Errors:
+            if !ok {
+                return
+            }
+            log.Printf("Config watcher error: %v", err)
+            
+        case <-cw.stopChan:
+            return
+        }
+    }
+}
+```
+
+**Hot Reload Logic:**
+```go
+func (o *Overseer) reloadConfig() {
+    log.Println("Reloading configuration...")
+    
+    // Load new config
+    newConfig, err := LoadConfig(o.configPath)
+    if err != nil {
+        log.Printf("ERROR: Failed to load config: %v", err)
+        log.Println("Keeping previous configuration")
+        return
+    }
+    
+    // Validate new config
+    if err := ValidateConfig(newConfig); err != nil {
+        log.Printf("ERROR: Invalid configuration: %v", err)
+        log.Println("Keeping previous configuration")
+        return
+    }
+    
+    // Apply changes
+    changes := o.applyConfigChanges(newConfig)
+    
+    if len(changes) > 0 {
+        log.Printf("Configuration reloaded successfully")
+        for _, change := range changes {
+            log.Printf("  - %s", change)
+        }
+    } else {
+        log.Println("Configuration reloaded (no changes detected)")
+    }
+}
+
+func (o *Overseer) applyConfigChanges(newConfig *Config) []string {
+    var changes []string
+    
+    // Update bead poll interval
+    if newConfig.Overseer.PollInterval != o.config.Overseer.PollInterval {
+        o.ticker.Reset(newConfig.Overseer.PollInterval)
+        changes = append(changes, 
+            fmt.Sprintf("poll_interval: %v → %v", 
+                o.config.Overseer.PollInterval, 
+                newConfig.Overseer.PollInterval))
+    }
+    
+    // Update project discovery interval
+    if newConfig.Overseer.ProjectDiscoveryInterval != o.config.Overseer.ProjectDiscoveryInterval {
+        o.projectTicker.Reset(newConfig.Overseer.ProjectDiscoveryInterval)
+        changes = append(changes,
+            fmt.Sprintf("project_discovery_interval: %v → %v",
+                o.config.Overseer.ProjectDiscoveryInterval,
+                newConfig.Overseer.ProjectDiscoveryInterval))
+    }
+    
+    // Update discovery paths
+    if !slices.Equal(newConfig.Discovery.Paths, o.config.Discovery.Paths) {
+        changes = append(changes,
+            fmt.Sprintf("discovery.paths updated: %v → %v",
+                o.config.Discovery.Paths,
+                newConfig.Discovery.Paths))
+    }
+    
+    // Update external tool configs
+    if newConfig.ExternalTools.BV.Enabled != o.config.ExternalTools.BV.Enabled {
+        changes = append(changes,
+            fmt.Sprintf("BV enabled: %v → %v",
+                o.config.ExternalTools.BV.Enabled,
+                newConfig.ExternalTools.BV.Enabled))
+    }
+    
+    // Update config reference
+    o.config = newConfig
+    
+    return changes
+}
+```
+
+### 14.6 Change Detection & Application
+
+**Dynamically Updated Settings:**
+
+| Setting | Component | Update Method |
+|---------|-----------|---------------|
+| `poll_interval` | beadTicker | Reset() |
+| `project_discovery_interval` | projectTicker | Reset() |
+| `discovery.paths` | Discovery | Update paths, next scan uses new |
+| `external_tools.*.enabled` | Tool clients | Enable/disable on next use |
+| `external_tools.*.timeout` | Tool clients | Apply immediately |
+| `mcp.*` | MCP client | Reconnect with new settings |
+| `api.port` | API server | Requires restart (log warning) |
+
+**Non-Reloadable Settings:**
+- Database paths (sqlite file locations)
+- API port (requires socket rebind)
+- Log file paths
+
+### 14.7 Logging & Observability
+
+**Hot Reload Logs:**
+```
+INFO  [2026-03-08T10:15:00Z] Config file changed: hydra.yaml
+INFO  [2026-03-08T10:15:02Z] Reloading configuration...
+INFO  [2026-03-08T10:15:02Z] Configuration reloaded successfully
+INFO  [2026-03-08T10:15:02Z]   - poll_interval: 5s → 10s
+INFO  [2026-03-08T10:15:02Z]   - project_discovery_interval: 30s → 60s
+INFO  [2026-03-08T10:15:02Z]   - BV enabled: true → false
+
+WARN  [2026-03-08T10:20:00Z] Config file changed: hydra.yaml
+ERROR [2026-03-08T10:20:02Z] Failed to load config: yaml: line 15: did not find expected key
+WARN  [2026-03-08T10:20:02Z] Keeping previous configuration
+```
+
+**Metrics:**
+```
+hydra_config_reloads_total{status="success"} 5
+hydra_config_reloads_total{status="failure"} 1
+hydra_config_changes_total{setting="poll_interval"} 2
+hydra_config_changes_total{setting="project_discovery_interval"} 1
+```
+
+### 14.8 CLI Commands
+
+**Force Reload:**
+```bash
+# Trigger manual reload
+./hydra -reload-config
+
+# Or via API
+curl -X POST http://localhost:8080/admin/reload-config
+```
+
+**Check Config:**
+```bash
+# Validate config without applying
+./hydra -validate-config -config hydra.yaml
+```
+
+---
+
+## 15. Implementation Phases
+
+### Phase 1: Dynamic Project Discovery (Week 4)
+- Day 1: Add `projectTicker` to Overseer (30s interval)
+- Day 2: Implement `discoverProjects()` with auto-repo-discovery
+- Day 3: Implement project/repo merge logic
+- Day 4: Add logging and metrics
+- Day 5: Tests and documentation
+
+### Phase 2: Hot Reload (Week 5)
+- Day 1: Implement `ConfigWatcher` with fsnotify
+- Day 2: Implement config validation and reload
+- Day 3: Implement dynamic component updates
+- Day 4: Add change detection and logging
+- Day 5: Tests and documentation
+
+### Phase 3: Integration (Week 5)
+- Day 1: Integration tests
+- Day 2: End-to-end testing
+- Day 3: Performance testing
+- Day 4: Documentation updates
+- Day 5: Final review
+
+---
+
 ## Appendix A: Tool Installation Commands
 
 ```bash

@@ -128,8 +128,8 @@ func parseJSON[T any](data []byte, context string) (T, error) {
 	return result, nil
 }
 
-// coreToBead converts BeadCore fields to a types.Bead with the given context
-func coreToBead(core BeadCore, ctx BeadContext) types.Bead {
+// createBaseBead converts BeadCore fields to a types.Bead with the given context
+func createBaseBead(core BeadCore, ctx BeadContext) types.Bead {
 	return types.Bead{
 		ID:          types.BeadID(core.ID),
 		Title:       core.Title,
@@ -155,9 +155,113 @@ func (p *Parser) ParseReadyBeads(output []byte, ctx BeadContext) ([]types.Bead, 
 
 	beads := make([]types.Bead, len(responses))
 	for i, resp := range responses {
-		beads[i] = coreToBead(resp.BeadCore, ctx)
+		beads[i] = createBaseBead(resp.BeadCore, ctx)
 	}
 	return beads, nil
+}
+
+// metadataSetter defines a function that sets a metadata field if the condition is true
+type metadataSetter func()
+
+// setStringIfNotNil sets a metadata field from a string pointer if not nil
+func setStringIfNotNil(metadata map[string]string, key string, value *string) {
+	if value != nil {
+		metadata[key] = *value
+	}
+}
+
+// setTimeIfNotNil sets a metadata field from a time pointer if not nil
+func setTimeIfNotNil(metadata map[string]string, key string, value *time.Time) {
+	if value != nil {
+		metadata[key] = value.Format(time.RFC3339)
+	}
+}
+
+// setBoolIfNotNil sets a metadata field from a bool pointer if not nil
+func setBoolIfNotNil(metadata map[string]string, key string, value *bool) {
+	if value != nil {
+		metadata[key] = fmt.Sprintf("%t", *value)
+	}
+}
+
+// setIntIfNotNil sets a metadata field from an int pointer if not nil
+func setIntIfNotNil(metadata map[string]string, key string, value *int) {
+	if value != nil {
+		metadata[key] = fmt.Sprintf("%d", *value)
+	}
+}
+
+// extractDependencies converts dependency JSON to bead dependencies and metadata
+func extractDependencies(deps []Dependency, metadata map[string]string) []types.BeadID {
+	dependencies := make([]types.BeadID, len(deps))
+	for i, dep := range deps {
+		dependencies[i] = types.BeadID(dep.DependsOnID)
+		if dep.Status != "" {
+			metadata[dep.DependsOnID+"_status"] = dep.Status
+		}
+		if dep.Type != "" {
+			metadata[dep.DependsOnID+"_relationship"] = dep.Type
+		}
+	}
+	return dependencies
+}
+
+// extractEventMetadata extracts event information into metadata
+func extractEventMetadata(events []BeadEvent, metadata map[string]string) {
+	if len(events) == 0 {
+		return
+	}
+	metadata["event_count"] = fmt.Sprintf("%d", len(events))
+	lastEvent := events[len(events)-1]
+	metadata["last_event_type"] = lastEvent.EventType
+	metadata["last_event_actor"] = lastEvent.Actor
+}
+
+// extractDependentMetadata extracts dependent information into metadata
+func extractDependentMetadata(dependents []DependentInfo, metadata map[string]string) {
+	if len(dependents) == 0 {
+		return
+	}
+	metadata["dependent_count"] = fmt.Sprintf("%d", len(dependents))
+	dependentIDs := make([]string, len(dependents))
+	for i, dep := range dependents {
+		dependentIDs[i] = dep.ID
+	}
+	metadata["dependent_ids"] = strings.Join(dependentIDs, ",")
+}
+
+// setMetadataFromDetail populates all metadata fields from a BeadDetail
+func setMetadataFromDetail(resp BeadDetail, metadata map[string]string) {
+	// Assignment and ownership
+	setStringIfNotNil(metadata, "close_reason", resp.CloseReason)
+	setStringIfNotNil(metadata, "created_by", resp.CreatedBy)
+	setStringIfNotNil(metadata, "assignee", resp.Assignee)
+	setStringIfNotNil(metadata, "owner", resp.Owner)
+	setStringIfNotNil(metadata, "notes", resp.Notes)
+
+	// Source information
+	setStringIfNotNil(metadata, "source_repo", resp.SourceRepo)
+	setStringIfNotNil(metadata, "source_system", resp.SourceSystem)
+
+	// Work fields
+	setIntIfNotNil(metadata, "estimated_minutes", resp.EstimatedMinutes)
+	setStringIfNotNil(metadata, "external_ref", resp.ExternalRef)
+
+	// Design and acceptance criteria
+	setStringIfNotNil(metadata, "design", resp.Design)
+	setStringIfNotNil(metadata, "acceptance_criteria", resp.AcceptanceCriteria)
+
+	// Scheduling
+	setTimeIfNotNil(metadata, "due_at", resp.DueAt)
+	setTimeIfNotNil(metadata, "defer_until", resp.DeferUntil)
+
+	// Flags
+	setBoolIfNotNil(metadata, "pinned", resp.Pinned)
+	setBoolIfNotNil(metadata, "ephemeral", resp.Ephemeral)
+
+	// Events and dependents
+	extractEventMetadata(resp.Events, metadata)
+	extractDependentMetadata(resp.Dependents, metadata)
 }
 
 // ParseBeadDetail parses JSON output from 'br show <id> --json' command
@@ -172,86 +276,16 @@ func (p *Parser) ParseBeadDetail(output []byte, ctx BeadContext) (*types.Bead, e
 	}
 
 	resp := responses[0]
-	bead := coreToBead(resp.BeadCore, ctx)
+	bead := createBaseBead(resp.BeadCore, ctx)
 
-	// Extract dependencies, their status, and relationship type
-	bead.Dependencies = make([]types.BeadID, len(resp.Dependencies))
-	for i, dep := range resp.Dependencies {
-		bead.Dependencies[i] = types.BeadID(dep.DependsOnID)
-		if dep.Status != "" {
-			bead.Metadata[dep.DependsOnID+"_status"] = dep.Status
-		}
-		if dep.Type != "" {
-			bead.Metadata[dep.DependsOnID+"_relationship"] = dep.Type
-		}
-	}
+	// Extract dependencies with their status and relationship type
+	bead.Dependencies = extractDependencies(resp.Dependencies, bead.Metadata)
 
 	// Set completion time
 	bead.CompletedAt = resp.ClosedAt
 
-	// Add optional metadata
-	if resp.CloseReason != nil {
-		bead.Metadata["close_reason"] = *resp.CloseReason
-	}
-	if resp.CreatedBy != nil {
-		bead.Metadata["created_by"] = *resp.CreatedBy
-	}
-	if resp.SourceRepo != nil {
-		bead.Metadata["source_repo"] = *resp.SourceRepo
-	}
-	if resp.Assignee != nil {
-		bead.Metadata["assignee"] = *resp.Assignee
-	}
-	if resp.Owner != nil {
-		bead.Metadata["owner"] = *resp.Owner
-	}
-	if resp.Notes != nil {
-		bead.Metadata["notes"] = *resp.Notes
-	}
-	if resp.SourceSystem != nil {
-		bead.Metadata["source_system"] = *resp.SourceSystem
-	}
-	if resp.EstimatedMinutes != nil {
-		bead.Metadata["estimated_minutes"] = fmt.Sprintf("%d", *resp.EstimatedMinutes)
-	}
-	if resp.Design != nil {
-		bead.Metadata["design"] = *resp.Design
-	}
-	if resp.AcceptanceCriteria != nil {
-		bead.Metadata["acceptance_criteria"] = *resp.AcceptanceCriteria
-	}
-	if resp.DueAt != nil {
-		bead.Metadata["due_at"] = resp.DueAt.Format(time.RFC3339)
-	}
-	if resp.DeferUntil != nil {
-		bead.Metadata["defer_until"] = resp.DeferUntil.Format(time.RFC3339)
-	}
-	if resp.ExternalRef != nil {
-		bead.Metadata["external_ref"] = *resp.ExternalRef
-	}
-	if resp.Pinned != nil {
-		bead.Metadata["pinned"] = fmt.Sprintf("%t", *resp.Pinned)
-	}
-	if resp.Ephemeral != nil {
-		bead.Metadata["ephemeral"] = fmt.Sprintf("%t", *resp.Ephemeral)
-	}
-	if len(resp.Events) > 0 {
-		bead.Metadata["event_count"] = fmt.Sprintf("%d", len(resp.Events))
-		// Extract last event information
-		lastEvent := resp.Events[len(resp.Events)-1]
-		bead.Metadata["last_event_type"] = lastEvent.EventType
-		bead.Metadata["last_event_actor"] = lastEvent.Actor
-	}
-
-	// Add dependent information
-	if len(resp.Dependents) > 0 {
-		bead.Metadata["dependent_count"] = fmt.Sprintf("%d", len(resp.Dependents))
-		dependentIDs := make([]string, len(resp.Dependents))
-		for i, dep := range resp.Dependents {
-			dependentIDs[i] = dep.ID
-		}
-		bead.Metadata["dependent_ids"] = strings.Join(dependentIDs, ",")
-	}
+	// Populate all metadata fields
+	setMetadataFromDetail(resp, bead.Metadata)
 
 	return &bead, nil
 }
@@ -265,7 +299,7 @@ func (p *Parser) ParseBeadList(output []byte, ctx BeadContext) ([]types.Bead, er
 
 	beads := make([]types.Bead, len(responses))
 	for i, resp := range responses {
-		bead := coreToBead(resp.BeadCore, ctx)
+		bead := createBaseBead(resp.BeadCore, ctx)
 		bead.Metadata["dependency_count"] = fmt.Sprintf("%d", resp.DependencyCount)
 		bead.Metadata["dependent_count"] = fmt.Sprintf("%d", resp.DependentCount)
 		beads[i] = bead

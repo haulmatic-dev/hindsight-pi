@@ -1,9 +1,7 @@
 package core
 
 import (
-	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -32,36 +30,6 @@ func (e *DAGError) Error() string {
 // This allows errors.Is and errors.As to work properly with DAGError.
 func (e *DAGError) Unwrap() error {
 	return e.Err
-}
-
-// CycleError represents a circular dependency detected in the DAG.
-// It contains the path that forms the cycle.
-type CycleError struct {
-	// Path is a slice of node IDs that form the cycle.
-	// The first and last elements should be the same node ID.
-	Path []string
-}
-
-// Error returns a formatted error message for the CycleError.
-// Format: "circular dependency detected: A → B → C → A"
-func (e *CycleError) Error() string {
-	if len(e.Path) == 0 {
-		return "circular dependency detected: empty path"
-	}
-
-	return fmt.Sprintf("circular dependency detected: %s", strings.Join(e.Path, " → "))
-}
-
-// Unwrap returns nil since CycleError does not wrap another error.
-func (e *CycleError) Unwrap() error {
-	return nil
-}
-
-// IsCycleError checks if the given error is or wraps a CycleError.
-// It uses errors.As to traverse the error chain.
-func IsCycleError(err error) bool {
-	var cycleErr *CycleError
-	return errors.As(err, &cycleErr)
 }
 
 // NodeNotFoundError represents an error when a requested node
