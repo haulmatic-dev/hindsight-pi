@@ -1,0 +1,55 @@
+[Unit]
+Description=Hydra Agent Orchestrator
+Documentation=https://github.com/haulmatic-dev/hydra
+After=network.target mcp-server.service cass-memory.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=hydra
+Group=hydra
+WorkingDirectory=/opt/hydra
+
+# Environment
+Environment="HYDRA_CONFIG=/etc/hydra/hydra.yaml"
+Environment="HYDRA_HOME=/opt/hydra"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:/opt/hydra/bin"
+Environment="HYDRA_ENVIRONMENT=production"
+
+# Main executable
+ExecStart=/opt/hydra/bin/hydra -config /etc/hydra/hydra.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStop=/bin/kill -TERM $MAINPID
+
+# Graceful shutdown
+TimeoutStopSec=60
+KillSignal=SIGTERM
+SendSIGKILL=yes
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+LimitAS=2G
+
+# Security
+NoNewPrivileges=false
+PrivateTmp=false
+ProtectSystem=false
+ProtectHome=false
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitInterval=60s
+StartLimitBurst=3
+
+# Logging
+StandardOutput=append:/var/log/hydra/hydra.log
+StandardError=append:/var/log/hydra/hydra-error.log
+SyslogIdentifier=hydra
+
+# Watchdog
+WatchdogSec=60s
+
+[Install]
+WantedBy=multi-user.target

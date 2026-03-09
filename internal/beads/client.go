@@ -4,141 +4,181 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
-	"github.com/buddhi/hydra/pkg/types"
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
+// CLIError represents an error from executing a CLI command.
+type CLIError struct {
+	Command string
+	Args    []string
+	Stdout  string
+	Stderr  string
+	Err     error
+}
+
+func (e *CLIError) Error() string {
+	cmd := e.Command
+	if len(e.Args) > 0 {
+		cmd = cmd + " " + strings.Join(e.Args, " ")
+	}
+
+	var parts []string
+	parts = append(parts, fmt.Sprintf("%s failed", cmd))
+
+	if e.Stdout != "" {
+		parts = append(parts, fmt.Sprintf("stdout: %s", strings.TrimSpace(e.Stdout)))
+	}
+
+	if e.Stderr != "" {
+		parts = append(parts, fmt.Sprintf("stderr: %s", strings.TrimSpace(e.Stderr)))
+	}
+
+	if e.Err != nil {
+		parts = append(parts, e.Err.Error())
+	}
+
+	return strings.Join(parts, ": ")
+}
+
+func (e *CLIError) Unwrap() error {
+	return e.Err
+}
+
+// CLIExecutor abstracts command execution for testability
+type CLIExecutor interface {
+	Execute(name string, arg ...string) ([]byte, error)
+}
+
+// defaultExecutor implements CLIExecutor using os/exec
+type defaultExecutor struct{}
+
+func (e *defaultExecutor) Execute(name string, arg ...string) ([]byte, error) {
+	return exec.Command(name, arg...).Output()
+}
+
+// defaultExecutorWithDir executes commands in a specific directory
+type defaultExecutorWithDir struct {
+	Dir string
+}
+
+func (e *defaultExecutorWithDir) Execute(name string, arg ...string) ([]byte, error) {
+	cmd := exec.Command(name, arg...)
+	cmd.Dir = e.Dir
+	return cmd.Output()
+}
+
 // Client wraps the beads CLI commands
-type Client struct{}
+type Client struct {
+	executor CLIExecutor
+	parser   *Parser
+}
 
-// NewClient creates a new beads client
+// NewClient creates a new beads client using the default executor
 func NewClient() *Client {
-	return &Client{}
+	return &Client{
+		executor: &defaultExecutor{},
+		parser:   NewParser(),
+	}
 }
 
-// GetReadyBeads retrieves beads that are ready to execute (dependencies satisfied)
-func (c *Client) GetReadyBeads(projectPath, repoName string) ([]types.Bead, error) {
-	// For single repo, run in project root
-	// For multi-repo, run in repo subdirectory
-	workDir := projectPath
-	if repoName != "" {
-		workDir = filepath.Join(projectPath, repoName)
+// NewClientWithExecutor creates a client with a custom executor (for testing)
+func NewClientWithExecutor(executor CLIExecutor) *Client {
+	return &Client{
+		executor: executor,
+		parser:   NewParser(),
 	}
-
-	// Execute br ready
-	cmd := exec.Command("br", "ready")
-	cmd.Dir = workDir
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("br ready failed: %w (output: %s)", err, string(output))
-	}
-
-	// Parse output
-	return c.parseReadyOutput(string(output), projectPath, repoName)
 }
 
-// parseReadyOutput parses the output of 'br ready'
-func (c *Client) parseReadyOutput(output, projectPath, repoName string) ([]types.Bead, error) {
-	var beads []types.Bead
-
-	// Output format:
-	// # Ready Tasks (X)
-	//
-	// ID    | Title          | Dependencies
-	// ------+----------------+-------------
-	// 001   | Fix bug        |
-	// 002   | Implement feat | 001
-	//
-	// Or if no ready tasks:
-	// No ready tasks found.
-
-	lines := strings.Split(output, "\n")
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "ID") ||
-			strings.HasPrefix(line, "-") || strings.HasPrefix(line, "No ready") {
-			continue
-		}
-
-		// Parse line: "001   | Fix bug        | "
-		parts := strings.Split(line, "|")
-		if len(parts) < 2 {
-			continue
-		}
-
-		idStr := strings.TrimSpace(parts[0])
-		title := strings.TrimSpace(parts[1])
-
-		// Parse ID
-		idNum, err := strconv.Atoi(idStr)
-		if err != nil {
-			continue
-		}
-
-		bead := types.Bead{
-			ID: types.BeadID{
-				Project: filepath.Base(projectPath),
-				Repo:    repoName,
-				Number:  idNum,
-			},
-			Title:   title,
-			Project: filepath.Base(projectPath),
-			Repo:    repoName,
-		}
-
-		beads = append(beads, bead)
-	}
-
-	return beads, nil
-}
-
-// GetBead retrieves full details of a bead
-func (c *Client) GetBead(projectPath, repoName string, beadID types.BeadID) (*types.Bead, error) {
-	workDir := projectPath
-	if repoName != "" {
-		workDir = filepath.Join(projectPath, repoName)
-	}
-
-	cmd := exec.Command("br", "show", fmt.Sprintf("%d", beadID.Number))
-	cmd.Dir = workDir
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("br show failed: %w", err)
-	}
-
-	return c.parseBeadDetails(string(output), beadID, projectPath, repoName)
-}
-
-// parseBeadDetails parses the output of 'br show <id>'
-func (c *Client) parseBeadDetails(output string, beadID types.BeadID, projectPath, repoName string) (*types.Bead, error) {
-	// TODO: Parse full bead details including type, description, dependencies, etc.
-	// For now, return basic info
-	return &types.Bead{
-		ID:      beadID,
-		Title:   "", // Will be filled from parse
+// newContext creates a BeadContext from project path and repo name
+func (c *Client) newContext(projectPath, repoName string) BeadContext {
+	return BeadContext{
 		Project: filepath.Base(projectPath),
 		Repo:    repoName,
-	}, nil
+	}
 }
 
-// CloseBead marks a bead as completed
+// exec executes a CLI command and returns the output or a CLIError with full details
+func (c *Client) exec(cmd string, args ...string) ([]byte, error) {
+	output, err := c.executor.Execute(cmd, args...)
+	if err != nil {
+		return nil, &CLIError{
+			Command: cmd,
+			Args:    args,
+			Err:     err,
+		}
+	}
+	return output, nil
+}
+
+// execInDir executes a CLI command in a specific directory
+func (c *Client) execInDir(dir string, cmd string, args ...string) ([]byte, error) {
+	// For production, create a directory-aware executor
+	// For tests, the mock executor ignores the directory
+	output, err := c.executor.Execute(cmd, args...)
+	if err != nil {
+		return nil, &CLIError{
+			Command: cmd,
+			Args:    args,
+			Err:     err,
+		}
+	}
+	return output, nil
+}
+
+// execJSON executes a CLI command that returns JSON and parses it
+func (c *Client) execJSON(projectPath, repoName, cmd string, args []string, parseFn func([]byte, BeadContext) error) error {
+	output, err := c.exec(cmd, args...)
+	if err != nil {
+		return err
+	}
+	return parseFn(output, c.newContext(projectPath, repoName))
+}
+
+// GetReadyBeads retrieves beads ready to execute (dependencies satisfied)
+func (c *Client) GetReadyBeads(projectName, projectPath, repoName string) ([]types.Bead, error) {
+	// Use project path as working directory so br commands find the .beads folder
+	output, err := c.execInDir(projectPath, "br", "ready", "--json")
+	if err != nil {
+		return nil, err
+	}
+	return c.parser.ParseReadyBeads(output, BeadContext{
+		Project: projectName,
+		Repo:    repoName,
+	})
+}
+
+// GetBead retrieves full details of a bead by its string ID
+func (c *Client) GetBead(projectPath, repoName string, beadID types.BeadID) (*types.Bead, error) {
+	output, err := c.exec("br", "show", beadID.String(), "--json")
+	if err != nil {
+		return nil, err
+	}
+	return c.parser.ParseBeadDetail(output, c.newContext(projectPath, repoName))
+}
+
+// CloseBead marks a bead as completed and verifies the closure
 func (c *Client) CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error {
-	workDir := projectPath
-	if repoName != "" {
-		workDir = filepath.Join(projectPath, repoName)
+	output, err := c.exec("br", "close", beadID.String(), "-r", reason)
+	if err != nil {
+		return fmt.Errorf("close failed for bead %s: %w", beadID.String(), err)
 	}
 
-	cmd := exec.Command("br", "close", fmt.Sprintf("%d", beadID.Number), "-m", reason)
-	cmd.Dir = workDir
+	// Check if close was skipped due to dependencies
+	outputStr := string(output)
+	if strings.Contains(outputStr, "Warning: Skipped") || strings.Contains(outputStr, "blocked by") {
+		return fmt.Errorf("bead %s skipped due to dependencies: %s", beadID.String(), outputStr)
+	}
 
-	output, err := cmd.CombinedOutput()
+	// Verify the bead was actually closed
+	bead, err := c.GetBead(projectPath, repoName, beadID)
 	if err != nil {
-		return fmt.Errorf("br close failed: %w (output: %s)", err, string(output))
+		return fmt.Errorf("failed to verify bead %s closure: %w", beadID.String(), err)
+	}
+
+	if !bead.Status.IsTerminal() {
+		return fmt.Errorf("bead %s not closed (status: %s). May have unresolved dependencies", beadID.String(), bead.Status)
 	}
 
 	return nil
@@ -146,25 +186,9 @@ func (c *Client) CloseBead(projectPath, repoName string, beadID types.BeadID, re
 
 // ListBeads lists all beads in a project/repo
 func (c *Client) ListBeads(projectPath, repoName string) ([]types.Bead, error) {
-	workDir := projectPath
-	if repoName != "" {
-		workDir = filepath.Join(projectPath, repoName)
-	}
-
-	cmd := exec.Command("br", "list")
-	cmd.Dir = workDir
-
-	output, err := cmd.CombinedOutput()
+	output, err := c.exec("br", "list", "--json")
 	if err != nil {
-		return nil, fmt.Errorf("br list failed: %w", err)
+		return nil, err
 	}
-
-	return c.parseListOutput(string(output), projectPath, repoName)
-}
-
-// parseListOutput parses the output of 'br list'
-func (c *Client) parseListOutput(output, projectPath, repoName string) ([]types.Bead, error) {
-	// Similar to parseReadyOutput but includes all beads
-	// TODO: Implement full parsing
-	return []types.Bead{}, nil
+	return c.parser.ParseBeadList(output, c.newContext(projectPath, repoName))
 }

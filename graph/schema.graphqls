@@ -1,0 +1,265 @@
+# Hydra GraphQL Schema
+
+scalar Time
+
+type Query {
+  # Beads
+  beads(
+    filter: BeadFilter
+    first: Int
+    after: String
+    sort: [BeadSort!]
+  ): BeadConnection!
+  
+  bead(id: ID!): Bead
+  readyBeads: [Bead!]!
+  blockedBeads: [Bead!]!
+  
+  # Workers
+  workers: [Worker!]!
+  worker(id: ID!): Worker
+  
+  # DAG
+  dagStats: DAGStats!
+  executionPath(beadId: ID!): [Bead!]!
+  
+  # System
+  health: Health!
+  stats: SystemStats!
+  config: Config!
+  
+  # MCP
+  mcpStatus: MCPStatus!
+  reservations: [Reservation!]!
+}
+
+type Mutation {
+  # Overseer control
+  pauseOverseer: Boolean!
+  resumeOverseer: Boolean!
+  setMaxWorkers(count: Int!): Int!
+  
+  # Worker control
+  cancelWorker(id: ID!): Boolean!
+  forceCompleteBead(id: ID!, reason: String): Bead!
+  
+  # Configuration
+  updateConfig(input: ConfigInput!): Config!
+  
+  # MCP
+  forceReleaseReservation(reservationId: ID!): Boolean!
+}
+
+type Subscription {
+  # Real-time updates
+  workerUpdates: Worker!
+  beadUpdates(filter: BeadFilter): Bead!
+  dagUpdates: DAGUpdate!
+  logStream(workerId: ID): LogEntry!
+}
+
+# Bead Types
+type Bead {
+  id: ID!
+  title: String!
+  description: String
+  type: String!
+  status: BeadStatus!
+  priority: Int!
+  project: String!
+  repo: String
+  dependencies: [Bead!]!
+  dependents: [Bead!]!
+  labels: [String!]!
+  createdAt: Time!
+  updatedAt: Time!
+  completedAt: Time
+  worker: Worker
+  
+  # Intelligence
+  patterns: [Pattern!]!
+  impact: ImpactAnalysis
+}
+
+type Pattern {
+  id: String!
+  content: String!
+  category: String!
+  score: Float
+}
+
+type ImpactAnalysis {
+  files: Int!
+  tokens: Int!
+  exceeded: Boolean!
+  callers: [Dependency!]!
+  callees: [Dependency!]!
+}
+
+type Dependency {
+  file: String!
+  function: String
+  line: Int
+}
+
+enum BeadStatus {
+  OPEN
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  BLOCKED
+}
+
+# Worker Types
+type Worker {
+  id: ID!
+  bead: Bead!
+  agentType: String!
+  status: WorkerStatus!
+  pid: Int!
+  startTime: Time!
+  endTime: Time
+  retryCount: Int!
+  logs: [LogEntry!]!
+}
+
+type LogEntry {
+  timestamp: Time!
+  level: LogLevel!
+  message: String!
+  workerId: ID
+}
+
+enum WorkerStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+}
+
+# DAG Types
+type DAGStats {
+  totalNodes: Int!
+  readyNodes: Int!
+  blockedNodes: Int!
+  completedNodes: Int!
+  failedNodes: Int!
+  activeWorkers: Int!
+  maxWorkers: Int!
+}
+
+type DAGUpdate {
+  type: UpdateType!
+  bead: Bead
+  worker: Worker
+  timestamp: Time!
+}
+
+enum UpdateType {
+  BEAD_CREATED
+  BEAD_UPDATED
+  BEAD_COMPLETED
+  WORKER_STARTED
+  WORKER_COMPLETED
+  WORKER_FAILED
+}
+
+# System Types
+type SystemStats {
+  uptime: Int!
+  totalProjects: Int!
+  overseerRunning: Boolean!
+  paused: Boolean!
+}
+
+type Health {
+  status: String!
+  version: String!
+  timestamp: Time!
+}
+
+type Config {
+  maxWorkers: Int!
+  pollInterval: Int!
+  retryDelay: Int!
+  workerTimeout: Int!
+  apiPort: Int!
+}
+
+# MCP Types
+type MCPStatus {
+  enabled: Boolean!
+  connected: Boolean!
+  url: String
+  activeReservations: Int!
+}
+
+type Reservation {
+  id: ID!
+  agentId: String!
+  beadId: String!
+  files: [String!]!
+  expiresAt: Time!
+}
+
+# Input Types
+input BeadFilter {
+  status: [BeadStatus!]
+  type: [String!]
+  project: String
+  priorityMin: Int
+  priorityMax: Int
+  labels: [String!]
+  createdAfter: Time
+  createdBefore: Time
+}
+
+input BeadSort {
+  field: BeadSortField!
+  direction: SortDirection!
+}
+
+enum BeadSortField {
+  PRIORITY
+  CREATED_AT
+  UPDATED_AT
+  TITLE
+}
+
+enum SortDirection {
+  ASC
+  DESC
+}
+
+input ConfigInput {
+  maxWorkers: Int
+  pollInterval: Int
+  retryDelay: Int
+}
+
+# Pagination
+type BeadConnection {
+  edges: [BeadEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type BeadEdge {
+  node: Bead!
+  cursor: String!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}

@@ -1,0 +1,33 @@
+overseer:
+  poll_interval: 5s
+  max_workers: 10
+  max_retries: 2
+  retry_delay: 5s
+  worker_timeout: 5m
+  resource_limits:
+    max_cpu_percent: 70
+    max_memory_percent: 70
+
+api:
+  enabled: false
+
+projects:
+  auto_discover: false
+  list:
+    - name: hydra
+      path: /Users/buddhi/source-code/personal/hydra
+      type: single
+
+intelligence:
+  cass_memory:
+    enabled: true
+  tldr:
+    enabled: true
+    max_files: 20  # Allow up to 20 files for intelligence gathering
+  gptcache:
+    enabled: true
+
+mcp:
+  enabled: true
+  url: http://127.0.0.1:8765
+  port: 8765

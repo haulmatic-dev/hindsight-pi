@@ -47,3 +47,13 @@ coverage.html
 # Environment
 .env
 .env.local
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# opencode
+.opencode/
+
+# Beads
+.beads/
+.hydra/

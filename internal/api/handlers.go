@@ -1,0 +1,394 @@
+package api
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/haulmatic-dev/hydra/internal/bv"
+	"github.com/haulmatic-dev/hydra/pkg/types"
+)
+
+// ErrorResponse represents an API error
+type ErrorResponse struct {
+	Error   string `json:"error"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// BeadResponse represents a bead in API responses
+type BeadResponse struct {
+	ID           string    `json:"id"`
+	Project      string    `json:"project"`
+	Repo         string    `json:"repo,omitempty"`
+	Number       int       `json:"number"`
+	Title        string    `json:"title"`
+	Type         string    `json:"type"`
+	Status       string    `json:"status"`
+	Dependencies []string  `json:"dependencies,omitempty"`
+	Labels       []string  `json:"labels,omitempty"`
+	Priority     int       `json:"priority"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// WorkerResponse represents a worker in API responses
+type WorkerResponse struct {
+	ID        string    `json:"id"`
+	BeadID    string    `json:"bead_id"`
+	AgentType string    `json:"agent_type"`
+	PID       int       `json:"pid"`
+	Status    string    `json:"status"`
+	StartTime time.Time `json:"start_time"`
+}
+
+// ProjectResponse represents a project in API responses
+type ProjectResponse struct {
+	Name  string     `json:"name"`
+	Path  string     `json:"path"`
+	Type  string     `json:"type"`
+	Repos []RepoInfo `json:"repos,omitempty"`
+}
+
+// RepoInfo represents repository info
+type RepoInfo struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// SystemStats represents system statistics
+type SystemStats struct {
+	ActiveWorkers   int       `json:"active_workers"`
+	MaxWorkers      int       `json:"max_workers"`
+	TotalProjects   int       `json:"total_projects"`
+	Uptime          int       `json:"uptime_seconds"`
+	OverseerRunning bool      `json:"overseer_running"`
+	Timestamp       time.Time `json:"timestamp"`
+}
+
+// toBeadResponse converts a Bead to API response format
+func toBeadResponse(bead types.Bead) BeadResponse {
+	resp := BeadResponse{
+		ID:        bead.ID.String(),
+		Project:   bead.Project,
+		Repo:      bead.Repo,
+		Title:     bead.Title,
+		Type:      bead.Type,
+		Status:    string(bead.Status),
+		Labels:    bead.Labels,
+		Priority:  bead.Priority,
+		CreatedAt: bead.CreatedAt,
+		UpdatedAt: bead.UpdatedAt,
+	}
+
+	// Try to extract numeric ID for backward compatibility
+	if num, err := bead.ID.Number(); err == nil {
+		resp.Number = num
+	}
+
+	for _, dep := range bead.Dependencies {
+		resp.Dependencies = append(resp.Dependencies, dep.String())
+	}
+
+	return resp
+}
+
+// toWorkerResponse converts a Worker to API response format
+func toWorkerResponse(worker *types.Worker) WorkerResponse {
+	return WorkerResponse{
+		ID:        worker.ID,
+		BeadID:    worker.BeadID.String(),
+		AgentType: string(worker.AgentType),
+		PID:       worker.PID,
+		Status:    worker.Status,
+		StartTime: worker.StartTime,
+	}
+}
+
+// HealthHandler returns health status
+func (s *Server) HealthHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "healthy",
+		"version": "1.0.0",
+	})
+}
+
+// GetStatsHandler returns system statistics
+func (s *Server) GetStatsHandler(c *gin.Context) {
+	stats := SystemStats{
+		ActiveWorkers:   s.overseer.GetActiveWorkerCount(),
+		MaxWorkers:      s.config.Overseer.MaxWorkers,
+		TotalProjects:   len(s.overseer.GetProjects()),
+		Uptime:          int(time.Since(time.Now().Add(-time.Hour)).Seconds()), // TODO: Track actual uptime
+		OverseerRunning: s.overseer.IsRunning(),
+		Timestamp:       time.Now(),
+	}
+
+	c.JSON(http.StatusOK, stats)
+}
+
+// GetProjectsHandler returns all projects
+func (s *Server) GetProjectsHandler(c *gin.Context) {
+	projects := s.overseer.GetProjects()
+	response := make([]ProjectResponse, len(projects))
+
+	for i, project := range projects {
+		resp := ProjectResponse{
+			Name: project.Name,
+			Path: project.Path,
+			Type: string(project.Type),
+		}
+
+		for _, repo := range project.Repos {
+			resp.Repos = append(resp.Repos, RepoInfo{
+				Name: repo.Name,
+				Path: repo.Path,
+			})
+		}
+
+		response[i] = resp
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// GetWorkersHandler returns active workers
+func (s *Server) GetWorkersHandler(c *gin.Context) {
+	workers := s.overseer.GetActiveWorkers()
+	response := make([]WorkerResponse, len(workers))
+
+	for i, worker := range workers {
+		response[i] = toWorkerResponse(&worker)
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// PauseOverseerHandler pauses the overseer
+func (s *Server) PauseOverseerHandler(c *gin.Context) {
+	s.overseer.Pause()
+	c.JSON(http.StatusOK, gin.H{"status": "paused"})
+}
+
+// ResumeOverseerHandler resumes the overseer
+func (s *Server) ResumeOverseerHandler(c *gin.Context) {
+	s.overseer.Resume()
+	c.JSON(http.StatusOK, gin.H{"status": "resumed"})
+}
+
+// SetMaxWorkersHandler sets the maximum number of workers
+func (s *Server) SetMaxWorkersHandler(c *gin.Context) {
+	var req struct {
+		Count int `json:"count" binding:"required,min=1,max=20"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:   "invalid_request",
+			Code:    "BAD_REQUEST",
+			Message: err.Error(),
+		})
+		return
+	}
+
+	s.overseer.SetMaxWorkers(req.Count)
+	c.JSON(http.StatusOK, gin.H{
+		"max_workers": req.Count,
+		"status":      "updated",
+	})
+}
+
+// GetDAGStatsHandler returns DAG statistics
+func (s *Server) GetDAGStatsHandler(c *gin.Context) {
+	stats := s.overseer.GetDAGStats()
+	c.JSON(http.StatusOK, stats)
+}
+
+// GetReadyBeadsHandler returns beads ready for execution
+func (s *Server) GetReadyBeadsHandler(c *gin.Context) {
+	beads := s.overseer.GetReadyBeadsFromDAG()
+	response := make([]BeadResponse, len(beads))
+	for i, bead := range beads {
+		response[i] = toBeadResponse(bead)
+	}
+	c.JSON(http.StatusOK, response)
+}
+
+// MCPStatusResponse represents the MCP status in API responses
+type MCPStatusResponse struct {
+	Enabled      bool      `json:"enabled"`
+	Connected    bool      `json:"connected"`
+	URL          string    `json:"url,omitempty"`
+	AgentID      string    `json:"agent_id,omitempty"`
+	Reservations int       `json:"active_reservations"`
+	Timestamp    time.Time `json:"timestamp"`
+}
+
+// ReservationResponse represents a reservation in API responses
+type ReservationResponse struct {
+	ID        string    `json:"id"`
+	BeadID    string    `json:"bead_id"`
+	Files     []string  `json:"files"`
+	AgentID   string    `json:"agent_id"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Status    string    `json:"status"`
+}
+
+// GetMCPStatusHandler returns the MCP connection status
+func (s *Server) GetMCPStatusHandler(c *gin.Context) {
+	status := s.overseer.GetMCPStatus()
+	reservations := s.overseer.GetActiveReservations()
+
+	response := MCPStatusResponse{
+		Enabled:      status.Enabled,
+		Connected:    status.Connected,
+		URL:          status.URL,
+		AgentID:      status.AgentID,
+		Reservations: len(reservations),
+		Timestamp:    time.Now(),
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// GetReservationsHandler returns all active file reservations
+func (s *Server) GetReservationsHandler(c *gin.Context) {
+	reservations := s.overseer.GetActiveReservations()
+
+	response := make([]ReservationResponse, 0, len(reservations))
+	for _, res := range reservations {
+		status := "active"
+		if res.IsExpired() {
+			status = "expired"
+		}
+
+		response = append(response, ReservationResponse{
+			ID:        res.ID,
+			BeadID:    res.BeadID,
+			Files:     res.Files,
+			AgentID:   res.AgentID,
+			CreatedAt: res.CreatedAt,
+			ExpiresAt: res.ExpiresAt,
+			Status:    status,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"reservations": response,
+		"count":        len(response),
+		"timestamp":    time.Now(),
+	})
+}
+
+// getBVInsights retrieves insights from the BV client with graceful fallback.
+// Returns an empty InsightsResponse if BV is unavailable or returns an error.
+func (s *Server) getBVInsights(project string) (*bv.InsightsResponse, error) {
+	bvClient := s.overseer.GetBVClient()
+	if bvClient == nil {
+		return &bv.InsightsResponse{}, nil
+	}
+
+	insights, err := bvClient.GetInsights(project)
+	if err != nil {
+		// Graceful degradation: return empty response on error
+		return &bv.InsightsResponse{}, nil
+	}
+	return insights, nil
+}
+
+// calculateDataHash generates a hash based on project and current date.
+func calculateDataHash(project string) string {
+	hash := sha256.New()
+	hash.Write([]byte(project))
+	hash.Write([]byte(time.Now().Format("2006-01-02")))
+	return hex.EncodeToString(hash.Sum(nil))[:16]
+}
+
+// buildGraphMetrics extracts metrics from insights into the response format.
+func buildGraphMetrics(insights *bv.InsightsResponse, project string) bv.GraphMetricsResponse {
+	pageRank := make(map[string]float64)
+	betweenness := make(map[string]float64)
+	criticalPath := []string{}
+
+	// Extract metrics from bottlenecks (high betweenness)
+	for _, b := range insights.Bottlenecks {
+		betweenness[b.BeadID] = float64(b.BlockedCount) * 0.1
+		if b.BlockedCount > 0 {
+			criticalPath = append(criticalPath, b.BeadID)
+		}
+	}
+
+	// Extract metrics from keystones (high impact)
+	for _, k := range insights.Keystones {
+		pageRank[k.BeadID] = float64(k.ImpactScore) * 0.01
+	}
+
+	return bv.GraphMetricsResponse{
+		DataHash:     calculateDataHash(project),
+		Timestamp:    time.Now(),
+		Project:      project,
+		TotalBeads:   insights.TotalBeads,
+		PageRank:     pageRank,
+		Betweenness:  betweenness,
+		Cycles:       insights.Cycles,
+		CriticalPath: criticalPath,
+	}
+}
+
+// GetGraphMetricsHandler returns graph analytics (PageRank, betweenness, critical path)
+func (s *Server) GetGraphMetricsHandler(c *gin.Context) {
+	project := s.resolveProject(c.Query("project"))
+
+	insights, _ := s.getBVInsights(project)
+
+	response := buildGraphMetrics(insights, project)
+	c.JSON(http.StatusOK, response)
+}
+
+// resolveProject returns the project from query param or the first configured project.
+func (s *Server) resolveProject(project string) string {
+	if project != "" {
+		return project
+	}
+	projects := s.overseer.GetProjects()
+	if len(projects) > 0 {
+		return projects[0].Path
+	}
+	return ""
+}
+
+// buildBottlenecksResponse converts insights into the bottlenecks response format.
+func buildBottlenecksResponse(insights *bv.InsightsResponse, project string) bv.BottlenecksResponse {
+	bottlenecks := make([]bv.BottleneckDetails, 0, len(insights.Bottlenecks))
+	for _, b := range insights.Bottlenecks {
+		bottlenecks = append(bottlenecks, bv.BottleneckDetails{
+			BeadID:          b.BeadID,
+			Title:           b.Title,
+			Betweenness:     float64(b.BlockedCount) * 0.1,
+			BlockedCount:    b.BlockedCount,
+			DependencyDepth: b.DependencyDepth,
+			Priority:        b.Priority,
+		})
+	}
+
+	return bv.BottlenecksResponse{
+		DataHash:    calculateDataHash(project),
+		Timestamp:   time.Now(),
+		Project:     project,
+		Bottlenecks: bottlenecks,
+		Count:       len(bottlenecks),
+	}
+}
+
+// GetGraphBottlenecksHandler returns high-betweenness beads (bottlenecks)
+func (s *Server) GetGraphBottlenecksHandler(c *gin.Context) {
+	project := s.resolveProject(c.Query("project"))
+
+	insights, _ := s.getBVInsights(project)
+
+	response := buildBottlenecksResponse(insights, project)
+	c.JSON(http.StatusOK, response)
+}
