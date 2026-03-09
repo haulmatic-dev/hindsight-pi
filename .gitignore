@@ -53,3 +53,6 @@ coverage.html
 
 # opencode
 .opencode/
+
+# Beads
+.beads/
