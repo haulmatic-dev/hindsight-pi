@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/intelligence"
@@ -700,10 +701,18 @@ monitorLoop:
 			break monitorLoop
 		case <-timeoutTicker.C:
 			if activityMonitor.IsTimedOut() {
-				log.Printf("⏰ Activity timeout! No output for %v. Killing process...", activityMonitor.TimeSinceActivity())
-				if err := cmd.Process.Kill(); err != nil {
-					log.Printf("Failed to kill process: %v", err)
+				log.Printf("⏰ Activity timeout! No output for %v. Killing process group...", activityMonitor.TimeSinceActivity())
+				// Kill entire process group using negative PID
+				if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+					log.Printf("Failed to kill process group: %v", err)
+					// Fallback: try killing just the main process
+					if err := cmd.Process.Kill(); err != nil {
+						log.Printf("Failed to kill main process: %v", err)
+					}
 				}
+				// Additional cleanup: kill any remaining children
+				cleanupCmd := exec.Command("pkill", "-P", fmt.Sprintf("%d", cmd.Process.Pid))
+				cleanupCmd.Run() // Ignore errors - best effort cleanup
 				result.ExitCode = -1
 				result.Success = false
 				result.Error = fmt.Sprintf("Activity timeout: no output for %v", activityTimeout)
@@ -791,6 +800,11 @@ func buildOpencodeCommand(bead types.Bead, agentType string, intelligenceCtx *In
 		opencodePath,
 		path,
 	))
+
+	// Create new process group so we can kill the entire tree (bash + opencode + children)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
 
 	// Add environment variables
 	cmd.Env = append(os.Environ(),

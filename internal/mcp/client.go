@@ -22,19 +22,19 @@ type Client struct {
 	mu        sync.RWMutex
 	msgChan   chan Message
 	connected bool
-	
+
 	stopChan      chan struct{}
 	reconnectChan chan struct{}
-	
+
 	reconnectMaxAttempts int
 	reconnectBaseDelay   time.Duration
 	reconnectMaxDelay    time.Duration
 	heartbeatInterval    time.Duration
 	writeTimeout         time.Duration
 	dialer               *websocket.Dialer
-	
+
 	messageHandler func(Message)
-	
+
 	requestID int64
 	requestMu sync.Mutex
 	pending   map[interface{}]chan *JSONRPCMessage

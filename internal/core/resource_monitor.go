@@ -57,32 +57,69 @@ func (rm *ResourceMonitor) getCPUUsage() (float64, error) {
 }
 
 // getMemoryUsage returns current memory usage percentage using standard Unix commands
+// Calculates physical memory usage only (excluding swap and compressed pages)
 func (rm *ResourceMonitor) getMemoryUsage() (float64, error) {
 	var cmd *exec.Cmd
 
 	if runtime.GOOS == "darwin" {
-		// macOS: use vm_stat and sysctl
+		// macOS: Calculate physical memory usage only
+		// Physical memory used = (wired + active) pages * page_size
+		// Exclude: inactive, speculative, compressed (occupied by compressor), swap
 		cmd = exec.Command("sh", "-c", `
+			# Get page size (default to 16384 for Apple Silicon, 4096 for Intel)
 			page_size=$(vm_stat | grep 'page size' | awk '{print $8}')
-			if [ -z "$page_size" ]; then page_size=4096; fi
+			if [ -z "$page_size" ]; then page_size=16384; fi
 			
-			free_pages=$(vm_stat | grep 'Pages free' | awk '{print $3}' | sed 's/\.//')
-			inactive_pages=$(vm_stat | grep 'Pages inactive' | awk '{print $3}' | sed 's/\.//')
-			speculative_pages=$(vm_stat | grep 'Pages speculative' | awk '{print $3}' | sed 's/\.//' || echo 0)
+			# Get physical memory in bytes
+			physical_mem=$(sysctl -n hw.memsize)
 			
-			used=$(vm_stat | grep 'Pages wired down\|Pages active\|Pages occupied' | awk '{sum+=$3} END {print sum}' | sed 's/\.//')
-			total=$(sysctl -n hw.memsize)
-			total_pages=$((total / page_size))
+			# Get page counts
+			wired_pages=$(vm_stat | grep 'Pages wired down' | awk '{print $4}' | sed 's/\.//')
+			active_pages=$(vm_stat | grep 'Pages active' | awk '{print $3}' | sed 's/\.//')
 			
-			if [ -n "$used" ] && [ "$total_pages" -gt 0 ]; then
-				echo "scale=2; ($used / $total_pages) * 100" | bc
+			# Handle missing values
+			if [ -z "$wired_pages" ]; then wired_pages=0; fi
+			if [ -z "$active_pages" ]; then active_pages=0; fi
+			
+			# Calculate physical memory used (wired + active only)
+			used_pages=$((wired_pages + active_pages))
+			used_bytes=$((used_pages * page_size))
+			
+			# Calculate percentage
+			if [ "$physical_mem" -gt 0 ]; then
+				python3 -c "print(f'{(($used_bytes / $physical_mem) * 100):.2f}')" 2>/dev/null || \
+				echo "scale=2; ($used_bytes / $physical_mem) * 100" | bc 2>/dev/null || \
+				echo "0"
 			else
 				echo "0"
 			fi
 		`)
 	} else {
-		// Linux: use free command
-		cmd = exec.Command("sh", "-c", "free | grep Mem | awk '{printf \"%.2f\", ($3/$2) * 100.0}'")
+		// Linux: Calculate physical memory usage (excluding buffers/cache)
+		// Use MemAvailable from /proc/meminfo for accurate "used" calculation
+		cmd = exec.Command("sh", "-c", `
+			# Read memory info from /proc/meminfo
+			mem_total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+			mem_available=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+			
+			# If MemAvailable not present (older kernels), calculate manually
+			if [ -z "$mem_available" ]; then
+				mem_free=$(grep MemFree /proc/meminfo | awk '{print $2}')
+				buffers=$(grep Buffers /proc/meminfo | awk '{print $2}')
+				cached=$(grep "^Cached" /proc/meminfo | awk '{print $2}')
+				mem_available=$((mem_free + buffers + cached))
+			fi
+			
+			# Calculate used memory
+			mem_used=$((mem_total - mem_available))
+			
+			# Calculate percentage
+			if [ "$mem_total" -gt 0 ]; then
+				printf "%.2f" $(echo "scale=4; ($mem_used / $mem_total) * 100" | bc)
+			else
+				echo "0"
+			fi
+		`)
 	}
 
 	output, err := cmd.Output()
@@ -129,6 +166,12 @@ func (rm *ResourceMonitor) CanSpawnWorker() bool {
 		log.Printf("[ResourceMonitor] Memory usage %.1f%% exceeds limit %.1f%%, blocking worker spawn",
 			memPercent, rm.maxMemoryUsage)
 		return false
+	}
+
+	// Log when we're close to limits (within 10%)
+	if cpuPercent > rm.maxCPUUsage*0.9 || memPercent > rm.maxMemoryUsage*0.9 {
+		log.Printf("[ResourceMonitor] Warning: Resources high - CPU: %.1f%%, Memory: %.1f%% (Limits: %.1f%%/%.1f%%)",
+			cpuPercent, memPercent, rm.maxCPUUsage, rm.maxMemoryUsage)
 	}
 
 	return true
