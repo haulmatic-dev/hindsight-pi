@@ -164,7 +164,7 @@ func (g *DependencyGraph) GetBlockedBeads() []types.Bead {
 			continue
 		}
 
-		if node.InDegree > 0 && node.Status == types.StatusOpen {
+		if node.InDegree > 0 && node.Status() == types.StatusOpen {
 			blocked = append(blocked, bead)
 		}
 	}
@@ -209,7 +209,7 @@ func (g *DependencyGraph) GetStats() GraphStats {
 
 // updateStatsForNode updates statistics based on a node's state.
 func (g *DependencyGraph) updateStatsForNode(stats *GraphStats, node *Node) {
-	switch node.Status {
+	switch node.Status() {
 	case types.StatusCompleted, types.StatusClosed:
 		stats.CompletedNodes++
 	case types.StatusFailed:

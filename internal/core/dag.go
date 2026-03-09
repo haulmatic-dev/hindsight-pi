@@ -4,6 +4,8 @@ package core
 import (
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -21,33 +23,55 @@ var (
 
 	// ErrSelfReference is returned when attempting to create a self-referencing edge.
 	ErrSelfReference = errors.New("node cannot depend on itself")
+
+	// ErrCyclicDependency is returned when the dependency graph contains a cycle.
+	ErrCyclicDependency = errors.New("cyclic dependency detected")
 )
 
-// Color represents the visit state for DFS cycle detection.
-type Color int
+// CycleError represents a circular dependency detected in the DAG.
+// It contains the path that forms the cycle.
+type CycleError struct {
+	// Path is a slice of node IDs that form the cycle.
+	// The first and last elements should be the same node ID.
+	Path []string
+}
+
+// Error returns a formatted error message for the CycleError.
+// Format: "circular dependency detected: A → B → C → A"
+func (e *CycleError) Error() string {
+	if len(e.Path) == 0 {
+		return "circular dependency detected: empty path"
+	}
+
+	return fmt.Sprintf("circular dependency detected: %s", strings.Join(e.Path, " → "))
+}
+
+// IsCycleError checks if the given error is or wraps a CycleError.
+// It uses errors.As to traverse the error chain.
+func IsCycleError(err error) bool {
+	var cycleErr *CycleError
+	return errors.As(err, &cycleErr)
+}
+
+// VisitState represents the visit state for DFS cycle detection.
+type VisitState int
 
 const (
-	White Color = iota // Unvisited
-	Gray               // In progress (currently in recursion stack)
-	Black              // Finished
+	StateUnvisited VisitState = iota // Node has not been visited
+	StateVisiting                    // Node is being processed (in recursion stack)
+	StateVisited                     // Node has been fully processed
 )
 
 // Node represents a bead within the DAG, tracking its dependencies and state.
-// It contains the bead data, dependency counts, and execution status.
 type Node struct {
-	// Bead is the underlying task data for this node.
-	Bead types.Bead
+	Bead     types.Bead
+	InDegree int      // Number of incomplete dependencies
+	OutEdges []string // IDs of nodes that depend on this node (outgoing edges)
+}
 
-	// InDegree is the number of incomplete dependencies (incoming edges).
-	// A node is "ready" when InDegree reaches 0.
-	InDegree int
-
-	// OutEdges contains the IDs of beads that depend on this node.
-	// These are the outgoing edges from this node.
-	OutEdges []string
-
-	// Status tracks the current execution state of the bead.
-	Status types.BeadStatus
+// Status returns the bead's status for convenience.
+func (n *Node) Status() types.BeadStatus {
+	return n.Bead.Status
 }
 
 // DAG represents a Directed Acyclic Graph for tracking bead dependencies.
@@ -103,7 +127,6 @@ func (d *DAG) AddNode(bead types.Bead) error {
 		Bead:     bead,
 		InDegree: 0,
 		OutEdges: make([]string, 0),
-		Status:   bead.Status,
 	}
 
 	return nil
@@ -211,7 +234,7 @@ func (d *DAG) GetReadyNodes() []*Node {
 
 	ready := make([]*Node, 0)
 	for _, node := range d.nodes {
-		if node.InDegree == 0 && node.Status == types.StatusOpen {
+		if node.InDegree == 0 && node.Bead.Status == types.StatusOpen {
 			ready = append(ready, node)
 		}
 	}
@@ -221,8 +244,8 @@ func (d *DAG) GetReadyNodes() []*Node {
 
 // dfsVisit visits a node and its descendants using DFS.
 // This is a helper method that must be called with the read lock held.
-func (d *DAG) dfsVisit(nodeID string, colors map[string]Color, parent map[string]string, stack *[]string) []string {
-	colors[nodeID] = Gray
+func (d *DAG) dfsVisit(nodeID string, states map[string]VisitState, parent map[string]string, stack *[]string) []string {
+	states[nodeID] = StateVisiting
 	*stack = append(*stack, nodeID)
 
 	// Visit all dependents
@@ -230,13 +253,13 @@ func (d *DAG) dfsVisit(nodeID string, colors map[string]Color, parent map[string
 	for _, dependentID := range node.OutEdges {
 		parent[dependentID] = nodeID
 
-		if colors[dependentID] == Gray {
-			// Found a cycle - reconstruct path from the Gray node to current end
+		if states[dependentID] == StateVisiting {
+			// Found a cycle - reconstruct path from the Visiting node to current end
 			return d.reconstructCyclePathFromStack(*stack, dependentID)
 		}
 
-		if colors[dependentID] == White {
-			if cycle := d.dfsVisit(dependentID, colors, parent, stack); cycle != nil {
+		if states[dependentID] == StateUnvisited {
+			if cycle := d.dfsVisit(dependentID, states, parent, stack); cycle != nil {
 				return cycle
 			}
 		}
@@ -244,7 +267,7 @@ func (d *DAG) dfsVisit(nodeID string, colors map[string]Color, parent map[string
 
 	// Remove from stack when done
 	*stack = (*stack)[:len(*stack)-1]
-	colors[nodeID] = Black
+	states[nodeID] = StateVisited
 	return nil
 }
 
@@ -273,26 +296,6 @@ func (d *DAG) reconstructCyclePathFromStack(stack []string, cycleStart string) [
 	return cycle
 }
 
-// reconstructCyclePath reconstructs the cycle path from start to end.
-// This is a helper method that must be called with the read lock held.
-func (d *DAG) reconstructCyclePath(start, end string, parent map[string]string) []string {
-	cycle := []string{start}
-	current := end
-
-	// Walk backwards from end to start
-	for current != start {
-		cycle = append([]string{current}, cycle...)
-		current = parent[current]
-		if current == "" {
-			// Should not happen if cycle exists, but handle gracefully
-			break
-		}
-	}
-
-	cycle = append(cycle, start) // Close the cycle
-	return cycle
-}
-
 // Validate runs DetectCycle and returns error if cycle found.
 //
 // Returns:
@@ -315,56 +318,143 @@ func (d *DAG) Validate() error {
 //   - []string: The cycle path if a cycle is detected (e.g., ["A", "B", "C", "A"]).
 //   - error: CycleError if a cycle is found, nil otherwise.
 //
-// The algorithm uses three-color marking:
-//   - White: Unvisited
-//   - Gray: Currently being processed (in recursion stack)
-//   - Black: Finished processing
+// The algorithm uses three-state marking:
+//   - Unvisited: Node has not been processed
+//   - Visiting: Node is being processed (in recursion stack)
+//   - Visited: Node has been fully processed
 //
 // Time Complexity: O(V + E) where V is the number of vertices and E is the number of edges.
-// Space Complexity: O(V) for the recursion stack and color map.
+// Space Complexity: O(V) for the recursion stack and state map.
 func (d *DAG) DetectCycle() ([]string, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
+	return d.detectCycleInternal()
+}
+
+// DetectCircularDependencies finds ALL elementary cycles in the DAG.
+// Unlike DetectCycle which stops at the first cycle, this method finds all unique cycles.
+//
+// Returns:
+//   - [][]string: A slice of cycles, where each cycle is a path (e.g., ["A", "B", "C", "A"]).
+//   - error: Only if a system error occurs (e.g., out of memory), nil on success.
+//
+// Note: Returns empty slice (not nil) when no cycles are found.
+// Each cycle path is closed (first == last).
+//
+// Time Complexity: O(V + E) per cycle found
+// Space Complexity: O(V) for the recursion stack.
+func (d *DAG) DetectCircularDependencies() ([][]string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
 	if len(d.nodes) == 0 {
-		return nil, nil
+		return [][]string{}, nil
 	}
 
-	// Three-color marking for cycle detection
-	colors := make(map[string]Color, len(d.nodes))
+	cycles := make([][]string, 0)
+	seen := make(map[string]bool)
+
+	// Sort nodes for deterministic ordering
+	nodeList := make([]string, 0, len(d.nodes))
 	for id := range d.nodes {
-		colors[id] = White
+		nodeList = append(nodeList, id)
+	}
+	sort.Strings(nodeList)
+
+	// Use DFS from each node to find all cycles
+	for _, startNode := range nodeList {
+		visited := make(map[string]bool)
+		d.findCyclesFromNode(startNode, startNode, []string{startNode}, visited, &cycles, seen)
 	}
 
-	parent := make(map[string]string)
+	return cycles, nil
+}
 
-	// For each unvisited node, perform DFS
-	for id := range d.nodes {
-		if colors[id] == White {
-			stack := []string{}
-			if cycle := d.dfsVisit(id, colors, parent, &stack); cycle != nil {
-				return cycle, &CycleError{Path: cycle}
+// findCyclesFromNode recursively finds all cycles starting from startNode.
+// It uses a visited set to prevent infinite recursion and a seen set for deduplication.
+func (d *DAG) findCyclesFromNode(startNode, currentNode string, path []string, visited map[string]bool, cycles *[][]string, seen map[string]bool) {
+	node := d.nodes[currentNode]
+	if node == nil {
+		return
+	}
+
+	for _, successor := range node.OutEdges {
+		if successor == startNode {
+			// Found a cycle back to start
+			// For self-reference (path = [startNode]), require len(path) == 1
+			// For longer cycles, require len(path) > 1
+			if len(path) == 1 || len(path) > 1 {
+				cycle := make([]string, len(path))
+				copy(cycle, path)
+				cycle = append(cycle, startNode)
+
+				// Deduplicate: normalize and check if seen
+				key := d.canonicalCycleKey(cycle)
+				if !seen[key] {
+					seen[key] = true
+					*cycles = append(*cycles, cycle)
+				}
 			}
+			// Don't recurse further when we hit startNode
+			continue
+		}
+
+		if !visited[successor] {
+			// Continue DFS - mark as visited to prevent revisiting in this path
+			visited[successor] = true
+			d.findCyclesFromNode(startNode, successor, append(path, successor), visited, cycles, seen)
+			delete(visited, successor) // Backtrack
+		}
+	}
+}
+
+// canonicalCycleKey creates a unique key for a cycle to enable deduplication.
+// It normalizes the cycle by finding the lexicographically smallest rotation.
+func (d *DAG) canonicalCycleKey(cycle []string) string {
+	if len(cycle) <= 1 {
+		return strings.Join(cycle, ",")
+	}
+
+	// Remove the closing duplicate (last element if it equals first)
+	nodes := cycle
+	if cycle[0] == cycle[len(cycle)-1] {
+		nodes = cycle[:len(cycle)-1]
+	}
+
+	// Find the lexicographically smallest rotation as canonical form
+	minKey := ""
+	n := len(nodes)
+
+	for i := 0; i < n; i++ {
+		// Create rotation starting at position i
+		rotation := make([]string, n)
+		for j := 0; j < n; j++ {
+			rotation[j] = nodes[(i+j)%n]
+		}
+		key := strings.Join(rotation, ",")
+		if minKey == "" || key < minKey {
+			minKey = key
 		}
 	}
 
-	return nil, nil
+	return minKey
 }
 
 // detectCycleInternal performs cycle detection without acquiring locks.
 // Must be called with read lock already held.
 func (d *DAG) detectCycleInternal() ([]string, error) {
-	colors := make(map[string]Color, len(d.nodes))
+	states := make(map[string]VisitState, len(d.nodes))
 	for id := range d.nodes {
-		colors[id] = White
+		states[id] = StateUnvisited
 	}
 
 	parent := make(map[string]string)
 
 	for id := range d.nodes {
-		if colors[id] == White {
+		if states[id] == StateUnvisited {
 			stack := []string{}
-			if cycle := d.dfsVisit(id, colors, parent, &stack); cycle != nil {
+			if cycle := d.dfsVisit(id, states, parent, &stack); cycle != nil {
 				return cycle, &CycleError{Path: cycle}
 			}
 		}
@@ -473,16 +563,6 @@ func (d *DAG) GetNodeCount() int {
 	return len(d.nodes)
 }
 
-// NodeCount returns the total number of nodes in the DAG.
-// Alias for GetNodeCount() for backward compatibility.
-// Uses RLock for thread-safe read access.
-//
-// Returns:
-//   - int: The count of nodes in the graph.
-func (d *DAG) NodeCount() int {
-	return d.GetNodeCount()
-}
-
 // UpdateNodeStatus updates the status of a node.
 //
 // Parameters:
@@ -504,7 +584,7 @@ func (d *DAG) UpdateNodeStatus(id string, status types.BeadStatus) error {
 		return fmt.Errorf("%w: %s", ErrNodeNotFound, id)
 	}
 
-	node.Status = status
+	node.Bead.Status = status
 	return nil
 }
 
@@ -539,15 +619,15 @@ func (d *DAG) MarkCompleted(id string) ([]string, error) {
 	}
 
 	// Validate state transition - can only complete from in_progress or open
-	if node.Status == types.StatusCompleted {
+	if node.Bead.Status == types.StatusCompleted {
 		return nil, fmt.Errorf("node %q is already completed", id)
 	}
-	if node.Status == types.StatusFailed {
+	if node.Bead.Status == types.StatusFailed {
 		return nil, fmt.Errorf("cannot mark failed node %q as completed", id)
 	}
 
 	// Mark as completed
-	node.Status = types.StatusCompleted
+	node.Bead.Status = types.StatusCompleted
 
 	// Reduce InDegree of all dependents and collect newly ready nodes
 	newlyReady := make([]string, 0)
@@ -558,29 +638,12 @@ func (d *DAG) MarkCompleted(id string) ([]string, error) {
 		}
 
 		dependent.InDegree--
-		if dependent.InDegree == 0 && dependent.Status == types.StatusOpen {
+		if dependent.InDegree == 0 && dependent.Bead.Status == types.StatusOpen {
 			newlyReady = append(newlyReady, dependentID)
 		}
 	}
 
 	return newlyReady, nil
-}
-
-// CompleteNode marks a node as completed and decrements the InDegree of dependent nodes.
-// Alias for MarkCompleted for API consistency.
-//
-// Parameters:
-//   - id: The ID of the completed node.
-//
-// Returns:
-//   - ErrNodeNotFound if the node doesn't exist, nil otherwise.
-//
-// Example:
-//
-//	err := dag.CompleteNode("project-123")
-func (d *DAG) CompleteNode(id string) error {
-	_, err := d.MarkCompleted(id)
-	return err
 }
 
 // MarkFailed marks a node as failed.
@@ -610,15 +673,15 @@ func (d *DAG) MarkFailed(id string) error {
 	}
 
 	// Validate state transition
-	if node.Status == types.StatusCompleted {
+	if node.Bead.Status == types.StatusCompleted {
 		return fmt.Errorf("cannot mark completed node %q as failed", id)
 	}
-	if node.Status == types.StatusFailed {
+	if node.Bead.Status == types.StatusFailed {
 		return fmt.Errorf("node %q is already failed", id)
 	}
 
 	// Mark as failed - dependents remain blocked
-	node.Status = types.StatusFailed
+	node.Bead.Status = types.StatusFailed
 
 	return nil
 }
@@ -644,7 +707,7 @@ func (d *DAG) GetNodeStatus(id string) (types.BeadStatus, error) {
 		return "", fmt.Errorf("%w: %s", ErrNodeNotFound, id)
 	}
 
-	return node.Status, nil
+	return node.Bead.Status, nil
 }
 
 // GetDependencies returns the IDs of all nodes that the given node depends on.
@@ -687,7 +750,7 @@ func (d *DAG) GetDependencies(id string) ([]string, error) {
 	return dependencies, nil
 }
 
-// GetDependents returns the IDs of all nodes that depend on the given node.
+// GetOutEdges returns the IDs of all nodes that depend on the given node.
 // This is equivalent to OutEdges.
 //
 // Parameters:
@@ -699,9 +762,9 @@ func (d *DAG) GetDependencies(id string) ([]string, error) {
 //
 // Example:
 //
-//	deps, err := dag.GetDependents("project-123")
+//	deps, err := dag.GetOutEdges("project-123")
 //	fmt.Printf("Blocks: %v\n", deps)
-func (d *DAG) GetDependents(id string) ([]string, error) {
+func (d *DAG) GetOutEdges(id string) ([]string, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -803,13 +866,9 @@ func (d *DAG) TopologicalSortWithPriority() ([]string, error) {
 		}
 
 		// Sort by priority (highest first)
-		for i := 0; i < len(ready)-1; i++ {
-			for j := i + 1; j < len(ready); j++ {
-				if ready[j].Bead.Priority > ready[i].Bead.Priority {
-					ready[i], ready[j] = ready[j], ready[i]
-				}
-			}
-		}
+		sort.Slice(ready, func(i, j int) bool {
+			return ready[i].Bead.Priority > ready[j].Bead.Priority
+		})
 
 		// Process highest priority
 		node := ready[0]
@@ -823,21 +882,6 @@ func (d *DAG) TopologicalSortWithPriority() ([]string, error) {
 	}
 
 	return result, nil
-}
-
-// GetExecutionOrder returns nodes in priority order within topological order.
-// Nodes at the same topological level are sorted by priority (high to low).
-// Time complexity: O(V + E), Space complexity: O(V)
-//
-// Returns:
-//   - []string: Node IDs in execution order.
-//   - error: CycleError if a cycle is detected.
-//
-// Example:
-//
-//	order, err := dag.GetExecutionOrder()
-func (d *DAG) GetExecutionOrder() ([]string, error) {
-	return d.TopologicalSortWithPriority()
 }
 
 // GetBlockedCount returns the number of nodes that are blocked (InDegree > 0).
@@ -869,7 +913,7 @@ func (d *DAG) GetCompletedCount() int {
 
 	count := 0
 	for _, node := range d.nodes {
-		if node.Status == types.StatusCompleted {
+		if node.Bead.Status == types.StatusCompleted {
 			count++
 		}
 	}
@@ -887,11 +931,56 @@ func (d *DAG) GetFailedCount() int {
 
 	count := 0
 	for _, node := range d.nodes {
-		if node.Status == types.StatusFailed {
+		if node.Bead.Status == types.StatusFailed {
 			count++
 		}
 	}
 	return count
+}
+
+// DAGStats holds statistical information about the DAG state.
+type DAGStats struct {
+	TotalNodes     int
+	ReadyNodes     int
+	BlockedNodes   int
+	CompletedNodes int
+	FailedNodes    int
+}
+
+// GetStats returns comprehensive statistics about the DAG state.
+//
+// Returns:
+//   - DAGStats: A struct containing counts of nodes in various states.
+func (d *DAG) GetStats() DAGStats {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	stats := DAGStats{
+		TotalNodes:     len(d.nodes),
+		BlockedNodes:   0,
+		CompletedNodes: 0,
+		FailedNodes:    0,
+		ReadyNodes:     0,
+	}
+
+	for _, node := range d.nodes {
+		switch node.Bead.Status {
+		case types.StatusCompleted:
+			stats.CompletedNodes++
+		case types.StatusFailed:
+			stats.FailedNodes++
+		case types.StatusBlocked:
+			stats.BlockedNodes++
+		case types.StatusOpen, types.StatusInProgress:
+			// A node is ready if it's not blocked, not completed, and not failed
+			// and all its dependencies are satisfied
+			if node.InDegree == 0 {
+				stats.ReadyNodes++
+			}
+		}
+	}
+
+	return stats
 }
 
 // Clear removes all nodes from the DAG, resetting it to an empty state.
@@ -905,11 +994,4 @@ func (d *DAG) Clear() {
 	defer d.mu.Unlock()
 
 	d.nodes = make(map[string]*Node)
-}
-
-// Reset resets the DAG to an empty state.
-// Alias for Clear() for backward compatibility.
-// Uses Lock for thread-safe write access.
-func (d *DAG) Reset() {
-	d.Clear()
 }

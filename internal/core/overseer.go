@@ -288,7 +288,28 @@ type BeadsClient interface {
 	ListBeads(projectPath, repoName string) ([]types.Bead, error)
 	GetBead(projectPath, repoName string, beadID types.BeadID) (*types.Bead, error)
 	CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error
-	GetReadyBeads(projectPath, repoName string) ([]types.Bead, error)
+	GetReadyBeads(projectName, projectPath, repoName string) ([]types.Bead, error)
+}
+
+// WorkerSpawner defines the interface for spawning workers
+// This allows for mocking in tests
+type WorkerSpawner interface {
+	Spawn(bead types.Bead, overseer *Overseer) (*types.Worker, error)
+}
+
+// defaultWorkerSpawner is the default implementation that spawns real worker processes
+type defaultWorkerSpawner struct{}
+
+// Spawn creates and starts a real worker process for a bead
+func (d *defaultWorkerSpawner) Spawn(bead types.Bead, overseer *Overseer) (*types.Worker, error) {
+	if err := overseer.spawnWorker(bead); err != nil {
+		return nil, err
+	}
+	// Return the worker from active workers map
+	overseer.workerMutex.RLock()
+	worker := overseer.activeWorkers[string(bead.ID)]
+	overseer.workerMutex.RUnlock()
+	return worker, nil
 }
 
 // Overseer is the main scheduler daemon
@@ -304,6 +325,7 @@ type Overseer struct {
 	maxWorkers    int
 	maxWorkersMux sync.RWMutex
 	beadsClient   BeadsClient
+	spawner       WorkerSpawner // Interface for spawning workers (allows mocking in tests)
 	dag           *DAG
 	dagMu         sync.RWMutex
 	completed     map[string]bool           // Track completed beads for this session
@@ -341,6 +363,7 @@ func NewOverseer(config *Config) *Overseer {
 		pollInterval:  config.Overseer.PollInterval,
 		maxWorkers:    config.Overseer.MaxWorkers,
 		beadsClient:   beads.NewClient(),
+		spawner:       &defaultWorkerSpawner{},
 		dag:           NewDAG(),
 		completed:     make(map[string]bool),
 		retries:       make(map[string]*beadRetryInfo),
@@ -1208,54 +1231,6 @@ func (o *Overseer) buildDAG() error {
 	return nil
 }
 
-// getReadyBeadsFromDAG returns beads that have no incomplete dependencies (InDegree == 0)
-func (o *Overseer) getReadyBeadsFromDAG() ([]types.Bead, error) {
-	o.dagMu.RLock()
-	defer o.dagMu.RUnlock()
-
-	// Get all nodes with InDegree == 0
-	nodes := o.dag.GetReadyNodes()
-
-	// Filter and collect ready beads
-	var readyBeads []types.Bead
-	o.workerMutex.RLock()
-	for _, node := range nodes {
-		beadID := string(node.Bead.ID)
-
-		// Filter: only StatusOpen
-		if node.Bead.Status != types.StatusOpen {
-			continue
-		}
-
-		// Filter: not already running
-		if _, isRunning := o.activeWorkers[beadID]; isRunning {
-			continue
-		}
-
-		// Filter: not already completed in this session
-		if o.completed[beadID] {
-			continue
-		}
-
-		// Skip approval gates (handled in tick, but also filter here)
-		if node.Bead.Type == "approval-gate" {
-			continue
-		}
-
-		readyBeads = append(readyBeads, node.Bead)
-	}
-	o.workerMutex.RUnlock()
-
-	// Sort by priority (high to low)
-	sort.Slice(readyBeads, func(i, j int) bool {
-		return readyBeads[i].Priority > readyBeads[j].Priority
-	})
-
-	log.Printf("📋 Found %d ready beads from DAG (after filtering)", len(readyBeads))
-
-	return readyBeads, nil
-}
-
 // getReadyBeads retrieves beads that are ready to execute using 'br ready'
 // This is more reliable than DAG as it queries the actual bead status
 func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
@@ -1263,7 +1238,7 @@ func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
 
 	for _, project := range o.projects {
 		if project.Type == types.RepoTypeSingle {
-			beads, err := o.beadsClient.GetReadyBeads(project.Path, "")
+			beads, err := o.beadsClient.GetReadyBeads(project.Name, project.Path, "")
 			if err != nil {
 				log.Printf("⚠️  Could not get beads for project %s: %v", project.Name, err)
 				continue
@@ -1272,7 +1247,7 @@ func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
 		} else {
 			// Multi-repo project
 			for _, repo := range project.Repos {
-				beads, err := o.beadsClient.GetReadyBeads(project.Path, repo.Name)
+				beads, err := o.beadsClient.GetReadyBeads(project.Name, project.Path, repo.Name)
 				if err != nil {
 					log.Printf("⚠️  Could not get beads for repo %s/%s: %v", project.Name, repo.Name, err)
 					continue
@@ -1317,7 +1292,7 @@ func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
 	return readyBeads, nil
 }
 
-// spawnWorker creates and starts a worker for a bead
+// spawnWorker creates and starts a worker for a bead using the configured spawner
 func (o *Overseer) spawnWorker(bead types.Bead) error {
 	beadIDStr := bead.ID.String()
 
@@ -1347,12 +1322,31 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		}
 	}
 
+	// Create the worker directly using internal implementation
+	worker, err := o.spawnWorkerInternal(bead)
+	if err != nil {
+		return err
+	}
+
+	// Track worker
+	o.workerMutex.Lock()
+	o.activeWorkers[beadIDStr] = worker
+	o.workerMutex.Unlock()
+
+	return nil
+}
+
+// spawnWorkerInternal creates and starts a real worker process for a bead
+// This is the actual implementation used by defaultWorkerSpawner
+func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
+	beadIDStr := bead.ID.String()
+
 	// Determine agent type
 	agentTypes := types.DetermineAgentTypes(bead.Type)
 	if len(agentTypes) == 0 {
 		err := fmt.Errorf("no agent type found for bead type: %s", bead.Type)
 		o.logError("spawnWorker", "agent_type", beadIDStr, err, "error")
-		return err
+		return nil, err
 	}
 
 	agentType := agentTypes[0] // Use primary agent
@@ -1425,7 +1419,7 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 			Err:       err,
 		}
 		o.logError("spawnWorker", "process_start", beadIDStr, spawnErr, "error")
-		return spawnErr
+		return nil, spawnErr
 	}
 
 	// Create worker record
@@ -1439,267 +1433,331 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		ProjectPath: projectPath,
 	}
 
-	// Track worker
-	o.workerMutex.Lock()
-	o.activeWorkers[beadIDStr] = worker
-	o.workerMutex.Unlock()
-
 	// Monitor in goroutine
 	go o.monitorWorker(worker, cmd)
 
-	return nil
+	return worker, nil
+}
+
+// workerCompletion encapsulates the result of a worker's execution
+type workerCompletion struct {
+	worker     *types.Worker
+	success    bool
+	exitCode   int
+	duration   time.Duration
+	newlyReady []string
+	closeError error
 }
 
 // monitorWorker watches a worker process until completion
 func (o *Overseer) monitorWorker(worker *types.Worker, cmd *exec.Cmd) {
-	// Wait for process to complete
+	completion := o.waitForWorker(worker, cmd)
+	o.handleWorkerCompletion(completion)
+}
+
+// waitForWorker waits for a worker process to complete and returns completion details
+func (o *Overseer) waitForWorker(worker *types.Worker, cmd *exec.Cmd) workerCompletion {
 	err := cmd.Wait()
 
-	// Determine success/failure
-	exitCode := 0
-	if err != nil {
-		if exitError, ok := err.(*exec.ExitError); ok {
-			exitCode = exitError.ExitCode()
-		} else {
-			exitCode = -1
-		}
-	}
-
+	exitCode := extractExitCode(err)
 	success := exitCode == 0
 	duration := time.Since(worker.StartTime)
 
-	// Update DAG node status based on completion result
 	var newlyReady []string
 	if success {
-		log.Printf("[Worker] Completed: %s (duration: %v)", worker.ID, duration)
-		worker.Status = "completed"
-
-		// Clear retry state on success
-		o.clearRetry(worker.ID)
-
-		// Mark as completed in DAG - this reduces InDegree of dependents
-		o.dagMu.Lock()
-		ready, err := o.dag.MarkCompleted(worker.ID)
-		o.dagMu.Unlock()
-		if err != nil {
-			o.logError("DAG", "MarkCompleted", worker.ID, err, "warn")
-		} else {
-			newlyReady = ready
-			if len(ready) > 0 {
-				log.Printf("[DAG] %d dependents now ready after %s completion", len(ready), worker.ID)
-			}
-		}
+		newlyReady = o.handleWorkerSuccess(worker, duration)
 	} else {
-		// Log worker failure with structured error
-		workerErr := fmt.Errorf("worker exited with code %d", exitCode)
-		o.recordRetry(worker.ID, workerErr)
-
-		retryCount := o.getRetryCount(worker.ID)
-		maxRetries := o.config.Overseer.DefaultRetries
-		if maxRetries <= 0 {
-			maxRetries = defaultMaxRetries
-		}
-
-		if retryCount >= maxRetries {
-			// Exhausted retries, log as error
-			log.Printf("[Worker] Failed permanently: %s (exit code: %d, duration: %v, retries: %d/%d)",
-				worker.ID, exitCode, duration, retryCount, maxRetries)
-			worker.Status = "failed"
-		} else {
-			// Will retry, log as warning
-			backoff := calculateBackoff(retryCount, o.baseDelay, o.maxDelay)
-			log.Printf("[Worker] Failed but will retry: %s (exit code: %d, duration: %v, retry %d/%d, backoff: %v)",
-				worker.ID, exitCode, duration, retryCount, maxRetries, backoff)
-			worker.Status = "retry_pending"
-		}
-
-		// Mark as failed in DAG - dependents remain blocked
-		o.dagMu.Lock()
-		if err := o.dag.MarkFailed(worker.ID); err != nil {
-			o.logError("DAG", "MarkFailed", worker.ID, err, "warn")
-		}
-		o.dagMu.Unlock()
+		o.handleWorkerFailure(worker, exitCode, duration)
 	}
 
-	// Remove from active workers
+	o.removeActiveWorker(worker.ID)
+	closeErr := o.finalizeBead(worker, success)
+
+	return workerCompletion{
+		worker:     worker,
+		success:    success,
+		exitCode:   exitCode,
+		duration:   duration,
+		newlyReady: newlyReady,
+		closeError: closeErr,
+	}
+}
+
+// extractExitCode extracts the exit code from an exec error
+func extractExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	if exitError, ok := err.(*exec.ExitError); ok {
+		return exitError.ExitCode()
+	}
+	return -1
+}
+
+// handleWorkerSuccess processes a successful worker completion
+func (o *Overseer) handleWorkerSuccess(worker *types.Worker, duration time.Duration) []string {
+	log.Printf("[Worker] Completed: %s (duration: %v)", worker.ID, duration)
+	worker.Status = string(types.WorkerStatusCompleted)
+	o.clearRetry(worker.ID)
+
+	o.dagMu.Lock()
+	defer o.dagMu.Unlock()
+
+	newlyReady, err := o.dag.MarkCompleted(worker.ID)
+	if err != nil {
+		o.logError("DAG", "MarkCompleted", worker.ID, err, "warn")
+		return nil
+	}
+
+	if len(newlyReady) > 0 {
+		log.Printf("[DAG] %d dependents now ready after %s completion", len(newlyReady), worker.ID)
+	}
+
+	o.completed[worker.ID] = true
+	return newlyReady
+}
+
+// handleWorkerFailure processes a failed worker completion
+func (o *Overseer) handleWorkerFailure(worker *types.Worker, exitCode int, duration time.Duration) {
+	workerErr := fmt.Errorf("worker exited with code %d", exitCode)
+	o.recordRetry(worker.ID, workerErr)
+
+	retryCount := o.getRetryCount(worker.ID)
+	maxRetries := o.getMaxRetries()
+
+	if retryCount >= maxRetries {
+		// Exhausted retries, log as error
+		log.Printf("[Worker] Failed permanently: %s (exit code: %d, duration: %v, retries: %d/%d)",
+			worker.ID, exitCode, duration, retryCount, maxRetries)
+		worker.Status = string(types.WorkerStatusFailed)
+	} else {
+		// Will retry, log as warning
+		backoff := calculateBackoff(retryCount, o.baseDelay, o.maxDelay)
+		log.Printf("[Worker] Failed but will retry: %s (exit code: %d, duration: %v, retry %d/%d, backoff: %v)",
+			worker.ID, exitCode, duration, retryCount, maxRetries, backoff)
+		worker.Status = string(types.WorkerStatusRetryPending)
+	}
+
+	o.dagMu.Lock()
+	defer o.dagMu.Unlock()
+	if err := o.dag.MarkFailed(worker.ID); err != nil {
+		o.logError("DAG", "MarkFailed", worker.ID, err, "warn")
+	}
+}
+
+// getMaxRetries returns the configured max retries with default fallback
+func (o *Overseer) getMaxRetries() int {
+	if o.config.Overseer.DefaultRetries > 0 {
+		return o.config.Overseer.DefaultRetries
+	}
+	return defaultMaxRetries
+}
+
+// removeActiveWorker removes a worker from the active workers map
+func (o *Overseer) removeActiveWorker(workerID string) {
 	o.workerMutex.Lock()
-	delete(o.activeWorkers, worker.ID)
-	o.workerMutex.Unlock()
+	defer o.workerMutex.Unlock()
+	delete(o.activeWorkers, workerID)
+}
 
-	// Close bead via beadsClient
-	closeErr := o.closeWorkerBead(worker, success)
-	if closeErr != nil {
-		o.logError("beadsClient", "CloseBead", worker.ID, closeErr, "warn")
+// handleWorkerCompletion handles the final steps after worker completion
+func (o *Overseer) handleWorkerCompletion(comp workerCompletion) {
+	success := comp.success
+	exitCode := comp.exitCode
 
-		// If close failed due to dependencies, mark as not successful so it gets retried
-		// This handles the case where a bead was processed but couldn't be closed
-		// because its dependencies weren't resolved yet
-		if strings.Contains(closeErr.Error(), "unresolved dependencies") ||
-			strings.Contains(closeErr.Error(), "dependencies") {
-			log.Printf("[Worker] Bead %s processed but not closed due to dependencies - will retry later", worker.BeadID.String())
+	if comp.closeError != nil {
+		o.logError("beadsClient", "CloseBead", comp.worker.ID, comp.closeError, "warn")
+		if isDependencyError(comp.closeError) {
+			log.Printf("[Worker] Bead %s processed but not closed due to dependencies - will retry later", comp.worker.BeadID.String())
 			success = false
-			exitCode = 1 // Mark as failed so it gets retried
+			exitCode = 1
 		}
 	}
 
-	// If successful and new beads are ready, trigger immediate scheduling
-	if success && len(newlyReady) > 0 {
-		log.Printf("[Scheduler] Triggering immediate scheduling for %d newly ready beads", len(newlyReady))
-		go o.triggerImmediateSchedule()
-	}
+	o.scheduleAfterCompletion(comp.worker, success, comp.newlyReady)
+	o.sendMCPWorkerCompletion(comp.worker, success, exitCode, comp.duration)
+}
 
-	// If failed but retries remain, trigger scheduling for retry candidates
-	if !success && o.getRetryCount(worker.ID) < o.config.Overseer.DefaultRetries {
+// isDependencyError checks if an error is related to unresolved dependencies
+func isDependencyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "unresolved dependencies") || strings.Contains(errStr, "dependencies")
+}
+
+// scheduleAfterCompletion triggers scheduling based on completion outcome
+func (o *Overseer) scheduleAfterCompletion(worker *types.Worker, success bool, newlyReady []string) {
+	if success {
+		if len(newlyReady) > 0 {
+			log.Printf("[Scheduler] Triggering immediate scheduling for %d newly ready beads", len(newlyReady))
+		} else {
+			log.Printf("[Scheduler] Worker completed, triggering immediate scheduling cycle")
+		}
+		go o.triggerImmediateSchedule()
+	} else if o.getRetryCount(worker.ID) < o.getMaxRetries() {
 		log.Printf("[Scheduler] Triggering scheduling to attempt retry for %s", worker.ID)
 		go o.triggerImmediateSchedule()
 	}
-
-	// Send completion message via MCP
-	o.sendMCPWorkerCompletion(worker, success, exitCode, duration)
-
-	// TODO: Record results to cass_memory
 }
 
-// closeWorkerBead closes the bead via beadsClient based on worker completion
-func (o *Overseer) closeWorkerBead(worker *types.Worker, success bool) error {
-	// Extract project and repo from BeadID
+// finalizeBead closes the bead via beadsClient based on worker completion
+func (o *Overseer) finalizeBead(worker *types.Worker, success bool) error {
 	projectName := worker.BeadID.Project()
 	repoName := worker.BeadID.Repo()
 
-	log.Printf("[closeWorkerBead] Attempting to close bead %s for project %s (repo: %s)",
+	log.Printf("[finalizeBead] Closing bead %s (project: %s, repo: %s)",
 		worker.BeadID.String(), projectName, repoName)
 
-	// First: use the project path stored in the worker record
-	var projectPath string
-	if worker.ProjectPath != "" {
-		projectPath = worker.ProjectPath
-		log.Printf("[closeWorkerBead] Using project path from worker record: %s", projectPath)
-	}
-
-	// Fallback: find project by name
+	projectPath := o.resolveProjectPath(worker, projectName)
 	if projectPath == "" {
-		for _, p := range o.projects {
-			if p.Name == projectName {
-				projectPath = p.Path
-				log.Printf("[closeWorkerBead] Found project %s at path: %s", projectName, projectPath)
-				break
-			}
-		}
-	}
-
-	// Fallback: try to find project by walking configured projects
-	if projectPath == "" && o.config != nil {
-		log.Printf("[closeWorkerBead] Searching in %d configured projects", len(o.config.Projects))
-		for _, proj := range o.config.Projects {
-			if proj.Name == projectName {
-				projectPath = proj.Path
-				log.Printf("[closeWorkerBead] Found in config: %s", projectPath)
-				break
-			}
-		}
-	}
-
-	// Final fallback: search configured projects for any valid beads directory
-	// This handles cases where bead.Project differs from configured project name
-	if projectPath == "" && len(o.projects) > 0 {
-		log.Printf("[closeWorkerBead] Searching configured projects for bead %s", worker.BeadID.String())
-		for _, proj := range o.projects {
-			// Check if this project has a .beads directory
-			beadsDir := filepath.Join(proj.Path, ".beads")
-			if _, err := os.Stat(beadsDir); err == nil {
-				// Found a valid beads project - use it
-				projectPath = proj.Path
-				log.Printf("[closeWorkerBead] Using configured project: %s at %s", proj.Name, projectPath)
-				break
-			}
-		}
-	}
-
-	if projectPath == "" {
-		log.Printf("[closeWorkerBead] ERROR: Project %s not found in %d configured projects",
-			projectName, len(o.projects))
-		for i, p := range o.projects {
-			log.Printf("[closeWorkerBead]   Project %d: %s at %s", i, p.Name, p.Path)
-		}
 		return fmt.Errorf("project %s not found", projectName)
 	}
 
-	// Determine close reason based on success
-	reason := "completed"
-	if !success {
-		reason = "failed"
-	}
-
-	log.Printf("[closeWorkerBead] Closing bead %s with reason: %s (path: %s)",
-		worker.BeadID.String(), reason, projectPath)
+	reason := o.getCloseReason(success)
+	log.Printf("[finalizeBead] Closing with reason: %s (path: %s)", reason, projectPath)
 
 	return o.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason)
 }
 
+// resolveProjectPath determines the project path using multiple resolution strategies
+func (o *Overseer) resolveProjectPath(worker *types.Worker, projectName string) string {
+	// Priority 1: Use path stored in worker record
+	if worker.ProjectPath != "" {
+		return worker.ProjectPath
+	}
+
+	// Priority 2: Find by project name in discovered projects
+	for _, p := range o.projects {
+		if p.Name == projectName {
+			return p.Path
+		}
+	}
+
+	// Priority 3: Find by project name in config
+	if o.config != nil {
+		for _, proj := range o.config.Projects {
+			if proj.Name == projectName {
+				return proj.Path
+			}
+		}
+	}
+
+	// Priority 4: Use first project with valid .beads directory
+	for _, proj := range o.projects {
+		if hasBeadsDirectory(proj.Path) {
+			return proj.Path
+		}
+	}
+
+	log.Printf("[resolveProjectPath] ERROR: Project %s not found in %d projects", projectName, len(o.projects))
+	return ""
+}
+
+// hasBeadsDirectory checks if a path contains a .beads directory
+func hasBeadsDirectory(projectPath string) bool {
+	beadsDir := filepath.Join(projectPath, ".beads")
+	_, err := os.Stat(beadsDir)
+	return err == nil
+}
+
+// getCloseReason returns the appropriate close reason based on success
+func (o *Overseer) getCloseReason(success bool) string {
+	if success {
+		return "completed"
+	}
+	return "failed"
+}
+
+// closeWorkerBead is an alias for finalizeBead for backward compatibility
+// Deprecated: Use finalizeBead instead
+func (o *Overseer) closeWorkerBead(worker *types.Worker, success bool) error {
+	return o.finalizeBead(worker, success)
+}
+
 // triggerImmediateSchedule spawns workers for ready beads without waiting for next poll
 func (o *Overseer) triggerImmediateSchedule() {
-	// Check if overseer is paused
 	if o.IsPaused() {
 		log.Println("⏸️  Immediate scheduling skipped: overseer is paused")
 		return
 	}
 
-	// Get available worker slots
+	availableSlots := o.getAvailableWorkerSlots()
+	if availableSlots <= 0 {
+		return
+	}
+
+	readyNodes := o.getReadyNodes()
+	if len(readyNodes) == 0 {
+		return
+	}
+
+	log.Printf("📊 Immediate schedule: %d ready beads available", len(readyNodes))
+	spawned := o.spawnWorkersForNodes(readyNodes, availableSlots)
+
+	if spawned > 0 {
+		log.Printf("🚀 Immediate scheduling complete: spawned %d workers", spawned)
+	}
+}
+
+// getAvailableWorkerSlots returns the number of available worker slots
+func (o *Overseer) getAvailableWorkerSlots() int {
 	o.workerMutex.RLock()
 	activeCount := len(o.activeWorkers)
 	o.workerMutex.RUnlock()
 
 	maxWorkers := o.GetMaxWorkers()
-	availableSlots := maxWorkers - activeCount
-	if availableSlots <= 0 {
-		log.Printf("📊 Immediate scheduling skipped: no available slots (%d/%d workers active)", activeCount, maxWorkers)
-		return
-	}
+	available := maxWorkers - activeCount
 
-	// Get ready beads from DAG
+	if available <= 0 {
+		log.Printf("📊 No available slots (%d/%d workers active)", activeCount, maxWorkers)
+	}
+	return available
+}
+
+// getReadyNodes returns nodes that are ready for execution
+func (o *Overseer) getReadyNodes() []*Node {
 	o.dagMu.RLock()
-	readyNodes := o.dag.GetReadyNodes()
-	o.dagMu.RUnlock()
+	defer o.dagMu.RUnlock()
+	return o.dag.GetReadyNodes()
+}
 
-	if len(readyNodes) == 0 {
-		return
-	}
-
-	log.Printf("📊 Immediate schedule: %d/%d workers active, %d ready beads in DAG", activeCount, maxWorkers, len(readyNodes))
-
-	// Convert nodes to beads and filter out already running ones
+// spawnWorkersForNodes spawns workers for the given nodes up to available slots
+func (o *Overseer) spawnWorkersForNodes(nodes []*Node, maxSlots int) int {
 	spawned := 0
-	for _, node := range readyNodes {
-		if availableSlots <= 0 {
+	for _, node := range nodes {
+		if spawned >= maxSlots {
 			break
 		}
 
-		beadID := string(node.Bead.ID)
-
-		// Skip if already running
-		if o.isBeadRunning(beadID) {
+		if !o.shouldSpawnWorker(node) {
 			continue
 		}
 
-		// Skip approval gates (require manual br close)
-		if node.Bead.Type == "approval-gate" {
-			log.Printf("⏸️  Skipping approval gate: %s", beadID)
-			continue
-		}
-
-		// Spawn worker for this bead
 		if err := o.spawnWorker(node.Bead); err != nil {
-			log.Printf("❌ Failed to spawn worker for bead %s: %v", beadID, err)
+			log.Printf("❌ Failed to spawn worker for bead %s: %v", node.Bead.ID, err)
 			continue
 		}
-
 		spawned++
-		availableSlots--
+	}
+	return spawned
+}
+
+// shouldSpawnWorker determines if a worker should be spawned for a node
+func (o *Overseer) shouldSpawnWorker(node *Node) bool {
+	beadID := string(node.Bead.ID)
+
+	if o.isBeadRunning(beadID) {
+		return false
 	}
 
-	if spawned > 0 {
-		log.Printf("🚀 Immediate scheduling complete: spawned %d workers", spawned)
+	if node.Bead.Type == "approval-gate" {
+		log.Printf("⏸️  Skipping approval gate: %s", beadID)
+		return false
 	}
+
+	return true
 }
 
 // isBeadRunning checks if a bead is currently being executed by an active worker
@@ -1778,15 +1836,6 @@ func (o *Overseer) GetMaxWorkers() int {
 	return o.maxWorkers
 }
 
-// DAGStats represents statistics about the DAG
-type DAGStats struct {
-	TotalNodes     int `json:"total_nodes"`
-	ReadyNodes     int `json:"ready_nodes"`
-	BlockedNodes   int `json:"blocked_nodes"`
-	CompletedNodes int `json:"completed_nodes"`
-	FailedNodes    int `json:"failed_nodes"`
-}
-
 // GetDAGStats returns statistics about the current DAG
 func (o *Overseer) GetDAGStats() DAGStats {
 	o.dagMu.RLock()
@@ -1837,7 +1886,7 @@ func (o *Overseer) GetBeadDependencies(beadID string) ([]string, error) {
 }
 
 // GetBeadDependents returns the IDs of beads that depend on the given bead.
-// This is a thread-safe wrapper around the DAG's GetDependents method.
+// This is a thread-safe wrapper around the DAG's GetOutEdges method.
 func (o *Overseer) GetBeadDependents(beadID string) ([]string, error) {
 	o.dagMu.RLock()
 	defer o.dagMu.RUnlock()
@@ -1846,7 +1895,7 @@ func (o *Overseer) GetBeadDependents(beadID string) ([]string, error) {
 		return nil, fmt.Errorf("DAG not initialized")
 	}
 
-	return o.dag.GetDependents(beadID)
+	return o.dag.GetOutEdges(beadID)
 }
 
 // GetBeadFromDAG retrieves a single bead from the DAG by its ID.
