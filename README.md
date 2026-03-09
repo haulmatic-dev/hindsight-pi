@@ -1,6 +1,6 @@
 # Hydra Orchestrator
 
-> AI-native orchestration platform for autonomous software engineering agents
+AI-native orchestration platform for autonomous software engineering agents
 
 [![Go Version](https://img.shields.io/badge/go-1.23+-blue.svg)](https://golang.org/)
 [![Status](https://img.shields.io/badge/status-production-green.svg)]()
