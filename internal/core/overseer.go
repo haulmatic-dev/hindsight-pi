@@ -323,6 +323,9 @@ type Overseer struct {
 	activeReservations map[string]*mcp.Reservation // Active file reservations
 	mcpMu              sync.RWMutex                // Mutex for MCP operations
 	mcpMessageHandler  func(mcp.Message)           // Handler for incoming MCP messages
+
+	// Resource monitoring for adaptive scaling
+	resourceMonitor *ResourceMonitor // Monitors CPU/Memory usage
 }
 
 // NewOverseer creates a new overseer instance
@@ -354,6 +357,10 @@ func NewOverseer(config *Config) *Overseer {
 			log.Printf("[MCP] Failed to initialize MCP: %v", err)
 		}
 	}
+
+	// Initialize resource monitor with 70% limits (0 means no limit)
+	o.resourceMonitor = NewResourceMonitor(70.0, 70.0)
+	log.Printf("[ResourceMonitor] Initialized with CPU: 70%%, Memory: 70%% limits")
 
 	// Override defaults if configured
 	if config.Overseer.WorkerTimeout > 0 {
@@ -950,6 +957,13 @@ func (o *Overseer) tick() error {
 		projectPath := o.findProjectPath(&bead)
 		if projectPath == "" {
 			log.Printf("⚠️  Skipping bead %s: project '%s' not configured or found", bead.ID, bead.Project)
+			continue
+		}
+
+		// Check resource limits before spawning
+		if o.resourceMonitor != nil && !o.resourceMonitor.CanSpawnWorker() {
+			log.Printf("[ResourceMonitor] Blocking worker spawn for bead %s: resource limits exceeded", bead.ID)
+			// Don't decrease availableSlots - we want to retry this bead
 			continue
 		}
 

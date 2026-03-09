@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/intelligence"
@@ -76,6 +78,42 @@ var (
 	agentID   string
 	agentType types.AgentType
 )
+
+// ActivityMonitor tracks activity and implements resettable timeout
+type ActivityMonitor struct {
+	lastActivity time.Time
+	timeout      time.Duration
+	mu           sync.RWMutex
+}
+
+// NewActivityMonitor creates a new activity monitor
+func NewActivityMonitor(timeout time.Duration) *ActivityMonitor {
+	return &ActivityMonitor{
+		lastActivity: time.Now(),
+		timeout:      timeout,
+	}
+}
+
+// RecordActivity records that activity occurred
+func (am *ActivityMonitor) RecordActivity() {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	am.lastActivity = time.Now()
+}
+
+// IsTimedOut checks if timeout has elapsed since last activity
+func (am *ActivityMonitor) IsTimedOut() bool {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return time.Since(am.lastActivity) > am.timeout
+}
+
+// TimeSinceActivity returns time since last activity
+func (am *ActivityMonitor) TimeSinceActivity() time.Duration {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return time.Since(am.lastActivity)
+}
 
 func main() {
 	// Generate unique agent ID based on timestamp and PID
@@ -563,7 +601,8 @@ func calculateBackoff(attempt int, policy RetryPolicy) time.Duration {
 	return time.Duration(backoff)
 }
 
-// executeWithOpencode executes the opencode CLI with the given bead and intelligence
+// executeWithOpencode executes the opencode CLI with activity-based timeout monitoring
+// The timeout resets whenever there's output activity (logs, messages, questions)
 func executeWithOpencode(
 	bead types.Bead,
 	agentType string,
@@ -576,46 +615,132 @@ func executeWithOpencode(
 		AgentType: agentType,
 	}
 
+	// Activity-based timeout: 5 minutes of inactivity
+	activityTimeout := 5 * time.Minute
+	activityMonitor := NewActivityMonitor(activityTimeout)
+
 	// Build opencode command
 	cmd := buildOpencodeCommand(bead, agentType, intelligenceCtx, projectPath)
 
 	log.Printf("🔧 Executing: %s %s", cmd.Path, strings.Join(cmd.Args[1:], " "))
 	log.Printf("📁 Working directory: %s", cmd.Dir)
-	streamLog(mcpClient, "info", fmt.Sprintf("Executing opencode command in %s", cmd.Dir))
+	log.Printf("⏱️  Activity timeout: %v (resets on any output)", activityTimeout)
+	streamLog(mcpClient, "info", fmt.Sprintf("Executing opencode command in %s with activity monitoring", cmd.Dir))
 
-	// Capture output
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	// Execute command
-	err := cmd.Run()
-
-	result.Output = stdout.String()
-	result.Error = stderr.String()
-
+	// Create pipes for stdout and stderr
+	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		return result, fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+	defer stdoutPipe.Close()
+
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return result, fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+	defer stderrPipe.Close()
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return result, fmt.Errorf("failed to start opencode: %w", err)
+	}
+
+	// Capture output with activity monitoring
+	var stdoutBuf, stderrBuf bytes.Buffer
+	var wg sync.WaitGroup
+
+	// Monitor stdout
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			line := scanner.Text()
+			stdoutBuf.WriteString(line + "\n")
+			activityMonitor.RecordActivity()
+			// Also stream to MCP for real-time monitoring
+			if mcpClient != nil {
+				streamLog(mcpClient, "info", fmt.Sprintf("[stdout] %s", line))
+			}
+		}
+	}()
+
+	// Monitor stderr
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			line := scanner.Text()
+			stderrBuf.WriteString(line + "\n")
+			activityMonitor.RecordActivity()
+			// Also stream to MCP for real-time monitoring
+			if mcpClient != nil {
+				streamLog(mcpClient, "warn", fmt.Sprintf("[stderr] %s", line))
+			}
+		}
+	}()
+
+	// Wait for completion or timeout
+	done := make(chan error, 1)
+	go func() {
+		wg.Wait() // Wait for stdout/stderr readers to finish
+		done <- cmd.Wait()
+	}()
+
+	// Monitor for timeout
+	timeoutTicker := time.NewTicker(10 * time.Second)
+	defer timeoutTicker.Stop()
+
+	var cmdErr error
+monitorLoop:
+	for {
+		select {
+		case cmdErr = <-done:
+			break monitorLoop
+		case <-timeoutTicker.C:
+			if activityMonitor.IsTimedOut() {
+				log.Printf("⏰ Activity timeout! No output for %v. Killing process...", activityMonitor.TimeSinceActivity())
+				if err := cmd.Process.Kill(); err != nil {
+					log.Printf("Failed to kill process: %v", err)
+				}
+				result.ExitCode = -1
+				result.Success = false
+				result.Error = fmt.Sprintf("Activity timeout: no output for %v", activityTimeout)
+				return result, fmt.Errorf("activity timeout after %v of inactivity", activityTimeout)
+			}
+			// Log activity status periodically
+			if timeSince := activityMonitor.TimeSinceActivity(); timeSince > 1*time.Minute {
+				log.Printf("⏳ Waiting... Last activity %v ago", timeSince)
+			}
+		}
+	}
+
+	result.Output = stdoutBuf.String()
+	result.Error = stderrBuf.String()
+
+	if cmdErr != nil {
+		if exitErr, ok := cmdErr.(*exec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
 		} else {
 			result.ExitCode = 1
 		}
 		result.Success = false
 
-		// Log the actual error output for debugging
 		log.Printf("❌ Opencode failed with exit code %d", result.ExitCode)
-		if stdoutStr := stdout.String(); stdoutStr != "" {
+		if stdoutStr := stdoutBuf.String(); stdoutStr != "" {
 			log.Printf("📤 STDOUT:\n%s", stdoutStr)
 		}
-		if stderrStr := stderr.String(); stderrStr != "" {
+		if stderrStr := stderrBuf.String(); stderrStr != "" {
 			log.Printf("📤 STDERR:\n%s", stderrStr)
 		}
 
-		return result, fmt.Errorf("opencode execution failed: %w", err)
+		return result, fmt.Errorf("opencode execution failed: %w", cmdErr)
 	}
 
 	result.ExitCode = 0
 	result.Success = true
+	log.Printf("✅ Opencode completed successfully (last activity %v ago)", activityMonitor.TimeSinceActivity())
 	return result, nil
 }
 
