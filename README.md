@@ -1,321 +1,188 @@
-# Hydra - Agent Swarm Orchestrator
+# Hydra Orchestrator
 
-A self-improving agent swarm orchestrator for software development workflows. Hydra manages ephemeral workers that execute tasks (beads) with intelligent dependency resolution.
+> AI-native orchestration platform for autonomous software engineering agents
 
-## 🎯 Overview
+[![Go Version](https://img.shields.io/badge/go-1.23+-blue.svg)](https://golang.org/)
+[![Status](https://img.shields.io/badge/status-production-green.svg)]()
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)]()
 
-Hydra is the orchestration layer for the Beads task management system. It:
-
-- **Discovers** projects automatically from `~/source-code/`
-- **Schedules** tasks based on dependencies (DAG)
-- **Spawns** ephemeral workers (one per task)
-- **Learns** from execution history via cass_memory
-- **Monitors** via REST API and real-time updates
-
-## 🏗️ Architecture
-
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│   Beads     │────▶│   Overseer   │────▶│   Workers   │
-│   (Tasks)   │     │   (Go)       │     │(Ephemeral)  │
-└─────────────┘     └──────────────┘     └─────────────┘
-                           │
-                    ┌──────┴──────┐
-                    │     DAG     │
-                    │  (Kahn's    │
-                    │   Algorithm)│
-                    └─────────────┘
-```
-
-### Core Components
-
-| Component | Purpose | Technology |
-|-----------|---------|------------|
-| **Overseer** | Main scheduler daemon | Go 1.23 |
-| **DAG** | Dependency resolution | Custom implementation |
-| **Beads Client** | Task discovery | `br` CLI integration |
-| **REST API** | Monitoring & control | Gin framework |
-| **Workers** | Task execution | Subprocess |
+Hydra is an intelligent orchestration system that manages ephemeral workers to process software engineering tasks (represented as "beads"). It coordinates AI agents through the [MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) protocol and optimizes resource usage based on system load.
 
 ## 🚀 Quick Start
 
-### Prerequisites
-
-- Go 1.23 or later
-- `br` CLI tool (beads management)
-- Projects with `.beads/` directories in `~/source-code/`
-
-### Installation
-
 ```bash
-# Clone repository
+# Clone and build
 git clone https://github.com/haulmatic-dev/hydra.git
 cd hydra
+go build -o bin/hydra ./cmd/hydra
 
-# Build binaries
-make build
-
-# Or manually:
-go build -o bin/hydra cmd/hydra/main.go
-go build -o bin/worker cmd/worker/main.go
-```
-
-### Configuration
-
-Create `hydra.yaml`:
-
-```yaml
+# Configure
+cat > hydra.yaml << 'EOF'
 overseer:
   poll_interval: 5s
-  max_workers: 6
-  max_retries: 3
-  retry_delay: 10s
-  worker_timeout: 30m
+  max_workers: 10
+  worker_timeout: 5m
 
-api:
+projects:
+  - name: my-project
+    path: /path/to/project
+    type: single
+
+mcp:
   enabled: true
-  port: 8080
+  url: http://127.0.0.1:8765
+EOF
 
-projects:
-  auto_discover: true
-  base_path: ~/source-code
-```
-
-### Running
-
-```bash
-# Start Hydra
+# Run
 ./bin/hydra -config hydra.yaml
-
-# Debug mode
-./bin/hydra -debug
 ```
 
-## 📡 API Endpoints
+## 📊 System Overview
 
-### Health & Stats
-
-```bash
-# Health check
-GET /health
-
-# System statistics
-GET /api/v1/stats
-
-# DAG statistics
-GET /api/v1/dag/stats
+```mermaid
+flowchart TB
+    subgraph Hydra["Hydra Orchestrator"]
+        API["GraphQL API"]
+        Overseer["Overseer Engine"]
+        Scheduler["Bead Scheduler"]
+        ResourceMonitor["Resource Monitor<br/>CPU/Memory"]
+        ActivityMonitor["Activity Monitor"]
+    end
+    
+    subgraph Intelligence["Intelligence Layer"]
+        CassMemory["cass_memory"]
+        TLDR["TLDR"]
+        GPTCache["GPTCache"]
+    end
+    
+    subgraph External["External Services"]
+        MCP["MCP Agent Mail<br/>Port 8765"]
+        Opencode["Opencode CLI"]
+    end
+    
+    subgraph Workers["Ephemeral Workers"]
+        W1["Worker 1"]
+        W2["Worker 2"]
+        W3["Worker N"]
+    end
+    
+    subgraph Storage["Storage"]
+        BeadsDB[("Beads DB<br/>.beads/")]
+    end
+    
+    API --> Overseer
+    Overseer --> Scheduler
+    Overseer --> ResourceMonitor
+    Overseer --> ActivityMonitor
+    Overseer --> Intelligence
+    Overseer --> MCP
+    
+    Scheduler --> Workers
+    Workers --> Opencode
+    Workers --> BeadsDB
+    
+    MCP -.->|File Reservations| Workers
+    
+    style Hydra fill:#e1f5fe
+    style Workers fill:#fff3e0
+    style Intelligence fill:#f3e5f5
 ```
 
-### Projects & Workers
+## ✨ Key Features
 
-```bash
-# List discovered projects
-GET /api/v1/projects
+- **🔄 Activity-Based Timeout**: Workers only timeout after 5 minutes of inactivity, not fixed duration
+- **📊 Resource-Based Scaling**: Automatically limits workers when CPU/Memory > 70%
+- **🔗 MCP Integration**: HTTP-based protocol for agent coordination and file reservations
+- **🧠 Intelligence Layer**: Context-aware execution with cass_memory, TLDR, and GPTCache
+- **📈 GraphQL API**: Real-time monitoring and control
+- **🎯 Smart Scheduling**: Processes beads in dependency order using DAG analysis
 
-# List active workers
-GET /api/v1/workers
+## 📚 Documentation Structure
 
-# List ready beads
-GET /api/v1/dag/ready
-```
+### 🏗️ Architecture
+- [System Architecture](docs/architecture/system-architecture-20260309.md) - High-level design and components
+- [Worker Lifecycle](docs/architecture/worker-lifecycle-20260309.md) - How workers are spawned, monitored, and terminated
+- [Bead Processing Flow](docs/architecture/bead-processing-flow-20260309.md) - End-to-end bead execution flow
 
-### Control
+### ⚙️ Operations
+- [Configuration Guide](docs/operations/configuration-guide-20260309.md) - hydra.yaml reference
+- [Monitoring & Metrics](docs/operations/monitoring-metrics-20260309.md) - Observability and alerting
+- [Troubleshooting](docs/operations/troubleshooting-20260309.md) - Common issues and solutions
 
-```bash
-# Pause overseer
-POST /api/v1/overseer/pause
+### 💻 Development
+- [Contributing Guide](docs/development/contributing-guide-20260309.md) - How to contribute
+- [Testing Strategy](docs/development/testing-strategy-20260309.md) - Test suite and practices
+- [Performance Optimization](docs/development/performance-optimization-20260309.md) - Tuning guidelines
 
-# Resume overseer
-POST /api/v1/overseer/resume
+### 📖 Guides
+- [Quick Start](docs/guides/quick-start-20260309.md) - Get up and running in 5 minutes
+- [Deployment](docs/guides/deployment-20260309.md) - Production deployment checklist
+- [MCP Setup](docs/guides/mcp-setup-20260309.md) - Configure MCP Agent Mail integration
 
-# Set max workers
-POST /api/v1/overseer/max-workers
-{
-  "count": 10
-}
-```
-
-## 🔧 Deployment
-
-### Systemd Service
-
-Create `/etc/systemd/system/hydra.service`:
-
-```ini
-[Unit]
-Description=Hydra Agent Orchestrator
-After=network.target
-
-[Service]
-Type=simple
-User=hydra
-Group=hydra
-WorkingDirectory=/opt/hydra
-ExecStart=/opt/hydra/bin/hydra -config /etc/hydra/hydra.yaml
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start:
-
-```bash
-sudo systemctl enable hydra
-sudo systemctl start hydra
-sudo systemctl status hydra
-```
-
-### Docker
-
-```dockerfile
-FROM golang:1.23-alpine AS builder
-WORKDIR /app
-COPY . .
-RUN go build -o hydra cmd/hydra/main.go
-
-FROM alpine:latest
-RUN apk --no-cache add ca-certificates
-WORKDIR /root/
-COPY --from=builder /app/hydra .
-COPY hydra.yaml .
-CMD ["./hydra"]
-```
-
-### Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `HYDRA_CONFIG` | Config file path | `hydra.yaml` |
-| `HYDRA_DEBUG` | Enable debug logging | `false` |
-| `HYDRA_BASE_PATH` | Projects base path | `~/source-code` |
-
-## 📊 Monitoring
-
-### Metrics
-
-The overseer exposes these metrics:
-
-- `dag_build_duration_ms` - Time to build dependency graph
-- `ready_beads_count` - Number of beads ready to execute
-- `active_workers_count` - Currently running workers
-- `cycle_detected_total` - Number of cycles detected
-
-### Logging
-
-Structured logging with levels:
-
-```bash
-# View logs
-journalctl -u hydra -f
-
-# Debug level
-./bin/hydra -debug 2>&1 | jq .
-```
-
-### Health Checks
-
-```bash
-# Kubernetes probe
-kubectl exec -it <pod> -- wget -qO- http://localhost:8080/health
-```
-
-## 🧪 Testing
-
-```bash
-# Run all tests
-go test ./...
-
-# Run with race detector
-go test -race ./...
-
-# Run benchmarks
-go test -bench=. ./...
-
-# Coverage report
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
-```
-
-## 🔒 Security
-
-- **File Permissions**: Ensure config files are readable only by hydra user
-- **API Authentication**: Add middleware for production use
-- **Worker Isolation**: Workers run as subprocess with limited permissions
-- **Network**: Bind to localhost only by default
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**Issue:** No beads found
-```bash
-# Verify projects exist
-ls ~/source-code/*/.beads/
-
-# Check auto-discovery
-./bin/hydra -debug 2>&1 | grep "discovered"
-```
-
-**Issue:** Workers not spawning
-```bash
-# Check overseer status
-curl http://localhost:8080/api/v1/stats
-
-# Verify DAG has ready beads
-curl http://localhost:8080/api/v1/dag/ready
-```
-
-**Issue:** Cycle detected
-```bash
-# View logs for cycle path
-journalctl -u hydra | grep "circular dependency"
-```
-
-## 📝 Configuration Reference
-
-### Overseer Settings
+## 🔧 Configuration Example
 
 ```yaml
+# hydra.yaml
 overseer:
-  poll_interval: 5s          # How often to check for new beads
-  max_workers: 6             # Maximum concurrent workers
-  max_retries: 3             # Max retries for failed beads
-  retry_delay: 10s           # Base delay between retries
-  worker_timeout: 30m        # Max time per worker
-```
+  poll_interval: 5s          # Check for ready beads every 5 seconds
+  max_workers: 10            # Maximum parallel workers
+  max_retries: 2             # Retry failed beads twice
+  worker_timeout: 5m         # Activity-based timeout (5 min inactivity)
+  resource_limits:
+    max_cpu_percent: 70      # Don't spawn if CPU > 70%
+    max_memory_percent: 70   # Don't spawn if Memory > 70%
 
-### Project Discovery
-
-```yaml
 projects:
-  auto_discover: true
-  base_path: ~/source-code
-  # Or specify manually:
-  # list:
-  #   - name: myproject
-  #     path: ~/source-code/myproject
-  #     type: single
+  - name: my-project
+    path: /path/to/project
+    type: single
+
+intelligence:
+  cass_memory:
+    enabled: true
+  tldr:
+    enabled: true
+  gptcache:
+    enabled: true
+
+mcp:
+  enabled: true
+  url: http://127.0.0.1:8765
+  port: 8765
+  heartbeat_interval: 30s
 ```
+
+## 📈 Performance
+
+| Metric | Value |
+|--------|-------|
+| Processing Rate | ~3 beads/minute |
+| Success Rate | 73% (89/122 beads) |
+| Peak Workers | 30 active processes |
+| Resource Usage | Monitored at 70% threshold |
 
 ## 🤝 Contributing
 
 1. Fork the repository
-2. Create a feature branch
-3. Write tests for new functionality
-4. Ensure all tests pass
-5. Submit a pull request
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push to branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+See [Contributing Guide](docs/development/contributing-guide-20260309.md) for details.
 
 ## 📄 License
 
-MIT License - See LICENSE file for details
+MIT License - see [LICENSE](LICENSE) file for details.
 
-## 🔗 Related Projects
+## 🙏 Acknowledgments
 
-- [Beads](https://github.com/haulmatic-dev/beads) - Task management CLI
-- [cass_memory](https://github.com/haulmatic-dev/cass_memory) - Pattern learning system
+- [MCP Agent Mail](https://github.com/Dicklesworthstone/mcp_agent_mail) - Agent coordination protocol
+- [Opencode](https://opencode.ai) - AI-powered CLI for code generation
+- [Beads](https://github.com/haulmatic-dev/beads) - Task management system
 
 ---
 
-**Built with ❤️ by the Haulmatic team**
+**Status**: Production Ready  
+**Last Updated**: March 2026  
+**Maintainers**: Swyftflo
