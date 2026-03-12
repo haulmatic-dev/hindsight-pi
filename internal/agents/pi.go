@@ -18,6 +18,26 @@ import (
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
+// Executor interface abstracts exec operations for testability
+type Executor interface {
+	LookPath(file string) (string, error)
+	Command(name string, arg ...string) *exec.Cmd
+}
+
+// DefaultExecutor implements Executor using the standard exec package
+type DefaultExecutor struct{}
+
+func (e *DefaultExecutor) LookPath(file string) (string, error) {
+	return exec.LookPath(file)
+}
+
+func (e *DefaultExecutor) Command(name string, arg ...string) *exec.Cmd {
+	return exec.Command(name, arg...)
+}
+
+// Cache TTL for installation status and path lookups
+const installationCacheTTL = 5 * time.Minute
+
 // PiConnector implements AgentConnector for Pi coding agent
 // Uses RPC mode (JSON protocol over stdin/stdout) for synchronous operation
 type PiConnector struct {
@@ -28,11 +48,19 @@ type PiConnector struct {
 	apiKeyName    string
 	configDir     string
 	logger        *log.Logger
+	executor      Executor
 
-	// Installation check
-	mu           sync.RWMutex
-	installed    bool
-	installCheck bool
+	// Installation check with TTL-based caching
+	mu               sync.RWMutex
+	installed        bool
+	installCheck     bool
+	installCheckTime time.Time
+
+	// Cached paths to reduce PATH lookups
+	piPath         string
+	npmPath        string
+	pathsCached    bool
+	pathsCacheTime time.Time
 }
 
 // PiConfig contains configuration for Pi connector
@@ -66,6 +94,7 @@ func NewPiConnector(config PiConfig, logger *log.Logger) *PiConnector {
 		apiKeyName:    config.ApiKeyName,
 		configDir:     config.ConfigDir,
 		logger:        logger,
+		executor:      &DefaultExecutor{},
 	}
 }
 
@@ -75,20 +104,6 @@ func (c *PiConnector) Start(ctx context.Context, bead types.Bead, opts AgentOpti
 	// Check if Pi is installed
 	if err := c.ensureInstalled(); err != nil {
 		return nil, fmt.Errorf("pi not available: %w", err)
-	}
-
-	// Build command arguments
-	args := []string{
-		"--mode", "rpc",
-		"--no-session",
-	}
-
-	if c.provider != "" {
-		args = append(args, "--provider", c.provider)
-	}
-
-	if c.model != "" {
-		args = append(args, "--model", c.model)
 	}
 
 	// Create session ID
@@ -620,15 +635,41 @@ func (c *PiConnector) IsHealthy() bool {
 
 // CheckInstallation checks if Pi agent is installed and available in PATH
 // Returns nil if pi is installed, error otherwise
+// escapeForJSON escapes a string for safe inclusion in JSON
+func escapeForJSON(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	s = strings.ReplaceAll(s, "\t", `\t`)
+	return s
+}
+
 func (c *PiConnector) CheckInstallation() error {
 	c.logger.Printf(`{"event": "pi_installation_check", "message": "Checking Pi agent installation...", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))
 
+	// Check cached path first (with TTL)
+	c.mu.RLock()
+	if c.pathsCached && time.Since(c.pathsCacheTime) < installationCacheTTL && c.piPath != "" {
+		c.mu.RUnlock()
+		c.logger.Printf(`{"event": "pi_installation_check", "status": "found", "path": "%s", "cached": true, "timestamp": "%s"}`, c.piPath, time.Now().Format(time.RFC3339))
+		return nil
+	}
+	c.mu.RUnlock()
+
 	// Check if pi command exists
-	piPath, err := exec.LookPath("pi")
+	piPath, err := c.executor.LookPath("pi")
 	if err != nil {
 		c.logger.Printf(`{"event": "pi_installation_check", "status": "not_found", "error": "%s", "timestamp": "%s"}`, err.Error(), time.Now().Format(time.RFC3339))
 		return fmt.Errorf("pi command not found in PATH: %w", err)
 	}
+
+	// Cache the path
+	c.mu.Lock()
+	c.piPath = piPath
+	c.pathsCached = true
+	c.pathsCacheTime = time.Now()
+	c.mu.Unlock()
 
 	c.logger.Printf(`{"event": "pi_installation_check", "status": "found", "path": "%s", "timestamp": "%s"}`, piPath, time.Now().Format(time.RFC3339))
 	return nil
@@ -636,29 +677,51 @@ func (c *PiConnector) CheckInstallation() error {
 
 // Install installs Pi agent via npm globally
 // Returns error if npm is not available or installation fails
+// Uses cached npm path when available to reduce PATH lookups
 func (c *PiConnector) Install() error {
 	c.logger.Printf(`{"event": "pi_installation_start", "message": "Installing Pi agent via npm...", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))
 
-	// Check if npm is available
-	npmPath, err := exec.LookPath("npm")
-	if err != nil {
-		c.logger.Printf(`{"event": "pi_installation_error", "error": "npm not found in PATH", "details": "%s", "timestamp": "%s"}`, err.Error(), time.Now().Format(time.RFC3339))
-		return fmt.Errorf("npm not found in PATH, cannot install pi. Please install Node.js and npm first: %w", err)
+	// Check cached npm path first (with TTL)
+	var npmPath string
+	var err error
+
+	c.mu.RLock()
+	if c.pathsCached && time.Since(c.pathsCacheTime) < installationCacheTTL && c.npmPath != "" {
+		npmPath = c.npmPath
+		c.mu.RUnlock()
+		c.logger.Printf(`{"event": "pi_installation_step", "step": "npm_check", "status": "success", "npm_path": "%s", "cached": true, "timestamp": "%s"}`, npmPath, time.Now().Format(time.RFC3339))
+	} else {
+		c.mu.RUnlock()
+
+		// Check if npm is available
+		npmPath, err = c.executor.LookPath("npm")
+		if err != nil {
+			c.logger.Printf(`{"event": "pi_installation_error", "error": "npm not found in PATH", "details": "%s", "timestamp": "%s"}`, err.Error(), time.Now().Format(time.RFC3339))
+			return fmt.Errorf("npm not found in PATH, cannot install pi. Please install Node.js and npm first: %w", err)
+		}
+
+		// Cache the npm path
+		c.mu.Lock()
+		c.npmPath = npmPath
+		c.pathsCached = true
+		c.pathsCacheTime = time.Now()
+		c.mu.Unlock()
+
+		c.logger.Printf(`{"event": "pi_installation_step", "step": "npm_check", "status": "success", "npm_path": "%s", "timestamp": "%s"}`, npmPath, time.Now().Format(time.RFC3339))
 	}
-	c.logger.Printf(`{"event": "pi_installation_step", "step": "npm_check", "status": "success", "npm_path": "%s", "timestamp": "%s"}`, npmPath, time.Now().Format(time.RFC3339))
 
 	// Install Pi globally
 	c.logger.Printf(`{"event": "pi_installation_step", "step": "npm_install", "message": "Running npm install -g @mariozechner/pi-coding-agent", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))
-	cmd := exec.Command("npm", "install", "-g", "@mariozechner/pi-coding-agent")
+	cmd := c.executor.Command("npm", "install", "-g", "@mariozechner/pi-coding-agent")
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {
-		outputStr := strings.ReplaceAll(string(output), `"`, `\"`)
+		outputStr := escapeForJSON(string(output))
 		c.logger.Printf(`{"event": "pi_installation_error", "error": "%s", "npm_output": "%s", "timestamp": "%s"}`, err.Error(), outputStr, time.Now().Format(time.RFC3339))
 		return fmt.Errorf("npm install failed: %w\nOutput: %s", err, string(output))
 	}
 
-	outputStr := strings.ReplaceAll(string(output), `"`, `\"`)
+	outputStr := escapeForJSON(string(output))
 	c.logger.Printf(`{"event": "pi_installation_step", "step": "npm_install", "status": "success", "npm_output": "%s", "timestamp": "%s"}`, outputStr, time.Now().Format(time.RFC3339))
 
 	// Verify installation
@@ -674,9 +737,11 @@ func (c *PiConnector) Install() error {
 
 // ensureInstalled checks if Pi is installed, attempts installation if not
 // This is the internal method used by Start() and IsHealthy()
+// Uses TTL-based caching for performance: cached results return in <1ms
 func (c *PiConnector) ensureInstalled() error {
 	c.mu.RLock()
-	if c.installCheck {
+	// Check cached installation status with TTL
+	if c.installCheck && time.Since(c.installCheckTime) < installationCacheTTL {
 		installed := c.installed
 		c.mu.RUnlock()
 		if installed {
@@ -690,7 +755,7 @@ func (c *PiConnector) ensureInstalled() error {
 	defer c.mu.Unlock()
 
 	// Double-check after acquiring lock
-	if c.installCheck {
+	if c.installCheck && time.Since(c.installCheckTime) < installationCacheTTL {
 		if c.installed {
 			return nil
 		}
@@ -698,17 +763,28 @@ func (c *PiConnector) ensureInstalled() error {
 	}
 
 	c.installCheck = true
+	c.installCheckTime = time.Now()
 
-	// Check if pi command exists
-	if err := c.CheckInstallation(); err == nil {
+	// Check if pi command exists using internal check to avoid lock reentrancy
+	// Note: We hold the write lock, so we can't call CheckInstallation() which acquires its own locks
+	piPath, lookErr := c.executor.LookPath("pi")
+	if lookErr == nil {
+		// Pi is installed - cache the path
+		c.piPath = piPath
+		c.pathsCached = true
+		c.pathsCacheTime = time.Now()
 		c.installed = true
 		return nil
 	}
 
-	// Try to install Pi
-	if err := c.Install(); err != nil {
+	// Pi not found - try to install (release lock during install to avoid deadlock)
+	c.mu.Unlock()
+	installErr := c.Install()
+	c.mu.Lock()
+
+	if installErr != nil {
 		c.installed = false
-		return err
+		return installErr
 	}
 
 	c.installed = true

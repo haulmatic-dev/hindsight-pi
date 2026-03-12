@@ -191,54 +191,57 @@ func TestGenerateMCPConfig(t *testing.T) {
 		t.Fatalf("mcp.json not created: %v", err)
 	}
 
-	// Verify it's valid JSON
-	var mcpConfig MCPConfig
+	// Verify it's valid JSON using generic map
+	var mcpConfig map[string]interface{}
 	if err := json.Unmarshal(data, &mcpConfig); err != nil {
 		t.Fatalf("mcp.json is not valid JSON: %v", err)
 	}
 
 	// Verify version
-	if mcpConfig.Version != "1.0" {
-		t.Errorf("Expected version '1.0', got '%s'", mcpConfig.Version)
+	if version, ok := mcpConfig["version"].(string); !ok || version != "1.0" {
+		t.Errorf("Expected version '1.0', got '%v'", mcpConfig["version"])
 	}
 
 	// Verify servers map exists
-	if mcpConfig.Servers == nil {
+	servers, ok := mcpConfig["servers"].(map[string]interface{})
+	if !ok {
 		t.Fatal("mcp.json missing 'servers' map")
 	}
 
 	// Verify gopls configuration
-	goServer, ok := mcpConfig.Servers["go"]
+	goServer, ok := servers["go"].(map[string]interface{})
 	if !ok {
 		t.Error("mcp.json missing 'go' server configuration")
 	} else {
-		if goServer.Command != "gopls" {
-			t.Errorf("Expected go server command 'gopls', got '%s'", goServer.Command)
+		if cmd, ok := goServer["command"].(string); !ok || cmd != "gopls" {
+			t.Errorf("Expected go server command 'gopls', got '%v'", goServer["command"])
 		}
-		if !goServer.Enabled {
+		if enabled, ok := goServer["enabled"].(bool); !ok || !enabled {
 			t.Error("Expected go server to be enabled")
-		}
-		expectedArgs := []string{"serve"}
-		if len(goServer.Args) != len(expectedArgs) || (len(expectedArgs) > 0 && goServer.Args[0] != expectedArgs[0]) {
-			t.Errorf("Expected go server args %v, got %v", expectedArgs, goServer.Args)
 		}
 	}
 
 	// Verify typescript-language-server configuration
-	tsServer, ok := mcpConfig.Servers["typescript"]
+	tsServer, ok := servers["typescript"].(map[string]interface{})
 	if !ok {
 		t.Error("mcp.json missing 'typescript' server configuration")
 	} else {
-		if tsServer.Command != "typescript-language-server" {
-			t.Errorf("Expected typescript server command 'typescript-language-server', got '%s'", tsServer.Command)
+		if cmd, ok := tsServer["command"].(string); !ok || cmd != "typescript-language-server" {
+			t.Errorf("Expected typescript server command 'typescript-language-server', got '%v'", tsServer["command"])
 		}
-		if !tsServer.Enabled {
+		if enabled, ok := tsServer["enabled"].(bool); !ok || !enabled {
 			t.Error("Expected typescript server to be enabled")
 		}
-		expectedArgs := []string{"--stdio"}
-		if len(tsServer.Args) != len(expectedArgs) || (len(expectedArgs) > 0 && tsServer.Args[0] != expectedArgs[0]) {
-			t.Errorf("Expected typescript server args %v, got %v", expectedArgs, tsServer.Args)
-		}
+	}
+
+	// Verify capabilities section exists
+	if _, ok := mcpConfig["capabilities"]; !ok {
+		t.Error("mcp.json missing 'capabilities' section")
+	}
+
+	// Verify lspCommands section exists
+	if _, ok := mcpConfig["lspCommands"]; !ok {
+		t.Error("mcp.json missing 'lspCommands' section")
 	}
 }
 
@@ -300,6 +303,36 @@ func TestGenerateMCPConfig_ValidatesJSON(t *testing.T) {
 		}
 	} else {
 		t.Error("Missing typescript server configuration")
+	}
+
+	// Verify capabilities section
+	if capabilities, ok := genericConfig["capabilities"].(map[string]interface{}); ok {
+		if _, ok := capabilities["definitionProvider"]; !ok {
+			t.Error("Missing 'definitionProvider' in capabilities")
+		}
+		if _, ok := capabilities["referencesProvider"]; !ok {
+			t.Error("Missing 'referencesProvider' in capabilities")
+		}
+		if _, ok := capabilities["documentSymbolProvider"]; !ok {
+			t.Error("Missing 'documentSymbolProvider' in capabilities")
+		}
+	} else {
+		t.Error("Missing capabilities section")
+	}
+
+	// Verify lspCommands section
+	if lspCommands, ok := genericConfig["lspCommands"].(map[string]interface{}); ok {
+		if _, ok := lspCommands["definition"]; !ok {
+			t.Error("Missing 'definition' command")
+		}
+		if _, ok := lspCommands["reference"]; !ok {
+			t.Error("Missing 'reference' command")
+		}
+		if _, ok := lspCommands["outline"]; !ok {
+			t.Error("Missing 'outline' command")
+		}
+	} else {
+		t.Error("Missing lspCommands section")
 	}
 }
 

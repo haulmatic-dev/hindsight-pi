@@ -4,6 +4,7 @@ package pi
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -174,19 +175,69 @@ func (cm *ConfigManager) GetTrackingFilePath() string {
 // It generates a configuration including gopls and typescript-language-server configurations,
 // validates the JSON syntax before writing, and saves it to the agent directory.
 func (cm *ConfigManager) GenerateMCPConfig() error {
-	// Create the MCP configuration structure
-	config := MCPConfig{
-		Version: "1.0",
-		Servers: map[string]MCPServerConfig{
-			"go": {
-				Command: "gopls",
-				Args:    []string{"serve"},
-				Enabled: true,
+	// Create the MCP configuration structure with enhanced LSP capabilities
+	config := map[string]interface{}{
+		"version": "1.0",
+		"servers": map[string]interface{}{
+			"go": map[string]interface{}{
+				"command": "gopls",
+				"args":    []string{"serve", "-rpc.trace"},
+				"enabled": true,
+				"rootUri": "file://${workspaceFolder}",
+				"settings": map[string]interface{}{
+					"gopls": map[string]interface{}{
+						"formatting.gofumpt": false,
+						"ui.diagnostic.annotations": map[string]bool{
+							"bounds": true,
+							"escape": true,
+							"inline": true,
+							"nil":    true,
+						},
+					},
+				},
 			},
-			"typescript": {
-				Command: "typescript-language-server",
-				Args:    []string{"--stdio"},
-				Enabled: true,
+			"typescript": map[string]interface{}{
+				"command": "typescript-language-server",
+				"args":    []string{"--stdio"},
+				"enabled": true,
+				"rootUri": "file://${workspaceFolder}",
+				"settings": map[string]interface{}{
+					"typescript": map[string]interface{}{
+						"format.enable":                 true,
+						"suggest.completeFunctionCalls": true,
+					},
+				},
+			},
+		},
+		"capabilities": map[string]interface{}{
+			"textDocumentSync": 1,
+			"hoverProvider":    true,
+			"definitionProvider": map[string]bool{
+				"enabled": true,
+			},
+			"referencesProvider": map[string]bool{
+				"enabled": true,
+			},
+			"documentSymbolProvider": map[string]bool{
+				"enabled": true,
+			},
+			"completionProvider": map[string]interface{}{
+				"triggerCharacters": []string{".", ":", ">"},
+				"resolveProvider":   true,
+			},
+		},
+		"lspCommands": map[string]interface{}{
+			"definition": map[string]string{
+				"description": "Get definition location for symbol at position",
+				"usage":       "lsp definition <file> <line>:<column>",
+			},
+			"reference": map[string]string{
+				"description": "Find all references to symbol at position",
+				"usage":       "lsp reference <file> <line>:<column>",
+			},
+			"outline": map[string]string{
+				"description": "Get document outline (symbols)",
+				"usage":       "lsp outline <file>",
 			},
 		},
 	}
@@ -213,5 +264,6 @@ func (cm *ConfigManager) GenerateMCPConfig() error {
 		return fmt.Errorf("failed to write mcp.json: %w", err)
 	}
 
+	log.Printf("[MCP] Generated mcp.json at %s", cm.mcpConfig)
 	return nil
 }

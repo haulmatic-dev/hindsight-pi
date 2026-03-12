@@ -5,12 +5,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func createTestSkills(t *testing.T, tempDir string) {
+func createTestSkills(t testing.TB, tempDir string) {
 	skillsDir := filepath.Join(tempDir, "skills")
 	require.NoError(t, os.MkdirAll(skillsDir, 0755))
 
@@ -242,6 +243,9 @@ func TestBuildSkillFlags_Consistency(t *testing.T) {
 	// Create test skill directories
 	createTestSkills(t, tempDir)
 
+	// Reset cache to ensure clean state
+	ResetSkillFlagsCache()
+
 	// Call BuildSkillFlags multiple times
 	result1, err := BuildSkillFlags(tempDir)
 	require.NoError(t, err)
@@ -253,4 +257,139 @@ func TestBuildSkillFlags_Consistency(t *testing.T) {
 	assert.Equal(t, result1.Flags, result2.Flags, "Multiple calls should return identical flags")
 	assert.Equal(t, result1.Missing, result2.Missing, "Multiple calls should return identical missing skills")
 	assert.Equal(t, result1.Found, result2.Found, "Multiple calls should return identical found skills")
+}
+
+// TestSkillFlagsCaching verifies that caching works correctly
+func TestSkillFlagsCaching(t *testing.T) {
+	tempDir := t.TempDir()
+	createTestSkills(t, tempDir)
+
+	// Reset cache
+	ResetSkillFlagsCache()
+
+	// First call - cache miss
+	result1, err := BuildSkillFlags(tempDir)
+	require.NoError(t, err)
+
+	hits, misses, _ := GetSkillFlagsCacheStats()
+	assert.Equal(t, int64(0), hits, "First call should be a cache miss")
+	assert.Equal(t, int64(1), misses, "First call should increment misses")
+
+	// Second call - cache hit
+	result2, err := BuildSkillFlags(tempDir)
+	require.NoError(t, err)
+
+	hits, misses, _ = GetSkillFlagsCacheStats()
+	assert.Equal(t, int64(1), hits, "Second call should be a cache hit")
+	assert.Equal(t, int64(1), misses, "Misses should not increment")
+
+	// Results should be identical
+	assert.Equal(t, result1.Flags, result2.Flags)
+	assert.Equal(t, result1.Found, result2.Found)
+	assert.Equal(t, result1.Missing, result2.Missing)
+}
+
+// TestSkillFlagsCacheTTL verifies that cache entries expire after TTL
+func TestSkillFlagsCacheTTL(t *testing.T) {
+	tempDir := t.TempDir()
+	createTestSkills(t, tempDir)
+
+	// Save original TTL
+	originalTTL := skillFlagsCacheTTL
+	defer func() {
+		skillFlagsCacheTTL = originalTTL
+	}()
+
+	// Set very short TTL for testing
+	skillFlagsCacheTTL = 50 * time.Millisecond
+
+	// Reset cache
+	ResetSkillFlagsCache()
+
+	// First call
+	_, err := BuildSkillFlags(tempDir)
+	require.NoError(t, err)
+
+	hits1, misses1, _ := GetSkillFlagsCacheStats()
+	assert.Equal(t, int64(0), hits1)
+	assert.Equal(t, int64(1), misses1)
+
+	// Second call immediately - should hit cache
+	_, err = BuildSkillFlags(tempDir)
+	require.NoError(t, err)
+
+	hits2, misses2, _ := GetSkillFlagsCacheStats()
+	assert.Equal(t, int64(1), hits2)
+	assert.Equal(t, int64(1), misses2)
+
+	// Wait for TTL to expire
+	time.Sleep(100 * time.Millisecond)
+
+	// Third call - cache should be expired
+	_, err = BuildSkillFlags(tempDir)
+	require.NoError(t, err)
+
+	hits3, misses3, _ := GetSkillFlagsCacheStats()
+	assert.Equal(t, int64(1), hits3)
+	assert.Equal(t, int64(2), misses3)
+}
+
+// BenchmarkBuildSkillFlags_Cached benchmarks cached performance
+func BenchmarkBuildSkillFlags_Cached(b *testing.B) {
+	tempDir := b.TempDir()
+	createTestSkills(b, tempDir)
+
+	// Reset cache
+	ResetSkillFlagsCache()
+
+	// Warm up cache
+	_, err := BuildSkillFlags(tempDir)
+	require.NoError(b, err)
+
+	// Verify cache hit
+	hits, misses, _ := GetSkillFlagsCacheStats()
+	require.Equal(b, int64(0), hits, "Cache should be cold")
+	require.Equal(b, int64(1), misses, "Should have 1 miss after warm-up")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = BuildSkillFlags(tempDir)
+	}
+
+	// Verify all calls were cache hits
+	hits, _, _ = GetSkillFlagsCacheStats()
+	require.Equal(b, int64(b.N), hits, "All benchmark calls should be cache hits")
+}
+
+// BenchmarkBuildSkillFlags_Uncached benchmarks uncached performance
+func BenchmarkBuildSkillFlags_Uncached(b *testing.B) {
+	tempDir := b.TempDir()
+	createTestSkills(b, tempDir)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Reset cache each iteration to force uncached builds
+		ResetSkillFlagsCache()
+		_, _ = BuildSkillFlags(tempDir)
+	}
+}
+
+// BenchmarkBuildSkillFlags_Concurrent benchmarks concurrent access
+func BenchmarkBuildSkillFlags_Concurrent(b *testing.B) {
+	tempDir := b.TempDir()
+	createTestSkills(b, tempDir)
+
+	// Reset cache
+	ResetSkillFlagsCache()
+
+	// Warm up cache
+	_, err := BuildSkillFlags(tempDir)
+	require.NoError(b, err)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, _ = BuildSkillFlags(tempDir)
+		}
+	})
 }

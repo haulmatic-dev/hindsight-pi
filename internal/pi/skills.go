@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"sync"
 	"time"
 )
 
@@ -47,6 +49,42 @@ type SkillVerificationResult struct {
 	Status string `json:"status"`
 }
 
+// skillFlagsCacheEntry represents a cached skill flags result
+type skillFlagsCacheEntry struct {
+	result    *SkillFlagsResult
+	timestamp time.Time
+	configDir string
+}
+
+// skillFlagsCache provides thread-safe caching of skill flags with TTL
+var (
+	skillFlagsCache     = make(map[string]*skillFlagsCacheEntry)
+	skillFlagsCacheMu   sync.RWMutex
+	skillFlagsCacheTTL  = 1 * time.Minute
+	skillFlagsCacheHits int64
+	skillFlagsCacheMiss int64
+)
+
+// GetSkillFlagsCacheStats returns cache statistics for monitoring
+func GetSkillFlagsCacheStats() (hits, misses int64, hitRate float64) {
+	skillFlagsCacheMu.RLock()
+	defer skillFlagsCacheMu.RUnlock()
+	total := skillFlagsCacheHits + skillFlagsCacheMiss
+	if total > 0 {
+		hitRate = float64(skillFlagsCacheHits) / float64(total) * 100
+	}
+	return skillFlagsCacheHits, skillFlagsCacheMiss, hitRate
+}
+
+// ResetSkillFlagsCache clears the cache and resets stats (useful for testing)
+func ResetSkillFlagsCache() {
+	skillFlagsCacheMu.Lock()
+	defer skillFlagsCacheMu.Unlock()
+	skillFlagsCache = make(map[string]*skillFlagsCacheEntry)
+	skillFlagsCacheHits = 0
+	skillFlagsCacheMiss = 0
+}
+
 // SkillsVerificationTracking represents the updated tracking file structure
 type SkillsVerificationTracking struct {
 	LastUpdated time.Time                 `json:"last_updated"`
@@ -54,8 +92,8 @@ type SkillsVerificationTracking struct {
 	Skills      []SkillVerificationResult `json:"skills"`
 }
 
-// CheckAndInstallSkills installs all required skills if not already installed
-// Part 1: Install skills
+// CheckAndInstallSkills installs all required skills if not already installed (parallel version)
+// Part 1: Install skills concurrently
 // Part 2: Verify installation and update tracking (via VerifySkillInstallation)
 func (sm *SetupManager) CheckAndInstallSkills() error {
 	if sm.AreSkillsInstalled() {
@@ -66,19 +104,49 @@ func (sm *SetupManager) CheckAndInstallSkills() error {
 
 	log.Printf("[PiSetup] Installing %d skills...", len(DefaultSkills))
 
+	// Concurrent installation with semaphore to limit parallelism
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, 4) // Max 4 concurrent installations
+
+	installedChan := make(chan string, len(DefaultSkills))
+	failedChan := make(chan string, len(DefaultSkills))
+
+	for _, skill := range DefaultSkills {
+		wg.Add(1)
+		go func(s Skill) {
+			defer wg.Done()
+
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			log.Printf("[PiSetup] Installing skill: %s (%s)...", s.Name, s.Repo)
+
+			if err := sm.installSkill(s); err != nil {
+				log.Printf("[PiSetup] ❌ Failed to install skill %s: %v", s.Name, err)
+				failedChan <- s.Name
+			} else {
+				log.Printf("[PiSetup] ✅ Skill %s installed successfully", s.Name)
+				installedChan <- s.Name
+			}
+		}(skill)
+	}
+
+	// Close channels when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(installedChan)
+		close(failedChan)
+	}()
+
+	// Collect results
 	var installedSkills []string
 	var failedSkills []string
 
-	for _, skill := range DefaultSkills {
-		log.Printf("[PiSetup] Installing skill: %s (%s)...", skill.Name, skill.Repo)
-
-		if err := sm.installSkill(skill); err != nil {
-			log.Printf("[PiSetup] ❌ Failed to install skill %s: %v", skill.Name, err)
-			failedSkills = append(failedSkills, skill.Name)
-		} else {
-			log.Printf("[PiSetup] ✅ Skill %s installed successfully", skill.Name)
-			installedSkills = append(installedSkills, skill.Name)
-		}
+	for name := range installedChan {
+		installedSkills = append(installedSkills, name)
+	}
+	for name := range failedChan {
+		failedSkills = append(failedSkills, name)
 	}
 
 	// Create tracking file even if some skills failed (backward compatibility)
@@ -244,7 +312,7 @@ func ListDefaultSkills() []Skill {
 	return DefaultSkills
 }
 
-// VerifySkills checks if all skills are properly installed and have SKILL.md files
+// VerifySkills checks if all skills are properly installed and have SKILL.md files (parallel version)
 // Returns verification results and any error encountered
 func (sm *SetupManager) VerifySkills() (*SkillsVerificationTracking, error) {
 	log.Println("[PiSetup] Verifying skill installations...")
@@ -255,36 +323,57 @@ func (sm *SetupManager) VerifySkills() (*SkillsVerificationTracking, error) {
 		Skills:      make([]SkillVerificationResult, 0, len(DefaultSkills)),
 	}
 
-	verifiedCount := 0
+	var wg sync.WaitGroup
+	resultChan := make(chan SkillVerificationResult, len(DefaultSkills))
+
 	for _, skill := range DefaultSkills {
-		skillPath := filepath.Join(skillsDir, skill.Name)
-		skillMDPath := filepath.Join(skillPath, "SKILL.md")
+		wg.Add(1)
+		go func(s Skill) {
+			defer wg.Done()
 
-		result := SkillVerificationResult{
-			Name:   skill.Name,
-			Status: "missing",
-		}
+			skillPath := filepath.Join(skillsDir, s.Name)
+			skillMDPath := filepath.Join(skillPath, "SKILL.md")
 
-		// Check if skill directory exists
-		if _, err := os.Stat(skillPath); os.IsNotExist(err) {
-			log.Printf("[PiSetup] ❌ Skill %s: directory not found", skill.Name)
-		} else if err != nil {
-			log.Printf("[PiSetup] ❌ Skill %s: error checking directory: %v", skill.Name, err)
-		} else {
-			// Check if SKILL.md exists
-			if _, err := os.Stat(skillMDPath); os.IsNotExist(err) {
-				log.Printf("[PiSetup] ⚠️ Skill %s: directory exists but SKILL.md not found", skill.Name)
-				result.Status = "incomplete"
-			} else if err != nil {
-				log.Printf("[PiSetup] ❌ Skill %s: error checking SKILL.md: %v", skill.Name, err)
-				result.Status = "error"
-			} else {
-				result.Status = "verified"
-				verifiedCount++
-				log.Printf("[PiSetup] ✅ Skill %s: verified", skill.Name)
+			result := SkillVerificationResult{
+				Name:   s.Name,
+				Status: "missing",
 			}
-		}
 
+			// Check if skill directory exists
+			if _, err := os.Stat(skillPath); os.IsNotExist(err) {
+				log.Printf("[PiSetup] ❌ Skill %s: directory not found", s.Name)
+			} else if err != nil {
+				log.Printf("[PiSetup] ❌ Skill %s: error checking directory: %v", s.Name, err)
+			} else {
+				// Check if SKILL.md exists
+				if _, err := os.Stat(skillMDPath); os.IsNotExist(err) {
+					log.Printf("[PiSetup] ⚠️ Skill %s: directory exists but SKILL.md not found", s.Name)
+					result.Status = "incomplete"
+				} else if err != nil {
+					log.Printf("[PiSetup] ❌ Skill %s: error checking SKILL.md: %v", s.Name, err)
+					result.Status = "error"
+				} else {
+					result.Status = "verified"
+					log.Printf("[PiSetup] ✅ Skill %s: verified", s.Name)
+				}
+			}
+
+			resultChan <- result
+		}(skill)
+	}
+
+	// Close channel when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results
+	verifiedCount := 0
+	for result := range resultChan {
+		if result.Status == "verified" {
+			verifiedCount++
+		}
 		results.Skills = append(results.Skills, result)
 	}
 
@@ -383,17 +472,59 @@ func BuildSkillFlags(configDir string) (*SkillFlagsResult, error) {
 
 // BuildSkillFlagsWithOptions builds skill flags with configurable options
 // failOnMissing: if true, returns an error if any skill directories are missing
+// Uses caching to avoid repeated filesystem operations
 func BuildSkillFlagsWithOptions(configDir string, failOnMissing bool) (*SkillFlagsResult, error) {
-	// Ensure configDir is absolute
+	// Ensure configDir is absolute for consistent cache keys
 	absConfigDir, err := filepath.Abs(configDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve absolute path for config dir: %w", err)
 	}
 
+	// Create cache key based on config directory and failOnMissing flag
+	cacheKey := fmt.Sprintf("%s:%v", absConfigDir, failOnMissing)
+
+	// Check cache first
+	skillFlagsCacheMu.RLock()
+	if entry, ok := skillFlagsCache[cacheKey]; ok {
+		// Check if cache entry is still valid
+		if time.Since(entry.timestamp) < skillFlagsCacheTTL {
+			skillFlagsCacheMu.RUnlock()
+			skillFlagsCacheMu.Lock()
+			skillFlagsCacheHits++
+			skillFlagsCacheMu.Unlock()
+			log.Printf("[BuildSkillFlags] Cache hit for %s (%d hits, %d misses)",
+				absConfigDir, skillFlagsCacheHits, skillFlagsCacheMiss)
+			return entry.result, nil
+		}
+	}
+	skillFlagsCacheMu.RUnlock()
+
+	// Cache miss - build skill flags
+	skillFlagsCacheMu.Lock()
+	skillFlagsCacheMiss++
+	skillFlagsCacheMu.Unlock()
+
+	result, err := buildSkillFlagsUncached(absConfigDir, failOnMissing)
+	// Only cache successful results to avoid caching error states
+	if err == nil {
+		skillFlagsCacheMu.Lock()
+		skillFlagsCache[cacheKey] = &skillFlagsCacheEntry{
+			result:    result,
+			timestamp: time.Now(),
+			configDir: absConfigDir,
+		}
+		skillFlagsCacheMu.Unlock()
+	}
+
+	return result, err
+}
+
+// buildSkillFlagsUncached performs the actual skill flag building without caching
+func buildSkillFlagsUncached(absConfigDir string, failOnMissing bool) (*SkillFlagsResult, error) {
 	result := &SkillFlagsResult{
-		Flags:         make([]string, 0),
+		Flags:         make([]string, 0, len(DefaultSkills)*2),
 		Warnings:      make([]string, 0),
-		Found:         make([]string, 0),
+		Found:         make([]string, 0, len(DefaultSkills)),
 		Missing:       make([]string, 0),
 		FailOnMissing: failOnMissing,
 	}
@@ -403,51 +534,100 @@ func BuildSkillFlagsWithOptions(configDir string, failOnMissing bool) (*SkillFla
 	// Sort skills alphabetically by name for reproducibility
 	sortedSkills := make([]Skill, len(DefaultSkills))
 	copy(sortedSkills, DefaultSkills)
+	sort.Slice(sortedSkills, func(i, j int) bool {
+		return sortedSkills[i].Name < sortedSkills[j].Name
+	})
 
-	// Simple bubble sort for alphabetical ordering
-	for i := 0; i < len(sortedSkills); i++ {
-		for j := i + 1; j < len(sortedSkills); j++ {
-			if sortedSkills[i].Name > sortedSkills[j].Name {
-				sortedSkills[i], sortedSkills[j] = sortedSkills[j], sortedSkills[i]
+	// Process skills concurrently for faster checking
+	var wg sync.WaitGroup
+	type skillCheck struct {
+		skill  Skill
+		exists bool
+		valid  bool
+	}
+	checkChan := make(chan skillCheck, len(sortedSkills))
+
+	for _, skill := range sortedSkills {
+		wg.Add(1)
+		go func(s Skill) {
+			defer wg.Done()
+
+			skillPath := filepath.Join(skillsDir, s.Name)
+			skillMDPath := filepath.Join(skillPath, "SKILL.md")
+
+			check := skillCheck{skill: s}
+
+			// Check if skill directory exists
+			if _, err := os.Stat(skillPath); os.IsNotExist(err) {
+				check.exists = false
+			} else if err != nil {
+				check.exists = false
+			} else {
+				check.exists = true
+				// Check if SKILL.md exists
+				if _, err := os.Stat(skillMDPath); err == nil {
+					check.valid = true
+				}
 			}
+
+			checkChan <- check
+		}(skill)
+	}
+
+	// Close channel when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(checkChan)
+	}()
+
+	// Collect results into a map for deterministic ordering
+	type skillResult struct {
+		skillPath string
+		exists    bool
+		valid     bool
+	}
+	results := make(map[string]skillResult, len(sortedSkills))
+
+	for check := range checkChan {
+		skillPath := filepath.Join(skillsDir, check.skill.Name)
+		results[check.skill.Name] = skillResult{
+			skillPath: skillPath,
+			exists:    check.exists,
+			valid:     check.valid,
 		}
 	}
 
-	for _, skill := range sortedSkills {
-		skillPath := filepath.Join(skillsDir, skill.Name)
-		skillMDPath := filepath.Join(skillPath, "SKILL.md")
+	// Process results in alphabetical order for reproducibility
+	sortedNames := make([]string, 0, len(results))
+	for name := range results {
+		sortedNames = append(sortedNames, name)
+	}
+	sort.Strings(sortedNames)
 
-		// Check if skill directory exists
-		if _, err := os.Stat(skillPath); os.IsNotExist(err) {
-			warning := fmt.Sprintf("Skill directory not found: %s", skill.Name)
+	for _, name := range sortedNames {
+		sr := results[name]
+		skillPath := sr.skillPath
+
+		if !sr.exists {
+			warning := fmt.Sprintf("Skill directory not found: %s", name)
 			result.Warnings = append(result.Warnings, warning)
-			result.Missing = append(result.Missing, skill.Name)
+			result.Missing = append(result.Missing, name)
 			log.Printf("[BuildSkillFlags] ⚠️ %s (expected at: %s)", warning, skillPath)
-			continue
-		} else if err != nil {
-			warning := fmt.Sprintf("Error checking skill directory %s: %v", skill.Name, err)
-			result.Warnings = append(result.Warnings, warning)
-			result.Missing = append(result.Missing, skill.Name)
-			log.Printf("[BuildSkillFlags] ⚠️ %s", warning)
 			continue
 		}
 
 		// Check if SKILL.md exists (directory exists but might be incomplete)
-		if _, err := os.Stat(skillMDPath); os.IsNotExist(err) {
-			warning := fmt.Sprintf("Skill %s directory exists but SKILL.md is missing", skill.Name)
+		if !sr.valid {
+			warning := fmt.Sprintf("Skill %s directory exists but SKILL.md is missing", name)
 			result.Warnings = append(result.Warnings, warning)
-			// Still add the flag since directory exists, but mark as incomplete
-			log.Printf("[BuildSkillFlags] ⚠️ %s (at: %s)", warning, skillPath)
-		} else if err != nil {
-			warning := fmt.Sprintf("Error checking SKILL.md for skill %s: %v", skill.Name, err)
-			result.Warnings = append(result.Warnings, warning)
-			log.Printf("[BuildSkillFlags] ⚠️ %s", warning)
+			skillMDPath := filepath.Join(skillPath, "SKILL.md")
+			log.Printf("[BuildSkillFlags] ⚠️ %s (at: %s)", warning, skillMDPath)
 		}
 
 		// Add the skill flag
 		result.Flags = append(result.Flags, "--skill", skillPath)
-		result.Found = append(result.Found, skill.Name)
-		log.Printf("[BuildSkillFlags] ✅ Added skill flag: %s", skill.Name)
+		result.Found = append(result.Found, name)
+		log.Printf("[BuildSkillFlags] ✅ Added skill flag: %s", name)
 	}
 
 	// Log summary

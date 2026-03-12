@@ -1063,3 +1063,139 @@ func TestOverseer_SessionCompletedTracking(t *testing.T) {
 		}
 	}
 }
+
+// ============================================================================
+// US-002 Overseer Integration Tests: Daily Skill Updates
+// ============================================================================
+// These tests verify that the overseer properly initializes and manages
+// the skill updater for US-002 Daily Skill Updates feature.
+
+// TestUS002_Overseer_InitializeSkillUpdater_AutoEnabled verifies that the
+// overseer initializes the skill updater when auto-update is enabled
+func TestUS002_Overseer_InitializeSkillUpdater_AutoEnabled(t *testing.T) {
+	// Create config with auto-update enabled
+	config := &Config{
+		Pi: PiRootConfig{
+			ConfigDir: "./test-pi-config",
+			Skills: PiSkillsConfig{
+				AutoUpdate:     true,
+				UpdateInterval: "24h",
+			},
+		},
+		Overseer: OverseerConfig{
+			MaxWorkers:            4,
+			BeadDiscoveryInterval: 1 * time.Second,
+		},
+	}
+
+	// Create overseer with skill updater enabled
+	overseer := NewOverseer(config)
+
+	// Verify skill updater was initialized
+	if overseer.skillUpdater == nil {
+		t.Fatal("Skill updater should be initialized when AutoUpdate is enabled")
+	}
+
+	// Verify interval was set correctly
+	if overseer.skillUpdater.GetUpdateInterval() != 24*time.Hour {
+		t.Errorf("Skill updater interval = %v, want %v", overseer.skillUpdater.GetUpdateInterval(), 24*time.Hour)
+	}
+}
+
+// TestUS002_Overseer_NoSkillUpdater_WhenAutoDisabled verifies that the
+// overseer does NOT initialize skill updater when auto-update is disabled
+func TestUS002_Overseer_NoSkillUpdater_WhenAutoDisabled(t *testing.T) {
+	config := &Config{
+		Pi: PiRootConfig{
+			ConfigDir: "./test-pi-config",
+			Skills: PiSkillsConfig{
+				AutoUpdate:     false, // Disabled
+				UpdateInterval: "24h",
+			},
+		},
+		Overseer: OverseerConfig{
+			MaxWorkers:            4,
+			BeadDiscoveryInterval: 1 * time.Second,
+		},
+	}
+
+	// Create overseer with skill updater disabled
+	overseer := NewOverseer(config)
+
+	// Verify skill updater was NOT initialized
+	if overseer.skillUpdater != nil {
+		t.Error("Skill updater should NOT be initialized when AutoUpdate is disabled")
+	}
+}
+
+// TestUS002_Overseer_DefaultInterval verifies that a default interval
+// of 24h is used when update_interval is not specified
+func TestUS002_Overseer_DefaultInterval(t *testing.T) {
+	config := &Config{
+		Pi: PiRootConfig{
+			ConfigDir: "./test-pi-config",
+			Skills: PiSkillsConfig{
+				AutoUpdate:     true,
+				UpdateInterval: "", // Empty - should default to 24h
+			},
+		},
+		Overseer: OverseerConfig{
+			MaxWorkers:            4,
+			BeadDiscoveryInterval: 1 * time.Second,
+		},
+	}
+
+	// Create overseer
+	overseer := NewOverseer(config)
+
+	// Verify skill updater uses default interval
+	if overseer.skillUpdater == nil {
+		t.Fatal("Skill updater should be initialized")
+	}
+
+	if overseer.skillUpdater.GetUpdateInterval() != 24*time.Hour {
+		t.Errorf("Default interval = %v, want %v", overseer.skillUpdater.GetUpdateInterval(), 24*time.Hour)
+	}
+}
+
+// TestUS002_Overseer_CustomInterval verifies that custom intervals are properly set
+func TestUS002_Overseer_CustomInterval(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval string
+		want     time.Duration
+	}{
+		{"1h", "1h", 1 * time.Hour},
+		{"30m", "30m", 30 * time.Minute},
+		{"12h", "12h", 12 * time.Hour},
+		{"2h30m", "2h30m", 2*time.Hour + 30*time.Minute},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := &Config{
+				Pi: PiRootConfig{
+					ConfigDir: "./test-pi-config",
+					Skills: PiSkillsConfig{
+						AutoUpdate:     true,
+						UpdateInterval: tt.interval,
+					},
+				},
+				Overseer: OverseerConfig{
+					MaxWorkers:            4,
+					BeadDiscoveryInterval: 1 * time.Second,
+				},
+			}
+
+			overseer := NewOverseer(config)
+
+			if overseer.skillUpdater == nil {
+				t.Fatal("Skill updater should be initialized")
+			}
+
+			if overseer.skillUpdater.GetUpdateInterval() != tt.want {
+				t.Errorf("Interval = %v, want %v", overseer.skillUpdater.GetUpdateInterval(), tt.want)
+			}
+		})
+	}
+}
