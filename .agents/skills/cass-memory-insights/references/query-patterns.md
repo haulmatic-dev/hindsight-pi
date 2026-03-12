@@ -8,13 +8,13 @@ Good queries include what you're trying to accomplish:
 
 ```bash
 # ✅ Good - clear intent
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "implement rate limiting for API endpoints" --json
+cm context "implement rate limiting for API endpoints" --json
 
 # ❌ Bad - too vague
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "rate limiting" --json
+cm context "rate limiting" --json
 
 # ❌ Bad - too specific with implementation details
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "implement token bucket rate limiting with Redis backend" --json
+cm context "implement token bucket rate limiting with Redis backend" --json
 ```
 
 ### DO: Use Natural Language
@@ -23,10 +23,10 @@ CASS understands natural language better than keywords:
 
 ```bash
 # ✅ Good
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "debug memory leaks in long-running processes" --json
+cm context "debug memory leaks in long-running processes" --json
 
 # ❌ Bad - keyword soup
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "memory leak goroutine debug" --json
+cm context "memory leak goroutine debug" --json
 ```
 
 ### DO: Include Context
@@ -35,10 +35,10 @@ Add relevant context to get better matches:
 
 ```bash
 # ✅ Good - includes technology context
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "database migration rollback strategy PostgreSQL" --json
+cm context "database migration rollback strategy PostgreSQL" --json
 
 # ❌ Bad - missing context
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "database rollback" --json
+cm context "database rollback" --json
 ```
 
 ## Category-Specific Queries
@@ -47,52 +47,52 @@ Add relevant context to get better matches:
 
 ```bash
 # Authentication patterns
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "OAuth2 authentication flow implementation" --category security --json
+cm context "OAuth2 authentication flow implementation" --category security --json
 
 # Authorization
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "role-based access control patterns" --category security --json
+cm context "role-based access control patterns" --category security --json
 
 # Common vulnerabilities
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "preventing SQL injection attacks" --category security --json
+cm context "preventing SQL injection attacks" --category security --json
 ```
 
 ### Testing
 
 ```bash
 # Test patterns
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "table-driven tests in Go" --category testing --json
+cm context "table-driven tests in Go" --category testing --json
 
 # Mocking strategies
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "mocking external API calls in tests" --category testing --json
+cm context "mocking external API calls in tests" --category testing --json
 
 # Test organization
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "organizing test suites by functionality" --category testing --json
+cm context "organizing test suites by functionality" --category testing --json
 ```
 
 ### Performance
 
 ```bash
 # Caching
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "caching strategies for frequently accessed data" --category performance --json
+cm context "caching strategies for frequently accessed data" --category performance --json
 
 # Database optimization
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "database query optimization techniques" --category performance --json
+cm context "database query optimization techniques" --category performance --json
 
 # Concurrency
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "managing concurrent request handling" --category performance --json
+cm context "managing concurrent request handling" --category performance --json
 ```
 
 ### Debugging
 
 ```bash
 # Error investigation
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "tracing errors through call stack" --category debugging --json
+cm context "tracing errors through call stack" --category debugging --json
 
 # Race conditions
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "detecting and fixing race conditions" --category debugging --json
+cm context "detecting and fixing race conditions" --category debugging --json
 
 # Logging
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "structured logging for debugging" --category debugging --json
+cm context "structured logging for debugging" --category debugging --json
 ```
 
 ## Interpreting Results
@@ -127,8 +127,8 @@ These provide context from previous implementations but may be less structured t
 
 ### Mistake 3: Queries Too Broad
 
-❌ **Wrong:** `/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "code" --json`
-✅ **Right:** `/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "error handling patterns in REST APIs" --json`
+❌ **Wrong:** `cm context "code" --json`
+✅ **Right:** `cm context "error handling patterns in REST APIs" --json`
 
 ### Mistake 4: Not Using Categories
 
@@ -141,20 +141,20 @@ These provide context from previous implementations but may be less structured t
 
 ```bash
 # First, get general context
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "microservice communication" --json
+cm context "microservice communication" --json
 
 # Then, drill into specific area
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "circuit breaker pattern implementation" --category architecture --json
+cm context "circuit breaker pattern implementation" --category architecture --json
 
 # Finally, check for pitfalls
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "circuit breaker common mistakes" --category anti-pattern --json
+cm context "circuit breaker common mistakes" --category anti-pattern --json
 ```
 
 ### Combining with Other Skills
 
 ```bash
 # 1. Query CASS for patterns
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "rate limiting" --json
+cm context "rate limiting" --json
 
 # 2. Use lsp-code-analysis to find existing implementations
 lsp search "RateLimiter" --kinds class

@@ -12,7 +12,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-const TLDR_BINARY = '/Users/buddhi/.pyenv/shims/llm-tldr';
+const TLDR_BINARY = 'llm-tldr'; // Will find real llm-tldr in PATH (after this wrapper)
 const LOG_DIR = '/tmp/hydra-logs';
 const LOG_FILE = path.join(LOG_DIR, 'tldr.log');
 const MAX_LOG_SIZE = 10 * 1024 * 1024; // 10MB

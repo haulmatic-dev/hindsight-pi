@@ -7,12 +7,44 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/api"
 	"github.com/haulmatic-dev/hydra/internal/core"
 )
+
+// setupPath ensures Hydra's bin directory is in PATH for wrapper scripts
+func setupPath() {
+	// Get the directory of the current executable (hydra binary)
+	execPath, err := os.Executable()
+	if err != nil {
+		log.Printf("[Setup] Warning: Could not determine executable path: %v", err)
+		return
+	}
+
+	// Get the bin directory (where hydra binary is located)
+	binDir := filepath.Dir(execPath)
+
+	// Get current PATH
+	currentPath := os.Getenv("PATH")
+	pathEntries := strings.Split(currentPath, string(filepath.ListSeparator))
+
+	// Check if binDir is already in PATH
+	for _, entry := range pathEntries {
+		if entry == binDir {
+			log.Printf("[Setup] Hydra bin directory already in PATH: %s", binDir)
+			return
+		}
+	}
+
+	// Prepend binDir to PATH
+	newPath := binDir + string(filepath.ListSeparator) + currentPath
+	os.Setenv("PATH", newPath)
+	log.Printf("[Setup] Added Hydra bin directory to PATH: %s", binDir)
+}
 
 func main() {
 	var (
@@ -27,6 +59,9 @@ func main() {
 
 	fmt.Println("🐍 Hydra - Agent Swarm Orchestrator")
 	fmt.Println("====================================")
+
+	// Ensure Hydra bin directory is in PATH for wrapper scripts
+	setupPath()
 
 	// Load configuration
 	config, err := core.LoadConfig(*configPath)

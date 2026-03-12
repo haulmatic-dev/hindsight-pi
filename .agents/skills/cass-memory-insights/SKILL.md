@@ -25,13 +25,13 @@ Query CASS for relevant patterns and anti-patterns based on your current task.
 
 ```bash
 # Query for general context about a task (using wrapper for logging)
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "implement rate limiting" --json --limit 10
+cm context "implement rate limiting" --json --limit 10
 
 # Query with specific category (security, testing, debugging, etc)
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "authentication patterns" --category security --json --limit 5
+cm context "authentication patterns" --category security --json --limit 5
 
 # Or use the direct command (without logging)
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "database migration" --json
+cm context "database migration" --json
 ```
 
 **Response format:**
@@ -65,10 +65,10 @@ Browse all stored patterns by category.
 
 ```bash
 # List all debugging patterns
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js list --category debugging --json
+cm list --category debugging --json
 
 # List top 10 security patterns
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js list --category security --limit 10 --json
+cm list --category security --limit 10 --json
 ```
 
 ### Add Pattern (Post-Implementation)
@@ -77,10 +77,10 @@ After successfully implementing a solution, add it to CASS for future agents.
 
 ```bash
 # Add a successful pattern
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js add "Use connection pooling with max 20 connections for database access" --category performance --json
+cm add "Use connection pooling with max 20 connections for database access" --category performance --json
 
 # Record an anti-pattern (what NOT to do)
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js add "DON'T: Use global variables for request-scoped data" --category anti-pattern --json
+cm add "DON'T: Use global variables for request-scoped data" --category anti-pattern --json
 ```
 
 ## Best Practices
@@ -106,7 +106,7 @@ After successfully implementing a solution, add it to CASS for future agents.
 
 ```bash
 # 1. Query CASS for context
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "<your task description>" --json --limit 5
+cm context "<your task description>" --json --limit 5
 
 # 2. Read relevant patterns
 # 3. Check anti-patterns to avoid
@@ -119,7 +119,7 @@ After successfully implementing a solution, add it to CASS for future agents.
 Task: Add rate limiting to API endpoints
 
 Pi: Querying CASS for relevant patterns...
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "rate limiting API endpoints" --json --limit 5
+cm context "rate limiting API endpoints" --json --limit 5
 
 Result: {
   "relevantBullets": [
@@ -171,27 +171,27 @@ Common categories to query:
 
 ```bash
 # Before implementing authentication
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "OAuth2 authentication flow" --category security --json
+cm context "OAuth2 authentication flow" --category security --json
 
 # Check for common pitfalls
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "authentication security anti-patterns" --category security --json
+cm context "authentication security anti-patterns" --category security --json
 ```
 
 ### Debugging
 
 ```bash
 # Before debugging a database issue
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "database connection pool exhaustion" --category debugging --json
+cm context "database connection pool exhaustion" --category debugging --json
 
 # Look for similar issues
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "intermittent test failures" --category testing --json
+cm context "intermittent test failures" --category testing --json
 ```
 
 ### Architecture Decision
 
 ```bash
 # Before choosing an approach
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "microservice communication patterns" --category architecture --json
+cm context "microservice communication patterns" --category architecture --json
 
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "interface design patterns" --category architecture --json
+cm context "interface design patterns" --category architecture --json
 ```

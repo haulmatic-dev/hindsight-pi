@@ -83,7 +83,7 @@ Before saving, verify the pattern doesn't already exist.
 
 ```bash
 # Search cass_memory for similar patterns
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js search "your pattern keywords" --json --limit 5
+cm search "your pattern keywords" --json --limit 5
 
 # Check for exact matches
 grep -i "your pattern" ~/.pi/skills/*/SKILL.md 2>/dev/null || true
@@ -119,7 +119,7 @@ Score < 60:   Don't save
 # Ask: Is this novel? Generalizable? Documented? Proven? Non-obvious?
 
 # Step 3: Check for duplicates
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js search "your insight" --json
+cm search "your insight" --json
 
 # Step 4: Calculate quality score
 # Novel (20) + Generalizable (20) + Documented (20) + Proven (20) + Non-obvious (20) = 100
@@ -130,7 +130,7 @@ Score < 60:   Don't save
 # Score < 60 → Don't save (but keep mental note)
 
 # Step 6: If saving, use descriptive title and comprehensive description
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js add "Quality pattern: [title] - [description with context, trade-offs, and examples]" --category [appropriate-category] --json
+cm add "Quality pattern: [title] - [description with context, trade-offs, and examples]" --category [appropriate-category] --json
 ```
 
 ### Pattern Documentation Template
@@ -163,7 +163,7 @@ Category: [testing, security, performance, etc.]
 
 ```bash
 # Save anti-pattern
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js add "DON'T: [what not to do]. Instead: [what to do]. Reason: [why]" --category anti-pattern --json
+cm add "DON'T: [what not to do]. Instead: [what to do]. Reason: [why]" --category anti-pattern --json
 ```
 
 ## Categories
@@ -200,7 +200,7 @@ Quality Check:
 Score: 100/100 → SAVE
 
 Save command:
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js add "Use exponential backoff with jitter for retry logic to prevent thundering herd problems. Base delay: 100ms, multiplier: 2, max delay: 30s, add random jitter 0-100ms. Category: performance" --category performance --json
+cm add "Use exponential backoff with jitter for retry logic to prevent thundering herd problems. Base delay: 100ms, multiplier: 2, max delay: 30s, add random jitter 0-100ms. Category: performance" --category performance --json
 ```
 
 ### Example 2: Low-Quality Pattern (Don't Save)
@@ -228,7 +228,7 @@ Task: Debug race condition in user cache
 Reflection: "Race condition occurred because cache wasn't thread-safe"
 
 Anti-Pattern:
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js add "DON'T: Use plain maps for caches in concurrent code without synchronization. Instead: Use sync.RWMutex or concurrent-safe data structures like sync.Map. Reason: Race conditions cause data corruption and are hard to debug. Category: debugging" --category debugging --json
+cm add "DON'T: Use plain maps for caches in concurrent code without synchronization. Instead: Use sync.RWMutex or concurrent-safe data structures like sync.Map. Reason: Race conditions cause data corruption and are hard to debug. Category: debugging" --category debugging --json
 
 Quality: High value because it prevents future bugs
 ```
@@ -281,11 +281,11 @@ echo "□ Proven (tested and working)?"
 echo "□ Non-obvious (learned wisdom)?"
 
 # Search for duplicates
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js search "your pattern keywords" --json
+cm search "your pattern keywords" --json
 
 # Save quality pattern
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js add "[Title]: [Problem]. Solution: [How]. Context: [When]. Trade-offs: [Pros/Cons]. Example: [Code]." --category [category] --json
+cm add "[Title]: [Problem]. Solution: [How]. Context: [When]. Trade-offs: [Pros/Cons]. Example: [Code]." --category [category] --json
 
 # Save anti-pattern
-/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js add "DON'T: [what not to do]. Instead: [what to do]. Reason: [why]." --category anti-pattern --json
+cm add "DON'T: [what not to do]. Instead: [what to do]. Reason: [why]." --category anti-pattern --json
 ```

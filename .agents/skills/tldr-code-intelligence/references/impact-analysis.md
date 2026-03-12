@@ -25,27 +25,27 @@
 
 ```bash
 # Check impact of changing an interface
-/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/interfaces/store.go --depth 2
+llm-tldr impact internal/interfaces/store.go --depth 2
 
 # Check impact of moving a function
-/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/utils/helpers.go --depth 2
+llm-tldr impact internal/utils/helpers.go --depth 2
 
 # Check impact of renaming
-/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/models/user.go --depth 2
+llm-tldr impact internal/models/user.go --depth 2
 ```
 
 ### Before Deleting Code
 
 ```bash
 # Check if anything uses this
-/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/old/legacy.go --depth 3
+llm-tldr impact internal/old/legacy.go --depth 3
 ```
 
 ### Before Changing APIs
 
 ```bash
 # Check public API impact
-/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact pkg/api/client.go --depth 2
+llm-tldr impact pkg/api/client.go --depth 2
 ```
 
 ## Interpreting Scope
@@ -76,7 +76,7 @@
 
 ```bash
 # Check what calls this function
-/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/service/order.go --depth 2
+llm-tldr impact internal/service/order.go --depth 2
 
 # Review callers list
 # Plan signature change
@@ -87,10 +87,10 @@
 
 ```bash
 # Check current dependencies
-/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/utils/common.go --depth 2
+llm-tldr impact internal/utils/common.go --depth 2
 
 # Check destination package
-/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/helpers/common.go --depth 1
+llm-tldr impact internal/helpers/common.go --depth 1
 
 # Plan import updates
 ```
@@ -99,7 +99,7 @@
 
 ```bash
 # Find all implementations
-/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/interfaces/database.go --depth 3
+llm-tldr impact internal/interfaces/database.go --depth 3
 
 # Check each implementation
 # Plan migration strategy

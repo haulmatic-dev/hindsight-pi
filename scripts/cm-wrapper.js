@@ -12,7 +12,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-const CM_BINARY = '/Users/buddhi/.local/bin/cm';
+const CM_BINARY = 'cm'; // Will find real cm in PATH (after this wrapper)
 const LOG_DIR = '/tmp/hydra-logs';
 const LOG_FILE = path.join(LOG_DIR, 'cass-memory.log');
 const MAX_LOG_SIZE = 10 * 1024 * 1024; // 10MB
