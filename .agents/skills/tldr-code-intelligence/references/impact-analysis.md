@@ -25,27 +25,27 @@
 
 ```bash
 # Check impact of changing an interface
-llm-tldr impact internal/interfaces/store.go --depth 2
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/interfaces/store.go --depth 2
 
 # Check impact of moving a function
-llm-tldr impact internal/utils/helpers.go --depth 2
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/utils/helpers.go --depth 2
 
 # Check impact of renaming
-llm-tldr impact internal/models/user.go --depth 2
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/models/user.go --depth 2
 ```
 
 ### Before Deleting Code
 
 ```bash
 # Check if anything uses this
-llm-tldr impact internal/old/legacy.go --depth 3
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/old/legacy.go --depth 3
 ```
 
 ### Before Changing APIs
 
 ```bash
 # Check public API impact
-llm-tldr impact pkg/api/client.go --depth 2
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact pkg/api/client.go --depth 2
 ```
 
 ## Interpreting Scope
@@ -76,7 +76,7 @@ llm-tldr impact pkg/api/client.go --depth 2
 
 ```bash
 # Check what calls this function
-llm-tldr impact internal/service/order.go --depth 2
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/service/order.go --depth 2
 
 # Review callers list
 # Plan signature change
@@ -87,10 +87,10 @@ llm-tldr impact internal/service/order.go --depth 2
 
 ```bash
 # Check current dependencies
-llm-tldr impact internal/utils/common.go --depth 2
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/utils/common.go --depth 2
 
 # Check destination package
-llm-tldr impact internal/helpers/common.go --depth 1
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/helpers/common.go --depth 1
 
 # Plan import updates
 ```
@@ -99,7 +99,7 @@ llm-tldr impact internal/helpers/common.go --depth 1
 
 ```bash
 # Find all implementations
-llm-tldr impact internal/interfaces/database.go --depth 3
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/interfaces/database.go --depth 3
 
 # Check each implementation
 # Plan migration strategy

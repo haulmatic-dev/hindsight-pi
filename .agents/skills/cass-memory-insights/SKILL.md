@@ -31,7 +31,7 @@ Query CASS for relevant patterns and anti-patterns based on your current task.
 /Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "authentication patterns" --category security --json --limit 5
 
 # Or use the direct command (without logging)
-$(which cm) context "database migration" --json
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "database migration" --json
 ```
 
 **Response format:**
@@ -65,10 +65,10 @@ Browse all stored patterns by category.
 
 ```bash
 # List all debugging patterns
-cm list --category debugging --json
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js list --category debugging --json
 
 # List top 10 security patterns
-cm list --category security --limit 10 --json
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js list --category security --limit 10 --json
 ```
 
 ### Add Pattern (Post-Implementation)
@@ -77,10 +77,10 @@ After successfully implementing a solution, add it to CASS for future agents.
 
 ```bash
 # Add a successful pattern
-cm add "Use connection pooling with max 20 connections for database access" --category performance --json
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js add "Use connection pooling with max 20 connections for database access" --category performance --json
 
 # Record an anti-pattern (what NOT to do)
-cm add "DON'T: Use global variables for request-scoped data" --category anti-pattern --json
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js add "DON'T: Use global variables for request-scoped data" --category anti-pattern --json
 ```
 
 ## Best Practices
@@ -106,7 +106,7 @@ cm add "DON'T: Use global variables for request-scoped data" --category anti-pat
 
 ```bash
 # 1. Query CASS for context
-$(which cm) context "<your task description>" --json --limit 5
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "<your task description>" --json --limit 5
 
 # 2. Read relevant patterns
 # 3. Check anti-patterns to avoid
@@ -119,7 +119,7 @@ $(which cm) context "<your task description>" --json --limit 5
 Task: Add rate limiting to API endpoints
 
 Pi: Querying CASS for relevant patterns...
-$(which cm) context "rate limiting API endpoints" --json --limit 5
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "rate limiting API endpoints" --json --limit 5
 
 Result: {
   "relevantBullets": [
@@ -171,27 +171,27 @@ Common categories to query:
 
 ```bash
 # Before implementing authentication
-$(which cm) context "OAuth2 authentication flow" --category security --json
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "OAuth2 authentication flow" --category security --json
 
 # Check for common pitfalls
-$(which cm) context "authentication security anti-patterns" --category security --json
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "authentication security anti-patterns" --category security --json
 ```
 
 ### Debugging
 
 ```bash
 # Before debugging a database issue
-$(which cm) context "database connection pool exhaustion" --category debugging --json
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "database connection pool exhaustion" --category debugging --json
 
 # Look for similar issues
-$(which cm) context "intermittent test failures" --category testing --json
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "intermittent test failures" --category testing --json
 ```
 
 ### Architecture Decision
 
 ```bash
 # Before choosing an approach
-$(which cm) context "microservice communication patterns" --category architecture --json
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "microservice communication patterns" --category architecture --json
 
-$(which cm) context "interface design patterns" --category architecture --json
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "interface design patterns" --category architecture --json
 ```

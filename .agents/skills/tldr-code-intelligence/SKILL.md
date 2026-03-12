@@ -24,14 +24,14 @@ description: Semantic code analysis and impact assessment. Search code by meanin
 Search for code by meaning, not just name.
 
 ```bash
-# Find code related to a concept (using wrapper for logging)
+# Find code related to a concept (logs automatically via wrapper)
 /Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "user authentication logic"
 
 # Search with context
 /Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "database connection pooling" --limit 5
 
-# Or use the direct command (without logging)
-llm-tldr search "rate limiting middleware"
+# Search in specific directory
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "rate limiting middleware" --path internal/middleware
 ```
 
 **When to use:**
@@ -45,13 +45,13 @@ Understand what depends on a file and what it depends on.
 
 ```bash
 # Basic impact analysis
-llm-tldr impact internal/auth/handler.go
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/auth/handler.go
 
 # Deeper analysis (more levels of dependencies)
-llm-tldr impact internal/auth/handler.go --depth 3
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/auth/handler.go --depth 3
 
 # Show full call graph
-llm-tldr impact internal/database/db.go --depth 2 --format json
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/database/db.go --depth 2 --format json
 ```
 
 **When to use:**
@@ -65,13 +65,13 @@ Create or update the semantic index for the current project.
 
 ```bash
 # Build index for current directory
-llm-tldr semantic index .
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js semantic index .
 
 # Build with specific model
-llm-tldr semantic index . --model all-MiniLM-L6-v2
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js semantic index . --model all-MiniLM-L6-v2
 
 # Force rebuild (ignore cache)
-llm-tldr semantic index . --force
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js semantic index . --force
 ```
 
 **When to use:**
@@ -85,10 +85,10 @@ Extract structured context from a specific file.
 
 ```bash
 # Get overview of a file
-llm-tldr context internal/user/service.go
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js context internal/user/service.go
 
 # Get specific function context
-llm-tldr context internal/user/service.go --function Authenticate
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js context internal/user/service.go --function Authenticate
 ```
 
 ## Best Practices
@@ -109,10 +109,10 @@ llm-tldr context internal/user/service.go --function Authenticate
 
 ```bash
 # 1. Build/update index if needed
-llm-tldr semantic index . --model all-MiniLM-L6-v2
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js semantic index . --model all-MiniLM-L6-v2
 
 # 2. Analyze impact
-llm-tldr impact internal/old/module.go --depth 2
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/old/module.go --depth 2
 
 # 3. See results
 # {
@@ -128,13 +128,13 @@ llm-tldr impact internal/old/module.go --depth 2
 
 ```bash
 # 1. Search for what you're looking for
-llm-tldr search "error handling middleware"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "error handling middleware"
 
 # 2. Get detailed context
-llm-tldr context internal/middleware/error.go
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js context internal/middleware/error.go
 
 # 3. Understand relationships
-llm-tldr impact internal/middleware/error.go
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/middleware/error.go
 ```
 
 ### Constructing Good Search Queries
@@ -142,31 +142,31 @@ llm-tldr impact internal/middleware/error.go
 **DO: Describe behavior**
 ```bash
 # ✅ Good - describes what code does
-llm-tldr search "validates JWT tokens"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "validates JWT tokens"
 
 # ❌ Bad - just keywords
-llm-tldr search "JWT validation"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "JWT validation"
 ```
 
 **DO: Be specific but not too narrow**
 ```bash
 # ✅ Good
-llm-tldr search "database transaction rollback handling"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "database transaction rollback handling"
 
 # ❌ Too broad
-llm-tldr search "database"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "database"
 
 # ❌ Too narrow
-llm-tldr search "PostgreSQL transaction rollback with savepoints in user service"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "PostgreSQL transaction rollback with savepoints in user service"
 ```
 
 **DO: Use natural language**
 ```bash
 # ✅ Good
-llm-tldr search "implements circuit breaker pattern for external API calls"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "implements circuit breaker pattern for external API calls"
 
 # ❌ Bad - keyword soup
-llm-tldr search "circuit breaker api external"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "circuit breaker api external"
 ```
 
 ## Common Workflows
@@ -177,15 +177,15 @@ llm-tldr search "circuit breaker api external"
 Task: Refactor authentication middleware
 
 # Step 1: Check current implementation context
-llm-tldr context internal/middleware/auth.go
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js context internal/middleware/auth.go
 
 # Step 2: Analyze impact (WHAT WILL BREAK?)
-llm-tldr impact internal/middleware/auth.go --depth 2
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/middleware/auth.go --depth 2
 
 # Output: 12 files affected, including critical paths
 
 # Step 3: Search for similar implementations
-llm-tldr search "middleware refactoring patterns"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "middleware refactoring patterns"
 
 # Step 4: Plan careful migration
 # (proceed with refactoring knowing full impact)
@@ -197,15 +197,15 @@ llm-tldr search "middleware refactoring patterns"
 Task: Add rate limiting
 
 # Step 1: Check if it already exists
-llm-tldr search "rate limiting implementation"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "rate limiting implementation"
 
 # Result: Found in internal/middleware/ratelimit.go
 
 # Step 2: Understand current implementation
-llm-tldr context internal/middleware/ratelimit.go
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js context internal/middleware/ratelimit.go
 
 # Step 3: Check where it's used
-llm-tldr impact internal/middleware/ratelimit.go
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/middleware/ratelimit.go
 
 # Step 4: Extend existing implementation
 ```
@@ -216,13 +216,13 @@ llm-tldr impact internal/middleware/ratelimit.go
 Task: Find source of intermittent failures
 
 # Step 1: Search for error-related code
-llm-tldr search "error handling timeout retry"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "error handling timeout retry"
 
 # Step 2: Analyze suspicious code
-llm-tldr impact internal/service/client.go --depth 2
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/service/client.go --depth 2
 
 # Step 3: Find all callers
-llm-tldr search "calls external API with timeout"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "calls external API with timeout"
 
 # Step 4: Trace data flow
 ```
@@ -294,34 +294,34 @@ llm-tldr search "calls external API with timeout"
 
 ```bash
 # Find authentication implementations
-llm-tldr search "JWT token validation implementation"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "JWT token validation implementation"
 
 # Find error handling patterns
-llm-tldr search "centralized error handling middleware"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "centralized error handling middleware"
 
 # Find database patterns
-llm-tldr search "repository pattern implementation"
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "repository pattern implementation"
 ```
 
 ### Pre-Refactoring Analysis
 
 ```bash
 # Before moving a function
-llm-tldr impact internal/utils/helpers.go --depth 2
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/utils/helpers.go --depth 2
 
 # Before changing an interface
-llm-tldr impact internal/interfaces/store.go --depth 3
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/interfaces/store.go --depth 3
 
 # Before renaming
-llm-tldr impact internal/models/user.go --depth 2
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/models/user.go --depth 2
 ```
 
 ### Understanding Dependencies
 
 ```bash
 # What does this service depend on?
-llm-tldr impact internal/service/order.go --depth 1
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/service/order.go --depth 1
 
 # What depends on this database layer?
-llm-tldr impact internal/db/connection.go --depth 2
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js impact internal/db/connection.go --depth 2
 ```
