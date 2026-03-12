@@ -35,8 +35,8 @@ var RequiredLSPPackages = []LSPPackage{
 	{
 		Name:        "LSP CLI",
 		Command:     "lsp",
-		NPMName:     "@pi/lsp-cli",
-		Description: "Pi LSP CLI tool",
+		NPMName:     "lsp-client",
+		Description: "Pi LSP CLI tool (Python package, not npm)",
 	},
 	{
 		Name:        "gopls",
@@ -699,29 +699,39 @@ func (sm *SetupManager) InstallLSPComponents() error {
 				installed = true
 
 			case "LSP CLI":
-				// Install lsp-client via pip (if needed) or npm
-				log.Printf("[LSP] Installing LSP CLI via npm...")
+				// Install lsp-client via pip/uv (Python package, not npm)
+				log.Printf("[LSP] Installing LSP CLI via pip...")
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				cmd := exec.CommandContext(ctx, "npm", "install", "-g", p.NPMName)
+
+				// Try pip3 first, then pip, then uv
+				var cmd *exec.Cmd
+				if _, err := exec.LookPath("pip3"); err == nil {
+					cmd = exec.CommandContext(ctx, "pip3", "install", "--user", "lsp-client")
+				} else if _, err := exec.LookPath("pip"); err == nil {
+					cmd = exec.CommandContext(ctx, "pip", "install", "--user", "lsp-client")
+				} else if _, err := exec.LookPath("uv"); err == nil {
+					cmd = exec.CommandContext(ctx, "uv", "pip", "install", "lsp-client")
+				} else {
+					cancel()
+					log.Printf("[LSP] ❌ No pip3, pip, or uv found. Cannot install lsp-client.")
+					mu.Lock()
+					failedComponents = append(failedComponents, p.Name)
+					mu.Unlock()
+					return
+				}
+
 				output, err := cmd.CombinedOutput()
 				cancel()
+
 				if err != nil {
-					// Try pip as fallback for lsp-client
-					log.Printf("[LSP] npm install failed, trying pip for lsp-client...")
-					ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Minute)
-					cmd = exec.CommandContext(ctx2, "pip", "install", "lsp-client")
-					output, err = cmd.CombinedOutput()
-					cancel2()
-					if err != nil {
-						log.Printf("[LSP] ❌ Failed to install LSP CLI via both npm and pip")
-						mu.Lock()
-						failedComponents = append(failedComponents, p.Name)
-						mu.Unlock()
-						return
-					}
-					_ = output
+					log.Printf("[LSP] ❌ Failed to install lsp-client: %v\nOutput: %s", err, string(output))
+					mu.Lock()
+					failedComponents = append(failedComponents, p.Name)
+					mu.Unlock()
+					return
 				}
-				_ = output
+
+				log.Printf("[LSP] ✅ Successfully installed lsp-client")
 				installed = true
 
 			default:
