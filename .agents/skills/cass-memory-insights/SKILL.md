@@ -24,13 +24,13 @@ description: Query institutional knowledge from cass_memory before implementing 
 Query CASS for relevant patterns and anti-patterns based on your current task.
 
 ```bash
-# Query for general context about a task
-cm context "implement rate limiting" --json --limit 10
+# Query for general context about a task (using wrapper for logging)
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "implement rate limiting" --json --limit 10
 
 # Query with specific category (security, testing, debugging, etc)
-cm context "authentication patterns" --category security --json --limit 5
+/Users/buddhi/source-code/personal/hydra/scripts/cm-wrapper.js context "authentication patterns" --category security --json --limit 5
 
-# Query and see raw output
+# Or use the direct command (without logging)
 $(which cm) context "database migration" --json
 ```
 

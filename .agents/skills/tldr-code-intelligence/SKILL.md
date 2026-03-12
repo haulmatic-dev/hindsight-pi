@@ -24,14 +24,14 @@ description: Semantic code analysis and impact assessment. Search code by meanin
 Search for code by meaning, not just name.
 
 ```bash
-# Find code related to a concept
-llm-tldr search "user authentication logic"
+# Find code related to a concept (using wrapper for logging)
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "user authentication logic"
 
 # Search with context
-llm-tldr search "database connection pooling" --limit 5
+/Users/buddhi/source-code/personal/hydra/scripts/llm-tldr-wrapper.js search "database connection pooling" --limit 5
 
-# Search in specific directory
-llm-tldr search "rate limiting middleware" --path internal/middleware
+# Or use the direct command (without logging)
+llm-tldr search "rate limiting middleware"
 ```
 
 **When to use:**
