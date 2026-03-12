@@ -19,21 +19,24 @@ type Skill struct {
 	Description string `json:"description,omitempty"`
 }
 
-// DefaultSkills contains the 13 required skills to install
+// DefaultSkills contains the 16 required skills to install
 var DefaultSkills = []Skill{
-	{Name: "golang-pro", Repo: "jeffallan/claude-skills", Description: "Go professional development skills"},
-	{Name: "golang-testing", Repo: "affaan-m/everything-claude-code", Description: "Go testing patterns and practices"},
-	{Name: "golang-patterns", Repo: "affaan-m/everything-claude-code", Description: "Go design patterns"},
-	{Name: "angular-component", Repo: "analogjs/angular-skills", Description: "Angular component development"},
-	{Name: "angular-signals", Repo: "analogjs/angular-skills", Description: "Angular signals state management"},
-	{Name: "angular-testing", Repo: "analogjs/angular-skills", Description: "Angular testing strategies"},
-	{Name: "typescript-advanced-types", Repo: "wshobson/agents", Description: "Advanced TypeScript type patterns"},
-	{Name: "vitest", Repo: "antfu/skills", Description: "Vitest testing framework"},
-	{Name: "implement-design", Repo: "figma/mcp-server-guide", Description: "Design implementation from Figma"},
-	{Name: "systematic-debugging", Repo: "obra/superpowers", Description: "Systematic debugging methodology"},
-	{Name: "test-driven-development", Repo: "obra/superpowers", Description: "TDD best practices"},
-	{Name: "code-review", Repo: "supercent-io/skills-template", Description: "Code review excellence"},
-	{Name: "lsp-code-analysis", Repo: "lsp-client/lsp-skill", Description: "LSP-based code analysis"},
+	{Name: "golang-pro", Repo: "jeffallan/claude-skills/skills/golang-pro", Description: "Go professional development skills"},
+	{Name: "golang-testing", Repo: "affaan-m/everything-claude-code/skills/golang-testing", Description: "Go testing patterns and practices"},
+	{Name: "golang-patterns", Repo: "affaan-m/everything-claude-code/skills/golang-patterns", Description: "Go design patterns"},
+	{Name: "angular-component", Repo: "analogjs/angular-skills/skills/angular-component", Description: "Angular component development"},
+	{Name: "angular-signals", Repo: "analogjs/angular-skills/skills/angular-signals", Description: "Angular signals state management"},
+	{Name: "angular-testing", Repo: "analogjs/angular-skills/skills/angular-testing", Description: "Angular testing strategies"},
+	{Name: "typescript-advanced-types", Repo: "wshobson/agents/plugins/javascript-typescript/skills/typescript-advanced-types", Description: "Advanced TypeScript type patterns"},
+	{Name: "nodejs-backend-patterns", Repo: "wshobson/agents/plugins/javascript-typescript/skills/nodejs-backend-patterns", Description: "Node.js backend patterns"},
+	{Name: "modern-javascript-patterns", Repo: "wshobson/agents/plugins/javascript-typescript/skills/modern-javascript-patterns", Description: "Modern JavaScript patterns"},
+	{Name: "vitest", Repo: "antfu/skills/skills/vitest", Description: "Vitest testing framework"},
+	{Name: "implement-design", Repo: "figma/mcp-server-guide/skills/implement-design", Description: "Design implementation from Figma"},
+	{Name: "systematic-debugging", Repo: "obra/superpowers/skills/systematic-debugging", Description: "Systematic debugging methodology"},
+	{Name: "test-driven-development", Repo: "obra/superpowers/skills/test-driven-development", Description: "TDD best practices"},
+	{Name: "code-review", Repo: "supercent-io/skills-template/.agent-skills/code-review", Description: "Code review excellence"},
+	{Name: "code-refactoring", Repo: "supercent-io/skills-template/.agent-skills/code-refactoring", Description: "Code refactoring patterns"},
+	{Name: "lsp-code-analysis", Repo: "lsp-client/lsp-skill/skills/lsp-code-analysis", Description: "LSP-based code analysis"},
 }
 
 // SkillsTrackingFile represents the structure of the skills tracking file
@@ -215,8 +218,9 @@ func (sm *SetupManager) installSkill(skill Skill) error {
 		return fmt.Errorf("skills CLI not available")
 	}
 
-	// Use npx to run skills add command
-	cmd := exec.Command("npx", "skills", "add", fmt.Sprintf("%s/%s", skill.Repo, skill.Name))
+	// Use npx to run skills add command with --yes flag for non-interactive mode
+	// Format: npx skills add <repo> --skill <skill-name> --yes
+	cmd := exec.Command("npx", "skills", "add", skill.Repo, "--skill", skill.Name, "--yes")
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {

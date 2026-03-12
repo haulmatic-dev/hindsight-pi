@@ -415,8 +415,9 @@ func (su *SkillUpdater) updateSkill(skill Skill) error {
 		return fmt.Errorf("skills CLI not available")
 	}
 
-	// Use npx to run skills add command
-	cmd := exec.Command("npx", "skills", "add", fmt.Sprintf("%s/%s", skill.Repo, skill.Name))
+	// Use npx to run skills add command with --yes flag for non-interactive mode
+	// Format: npx skills add <repo> --skill <skill-name> --yes
+	cmd := exec.Command("npx", "skills", "add", skill.Repo, "--skill", skill.Name, "--yes")
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {
