@@ -20,6 +20,7 @@ import (
 	"github.com/haulmatic-dev/hydra/internal/bv"
 	"github.com/haulmatic-dev/hydra/internal/intelligence"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
+	"github.com/haulmatic-dev/hydra/internal/pi"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -375,6 +376,9 @@ type Overseer struct {
 	// Agent connector for modular agent support
 	agentConnector agents.AgentConnector // Agent connector interface
 	agentConnMu    sync.RWMutex          // Mutex for agent connector
+
+	// Skill updater for periodic skill updates
+	skillUpdater *pi.SkillUpdater // Skill updater for background updates
 }
 
 // NewOverseer creates a new overseer instance
@@ -446,7 +450,7 @@ func NewOverseer(config *Config) *Overseer {
 		Timeout:       config.Agents.Pi.Timeout,
 		ApiKeyName:    config.Agents.Pi.ApiKeyName,
 	}
-	o.agentConnector = agents.NewPiConnector(piConfig)
+	o.agentConnector = agents.NewPiConnector(piConfig, log.Default())
 	log.Printf("[AgentConnector] Initialized Pi connector (provider: %s, model: %s, apiKey: %s)",
 		piConfig.Provider, piConfig.Model, piConfig.ApiKeyName)
 
@@ -460,6 +464,13 @@ func NewOverseer(config *Config) *Overseer {
 		o.initializeChainCompletionDetector()
 	}
 
+	// Initialize skill updater if auto-update is enabled
+	if config.Pi.Skills.AutoUpdate {
+		if err := o.initializeSkillUpdater(); err != nil {
+			log.Printf("[Overseer] Warning: failed to initialize skill updater: %v", err)
+		}
+	}
+
 	// Override defaults if configured
 	if config.Overseer.WorkerTimeout > 0 {
 		// WorkerTimeout can be used to derive maxDelay
@@ -470,6 +481,29 @@ func NewOverseer(config *Config) *Overseer {
 	}
 
 	return o
+}
+
+// initializeSkillUpdater creates and configures the skill updater
+func (o *Overseer) initializeSkillUpdater() error {
+	configDir := o.config.Pi.ConfigDir
+	if configDir == "" {
+		configDir = "./pi-config"
+	}
+
+	updateInterval := o.config.Pi.Skills.UpdateInterval
+	if updateInterval == "" {
+		updateInterval = "24h"
+	}
+
+	setupManager := pi.NewSetupManager(configDir, configDir)
+	skillUpdater, err := pi.NewSkillUpdater(setupManager, updateInterval)
+	if err != nil {
+		return fmt.Errorf("failed to create skill updater: %w", err)
+	}
+
+	o.skillUpdater = skillUpdater
+	log.Printf("[SkillUpdater] Initialized with interval: %s", updateInterval)
+	return nil
 }
 
 // initializeIntelligenceClients creates intelligence service clients based on config
@@ -954,6 +988,12 @@ func (o *Overseer) Start(ctx context.Context) error {
 		log.Println("🧹 Orphan janitor started")
 	}
 
+	// Run Pi ecosystem setup
+	if err := o.runPiSetup(); err != nil {
+		log.Printf("[Overseer] Pi setup warning: %v", err)
+		// Continue even if Pi setup fails - not critical for Hydra operation
+	}
+
 	// Discover projects
 	if err := o.discoverProjects(); err != nil {
 		return fmt.Errorf("failed to discover projects: %w", err)
@@ -968,6 +1008,12 @@ func (o *Overseer) Start(ctx context.Context) error {
 		} else {
 			log.Println("🔒 Settled-state detection service started")
 		}
+	}
+
+	// Start skill updater if initialized
+	if o.skillUpdater != nil {
+		o.skillUpdater.Start()
+		log.Println("📚 Skill updater started")
 	}
 
 	o.running = true
@@ -989,6 +1035,11 @@ func (o *Overseer) Start(ctx context.Context) error {
 				} else {
 					log.Println("🔒 Settled-state detection service stopped")
 				}
+			}
+			// Stop skill updater
+			if o.skillUpdater != nil {
+				o.skillUpdater.Stop()
+				log.Println("📚 Skill updater stopped")
 			}
 			return nil
 		case <-ticker.C:
@@ -3456,4 +3507,54 @@ func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead, cassClient
 	}
 
 	return env
+}
+
+// runPiSetup initializes and runs the Pi ecosystem setup
+func (o *Overseer) runPiSetup() error {
+	log.Println("[Overseer] Initializing Pi ecosystem setup...")
+
+	// Import the pi package and create setup manager
+	configDir := o.config.Pi.ConfigDir
+	piConfigDir := o.config.Pi.PiConfigDir
+	if configDir == "" {
+		configDir = ""
+	}
+	if piConfigDir == "" {
+		piConfigDir = "pi-config"
+	}
+	setupManager := pi.NewSetupManager(configDir, piConfigDir)
+
+	// Run setup
+	result, err := setupManager.RunSetup()
+	if err != nil {
+		return fmt.Errorf("pi setup failed: %w", err)
+	}
+
+	// Log results
+	if result.PiInstalled {
+		log.Println("[Overseer] ✅ Pi agent ready")
+	} else {
+		log.Println("[Overseer] ⚠️  Pi agent not installed")
+	}
+
+	if result.LSPInstalled {
+		log.Println("[Overseer] ✅ LSP servers ready")
+	} else {
+		log.Println("[Overseer] ⚠️  LSP servers may be missing")
+	}
+
+	if result.SkillsInstalled {
+		log.Println("[Overseer] ✅ Pi skills ready")
+	} else {
+		log.Println("[Overseer] ⚠️  Pi skills may be missing")
+	}
+
+	if len(result.Errors) > 0 {
+		log.Printf("[Overseer] Pi setup completed with %d errors", len(result.Errors))
+		for _, err := range result.Errors {
+			log.Printf("[Overseer]   - %s", err)
+		}
+	}
+
+	return nil
 }

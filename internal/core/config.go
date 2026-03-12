@@ -17,6 +17,7 @@ type Config struct {
 	API          APIConfig          `yaml:"api"`
 	Intelligence IntelligenceConfig `yaml:"intelligence"`
 	Agents       AgentsConfig       `yaml:"agents"`
+	Pi           PiRootConfig       `yaml:"pi"`
 }
 
 // AgentsConfig contains agent connector settings
@@ -36,6 +37,42 @@ type PiConfig struct {
 	ApiKeyName    string `yaml:"api_key_name"`
 }
 
+// PiRootConfig contains Pi-specific configuration settings
+type PiRootConfig struct {
+	ConfigDir   string         `yaml:"config_dir"`
+	PiConfigDir string         `yaml:"pi_config_dir"`
+	Skills      PiSkillsConfig `yaml:"skills"`
+	LSP         LSPConfig      `yaml:"lsp"`
+}
+
+// LSPConfig contains LSP (Language Server Protocol) settings
+type LSPConfig struct {
+	Enabled bool                       `yaml:"enabled"`
+	Servers map[string]LSPServerConfig `yaml:"servers"`
+}
+
+// LSPServerConfig contains configuration for an individual LSP server
+type LSPServerConfig struct {
+	Command      string   `yaml:"command"`
+	Args         []string `yaml:"args"`
+	InstallCheck string   `yaml:"install_check"`
+	InstallCmd   string   `yaml:"install_cmd"`
+}
+
+// PiSkillsConfig contains Pi skills configuration
+type PiSkillsConfig struct {
+	UpdateInterval string       `yaml:"update_interval"`
+	AutoUpdate     bool         `yaml:"auto_update"`
+	Global         bool         `yaml:"global"`
+	List           []SkillEntry `yaml:"list"`
+}
+
+// SkillEntry represents a skill in the Pi skills list
+type SkillEntry struct {
+	Name string `yaml:"name"`
+	Repo string `yaml:"repo"`
+}
+
 // rawConfig is used for YAML parsing to handle the nested projects structure
 type rawConfig struct {
 	Overseer     OverseerConfig     `yaml:"overseer"`
@@ -44,6 +81,15 @@ type rawConfig struct {
 	API          APIConfig          `yaml:"api"`
 	Intelligence IntelligenceConfig `yaml:"intelligence"`
 	Agents       AgentsConfig       `yaml:"agents"`
+	Pi           rawPiConfig        `yaml:"pi"`
+}
+
+// rawPiConfig is used for YAML parsing of Pi configuration
+type rawPiConfig struct {
+	ConfigDir   string         `yaml:"config_dir"`
+	PiConfigDir string         `yaml:"pi_config_dir"`
+	Skills      PiSkillsConfig `yaml:"skills"`
+	LSP         LSPConfig      `yaml:"lsp"`
 }
 
 // projectsListConfig handles the case where projects is an object with 'list' field
@@ -304,6 +350,19 @@ func DefaultConfig() *Config {
 				Timeout:       "10m",
 			},
 		},
+		Pi: PiRootConfig{
+			ConfigDir: "./pi-config",
+			Skills: PiSkillsConfig{
+				UpdateInterval: "24h",
+				AutoUpdate:     true,
+				Global:         false,
+				List:           []SkillEntry{},
+			},
+			LSP: LSPConfig{
+				Enabled: true,
+				Servers: map[string]LSPServerConfig{},
+			},
+		},
 	}
 }
 
@@ -329,6 +388,12 @@ func LoadConfig(path string) (*Config, error) {
 	config.API = raw.API
 	config.Intelligence = raw.Intelligence
 	config.Agents = raw.Agents
+	config.Pi = PiRootConfig{
+		ConfigDir:   raw.Pi.ConfigDir,
+		PiConfigDir: raw.Pi.PiConfigDir,
+		Skills:      raw.Pi.Skills,
+		LSP:         raw.Pi.LSP,
+	}
 
 	// Handle projects field - can be:
 	// 1. An array of ProjectConfig (direct list)
@@ -374,6 +439,8 @@ func (c *Config) Clone() *Config {
 		MCP:          c.MCP,
 		API:          c.API,
 		Intelligence: c.Intelligence,
+		Agents:       c.Agents,
+		Pi:           c.Pi,
 	}
 
 	// Deep copy Projects slice
