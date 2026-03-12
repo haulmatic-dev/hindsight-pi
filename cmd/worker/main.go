@@ -66,13 +66,11 @@ type ExecutionResult struct {
 	Intelligence *IntelligenceContext
 }
 
-// IntelligenceContext holds pre-execution intelligence
+// Note: IntelligenceContext deprecated - now using skills instead of force-feeding
+// Pi agents use cass-memory-insights and tldr-code-intelligence skills on-demand
+// This struct kept for backward compatibility in result recording only
 type IntelligenceContext struct {
-	Patterns     []intelligence.Bullet
-	AntiPatterns []intelligence.Bullet
-	Impact       *intelligence.TLDRImpactResponse
-	RelatedFiles []intelligence.TLDRSemanticResult
-	CassContext  *intelligence.CassContextResponse
+	// Fields removed - agents now query via skills
 }
 
 var (
@@ -188,28 +186,12 @@ func main() {
 	log.Printf("📋 Determined agent type: %s", determinedAgentType)
 	streamLog(mcpClient, "info", fmt.Sprintf("Using agent type: %s", determinedAgentType))
 
-	// STEP 2: Gather pre-execution intelligence
-	log.Printf("🧠 Gathering pre-execution intelligence...")
-	streamLog(mcpClient, "info", "Gathering pre-execution intelligence...")
-
-	intelligenceCtx, err := gatherPreExecutionIntelligence(bead, projectPath)
-	if err != nil {
-		log.Printf("[WARN] Failed to gather intelligence: %v", err)
-		streamLog(mcpClient, "warn", fmt.Sprintf("Intelligence gathering failed: %v", err))
-		// Continue with empty intelligence context for graceful degradation
-		intelligenceCtx = &IntelligenceContext{}
-	} else {
-		log.Printf("✅ Intelligence gathered: %d patterns, %d anti-patterns, %d related files",
-			len(intelligenceCtx.Patterns), len(intelligenceCtx.AntiPatterns), len(intelligenceCtx.RelatedFiles))
-		streamLog(mcpClient, "info", fmt.Sprintf("Intelligence: %d patterns found", len(intelligenceCtx.Patterns)))
-	}
-
-	// STEP 3: Execute with retry policy
+	// STEP 2: Execute with retry policy
 	retryPolicy := DefaultRetryPolicy()
 	log.Printf("⚙️  Executing with retry policy (max %d retries)...", retryPolicy.MaxRetries)
 	streamLog(mcpClient, "info", fmt.Sprintf("Starting execution (max %d retries)", retryPolicy.MaxRetries))
 
-	result, err := executeWithRetry(bead, determinedAgentType, intelligenceCtx, mcpClient, retryPolicy, projectPath)
+	result, err := executeWithRetry(bead, determinedAgentType, mcpClient, retryPolicy, projectPath)
 
 	// Calculate duration
 	duration := time.Since(startTime)
@@ -230,7 +212,7 @@ func main() {
 	log.Printf("📝 Recording execution results...")
 	streamLog(mcpClient, "info", fmt.Sprintf("Recording results (status: %s)", status))
 
-	recordExecutionResult(bead, result, intelligenceCtx, mcpClient)
+	recordExecutionResult(bead, result, mcpClient)
 
 	// Notify task completion
 	notifyTaskComplete(mcpClient, bead, status, duration, exitCode)
@@ -433,70 +415,10 @@ func determineAgentType(bead types.Bead) string {
 	return "orchestrator"
 }
 
-// gatherPreExecutionIntelligence gathers intelligence from cass_memory and TLDR
-func gatherPreExecutionIntelligence(bead types.Bead, projectPath string) (*IntelligenceContext, error) {
-	ctx := &IntelligenceContext{
-		Patterns:     []intelligence.Bullet{},
-		AntiPatterns: []intelligence.Bullet{},
-		RelatedFiles: []intelligence.TLDRSemanticResult{},
-	}
-
-	// Build task query from bead description and title
-	taskQuery := bead.Title
-	if bead.Description != "" {
-		taskQuery = fmt.Sprintf("%s %s", bead.Title, bead.Description)
-	}
-
-	// Query cass_memory for patterns and anti-patterns
-	cassClient := intelligence.NewCassMemoryClient()
-	if cassClient.IsEnabled() {
-		cassCtx, err := cassClient.Context(taskQuery)
-		if err != nil {
-			log.Printf("[WARN] Failed to query cass_memory: %v", err)
-		} else {
-			ctx.CassContext = cassCtx
-			ctx.Patterns = cassCtx.Data.RelevantBullets
-			ctx.AntiPatterns = cassCtx.Data.AntiPatterns
-		}
-	} else {
-		log.Println("ℹ️ cass_memory client not enabled, skipping pattern lookup")
-	}
-
-	// Query TLDR for impact analysis and related files
-	tldrClient := intelligence.NewTLDRClient("", true, "llm-tldr", projectPath, 30*time.Second)
-	if tldrClient.IsAvailable() {
-		// Get target files for impact analysis
-		targetFiles := extractTargetFiles(bead)
-
-		if len(targetFiles) > 0 {
-			// Analyze first target file for impact
-			impact, err := tldrClient.ImpactAnalysis(targetFiles[0], 2)
-			if err != nil {
-				log.Printf("[WARN] Failed to get impact analysis: %v", err)
-			} else {
-				ctx.Impact = impact
-			}
-		}
-
-		// Perform semantic search for related files
-		semanticResults, err := tldrClient.SemanticSearch(taskQuery)
-		if err != nil {
-			log.Printf("[WARN] Failed semantic search: %v", err)
-		} else {
-			ctx.RelatedFiles = semanticResults.Results
-		}
-	} else {
-		log.Println("ℹ️ TLDR daemon not available, skipping impact analysis")
-	}
-
-	return ctx, nil
-}
-
 // executeWithRetry executes the bead with exponential backoff retry logic
 func executeWithRetry(
 	bead types.Bead,
 	agentType string,
-	intelligenceCtx *IntelligenceContext,
 	mcpClient *mcp.Client,
 	policy RetryPolicy,
 	projectPath string,
@@ -515,7 +437,7 @@ func executeWithRetry(
 		log.Printf("🔄 Execution attempt %d/%d", attempt+1, policy.MaxRetries+1)
 		streamLog(mcpClient, "info", fmt.Sprintf("Execution attempt %d/%d", attempt+1, policy.MaxRetries+1))
 
-		result, lastErr = executeWithOpencode(bead, agentType, intelligenceCtx, mcpClient, projectPath)
+		result, lastErr = executeWithOpencode(bead, agentType, mcpClient, projectPath)
 		result.Attempts = attempt + 1
 
 		if lastErr == nil && result.Success {
@@ -607,7 +529,6 @@ func calculateBackoff(attempt int, policy RetryPolicy) time.Duration {
 func executeWithOpencode(
 	bead types.Bead,
 	agentType string,
-	intelligenceCtx *IntelligenceContext,
 	mcpClient *mcp.Client,
 	projectPath string,
 ) (*ExecutionResult, error) {
@@ -621,7 +542,7 @@ func executeWithOpencode(
 	activityMonitor := NewActivityMonitor(activityTimeout)
 
 	// Build opencode command
-	cmd := buildOpencodeCommand(bead, agentType, intelligenceCtx, projectPath)
+	cmd := buildOpencodeCommand(bead, agentType, projectPath)
 
 	log.Printf("🔧 Executing: %s %s", cmd.Path, strings.Join(cmd.Args[1:], " "))
 	log.Printf("📁 Working directory: %s", cmd.Dir)
@@ -755,7 +676,7 @@ monitorLoop:
 
 // buildOpencodeCommand builds the opencode CLI command for a bead
 // Opencode run syntax: echo "prompt" | opencode run --format json --dir <path>
-func buildOpencodeCommand(bead types.Bead, agentType string, intelligenceCtx *IntelligenceContext, projectPath string) *exec.Cmd {
+func buildOpencodeCommand(bead types.Bead, agentType string, projectPath string) *exec.Cmd {
 	// Find opencode binary
 	opencodePath := os.Getenv("HYDRA_OPCODE_PATH")
 	if opencodePath == "" {
@@ -789,60 +710,8 @@ func buildOpencodeCommand(bead types.Bead, agentType string, intelligenceCtx *In
 		promptParts = append(promptParts, fmt.Sprintf("Files to modify: %v", targetFiles))
 	}
 
-	// Add intelligence context (patterns from Collective Unconscious)
-	if intelligenceCtx != nil {
-		// Add relevant patterns
-		if len(intelligenceCtx.Patterns) > 0 {
-			promptParts = append(promptParts, "\n## Relevant Patterns from Previous Work:\n")
-			for i, pattern := range intelligenceCtx.Patterns {
-				if i >= 3 { // Limit to top 3 patterns
-					break
-				}
-				patternText := fmt.Sprintf("Pattern %d (Category: %s, Score: %.2f):\n%s", i+1, pattern.Category, pattern.Score, pattern.Content)
-				if len(pattern.Tags) > 0 {
-					patternText += fmt.Sprintf("\nTags: %v", pattern.Tags)
-				}
-				promptParts = append(promptParts, patternText)
-			}
-		}
-
-		// Add anti-patterns to avoid
-		if len(intelligenceCtx.AntiPatterns) > 0 {
-			promptParts = append(promptParts, "\n## Anti-Patterns to Avoid:\n")
-			for _, antiPattern := range intelligenceCtx.AntiPatterns {
-				promptParts = append(promptParts, fmt.Sprintf("- %s: %s (Category: %s)", antiPattern.ID, antiPattern.Content, antiPattern.Category))
-			}
-		}
-
-		// Add impact analysis if available
-		if intelligenceCtx.Impact != nil {
-			impactedFiles := make(map[string]bool)
-			for _, dep := range intelligenceCtx.Impact.Impact.Callers {
-				impactedFiles[dep.File] = true
-			}
-			for _, dep := range intelligenceCtx.Impact.Impact.Callees {
-				impactedFiles[dep.File] = true
-			}
-
-			if len(impactedFiles) > 0 {
-				promptParts = append(promptParts, "\n## Files That May Be Impacted:\n")
-				for file := range impactedFiles {
-					promptParts = append(promptParts, fmt.Sprintf("- %s", file))
-				}
-			}
-		}
-
-		// Add related files from semantic search
-		if len(intelligenceCtx.RelatedFiles) > 0 {
-			promptParts = append(promptParts, "\n## Related Files:\n")
-			for i, file := range intelligenceCtx.RelatedFiles {
-				if i >= 5 { // Limit to top 5 related files
-					break
-				}
-				promptParts = append(promptParts, fmt.Sprintf("- %s (score: %.2f)", file.File, file.Score))
-			}
-		}
-	}
+	// Note: Intelligence context now accessed via skills on-demand, not force-fed
+	// Pi agents use cass-memory-insights and tldr-code-intelligence skills
 
 	// Join all parts into single prompt
 	prompt := strings.Join(promptParts, "\n")
@@ -877,7 +746,6 @@ func buildOpencodeCommand(bead types.Bead, agentType string, intelligenceCtx *In
 func recordExecutionResult(
 	bead types.Bead,
 	result *ExecutionResult,
-	intelligenceCtx *IntelligenceContext,
 	mcpClient *mcp.Client,
 ) {
 	if result == nil {
@@ -915,24 +783,6 @@ func recordExecutionResult(
 	} else {
 		log.Printf("✅ Recorded %s pattern to cass_memory (category: %s)", status, category)
 		streamLog(mcpClient, "info", fmt.Sprintf("Recorded %s pattern to cass_memory", status))
-	}
-
-	// Record outcome for any matched patterns
-	if intelligenceCtx != nil && intelligenceCtx.CassContext != nil {
-		var ruleIDs []string
-		for _, bullet := range intelligenceCtx.CassContext.Data.RelevantBullets {
-			if bullet.ID != "" {
-				ruleIDs = append(ruleIDs, bullet.ID)
-			}
-		}
-
-		if len(ruleIDs) > 0 {
-			if err := cassClient.RecordOutcome(status, ruleIDs, result.Duration); err != nil {
-				log.Printf("[WARN] Failed to record outcome: %v", err)
-			} else {
-				log.Printf("✅ Recorded outcome for %d rules", len(ruleIDs))
-			}
-		}
 	}
 }
 

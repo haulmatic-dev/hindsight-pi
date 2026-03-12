@@ -621,72 +621,6 @@ func (o *Overseer) initializeChainCompletionDetector() {
 		config.DetectionInterval, config.Timeout)
 }
 
-// runPreExecutionIntelligence gathers intelligence before executing a bead
-// This method is designed to be non-blocking and degrades gracefully if services are unavailable
-func (o *Overseer) runPreExecutionIntelligence(bead *types.Bead) (*IntelligenceBundle, error) {
-	startTime := time.Now()
-	bundle := &IntelligenceBundle{
-		Patterns:       make([]Pattern, 0),
-		ContextEntries: make([]ContextEntry, 0),
-		GatheredAt:     time.Now(),
-		ScopeValidated: true, // Default to true, will set to false if validation fails
-	}
-
-	beadIDStr := string(bead.ID)
-	log.Printf("[Intelligence] Starting pre-execution intelligence for bead: %s", beadIDStr)
-
-	o.intelMutex.RLock()
-	cassClient := o.cassClient
-	tldrClient := o.tldrClient
-	o.intelMutex.RUnlock()
-
-	// Extract target files from bead metadata or description
-	targetFiles := o.extractTargetFiles(bead)
-	if len(targetFiles) > 0 {
-		log.Printf("[Intelligence] Extracted %d target files for analysis", len(targetFiles))
-	}
-
-	// 1. Query cass_memory for relevant context (if enabled)
-	if cassClient != nil && o.config.Intelligence.CassMemory.Enabled {
-		ctxEntries, err := o.queryCassMemoryContext(cassClient, bead, targetFiles)
-		if err != nil {
-			// Graceful degradation: log error but continue
-			o.logGracefulDegradation("Intelligence", "cass_memory query",
-				"continuing without context", err)
-		} else {
-			bundle.ContextEntries = ctxEntries
-			log.Printf("[Intelligence] Retrieved %d context entries from cass_memory", len(ctxEntries))
-		}
-	}
-
-	// 2. Analyze impact with TLDR (if enabled and files available)
-	if tldrClient != nil && o.config.Intelligence.TLDR.Enabled && len(targetFiles) > 0 {
-		impact, err := o.analyzeImpactWithTLDR(tldrClient, bead, targetFiles)
-		if err != nil {
-			// Graceful degradation: log error but continue
-			o.logGracefulDegradation("Intelligence", "TLDR impact analysis",
-				"continuing without impact analysis", err)
-		} else {
-			bundle.ImpactAnalysis = impact
-			log.Printf("[Intelligence] TLDR impact analysis complete: %d files affected, risk: %s",
-				len(impact.AffectedFiles), impact.RiskLevel)
-		}
-	}
-
-	// 3. Validate scope against limits
-	if err := o.validateScope(bundle, targetFiles); err != nil {
-		bundle.ScopeValidated = false
-		bundle.ValidationError = err.Error()
-		log.Printf("[Intelligence] Scope validation failed for bead %s: %v", beadIDStr, err)
-	}
-
-	duration := time.Since(startTime)
-	log.Printf("[Intelligence] Pre-execution intelligence complete for %s (duration: %v, entries: %d, validated: %t)",
-		beadIDStr, duration, len(bundle.ContextEntries), bundle.ScopeValidated)
-
-	return bundle, nil
-}
-
 // queryCassMemoryContext queries cass_memory for relevant context with error handling
 func (o *Overseer) queryCassMemoryContext(client *CassMemoryClient, bead *types.Bead, files []string) ([]ContextEntry, error) {
 	// Create a context with timeout
@@ -2173,14 +2107,6 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		log.Printf("[Worker] Spawning worker for bead: %s (agent: %s)", beadIDStr, agentType)
 	}
 
-	// Gather pre-execution intelligence (non-blocking, graceful degradation)
-	var intelBundle *IntelligenceBundle
-	if o.isIntelligenceEnabled() {
-		intelBundle, _ = o.runPreExecutionIntelligence(&bead)
-		// Intelligence errors are logged within runPreExecutionIntelligence
-		// We continue with nil bundle if gathering fails
-	}
-
 	// Find project path
 	projectPath := o.findProjectPath(&bead)
 	if projectPath == "" {
@@ -2221,18 +2147,6 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		fmt.Sprintf("HYDRA_BEAD_TITLE=%s", bead.Title),
 		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
 	)
-
-	// Pass intelligence bundle to worker if available
-	if intelBundle != nil {
-		intelJSON, err := json.Marshal(intelBundle)
-		if err == nil {
-			env = append(env, fmt.Sprintf("HYDRA_INTELLIGENCE=%s", string(intelJSON)))
-			log.Printf("[Worker] Intelligence bundle passed to worker for bead %s (%d bytes)",
-				beadIDStr, len(intelJSON))
-		} else {
-			log.Printf("[Worker] Failed to marshal intelligence bundle: %v", err)
-		}
-	}
 
 	cmd.Env = env
 

@@ -47,24 +47,6 @@ func (o *Overseer) spawnWorkerViaAgent(bead types.Bead) (*types.Worker, error) {
 		}
 	}
 
-	// Gather intelligence
-	var patterns []agents.Pattern
-	var antiPatterns []agents.AntiPattern
-
-	if o.isIntelligenceEnabled() {
-		if intelBundle, _ := o.runPreExecutionIntelligence(&bead); intelBundle != nil {
-			// Convert intelligence bundle to agent patterns
-			for _, p := range intelBundle.Patterns {
-				patterns = append(patterns, agents.Pattern{
-					ID:         p.ID,
-					Title:      p.Description,
-					Content:    p.Description, // Use Description as Content
-					Confidence: p.Confidence,
-				})
-			}
-		}
-	}
-
 	// Create worker record
 	worker := &types.Worker{
 		ID:          beadIDStr,
@@ -86,11 +68,10 @@ func (o *Overseer) spawnWorkerViaAgent(bead types.Bead) (*types.Worker, error) {
 
 	// Start session
 	opts := agents.AgentOptions{
-		ProjectPath:  projectPath,
-		Timeout:      o.config.Overseer.WorkerTimeout,
-		AgentType:    string(agentType),
-		Patterns:     patterns,
-		AntiPatterns: antiPatterns,
+		ProjectPath: projectPath,
+		Timeout:     o.config.Overseer.WorkerTimeout,
+		AgentType:   string(agentType),
+		// Note: Patterns/AntiPatterns now accessed via cass-memory-insights skill on-demand
 	}
 
 	ctx := context.Background()
