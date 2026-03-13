@@ -12,7 +12,21 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-const TLDR_BINARY = 'llm-tldr'; // Will find real llm-tldr in PATH (after this wrapper)
+// Find the real llm-tldr binary, excluding this wrapper script
+// Use 'which' command with modified PATH (excluding hydra/bin) to avoid recursion
+const { execSync } = require('child_process');
+let TLDR_BINARY;
+try {
+  // Get original PATH without hydra/bin to find the real binary
+  const originalPath = process.env.PATH.replace(/[^:]*hydra\/bin:?/g, '');
+  TLDR_BINARY = execSync('which llm-tldr', { 
+    encoding: 'utf8',
+    env: { ...process.env, PATH: originalPath }
+  }).trim();
+} catch (err) {
+  console.error('[tldr-wrapper] ERROR: Could not find real llm-tldr binary');
+  process.exit(1);
+}
 const LOG_DIR = '/tmp/hydra-logs';
 const LOG_FILE = path.join(LOG_DIR, 'tldr.log');
 const MAX_LOG_SIZE = 10 * 1024 * 1024; // 10MB
