@@ -384,6 +384,9 @@ type Overseer struct {
 
 	// Skill updater for periodic skill updates
 	skillUpdater *pi.SkillUpdater // Skill updater for background updates
+
+	// TLDR indexer for deterministic code indexing
+	tldrIndexer *TLDRIndexer // Indexes repositories after code changes
 }
 
 // NewOverseer creates a new overseer instance
@@ -541,6 +544,18 @@ func (o *Overseer) initializeIntelligenceClients() {
 		)
 		log.Printf("[Intelligence] TLDR client initialized (baseURL: %s, maxFiles: %d)",
 			intellConfig.TLDR.BaseURL, intellConfig.TLDR.MaxFiles)
+
+		// Initialize TLDR indexer if enabled
+		if intellConfig.TLDR.Indexing.Enabled {
+			o.tldrIndexer = NewTLDRIndexer(
+				intellConfig.TLDR.Indexing.MaxConcurrent,
+				intellConfig.TLDR.Indexing.RetryAttempts,
+				intellConfig.TLDR.Indexing.RetryDelay,
+				"llm-tldr",
+			)
+			log.Printf("[Intelligence] TLDR indexer initialized (maxConcurrent: %d, queueSize: %d)",
+				intellConfig.TLDR.Indexing.MaxConcurrent, intellConfig.TLDR.Indexing.QueueSize)
+		}
 	}
 
 	// Initialize GPTCache client if enabled
@@ -1013,6 +1028,15 @@ func (o *Overseer) Start(ctx context.Context) error {
 		log.Println("📚 Skill updater started")
 	}
 
+	// Start TLDR indexer if enabled
+	if o.tldrIndexer != nil {
+		o.tldrIndexer.Start()
+		log.Println("📇 TLDR indexer started")
+
+		// Queue initial indexing for all project repos
+		o.queueInitialIndexing()
+	}
+
 	o.running = true
 	ticker := time.NewTicker(o.beadDiscoveryInterval)
 	defer ticker.Stop()
@@ -1038,12 +1062,53 @@ func (o *Overseer) Start(ctx context.Context) error {
 				o.skillUpdater.Stop()
 				log.Println("📚 Skill updater stopped")
 			}
+			// Stop TLDR indexer
+			if o.tldrIndexer != nil {
+				o.tldrIndexer.Stop()
+				log.Println("📇 TLDR indexer stopped")
+			}
 			return nil
 		case <-ticker.C:
 			if err := o.tick(); err != nil {
 				log.Printf("Error during tick: %v", err)
 			}
 		}
+	}
+}
+
+// queueInitialIndexing queues all project repositories for initial TLDR indexing
+func (o *Overseer) queueInitialIndexing() {
+	if o.tldrIndexer == nil {
+		return
+	}
+
+	log.Printf("[TLDRIndexer] Queueing initial indexing for %d projects", len(o.projects))
+
+	for _, project := range o.projects {
+		if project.Type == "multi" {
+			// Multi-repo project: index each repo
+			for _, repo := range project.Repos {
+				if o.tldrIndexer.QueueIndex(repo.Path) {
+					log.Printf("[TLDRIndexer] Queued for indexing: %s/%s", project.Name, repo.Name)
+				}
+			}
+		} else {
+			// Single repo project: index project path
+			if o.tldrIndexer.QueueIndex(project.Path) {
+				log.Printf("[TLDRIndexer] Queued for indexing: %s", project.Name)
+			}
+		}
+	}
+}
+
+// queueRepoIndexing queues a repository for TLDR indexing after bead completion
+func (o *Overseer) queueRepoIndexing(projectName, repoPath string) {
+	if o.tldrIndexer == nil {
+		return
+	}
+
+	if o.tldrIndexer.QueueIndex(repoPath) {
+		log.Printf("[TLDRIndexer] Queued for indexing: %s (%s)", projectName, repoPath)
 	}
 }
 
@@ -2502,6 +2567,7 @@ func (o *Overseer) scheduleAfterCompletion(worker *types.Worker, success bool, n
 
 // closeBead closes the bead via beadsClient based on worker completion status.
 // It determines the appropriate status reason and handles project path resolution.
+// On successful completion, it queues the repository for TLDR indexing.
 func (o *Overseer) closeBead(worker *types.Worker, success bool) error {
 	projectName := worker.BeadID.Project()
 	repoName := worker.BeadID.Repo()
@@ -2517,7 +2583,37 @@ func (o *Overseer) closeBead(worker *types.Worker, success bool) error {
 	reason := statusReason(success)
 	log.Printf("[closeBead] Closing with reason: %s (path: %s)", reason, projectPath)
 
+	// Queue TLDR indexing on successful completion
+	if success && o.config.Intelligence.TLDR.Indexing.Enabled {
+		// Find the repo path
+		repoPath := o.resolveRepoPath(projectName, repoName, projectPath)
+		if repoPath != "" {
+			o.queueRepoIndexing(projectName, repoPath)
+		}
+	}
+
 	return o.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason)
+}
+
+// resolveRepoPath finds the repository path for a given project and repo
+func (o *Overseer) resolveRepoPath(projectName, repoName, projectPath string) string {
+	// Find the project
+	for _, p := range o.projects {
+		if p.Name == projectName {
+			if p.Type == "multi" {
+				// Multi-repo: find specific repo
+				for _, r := range p.Repos {
+					if r.Name == repoName {
+						return r.Path
+					}
+				}
+			}
+			// Single repo or default to project path
+			return p.Path
+		}
+	}
+	// Fallback to project path
+	return projectPath
 }
 
 // resolveProjectPath determines the project path using multiple resolution strategies

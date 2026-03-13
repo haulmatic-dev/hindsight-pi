@@ -34,6 +34,12 @@ intelligence:
     enabled: true
     timeout: 30s
     max_files: 20  # Allow up to 20 files for intelligence gathering
+    indexing:
+      enabled: true
+      max_concurrent: 2        # Max concurrent indexing operations
+      queue_size: 100          # Max queue depth
+      retry_attempts: 3        # Number of retry attempts
+      retry_delay: 5s          # Delay between retries
   gptcache:
     enabled: true
   patterns:

@@ -178,13 +178,23 @@ type CassMemoryConfig struct {
 	Timeout     time.Duration `yaml:"timeout"`
 }
 
+// TLDRIndexingConfig contains TLDR indexing settings
+type TLDRIndexingConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	MaxConcurrent int           `yaml:"max_concurrent"`
+	QueueSize     int           `yaml:"queue_size"`
+	RetryAttempts int           `yaml:"retry_attempts"`
+	RetryDelay    time.Duration `yaml:"retry_delay"`
+}
+
 // TLDRConfig contains TLDR service settings
 type TLDRConfig struct {
-	Enabled   bool          `yaml:"enabled"`
-	BaseURL   string        `yaml:"base_url"`
-	Timeout   time.Duration `yaml:"timeout"`
-	MaxFiles  int           `yaml:"max_files"`
-	MaxTokens int           `yaml:"max_tokens"`
+	Enabled   bool               `yaml:"enabled"`
+	BaseURL   string             `yaml:"base_url"`
+	Timeout   time.Duration      `yaml:"timeout"`
+	MaxFiles  int                `yaml:"max_files"`
+	MaxTokens int                `yaml:"max_tokens"`
+	Indexing  TLDRIndexingConfig `yaml:"indexing"`
 }
 
 // GPTCacheConfig contains GPTCache service settings
@@ -291,6 +301,13 @@ func DefaultConfig() *Config {
 				Timeout:   10 * time.Second,
 				MaxFiles:  50,
 				MaxTokens: 100000,
+				Indexing: TLDRIndexingConfig{
+					Enabled:       true,
+					MaxConcurrent: 2,
+					QueueSize:     100,
+					RetryAttempts: 3,
+					RetryDelay:    5 * time.Second,
+				},
 			},
 			GPTCache: GPTCacheConfig{
 				Enabled:   true,
