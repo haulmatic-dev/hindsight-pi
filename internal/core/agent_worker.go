@@ -187,7 +187,19 @@ func (o *Overseer) buildAgentPrompt(bead types.Bead) string {
 
 	buf.WriteString("## Instructions\n")
 	buf.WriteString("Please complete this task based on the description above.\n")
-	buf.WriteString("When finished, ensure all files are saved and the solution is complete.\n")
+	buf.WriteString("When finished, ensure all files are saved and the solution is complete.\n\n")
+
+	buf.WriteString("## IMPORTANT: Use Available Skills\n")
+	buf.WriteString("Before implementing, check institutional knowledge and code context:\n\n")
+	buf.WriteString("1. **Query cass_memory for patterns** (cass-memory-insights skill):\n")
+	buf.WriteString("   Run: `cm context '<your task description>' --json`\n")
+	buf.WriteString("   Example: `cm context 'implement rate limiting' --json`\n\n")
+	buf.WriteString("2. **Search code with TLDR** (tldr-code-intelligence skill):\n")
+	buf.WriteString("   Run: `llm-tldr search '<what you are looking for>'`\n")
+	buf.WriteString("   Example: `llm-tldr search 'rate limiting middleware'`\n\n")
+	buf.WriteString("3. **Check impact before refactoring**:\n")
+	buf.WriteString("   Run: `llm-tldr impact <file> --depth 2`\n\n")
+	buf.WriteString("Always query these resources FIRST to learn from previous work and understand the codebase.\n")
 
 	return buf.String()
 }
