@@ -523,12 +523,69 @@ func BuildSkillFlagsWithOptions(configDir string, failOnMissing bool) (*SkillFla
 	return result, err
 }
 
+// discoverLocalSkills scans .agents/skills/ for additional skills not in DefaultSkills
+func discoverLocalSkills(hydraDir string) []Skill {
+	localSkills := []Skill{}
+	localSkillsDir := filepath.Join(hydraDir, ".agents", "skills")
+
+	entries, err := os.ReadDir(localSkillsDir)
+	if err != nil {
+		// Directory doesn't exist or can't be read - not an error, just no local skills
+		return localSkills
+	}
+
+	// Create a set of existing skill names for quick lookup
+	existingNames := make(map[string]bool)
+	for _, s := range DefaultSkills {
+		existingNames[s.Name] = true
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		skillName := entry.Name()
+
+		// Skip if already in DefaultSkills
+		if existingNames[skillName] {
+			continue
+		}
+
+		// Check if SKILL.md exists
+		skillMDPath := filepath.Join(localSkillsDir, skillName, "SKILL.md")
+		if _, err := os.Stat(skillMDPath); err != nil {
+			// No SKILL.md, not a valid skill
+			continue
+		}
+
+		// Found a local skill
+		localSkills = append(localSkills, Skill{
+			Name:        skillName,
+			Repo:        "local", // Local skills don't have a repo
+			Description: "Local skill discovered in .agents/skills/",
+		})
+		log.Printf("[BuildSkillFlags] Discovered local skill: %s", skillName)
+	}
+
+	return localSkills
+}
+
 // buildSkillFlagsUncached performs the actual skill flag building without caching
 func buildSkillFlagsUncached(absConfigDir string, failOnMissing bool) (*SkillFlagsResult, error) {
+	// Discover local skills from .agents/skills/
+	hydraDir := filepath.Dir(absConfigDir) // configDir is <hydra>/config, so parent is <hydra>
+	localSkills := discoverLocalSkills(hydraDir)
+
+	// Merge DefaultSkills with local skills
+	allSkills := make([]Skill, len(DefaultSkills)+len(localSkills))
+	copy(allSkills, DefaultSkills)
+	copy(allSkills[len(DefaultSkills):], localSkills)
+
 	result := &SkillFlagsResult{
-		Flags:         make([]string, 0, len(DefaultSkills)*2),
+		Flags:         make([]string, 0, len(allSkills)*2),
 		Warnings:      make([]string, 0),
-		Found:         make([]string, 0, len(DefaultSkills)),
+		Found:         make([]string, 0, len(allSkills)),
 		Missing:       make([]string, 0),
 		FailOnMissing: failOnMissing,
 	}
@@ -536,8 +593,8 @@ func buildSkillFlagsUncached(absConfigDir string, failOnMissing bool) (*SkillFla
 	skillsDir := filepath.Join(absConfigDir, "skills")
 
 	// Sort skills alphabetically by name for reproducibility
-	sortedSkills := make([]Skill, len(DefaultSkills))
-	copy(sortedSkills, DefaultSkills)
+	sortedSkills := make([]Skill, len(allSkills))
+	copy(sortedSkills, allSkills)
 	sort.Slice(sortedSkills, func(i, j int) bool {
 		return sortedSkills[i].Name < sortedSkills[j].Name
 	})
