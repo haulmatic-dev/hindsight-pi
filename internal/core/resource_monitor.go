@@ -14,14 +14,21 @@ import (
 type ResourceMonitor struct {
 	maxCPUUsage    float64 // Maximum allowed CPU usage (0-100)
 	maxMemoryUsage float64 // Maximum allowed memory usage (0-100)
+	maxProcPercent float64 // Maximum allowed process count percentage (0-100)
 	checkInterval  time.Duration
 }
 
 // NewResourceMonitor creates a new resource monitor
-func NewResourceMonitor(maxCPU, maxMemory float64) *ResourceMonitor {
+// maxProcPercent: maximum process usage percentage (0 = unlimited, default 90%)
+func NewResourceMonitor(maxCPU, maxMemory float64, maxProcPercent ...float64) *ResourceMonitor {
+	procPercent := 90.0 // Default: block when >90% of process limit reached
+	if len(maxProcPercent) > 0 {
+		procPercent = maxProcPercent[0]
+	}
 	return &ResourceMonitor{
 		maxCPUUsage:    maxCPU,
 		maxMemoryUsage: maxMemory,
+		maxProcPercent: procPercent,
 		checkInterval:  5 * time.Second,
 	}
 }
@@ -140,8 +147,52 @@ func (rm *ResourceMonitor) getMemoryUsage() (float64, error) {
 	return mem, nil
 }
 
+// getProcessCount returns the current number of processes running
+func (rm *ResourceMonitor) getProcessCount() (int, error) {
+	var cmd *exec.Cmd
+
+	if runtime.GOOS == "darwin" {
+		// macOS: count processes using ps
+		cmd = exec.Command("sh", "-c", "ps ax | wc -l")
+	} else {
+		// Linux: count processes in /proc
+		cmd = exec.Command("sh", "-c", "ls /proc | grep -E '^[0-9]+$' | wc -l")
+	}
+
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get process count: %w", err)
+	}
+
+	countStr := strings.TrimSpace(string(output))
+	count, err := strconv.Atoi(countStr)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse process count '%s': %w", countStr, err)
+	}
+
+	return count, nil
+}
+
+// getProcessLimit returns the maximum number of processes allowed (ulimit -u)
+func (rm *ResourceMonitor) getProcessLimit() (int, error) {
+	// Get ulimit -u for current user
+	cmd := exec.Command("ulimit", "-u")
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get process limit: %w", err)
+	}
+
+	limitStr := strings.TrimSpace(string(output))
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse process limit '%s': %w", limitStr, err)
+	}
+
+	return limit, nil
+}
+
 // CanSpawnWorker checks if system resources allow spawning a new worker
-// Returns true if CPU and Memory are below their respective limits
+// Returns true if CPU, Memory, and Process count are below their respective limits
 // Limit of 0 means unlimited (no check performed)
 func (rm *ResourceMonitor) CanSpawnWorker() bool {
 	// Check CPU usage (skip if limit is 0)
@@ -186,34 +237,76 @@ func (rm *ResourceMonitor) CanSpawnWorker() bool {
 		}
 	}
 
+	// Check process count against limit (skip if limit is 0)
+	if rm.maxProcPercent > 0 {
+		procLimit, err := rm.getProcessLimit()
+		if err != nil {
+			log.Printf("[ResourceMonitor] Failed to get process limit: %v", err)
+			// Continue anyway (fail open for this check)
+		} else {
+			procCount, err := rm.getProcessCount()
+			if err != nil {
+				log.Printf("[ResourceMonitor] Failed to get process count: %v", err)
+				return true // Allow spawn on error (fail open)
+			}
+
+			procPercent := float64(procCount) / float64(procLimit) * 100
+			if procPercent > rm.maxProcPercent {
+				log.Printf("[ResourceMonitor] Process count %d/%d (%.1f%%) exceeds %.1f%%, blocking worker spawn",
+					procCount, procLimit, procPercent, rm.maxProcPercent)
+				return false
+			}
+
+			// Log when we're close to limits (within 10%)
+			if procPercent > rm.maxProcPercent*0.9 {
+				log.Printf("[ResourceMonitor] Warning: Process count high - %d/%d (%.1f%%) (Limit: %.1f%%)",
+					procCount, procLimit, procPercent, rm.maxProcPercent)
+			}
+		}
+	}
+
 	return true
 }
 
-// GetUsage returns current CPU and memory usage
-func (rm *ResourceMonitor) GetUsage() (cpuPercent float64, memPercent float64, err error) {
+// GetUsage returns current CPU and memory usage, and optionally process count info
+func (rm *ResourceMonitor) GetUsage() (cpuPercent float64, memPercent float64, procPercent float64, procCount int, procLimit int, err error) {
 	cpu, err := rm.getCPUUsage()
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get CPU usage: %w", err)
+		return 0, 0, 0, 0, 0, fmt.Errorf("failed to get CPU usage: %w", err)
 	}
 
 	mem, err := rm.getMemoryUsage()
 	if err != nil {
-		return cpu, 0, fmt.Errorf("failed to get memory usage: %w", err)
+		return cpu, 0, 0, 0, 0, fmt.Errorf("failed to get memory usage: %w", err)
 	}
 
-	return cpu, mem, nil
+	procLimit, err = rm.getProcessLimit()
+	if err != nil {
+		// Non-fatal: just return without process info
+		return cpu, mem, 0, 0, 0, nil
+	}
+
+	procCount, err = rm.getProcessCount()
+	if err != nil {
+		// Non-fatal: just return without process info
+		return cpu, mem, 0, 0, procLimit, nil
+	}
+
+	procPercent = float64(procCount) / float64(procLimit) * 100
+
+	return cpu, mem, procPercent, procCount, procLimit, nil
 }
 
 // LogUsage logs current resource usage
 func (rm *ResourceMonitor) LogUsage() {
-	cpu, mem, err := rm.GetUsage()
+	cpu, mem, procPercent, procCount, procLimit, err := rm.GetUsage()
 	if err != nil {
 		log.Printf("[ResourceMonitor] Error getting usage: %v", err)
 		return
 	}
 
-	log.Printf("[ResourceMonitor] CPU: %.1f%%, Memory: %.1f%% (Limits: %.1f%%/%.1f%%)",
-		cpu, mem, rm.maxCPUUsage, rm.maxMemoryUsage)
+	log.Printf("[ResourceMonitor] CPU: %.1f%%, Memory: %.1f%%, Processes: %d/%d (%.1f%%)",
+		cpu, mem, procCount, procLimit, procPercent)
 }
 
 // ForceGC runs garbage collection to free memory

@@ -373,6 +373,11 @@ type Overseer struct {
 	spawnTimestamps []time.Time // Timestamps of recent worker spawns
 	spawnRateMu     sync.Mutex  // Mutex for spawn rate tracking
 
+	// Spawn backoff tracking
+	lastSpawnFailure time.Time  // Last time a spawn failed (for exponential backoff)
+	spawnFailures    int        // Consecutive spawn failures count
+	spawnBackoffMu   sync.Mutex // Mutex for spawn backoff state
+
 	// Agent connector for modular agent support
 	agentConnector agents.AgentConnector // Agent connector interface
 	agentConnMu    sync.RWMutex          // Mutex for agent connector
@@ -875,6 +880,63 @@ func (o *Overseer) getRetryCount(beadID string) int {
 		return info.count
 	}
 	return 0
+}
+
+// recordSpawnFailure records a spawn failure and calculates backoff
+func (o *Overseer) recordSpawnFailure() time.Duration {
+	o.spawnBackoffMu.Lock()
+	defer o.spawnBackoffMu.Unlock()
+
+	o.spawnFailures++
+	o.lastSpawnFailure = time.Now()
+
+	// Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 60s
+	backoff := time.Duration(1<<uint(o.spawnFailures-1)) * time.Second
+	if backoff > 60*time.Second {
+		backoff = 60 * time.Second
+	}
+
+	log.Printf("[Overseer] Spawn failure recorded (%d consecutive). Backoff: %v",
+		o.spawnFailures, backoff)
+
+	return backoff
+}
+
+// clearSpawnFailures resets the spawn failure count after a successful spawn
+func (o *Overseer) clearSpawnFailures() {
+	o.spawnBackoffMu.Lock()
+	defer o.spawnBackoffMu.Unlock()
+
+	if o.spawnFailures > 0 {
+		log.Printf("[Overseer] Spawn failures cleared (was %d)", o.spawnFailures)
+		o.spawnFailures = 0
+	}
+}
+
+// shouldSpawnBackoff returns true if we should wait before spawning more workers
+func (o *Overseer) shouldSpawnBackoff() bool {
+	o.spawnBackoffMu.Lock()
+	defer o.spawnBackoffMu.Unlock()
+
+	if o.spawnFailures == 0 {
+		return false
+	}
+
+	// Calculate backoff duration
+	backoff := time.Duration(1<<uint(o.spawnFailures-1)) * time.Second
+	if backoff > 60*time.Second {
+		backoff = 60 * time.Second
+	}
+
+	elapsed := time.Since(o.lastSpawnFailure)
+	shouldWait := elapsed < backoff
+
+	if shouldWait {
+		remaining := backoff - elapsed
+		log.Printf("[Overseer] Spawn backoff active: %v remaining", remaining)
+	}
+
+	return shouldWait
 }
 
 // logError logs an error with structured context information
@@ -1998,6 +2060,17 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		return fmt.Errorf("cannot spawn worker for bead with empty ID")
 	}
 
+	// Check if we should back off due to recent spawn failures
+	if o.shouldSpawnBackoff() {
+		o.spawnBackoffMu.Lock()
+		backoff := time.Duration(1<<uint(o.spawnFailures-1)) * time.Second
+		if backoff > 60*time.Second {
+			backoff = 60 * time.Second
+		}
+		o.spawnBackoffMu.Unlock()
+		return fmt.Errorf("spawn backoff active: waiting %v before retry", backoff)
+	}
+
 	// CRITICAL: Atomic check-and-reserve pattern to prevent race conditions
 	// Hold lock during check AND registration to ensure accurate worker count
 	o.workerMutex.Lock()
@@ -2083,6 +2156,9 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 	o.activeWorkers[beadIDStr] = worker
 	o.workerMutex.Unlock()
 
+	// Clear spawn failure count on successful spawn
+	o.clearSpawnFailures()
+
 	return nil
 }
 
@@ -2166,6 +2242,14 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 			Err:       err,
 		}
 		o.logError("spawnWorker", "process_start", beadIDStr, spawnErr, "error")
+
+		// Record spawn failure for exponential backoff
+		if strings.Contains(err.Error(), "resource temporarily unavailable") ||
+			strings.Contains(err.Error(), "EAGAIN") ||
+			strings.Contains(err.Error(), "fork") {
+			o.recordSpawnFailure()
+		}
+
 		return nil, spawnErr
 	}
 
@@ -2184,11 +2268,16 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 
 	// Track worker PID for orphan detection
 	if o.workerTracker != nil {
-		log.Printf("[Overseer] Tracking worker PID %d for bead %s", cmd.Process.Pid, beadIDStr)
-		if err := o.workerTracker.TrackWorker(cmd.Process.Pid, beadIDStr, projectPath); err != nil {
-			log.Printf("[Overseer] Warning: failed to track worker PID %d: %v", cmd.Process.Pid, err)
+		if cmd.Process.Pid <= 0 {
+			// Skip tracking placeholder PIDs
+			log.Printf("[Overseer] Skipping tracking of invalid PID %d for bead %s", cmd.Process.Pid, beadIDStr)
 		} else {
-			log.Printf("[Overseer] Successfully tracked worker PID %d for bead %s", cmd.Process.Pid, beadIDStr)
+			log.Printf("[Overseer] Tracking worker PID %d for bead %s", cmd.Process.Pid, beadIDStr)
+			if err := o.workerTracker.TrackWorker(cmd.Process.Pid, beadIDStr, projectPath); err != nil {
+				log.Printf("[Overseer] Warning: failed to track worker PID %d: %v", cmd.Process.Pid, err)
+			} else {
+				log.Printf("[Overseer] Successfully tracked worker PID %d for bead %s", cmd.Process.Pid, beadIDStr)
+			}
 		}
 	} else {
 		log.Printf("[Overseer] Warning: workerTracker is nil, cannot track worker PID %d", cmd.Process.Pid)
