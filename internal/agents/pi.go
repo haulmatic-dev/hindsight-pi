@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/pi"
@@ -181,6 +182,11 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 		cmd.Dir = projectPath
 	}
 
+	// Create new process group so we can kill the entire tree (pi + children)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
 	// Prepare environment variables
 	envVars := os.Environ()
 
@@ -275,6 +281,11 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 	// Update session with PID
 	session.PID = cmd.Process.Pid
 
+	// Notify about PID availability through callback if provided
+	if pidCallback, ok := session.metadata["pidCallback"].(func(int)); ok {
+		pidCallback(session.PID)
+	}
+
 	// Send prompt command
 	promptCmd := map[string]interface{}{
 		"type":    "prompt",
@@ -325,7 +336,15 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 		case <-time.After(5 * time.Second):
 			// Timeout waiting for process exit
 			log.Printf("[PiConnector] Timeout waiting for process exit after read completion")
-			cmd.Process.Kill()
+			// Kill entire process group using negative PID
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+				log.Printf("[PiConnector] Failed to kill process group: %v", err)
+				// Fallback: kill just the main process
+				cmd.Process.Kill()
+			}
+			// Additional cleanup: kill any remaining children
+			cleanupCmd := exec.Command("pkill", "-P", fmt.Sprintf("%d", cmd.Process.Pid))
+			cleanupCmd.Run() // Ignore errors - best effort cleanup
 		}
 	case exitErr = <-exitChan:
 		// Process exited, now wait for read completion with timeout
@@ -573,22 +592,29 @@ func scanLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	return 0, nil, nil
 }
 
-// Abort forcibly stops the Pi session
+// Abort forcibly stops the Pi session and its process group
 func (c *PiConnector) Abort(ctx context.Context, session *AgentSession) error {
 	if session.PID == 0 {
 		return fmt.Errorf("no process to abort")
 	}
 
-	// Kill the process
-	log.Printf("[PiConnector] Aborting session %s (PID: %d)", session.ID, session.PID)
+	// Kill the process group
+	log.Printf("[PiConnector] Aborting session %s (PID: %d, PGID: %d)", session.ID, session.PID, -session.PID)
 
-	// Try graceful termination first
-	if process, err := exec.Command("kill", fmt.Sprintf("%d", session.PID)).Output(); err != nil {
-		// Force kill if graceful fails
-		exec.Command("kill", "-9", fmt.Sprintf("%d", session.PID)).Run()
-	} else {
-		_ = process // suppress unused variable warning
+	// Try graceful termination of process group first
+	if err := syscall.Kill(-session.PID, syscall.SIGTERM); err != nil {
+		log.Printf("[PiConnector] Graceful kill of process group failed: %v", err)
+		// Force kill the process group
+		if err := syscall.Kill(-session.PID, syscall.SIGKILL); err != nil {
+			log.Printf("[PiConnector] Force kill of process group failed: %v", err)
+			// Fallback: kill just the main process
+			exec.Command("kill", "-9", fmt.Sprintf("%d", session.PID)).Run()
+		}
 	}
+
+	// Additional cleanup: kill any remaining children
+	cleanupCmd := exec.Command("pkill", "-P", fmt.Sprintf("%d", session.PID))
+	cleanupCmd.Run() // Ignore errors - best effort cleanup
 
 	return nil
 }

@@ -218,18 +218,18 @@ func main() {
 	notifyTaskComplete(mcpClient, bead, status, duration, exitCode)
 
 	// STEP 5: Close the bead using beads CLI (best-effort)
-	// This makes the worker self-contained and resilient to overseer failures
-	closeReason := "completed"
-	if exitCode != 0 {
-		closeReason = "failed"
-	}
-
-	if err := closeBeadFromWorker(bead, projectPath, config.Repo, closeReason); err != nil {
-		log.Printf("[WARN] Failed to close bead from worker (non-fatal): %v", err)
-		// Don't fail the worker just because we couldn't close the bead
-		// The overseer can handle this asynchronously
+	// Only close beads that succeeded - failed beads remain open for retry/investigation
+	if exitCode == 0 && result.Success {
+		if err := closeBeadFromWorker(bead, projectPath, config.Repo, "completed"); err != nil {
+			log.Printf("[WARN] Failed to close bead from worker (non-fatal): %v", err)
+			// Don't fail the worker just because we couldn't close the bead
+			// The overseer can handle this asynchronously
+		} else {
+			log.Printf("✅ Successfully closed bead %s with status: completed", beadID)
+		}
 	} else {
-		log.Printf("✅ Successfully closed bead %s with status: %s", beadID, closeReason)
+		log.Printf("⚠️  Bead %s NOT closed - worker failed (exit: %d, success: %v). Will remain open for retry.",
+			beadID, exitCode, result.Success)
 	}
 
 	streamLog(mcpClient, "info", fmt.Sprintf("Worker completed for bead %s with status %s", beadID, status))

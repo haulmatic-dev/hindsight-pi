@@ -2149,6 +2149,13 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
 	)
 
+	// Pass API key to worker if configured
+	if o.config != nil && o.config.Agents.Pi.ApiKeyName != "" {
+		if apiKey := os.Getenv(o.config.Agents.Pi.ApiKeyName); apiKey != "" {
+			env = append(env, fmt.Sprintf("%s=%s", o.config.Agents.Pi.ApiKeyName, apiKey))
+		}
+	}
+
 	cmd.Env = env
 
 	// Start process
