@@ -71,6 +71,16 @@ func main() {
 		config = core.DefaultConfig()
 	}
 
+	// Set API key from config for Pi agents
+	if config.Agents.Pi.ApiKeyName != "" {
+		apiKey := os.Getenv(config.Agents.Pi.ApiKeyName)
+		if apiKey == "" {
+			log.Printf("[Setup] Warning: API key %s not found in environment", config.Agents.Pi.ApiKeyName)
+		} else {
+			log.Printf("[Setup] API key %s loaded (%d chars)", config.Agents.Pi.ApiKeyName, len(apiKey))
+		}
+	}
+
 	// Create overseer
 	overseer := core.NewOverseer(config)
 
