@@ -18,6 +18,7 @@ import (
 type mockCassSearchClient struct {
 	searchCalled      bool
 	searchQuery       string
+	searchLimit       int
 	sessions          []SessionHit
 	timeoutDuration   time.Duration
 	enabled           bool
@@ -25,25 +26,10 @@ type mockCassSearchClient struct {
 	searchReturnEmpty bool
 }
 
-type SessionHit struct {
-	Agent      string  `json:"agent"`
-	Title      string  `json:"title"`
-	Content    string  `json:"content"`
-	Score      float64 `json:"score"`
-	SourcePath string  `json:"source_path"`
-	LineNumber int     `json:"line_number"`
-	CreatedAt  int64   `json:"created_at"`
-}
-
-type CASSSearchResult struct {
-	Count        int          `json:"count"`
-	TotalMatches int          `json:"total_matches"`
-	Hits         []SessionHit `json:"hits"`
-}
-
 func (m *mockCassSearchClient) SearchSessions(query string, limit int, timeout time.Duration) (*CASSSearchResult, error) {
 	m.searchCalled = true
 	m.searchQuery = query
+	m.searchLimit = limit
 	m.timeoutDuration = timeout
 
 	if m.searchError != nil {
@@ -666,10 +652,10 @@ func TestFR018_ContextEnvironmentVariable_PresentInWorker(t *testing.T) {
 func createTestOverseerWithCass(t *testing.T, cassClient *mockCassSearchClient) *Overseer {
 	config := &Config{
 		Overseer: OverseerConfig{
-			PollInterval:   5 * time.Second,
-			MaxWorkers:     5,
-			WorkerTimeout:  3 * time.Minute,
-			DefaultRetries: 3,
+			BeadDiscoveryInterval: 5 * time.Second,
+			MaxWorkers:            5,
+			WorkerTimeout:         3 * time.Minute,
+			DefaultRetries:        3,
 		},
 		Intelligence: IntelligenceConfig{
 			CassMemory: CassMemoryConfig{
@@ -689,26 +675,17 @@ func createTestOverseerWithCass(t *testing.T, cassClient *mockCassSearchClient) 
 		activeWorkers: make(map[string]*types.Worker),
 		retries:       make(map[string]*beadRetryInfo),
 	}
-	// Note: cassClient would be stored in a cassClient field when feature is implemented
+
+	// Create CASS client only if mock is provided
+	if cassClient != nil {
+		overseer.cassClient = &CassMemoryClient{
+			searchClient: cassClient,
+		}
+	}
 
 	return overseer
 }
 
 func getSearchLimit(mock *mockCassSearchClient) int {
-	// This helper would examine the mock to determine what limit was requested
-	// For now, return 0 to make tests fail (the feature doesn't exist)
-	return 0
-}
-
-// Mock methods on Overseer for testing - these don't exist yet
-// They will make the tests fail (RED phase)
-
-func (o *Overseer) spawnWorkerWithContextEnrichment(bead types.Bead) (*types.Worker, error) {
-	// This method doesn't exist yet - tests will fail
-	return nil, fmt.Errorf("spawnWorkerWithContextEnrichment not implemented")
-}
-
-func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead, cassClient interface{}) []string {
-	// This method doesn't exist yet - tests will fail
-	return nil
+	return mock.searchLimit
 }

@@ -56,7 +56,7 @@ Welcome to the swarm.
 
 ## What is Hydra?
 
-- **Hydra is an agent swarm orchestrator** — It spawns agents that work with any coding tool (opencode, claudecode, pi) in a completely agnostic way. Cut off one agent's task, and another one immediately spawns to take its place. No heads were harmed in the making of this software.
+- **Hydra is an agent swarm orchestrator** — It spawns agents that work with any coding tool (opencode, claudecode, pi) via the **Agent Connector Architecture**. This modular system uses HTTP APIs for better session control, allowing seamless integration of multiple AI agents. Cut off one agent's task, and another one immediately spawns to take its place. No heads were harmed in the making of this software.
 
 - **PRDs and beads go in, working software comes out** — Developers create PRDs and beads using opencode (currently). Once the approval gate is released (after review), Hydra goes to town on them. Think of it as releasing the hounds, except the hounds are AI agents and the fox is technical debt.
 
@@ -87,7 +87,7 @@ go build -o bin/hydra ./cmd/hydra
 # Configure
 cat > hydra.yaml << 'EOF'
 overseer:
-  poll_interval: 5s
+  bead_discovery_interval: 5s
   max_workers: 10
   worker_timeout: 5m
 
@@ -117,15 +117,22 @@ flowchart TB
         ActivityMonitor["Activity Monitor"]
     end
     
+    subgraph Agents["Agent Connector Layer"]
+        AgentRegistry["Agent Registry"]
+        OpencodeConn["Opencode Connector<br/>HTTP API"]
+        ClaudeConn["Claude Connector<br/>(Future)"]
+    end
+    
     subgraph Intelligence["Intelligence Layer"]
         CassMemory["cass_memory"]
         TLDR["TLDR"]
         GPTCache["GPTCache"]
+        PatternMatcher["Pattern Matcher"]
     end
     
     subgraph External["External Services"]
         MCP["MCP Agent Mail<br/>Port 8765"]
-        Opencode["Opencode CLI"]
+        OpencodeServer["Opencode Server<br/>Port 4096"]
     end
     
     subgraph Workers["Ephemeral Workers"]
@@ -136,6 +143,7 @@ flowchart TB
     
     subgraph Storage["Storage"]
         BeadsDB[("Beads DB<br/>.beads/")]
+        PatternStore[("Pattern Store")]
     end
     
     API --> Overseer
@@ -144,31 +152,47 @@ flowchart TB
     Overseer --> ActivityMonitor
     Overseer --> Intelligence
     Overseer --> MCP
+    Overseer --> Agents
+    
+    AgentRegistry --> OpencodeConn
+    AgentRegistry --> ClaudeConn
+    OpencodeConn --> OpencodeServer
     
     Scheduler --> Workers
-    Workers --> Opencode
+    Workers --> OpencodeServer
     Workers --> BeadsDB
+    
+    PatternMatcher --> PatternStore
     
     MCP -.->|File Reservations| Workers
     
     style Hydra fill:#e1f5fe
     style Workers fill:#fff3e0
     style Intelligence fill:#f3e5f5
+    style Agents fill:#fff8e1
 ```
 
 ## ✨ Key Features
 
+- **🤖 Agent Connector Architecture**: Modular system supporting multiple AI agents (opencode, claude, etc.) via HTTP APIs
 - **🔄 Activity-Based Timeout**: Workers only timeout after 5 minutes of inactivity, not fixed duration
 - **📊 Resource-Based Scaling**: Automatically limits workers when CPU/Memory > 70%
 - **🔗 MCP Integration**: HTTP-based protocol for agent coordination and file reservations
 - **🧠 Intelligence Layer**: Context-aware execution with cass_memory, TLDR, and GPTCache
 - **📈 GraphQL API**: Real-time monitoring and control
 - **🎯 Smart Scheduling**: Processes beads in dependency order using DAG analysis
+- **📚 Pattern Learning**: Collective Unconscious system extracts and injects patterns from completed beads
+
+## 🧠 Collective Unconscious
+
+Hydra's Collective Unconscious is a cross-project pattern learning system that enables agents to learn from each other's successes. When beads complete successfully, the system automatically extracts reusable patterns—implementation approaches, design decisions, testing strategies—and stores them in a shared knowledge base. New beads automatically receive relevant patterns from similar past tasks across all projects, dramatically improving agent effectiveness and consistency. This creates a compounding intelligence effect: every solved problem makes future agents smarter.
 
 ## 📚 Documentation Structure
 
 ### 🏗️ Architecture
 - [System Architecture](docs/architecture/system-architecture-20260309.md) - High-level design and components
+- [Agent Connector Architecture](docs/architecture/agent-connector-20260311.md) - Multi-agent support system
+- [Collective Unconscious](docs/collective-unconscious/test-results/TEST_RESULTS.md) - Pattern learning and injection
 - [Worker Lifecycle](docs/architecture/worker-lifecycle-20260309.md) - How workers are spawned, monitored, and terminated
 - [Bead Processing Flow](docs/architecture/bead-processing-flow-20260309.md) - End-to-end bead execution flow
 
@@ -192,7 +216,7 @@ flowchart TB
 ```yaml
 # hydra.yaml
 overseer:
-  poll_interval: 5s          # Check for ready beads every 5 seconds
+  bead_discovery_interval: 5s  # Check for ready beads every 5 seconds
   max_workers: 10            # Maximum parallel workers
   max_retries: 2             # Retry failed beads twice
   worker_timeout: 5m         # Activity-based timeout (5 min inactivity)
@@ -218,6 +242,16 @@ mcp:
   url: http://127.0.0.1:8765
   port: 8765
   heartbeat_interval: 30s
+
+# Agent Connector Configuration
+agents:
+  enabled: true
+  default_agent: pi
+  pi:
+    enabled: true
+    provider: kimi
+    model: k2.5
+    timeout: 10m
 ```
 
 

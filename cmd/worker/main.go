@@ -192,7 +192,7 @@ func main() {
 	log.Printf("🧠 Gathering pre-execution intelligence...")
 	streamLog(mcpClient, "info", "Gathering pre-execution intelligence...")
 
-	intelligenceCtx, err := gatherPreExecutionIntelligence(bead)
+	intelligenceCtx, err := gatherPreExecutionIntelligence(bead, projectPath)
 	if err != nil {
 		log.Printf("[WARN] Failed to gather intelligence: %v", err)
 		streamLog(mcpClient, "warn", fmt.Sprintf("Intelligence gathering failed: %v", err))
@@ -434,7 +434,7 @@ func determineAgentType(bead types.Bead) string {
 }
 
 // gatherPreExecutionIntelligence gathers intelligence from cass_memory and TLDR
-func gatherPreExecutionIntelligence(bead types.Bead) (*IntelligenceContext, error) {
+func gatherPreExecutionIntelligence(bead types.Bead, projectPath string) (*IntelligenceContext, error) {
 	ctx := &IntelligenceContext{
 		Patterns:     []intelligence.Bullet{},
 		AntiPatterns: []intelligence.Bullet{},
@@ -463,7 +463,7 @@ func gatherPreExecutionIntelligence(bead types.Bead) (*IntelligenceContext, erro
 	}
 
 	// Query TLDR for impact analysis and related files
-	tldrClient := intelligence.NewTLDRClient("")
+	tldrClient := intelligence.NewTLDRClient("", true, "llm-tldr", projectPath, 30*time.Second)
 	if tldrClient.IsAvailable() {
 		// Get target files for impact analysis
 		targetFiles := extractTargetFiles(bead)
@@ -789,8 +789,63 @@ func buildOpencodeCommand(bead types.Bead, agentType string, intelligenceCtx *In
 		promptParts = append(promptParts, fmt.Sprintf("Files to modify: %v", targetFiles))
 	}
 
+	// Add intelligence context (patterns from Collective Unconscious)
+	if intelligenceCtx != nil {
+		// Add relevant patterns
+		if len(intelligenceCtx.Patterns) > 0 {
+			promptParts = append(promptParts, "\n## Relevant Patterns from Previous Work:\n")
+			for i, pattern := range intelligenceCtx.Patterns {
+				if i >= 3 { // Limit to top 3 patterns
+					break
+				}
+				patternText := fmt.Sprintf("Pattern %d (Category: %s, Score: %.2f):\n%s", i+1, pattern.Category, pattern.Score, pattern.Content)
+				if len(pattern.Tags) > 0 {
+					patternText += fmt.Sprintf("\nTags: %v", pattern.Tags)
+				}
+				promptParts = append(promptParts, patternText)
+			}
+		}
+
+		// Add anti-patterns to avoid
+		if len(intelligenceCtx.AntiPatterns) > 0 {
+			promptParts = append(promptParts, "\n## Anti-Patterns to Avoid:\n")
+			for _, antiPattern := range intelligenceCtx.AntiPatterns {
+				promptParts = append(promptParts, fmt.Sprintf("- %s: %s (Category: %s)", antiPattern.ID, antiPattern.Content, antiPattern.Category))
+			}
+		}
+
+		// Add impact analysis if available
+		if intelligenceCtx.Impact != nil {
+			impactedFiles := make(map[string]bool)
+			for _, dep := range intelligenceCtx.Impact.Impact.Callers {
+				impactedFiles[dep.File] = true
+			}
+			for _, dep := range intelligenceCtx.Impact.Impact.Callees {
+				impactedFiles[dep.File] = true
+			}
+
+			if len(impactedFiles) > 0 {
+				promptParts = append(promptParts, "\n## Files That May Be Impacted:\n")
+				for file := range impactedFiles {
+					promptParts = append(promptParts, fmt.Sprintf("- %s", file))
+				}
+			}
+		}
+
+		// Add related files from semantic search
+		if len(intelligenceCtx.RelatedFiles) > 0 {
+			promptParts = append(promptParts, "\n## Related Files:\n")
+			for i, file := range intelligenceCtx.RelatedFiles {
+				if i >= 5 { // Limit to top 5 related files
+					break
+				}
+				promptParts = append(promptParts, fmt.Sprintf("- %s (score: %.2f)", file.File, file.Score))
+			}
+		}
+	}
+
 	// Join all parts into single prompt
-	prompt := strings.Join(promptParts, " ")
+	prompt := strings.Join(promptParts, "\n")
 
 	// Build command: echo "prompt" | opencode run --format json --dir <path> --title <name>
 	// We use bash to pipe the prompt to opencode

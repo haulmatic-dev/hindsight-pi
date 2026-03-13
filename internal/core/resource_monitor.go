@@ -141,37 +141,49 @@ func (rm *ResourceMonitor) getMemoryUsage() (float64, error) {
 }
 
 // CanSpawnWorker checks if system resources allow spawning a new worker
+// Returns true if CPU and Memory are below their respective limits
+// Limit of 0 means unlimited (no check performed)
 func (rm *ResourceMonitor) CanSpawnWorker() bool {
-	// Check CPU usage
-	cpuPercent, err := rm.getCPUUsage()
-	if err != nil {
-		log.Printf("[ResourceMonitor] Failed to get CPU usage: %v", err)
-		return true // Allow spawn on error (fail open)
+	// Check CPU usage (skip if limit is 0)
+	if rm.maxCPUUsage > 0 {
+		cpuPercent, err := rm.getCPUUsage()
+		if err != nil {
+			log.Printf("[ResourceMonitor] Failed to get CPU usage: %v", err)
+			return true // Allow spawn on error (fail open)
+		}
+
+		if cpuPercent > rm.maxCPUUsage {
+			log.Printf("[ResourceMonitor] CPU usage %.1f%% exceeds limit %.1f%%, blocking worker spawn",
+				cpuPercent, rm.maxCPUUsage)
+			return false
+		}
+
+		// Log when we're close to limits (within 10%)
+		if cpuPercent > rm.maxCPUUsage*0.9 {
+			log.Printf("[ResourceMonitor] Warning: CPU high - %.1f%% (Limit: %.1f%%)",
+				cpuPercent, rm.maxCPUUsage)
+		}
 	}
 
-	if cpuPercent > rm.maxCPUUsage {
-		log.Printf("[ResourceMonitor] CPU usage %.1f%% exceeds limit %.1f%%, blocking worker spawn",
-			cpuPercent, rm.maxCPUUsage)
-		return false
-	}
+	// Check memory usage (skip if limit is 0)
+	if rm.maxMemoryUsage > 0 {
+		memPercent, err := rm.getMemoryUsage()
+		if err != nil {
+			log.Printf("[ResourceMonitor] Failed to get memory usage: %v", err)
+			return true // Allow spawn on error (fail open)
+		}
 
-	// Check memory usage
-	memPercent, err := rm.getMemoryUsage()
-	if err != nil {
-		log.Printf("[ResourceMonitor] Failed to get memory usage: %v", err)
-		return true // Allow spawn on error (fail open)
-	}
+		if memPercent > rm.maxMemoryUsage {
+			log.Printf("[ResourceMonitor] Memory usage %.1f%% exceeds limit %.1f%%, blocking worker spawn",
+				memPercent, rm.maxMemoryUsage)
+			return false
+		}
 
-	if memPercent > rm.maxMemoryUsage {
-		log.Printf("[ResourceMonitor] Memory usage %.1f%% exceeds limit %.1f%%, blocking worker spawn",
-			memPercent, rm.maxMemoryUsage)
-		return false
-	}
-
-	// Log when we're close to limits (within 10%)
-	if cpuPercent > rm.maxCPUUsage*0.9 || memPercent > rm.maxMemoryUsage*0.9 {
-		log.Printf("[ResourceMonitor] Warning: Resources high - CPU: %.1f%%, Memory: %.1f%% (Limits: %.1f%%/%.1f%%)",
-			cpuPercent, memPercent, rm.maxCPUUsage, rm.maxMemoryUsage)
+		// Log when we're close to limits (within 10%)
+		if memPercent > rm.maxMemoryUsage*0.9 {
+			log.Printf("[ResourceMonitor] Warning: Memory high - %.1f%% (Limit: %.1f%%)",
+				memPercent, rm.maxMemoryUsage)
+		}
 	}
 
 	return true

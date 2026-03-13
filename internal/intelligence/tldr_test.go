@@ -37,7 +37,7 @@ func TestNewTLDRClient(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := NewTLDRClient(tt.baseURL)
+			client := NewTLDRClient(tt.baseURL, false, "llm-tldr", "", 30*time.Second)
 
 			if client == nil {
 				t.Fatal("expected client to not be nil")
@@ -51,9 +51,10 @@ func TestNewTLDRClient(t *testing.T) {
 				t.Fatal("expected HTTP client to not be nil")
 			}
 
-			// Verify timeout is set
-			if client.client.Timeout != RequestTimeout {
-				t.Errorf("expected timeout %v, got %v", RequestTimeout, client.client.Timeout)
+			// Verify timeout is set (30s passed to constructor)
+			expectedTimeout := 30 * time.Second
+			if client.client.Timeout != expectedTimeout {
+				t.Errorf("expected timeout %v, got %v", expectedTimeout, client.client.Timeout)
 			}
 		})
 	}
@@ -282,7 +283,7 @@ func TestImpactAnalysis(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewTLDRClient(server.URL)
+			client := NewTLDRClient(server.URL, false, "llm-tldr", "", 30*time.Second)
 			resp, err := client.ImpactAnalysis(tt.file, tt.depth)
 
 			if tt.expectedError {
@@ -445,7 +446,7 @@ func TestSemanticSearch(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewTLDRClient(server.URL)
+			client := NewTLDRClient(server.URL, false, "llm-tldr", "", 30*time.Second)
 			resp, err := client.SemanticSearch(tt.query)
 
 			if tt.expectedError {
@@ -625,7 +626,7 @@ func TestContext(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewTLDRClient(server.URL)
+			client := NewTLDRClient(server.URL, false, "llm-tldr", "", 30*time.Second)
 			resp, err := client.Context(tt.file)
 
 			if tt.expectedError {
@@ -704,7 +705,7 @@ func TestIsAvailable(t *testing.T) {
 				server.Close()
 			}
 
-			client := NewTLDRClient(server.URL)
+			client := NewTLDRClient(server.URL, false, "llm-tldr", "", 30*time.Second)
 			available := client.IsAvailable()
 
 			if available != tt.expected {
@@ -723,7 +724,7 @@ func TestErrorHandling(t *testing.T) {
 		}))
 		server.Close()
 
-		client := NewTLDRClient(server.URL)
+		client := NewTLDRClient(server.URL, false, "llm-tldr", "", 30*time.Second)
 		_, err := client.ImpactAnalysis("test.go", 1)
 
 		if err == nil {
@@ -768,7 +769,7 @@ func TestErrorHandling(t *testing.T) {
 		}))
 		defer server.Close()
 
-		client := NewTLDRClient(server.URL)
+		client := NewTLDRClient(server.URL, false, "llm-tldr", "", 30*time.Second)
 		_, err := client.ImpactAnalysis("test.go", 1)
 
 		if err == nil {
@@ -789,7 +790,7 @@ func TestErrorHandling(t *testing.T) {
 		}))
 		defer server.Close()
 
-		client := NewTLDRClient(server.URL)
+		client := NewTLDRClient(server.URL, false, "llm-tldr", "", 30*time.Second)
 		resp, err := client.ImpactAnalysis("test.go", 1)
 
 		// This should NOT error - JSON unmarshaling is lenient
@@ -814,7 +815,7 @@ func TestErrorHandling(t *testing.T) {
 		}))
 		defer server.Close()
 
-		client := NewTLDRClient(server.URL)
+		client := NewTLDRClient(server.URL, false, "llm-tldr", "", 30*time.Second)
 		_, err := client.SemanticSearch("query")
 
 		if err == nil {
@@ -846,7 +847,7 @@ func TestRequestFormatValidation(t *testing.T) {
 		}))
 		defer server.Close()
 
-		client := NewTLDRClient(server.URL)
+		client := NewTLDRClient(server.URL, false, "llm-tldr", "", 30*time.Second)
 		client.ImpactAnalysis("src/main.go", 3)
 
 		if capturedRequest["file"] != "src/main.go" {
@@ -871,7 +872,7 @@ func TestRequestFormatValidation(t *testing.T) {
 		}))
 		defer server.Close()
 
-		client := NewTLDRClient(server.URL)
+		client := NewTLDRClient(server.URL, false, "llm-tldr", "", 30*time.Second)
 		client.SemanticSearch("authentication middleware")
 
 		if capturedRequest["query"] != "authentication middleware" {
@@ -896,7 +897,7 @@ func TestRequestFormatValidation(t *testing.T) {
 		}))
 		defer server.Close()
 
-		client := NewTLDRClient(server.URL)
+		client := NewTLDRClient(server.URL, false, "llm-tldr", "", 30*time.Second)
 		client.Context("src/service.go")
 
 		if capturedRequest["file"] != "src/service.go" {
@@ -911,7 +912,7 @@ func TestRequestFormatValidation(t *testing.T) {
 
 // TestClose tests the Close method
 func TestClose(t *testing.T) {
-	client := NewTLDRClient(DefaultTLDRURL)
+	client := NewTLDRClient(DefaultTLDRURL, false, "llm-tldr", "", 30*time.Second)
 
 	err := client.Close()
 	if err != nil {
@@ -936,7 +937,7 @@ func TestClientConcurrency(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewTLDRClient(server.URL)
+	client := NewTLDRClient(server.URL, false, "llm-tldr", "", 30*time.Second)
 
 	// Run concurrent requests
 	done := make(chan bool, 9)
@@ -1059,7 +1060,7 @@ func TestContextWithTimeout(t *testing.T) {
 		}))
 		defer server.Close()
 
-		client := NewTLDRClient(server.URL)
+		client := NewTLDRClient(server.URL, false, "llm-tldr", "", 30*time.Second)
 		resp, err := client.ImpactAnalysis("test.go", 1)
 
 		if err != nil {

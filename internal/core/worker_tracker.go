@@ -74,13 +74,12 @@ func (wt *WorkerTracker) load() error {
 }
 
 // save writes workers to disk
+// Note: Caller must hold the appropriate lock
 func (wt *WorkerTracker) save() error {
-	wt.mu.RLock()
 	records := make([]*WorkerRecord, 0, len(wt.workers))
 	for _, r := range wt.workers {
 		records = append(records, r)
 	}
-	wt.mu.RUnlock()
 
 	data, err := json.MarshalIndent(records, "", "  ")
 	if err != nil {
@@ -216,4 +215,27 @@ func (wt *WorkerTracker) GetStats() (running, completed int) {
 	}
 
 	return running, completed
+}
+
+// GetWorkerByBead finds a worker record by bead ID
+func (wt *WorkerTracker) GetWorkerByBead(beadID string) (*WorkerRecord, bool) {
+	wt.mu.RLock()
+	defer wt.mu.RUnlock()
+
+	for _, r := range wt.workers {
+		if r.BeadID == beadID {
+			// Return a copy
+			return &WorkerRecord{
+				PID:         r.PID,
+				BeadID:      r.BeadID,
+				ProjectPath: r.ProjectPath,
+				StartedAt:   r.StartedAt,
+				Status:      r.Status,
+				ExitCode:    r.ExitCode,
+				CompletedAt: r.CompletedAt,
+			}, true
+		}
+	}
+
+	return nil, false
 }

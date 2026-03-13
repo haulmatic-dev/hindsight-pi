@@ -58,18 +58,35 @@ type InsightsMetrics struct {
 	Parallelizable  int     `json:"parallelizable"`
 }
 
+// TriageWrapper wraps the triage response from bv --robot-triage
+type TriageWrapper struct {
+	GeneratedAt string         `json:"generated_at"`
+	DataHash    string         `json:"data_hash"`
+	Triage      TriageResponse `json:"triage"`
+}
+
 // TriageResponse represents unified triage from bv --robot-triage
 type TriageResponse struct {
 	Recommendations []TriageRecommendation `json:"recommendations"`
+	BlockersToClear []BlockerToClear       `json:"blockers_to_clear"`
 	ReadyCount      int                    `json:"ready_count"`
 	BlockedCount    int                    `json:"blocked_count"`
 	Attention       []AttentionItem        `json:"attention"`
-	GeneratedAt     time.Time              `json:"generated_at"`
+}
+
+// BlockerToClear represents a blocker that can be cleared (actionable)
+type BlockerToClear struct {
+	BeadID        string   `json:"id"`
+	Title         string   `json:"title"`
+	UnblocksCount int      `json:"unblocks_count"`
+	UnblocksIDs   []string `json:"unblocks_ids"`
+	Actionable    bool     `json:"actionable"`
+	BlockedBy     []string `json:"blocked_by,omitempty"`
 }
 
 // TriageRecommendation represents a single triage recommendation
 type TriageRecommendation struct {
-	BeadID        string   `json:"bead_id"`
+	BeadID        string   `json:"id"`
 	Title         string   `json:"title"`
 	Type          string   `json:"type"`
 	Priority      int      `json:"priority"`
@@ -77,6 +94,7 @@ type TriageRecommendation struct {
 	Reason        string   `json:"reason"`
 	Labels        []string `json:"labels"`
 	EstimatedTime string   `json:"estimated_time,omitempty"`
+	BlockedBy     []string `json:"blocked_by,omitempty"` // Dependencies that block this bead
 }
 
 // AttentionItem represents items needing attention

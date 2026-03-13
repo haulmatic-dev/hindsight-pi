@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/intelligence"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -148,12 +149,13 @@ func TestPreExecutionIntelligence_Success(t *testing.T) {
 		httpClient: nil,
 		queryLimit: 10,
 	}
-	overseer.tldrClient = &TLDRClient{
-		baseURL:    "http://mock-tldr:8787",
-		httpClient: nil,
-		maxFiles:   50,
-		maxTokens:  100000,
-	}
+	overseer.tldrClient = intelligence.NewTLDRClient(
+		"http://mock-tldr:8787",
+		false, // useCLI
+		"llm-tldr",
+		"",
+		30*time.Second,
+	)
 
 	// Override the query methods with our mocks
 	overseer.config.Intelligence.CassMemory.Enabled = true

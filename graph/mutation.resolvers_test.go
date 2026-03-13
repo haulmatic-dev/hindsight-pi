@@ -17,10 +17,10 @@ import (
 func createTestOverseer() *core.Overseer {
 	config := &core.Config{
 		Overseer: core.OverseerConfig{
-			PollInterval:   5 * time.Second,
-			MaxWorkers:     5,
-			DefaultRetries: 3,
-			WorkerTimeout:  30 * time.Minute,
+			BeadDiscoveryInterval: 5 * time.Second,
+			MaxWorkers:            5,
+			DefaultRetries:        3,
+			WorkerTimeout:         30 * time.Minute,
 		},
 		MCP: core.MCPConfig{
 			Enabled: false, // Disable MCP for tests
@@ -569,8 +569,8 @@ func TestUpdateConfig_PollInterval(t *testing.T) {
 	}
 
 	expectedDuration := time.Duration(newPollInterval) * time.Second
-	if overseer.GetPollInterval() != expectedDuration {
-		t.Errorf("Expected poll interval %v, got %v", expectedDuration, overseer.GetPollInterval())
+	if overseer.GetBeadDiscoveryInterval() != expectedDuration {
+		t.Errorf("Expected poll interval %v, got %v", expectedDuration, overseer.GetBeadDiscoveryInterval())
 	}
 
 	// Verify other config values unchanged
@@ -650,8 +650,8 @@ func TestUpdateConfig_MultipleFields(t *testing.T) {
 	}
 
 	expectedPollInterval := time.Duration(newPollInterval) * time.Second
-	if overseer.GetPollInterval() != expectedPollInterval {
-		t.Errorf("Expected poll interval %v, got %v", expectedPollInterval, overseer.GetPollInterval())
+	if overseer.GetBeadDiscoveryInterval() != expectedPollInterval {
+		t.Errorf("Expected poll interval %v, got %v", expectedPollInterval, overseer.GetBeadDiscoveryInterval())
 	}
 
 	expectedRetryDelay := time.Duration(newRetryDelay) * time.Second
@@ -744,7 +744,7 @@ func TestUpdateConfig_MaxWorkersValidation_TooHigh(t *testing.T) {
 
 func TestUpdateConfig_PollIntervalValidation_Zero(t *testing.T) {
 	overseer := createTestOverseer()
-	originalInterval := overseer.GetPollInterval()
+	originalInterval := overseer.GetBeadDiscoveryInterval()
 	resolver := createMutationResolver(overseer)
 
 	invalidPollInterval := int32(0)
@@ -763,8 +763,8 @@ func TestUpdateConfig_PollIntervalValidation_Zero(t *testing.T) {
 		t.Errorf("Expected error message '%s', got '%s'", expectedErrMsg, err.Error())
 	}
 
-	if overseer.GetPollInterval() != originalInterval {
-		t.Errorf("Expected poll interval to remain %v, got %v", originalInterval, overseer.GetPollInterval())
+	if overseer.GetBeadDiscoveryInterval() != originalInterval {
+		t.Errorf("Expected poll interval to remain %v, got %v", originalInterval, overseer.GetBeadDiscoveryInterval())
 	}
 
 	if result != nil {
@@ -774,7 +774,7 @@ func TestUpdateConfig_PollIntervalValidation_Zero(t *testing.T) {
 
 func TestUpdateConfig_PollIntervalValidation_Negative(t *testing.T) {
 	overseer := createTestOverseer()
-	originalInterval := overseer.GetPollInterval()
+	originalInterval := overseer.GetBeadDiscoveryInterval()
 	resolver := createMutationResolver(overseer)
 
 	invalidPollInterval := int32(-10)
@@ -793,8 +793,8 @@ func TestUpdateConfig_PollIntervalValidation_Negative(t *testing.T) {
 		t.Errorf("Expected error message '%s', got '%s'", expectedErrMsg, err.Error())
 	}
 
-	if overseer.GetPollInterval() != originalInterval {
-		t.Errorf("Expected poll interval to remain %v, got %v", originalInterval, overseer.GetPollInterval())
+	if overseer.GetBeadDiscoveryInterval() != originalInterval {
+		t.Errorf("Expected poll interval to remain %v, got %v", originalInterval, overseer.GetBeadDiscoveryInterval())
 	}
 }
 
@@ -857,7 +857,7 @@ func TestUpdateConfig_RetryDelayValidation_Negative(t *testing.T) {
 func TestUpdateConfig_EmptyInput(t *testing.T) {
 	overseer := createTestOverseer()
 	originalMaxWorkers := overseer.GetMaxWorkers()
-	originalPollInterval := overseer.GetPollInterval()
+	originalPollInterval := overseer.GetBeadDiscoveryInterval()
 	originalRetryDelay := overseer.GetRetryDelay()
 
 	resolver := createMutationResolver(overseer)
@@ -880,8 +880,8 @@ func TestUpdateConfig_EmptyInput(t *testing.T) {
 		t.Errorf("Expected maxWorkers to remain %d, got %d", originalMaxWorkers, overseer.GetMaxWorkers())
 	}
 
-	if overseer.GetPollInterval() != originalPollInterval {
-		t.Errorf("Expected poll interval to remain %v, got %v", originalPollInterval, overseer.GetPollInterval())
+	if overseer.GetBeadDiscoveryInterval() != originalPollInterval {
+		t.Errorf("Expected poll interval to remain %v, got %v", originalPollInterval, overseer.GetBeadDiscoveryInterval())
 	}
 
 	if overseer.GetRetryDelay() != originalRetryDelay {

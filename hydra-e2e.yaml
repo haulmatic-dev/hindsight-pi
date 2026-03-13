@@ -1,0 +1,48 @@
+overseer:
+  bead_discovery_interval: 10s
+  max_workers: 10
+  max_retries: 2
+  retry_delay: 30s
+  worker_timeout: 2m
+  resource_limits:
+    max_cpu_percent: 70
+    max_memory_percent: 70
+
+api:
+  enabled: true
+  port: 8081
+
+projects:
+  - name: opencode-simple-test
+    path: /Users/buddhi/source-code/personal/opencode-simple-test
+    type: single
+
+intelligence:
+  cass_memory:
+    enabled: true
+  tldr:
+    enabled: true
+  patterns:
+    enabled: true
+    min_confidence: 0.7
+    max_patterns_per_bead: 5
+    extract_code_snippets: true
+  settled_state:
+    enabled: true
+    extract_patterns_on_settle: true
+    settlement_delay: 2m
+    check_interval: 30s
+
+mcp:
+  enabled: true
+  url: http://127.0.0.1:8765
+  port: 8765
+
+agents:
+  enabled: true
+  default_agent: pi
+  pi:
+    enabled: true
+    provider: kimi-coding
+    model: k2.5
+    timeout: 10m

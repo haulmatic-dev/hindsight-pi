@@ -571,7 +571,7 @@ func TestSearch_Success(t *testing.T) {
 
 	jsonData, _ := json.Marshal(search)
 	mockExec.AddResponse("bv", []string{"-version"}, []byte("bv version 1.0.0"), nil)
-	mockExec.AddResponse("bv", []string{"--robot-search", "--search", "overseer implementation", "--format", "json", "--search-limit", "10"}, jsonData, nil)
+	mockExec.AddResponse("bv", []string{"--robot-search", "--format", "json", "--search", "overseer implementation", "--search-limit", "10"}, jsonData, nil)
 
 	client := NewClient(WithExecutor(mockExec))
 	result, err := client.Search("", "overseer implementation", 10)
@@ -631,7 +631,7 @@ func TestGetRelatedBeads_Success(t *testing.T) {
 
 	jsonData, _ := json.Marshal(related)
 	mockExec.AddResponse("bv", []string{"-version"}, []byte("bv version 1.0.0"), nil)
-	mockExec.AddResponse("bv", []string{"--robot-related", "hydra-001", "--format", "json"}, jsonData, nil)
+	mockExec.AddResponse("bv", []string{"--robot-related", "--format", "json", "hydra-001"}, jsonData, nil)
 
 	client := NewClient(WithExecutor(mockExec))
 	result, err := client.GetRelatedBeads("", "hydra-001")

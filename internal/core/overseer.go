@@ -15,8 +15,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/agents"
 	"github.com/haulmatic-dev/hydra/internal/beads"
 	"github.com/haulmatic-dev/hydra/internal/bv"
+	"github.com/haulmatic-dev/hydra/internal/intelligence"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -82,10 +84,32 @@ type CallEdge struct {
 }
 
 // CassMemoryClient provides access to cass_memory service
+// CASSSearchResult represents a search result from CASS memory
+type CASSSearchResult struct {
+	Count        int          `json:"count"`
+	TotalMatches int          `json:"total_matches"`
+	Hits         []SessionHit `json:"hits"`
+}
+
+// SessionHit represents a single search result from CASS memory
+type SessionHit struct {
+	Agent      string  `json:"agent"`
+	Title      string  `json:"title"`
+	Content    string  `json:"content"`
+	Score      float64 `json:"score"`
+	SourcePath string  `json:"source_path"`
+	LineNumber int     `json:"line_number"`
+	CreatedAt  int64   `json:"created_at"`
+}
+
 type CassMemoryClient struct {
-	baseURL    string
-	httpClient *http.Client
-	queryLimit int
+	baseURL      string
+	httpClient   *http.Client
+	queryLimit   int
+	searchClient interface {
+		SearchSessions(query string, limit int, timeout time.Duration) (*CASSSearchResult, error)
+		IsEnabled() bool
+	}
 }
 
 // NewCassMemoryClient creates a new cass_memory client
@@ -146,75 +170,6 @@ func (c *CassMemoryClient) QueryContext(beadType string, files []string, days in
 	return result.Entries, nil
 }
 
-// TLDRClient provides access to TLDR impact analysis service
-type TLDRClient struct {
-	baseURL    string
-	httpClient *http.Client
-	maxFiles   int
-	maxTokens  int
-}
-
-// NewTLDRClient creates a new TLDR client
-func NewTLDRClient(baseURL string, timeout time.Duration, maxFiles, maxTokens int) *TLDRClient {
-	return &TLDRClient{
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
-		maxFiles:  maxFiles,
-		maxTokens: maxTokens,
-	}
-}
-
-// AnalyzeImpact performs impact analysis on target files
-func (c *TLDRClient) AnalyzeImpact(projectPath string, files []string, depth int) (*ImpactAnalysis, error) {
-	if c.baseURL == "" {
-		return nil, fmt.Errorf("TLDR base URL not configured")
-	}
-
-	// Limit files to maxFiles
-	if len(files) > c.maxFiles {
-		files = files[:c.maxFiles]
-	}
-
-	reqBody := map[string]interface{}{
-		"project_path": projectPath,
-		"files":        files,
-		"depth":        depth,
-		"max_tokens":   c.maxTokens,
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	url := fmt.Sprintf("%s/api/v1/analyze/impact", c.baseURL)
-	req, err := http.NewRequest("POST", url, strings.NewReader(string(jsonBody)))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("TLDR request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("TLDR returned status %d", resp.StatusCode)
-	}
-
-	var result ImpactAnalysis
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode TLDR response: %w", err)
-	}
-
-	return &result, nil
-}
-
 // GPTCacheClient provides access to GPTCache service
 type GPTCacheClient struct {
 	serverURL  string
@@ -255,7 +210,14 @@ const (
 	defaultMaxRetries    = 3
 	defaultBaseDelay     = 5 * time.Second
 	defaultMaxDelay      = 5 * time.Minute
-	defaultRetryCooldown = 10 * time.Second
+	defaultRetryCooldown = 60 * time.Second // Increased from 10s to prevent retry explosions
+)
+
+// Rate limiting constants
+const (
+	maxWorkersPerWindow = 5                      // Max workers to spawn in time window
+	rateLimitWindow     = 10 * time.Second       // Time window for rate limiting
+	minSpawnInterval    = 500 * time.Millisecond // Minimum time between individual spawns (0.5s)
 )
 
 // beadRetryInfo tracks retry state for a bead
@@ -283,6 +245,49 @@ func calculateBackoff(attempt int, baseDelay, maxDelay time.Duration) time.Durat
 	return delay
 }
 
+// canSpawnWithinRateLimit checks if we can spawn a worker
+// Returns true if minimum interval has passed since last spawn (prevents bursts)
+func (o *Overseer) canSpawnWithinRateLimit() bool {
+	o.spawnRateMu.Lock()
+	defer o.spawnRateMu.Unlock()
+
+	now := time.Now()
+
+	// Clean up old timestamps (keep last 5 minutes for metrics)
+	cutoff := now.Add(-5 * time.Minute)
+	validTimestamps := make([]time.Time, 0, len(o.spawnTimestamps))
+	for _, ts := range o.spawnTimestamps {
+		if ts.After(cutoff) {
+			validTimestamps = append(validTimestamps, ts)
+		}
+	}
+	o.spawnTimestamps = validTimestamps
+
+	// Check minimum interval between spawns (prevents bursts)
+	if len(o.spawnTimestamps) > 0 {
+		lastSpawn := o.spawnTimestamps[len(o.spawnTimestamps)-1]
+		timeSinceLastSpawn := now.Sub(lastSpawn)
+		if timeSinceLastSpawn < minSpawnInterval {
+			waitTime := minSpawnInterval - timeSinceLastSpawn
+			log.Printf("[RateLimit] Blocking spawn: minimum interval not met (last spawn %v ago, need to wait %v)",
+				timeSinceLastSpawn.Round(time.Millisecond), waitTime.Round(time.Millisecond))
+			return false
+		}
+	}
+
+	return true
+}
+
+// recordWorkerSpawn records a worker spawn timestamp for rate limiting
+func (o *Overseer) recordWorkerSpawn() {
+	o.spawnRateMu.Lock()
+	defer o.spawnRateMu.Unlock()
+
+	o.spawnTimestamps = append(o.spawnTimestamps, time.Now())
+	log.Printf("[RateLimit] Spawn recorded: %d/%d workers in last %v",
+		len(o.spawnTimestamps), maxWorkersPerWindow, rateLimitWindow)
+}
+
 // BeadsClient defines the interface for beads operations
 // This allows for mocking in tests
 type BeadsClient interface {
@@ -290,6 +295,7 @@ type BeadsClient interface {
 	GetBead(projectPath, repoName string, beadID types.BeadID) (*types.Bead, error)
 	CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error
 	GetReadyBeads(projectName, projectPath, repoName string) ([]types.Bead, error)
+	UpdateBeadStatus(projectPath string, beadID types.BeadID, status types.BeadStatus) error
 }
 
 // WorkerSpawner defines the interface for spawning workers
@@ -315,30 +321,31 @@ func (d *defaultWorkerSpawner) Spawn(bead types.Bead, overseer *Overseer) (*type
 
 // Overseer is the main scheduler daemon
 type Overseer struct {
-	config        *Config
-	projects      []types.Project
-	activeWorkers map[string]*types.Worker
-	workerMutex   sync.RWMutex
-	running       bool
-	paused        bool
-	pauseMutex    sync.RWMutex
-	pollInterval  time.Duration
-	maxWorkers    int
-	maxWorkersMux sync.RWMutex
-	beadsClient   BeadsClient
-	spawner       WorkerSpawner // Interface for spawning workers (allows mocking in tests)
-	dag           *DAG
-	dagMu         sync.RWMutex
-	completed     map[string]bool           // Track completed beads for this session
-	retries       map[string]*beadRetryInfo // Track retry state for failed beads
-	retriesMu     sync.RWMutex              // Mutex for retries map
-	baseDelay     time.Duration             // Base delay for exponential backoff
-	maxDelay      time.Duration             // Maximum delay for exponential backoff
-	cassClient    *CassMemoryClient         // cass_memory client for context retrieval
-	tldrClient    *TLDRClient               // TLDR client for impact analysis
-	gptCache      *GPTCacheClient           // GPTCache client for caching
-	bvClient      *bv.Client                // BV client for graph analytics
-	intelMutex    sync.RWMutex              // Mutex for intelligence clients
+	config                *Config
+	projects              []types.Project
+	activeWorkers         map[string]*types.Worker
+	workerMutex           sync.RWMutex
+	running               bool
+	paused                bool
+	pauseMutex            sync.RWMutex
+	beadDiscoveryInterval time.Duration
+	maxWorkers            int
+	maxWorkersMux         sync.RWMutex
+	beadsClient           BeadsClient
+	spawner               WorkerSpawner // Interface for spawning workers (allows mocking in tests)
+	dag                   *DAG
+	dagMu                 sync.RWMutex
+	completed             map[string]bool           // Track completed beads for this session
+	retries               map[string]*beadRetryInfo // Track retry state for failed beads
+	retriesMu             sync.RWMutex              // Mutex for retries map
+	baseDelay             time.Duration             // Base delay for exponential backoff
+	maxDelay              time.Duration             // Maximum delay for exponential backoff
+	cassClient            *CassMemoryClient         // cass_memory client for context retrieval
+	tldrClient            *intelligence.TLDRClient  // TLDR client for impact analysis
+	gptCache              *GPTCacheClient           // GPTCache client for caching
+	bvClient              *bv.Client                // BV client for graph analytics
+	intelMutex            sync.RWMutex              // Mutex for intelligence clients
+	settledStateSvc       *SettledStateService      // Settled-state detection service
 
 	// MCP (Model Context Protocol) fields
 	mcpClient          *mcp.HTTPClient             // MCP HTTP client (Streamable HTTP)
@@ -354,8 +361,20 @@ type Overseer struct {
 	// Orphan process janitor for cleaning up orphaned opencode processes
 	orphanJanitor *Charon // Cleans up orphaned opencode processes
 
+	// Chain completion detector for end-of-chain pattern extraction
+	chainCompletionDetector *ChainCompletionDetector // Detects chain completion and triggers pattern extraction
+	chainsRegistered        bool                     // Track if chains have been registered (only once at startup)
+
 	// Worker tracker for persistent PID tracking
 	workerTracker *WorkerTracker // Tracks worker PIDs to identify Hydra workers
+
+	// Rate limiting: track spawn timestamps to limit workers per time window
+	spawnTimestamps []time.Time // Timestamps of recent worker spawns
+	spawnRateMu     sync.Mutex  // Mutex for spawn rate tracking
+
+	// Agent connector for modular agent support
+	agentConnector agents.AgentConnector // Agent connector interface
+	agentConnMu    sync.RWMutex          // Mutex for agent connector
 }
 
 // NewOverseer creates a new overseer instance
@@ -366,18 +385,18 @@ func NewOverseer(config *Config) *Overseer {
 	}
 
 	o := &Overseer{
-		config:        config,
-		activeWorkers: make(map[string]*types.Worker),
-		pollInterval:  config.Overseer.PollInterval,
-		maxWorkers:    config.Overseer.MaxWorkers,
-		beadsClient:   beads.NewClient(),
-		bvClient:      bv.NewClient(),
-		spawner:       &defaultWorkerSpawner{},
-		dag:           NewDAG(),
-		completed:     make(map[string]bool),
-		retries:       make(map[string]*beadRetryInfo),
-		baseDelay:     defaultBaseDelay,
-		maxDelay:      defaultMaxDelay,
+		config:                config,
+		activeWorkers:         make(map[string]*types.Worker),
+		beadDiscoveryInterval: config.Overseer.BeadDiscoveryInterval,
+		maxWorkers:            config.Overseer.MaxWorkers,
+		beadsClient:           beads.NewClient(),
+		bvClient:              bv.NewClient(),
+		spawner:               &defaultWorkerSpawner{},
+		dag:                   NewDAG(),
+		completed:             make(map[string]bool),
+		retries:               make(map[string]*beadRetryInfo),
+		baseDelay:             defaultBaseDelay,
+		maxDelay:              defaultMaxDelay,
 	}
 
 	// Initialize intelligence clients if enabled
@@ -390,9 +409,17 @@ func NewOverseer(config *Config) *Overseer {
 		}
 	}
 
-	// Initialize resource monitor with 70% limits (0 means no limit)
-	o.resourceMonitor = NewResourceMonitor(70.0, 70.0)
-	log.Printf("[ResourceMonitor] Initialized with CPU: 70%%, Memory: 70%% limits")
+	// Initialize resource monitor with config values (0 or unset defaults to 70%)
+	maxCPU := 70.0
+	maxMemory := 70.0
+	if config.Overseer.ResourceMonitoring.MaxCPUPercent > 0 {
+		maxCPU = config.Overseer.ResourceMonitoring.MaxCPUPercent
+	}
+	if config.Overseer.ResourceMonitoring.MaxMemoryPercent > 0 {
+		maxMemory = config.Overseer.ResourceMonitoring.MaxMemoryPercent
+	}
+	o.resourceMonitor = NewResourceMonitor(maxCPU, maxMemory)
+	log.Printf("[ResourceMonitor] Initialized with CPU: %.1f%%, Memory: %.1f%% limits (0=unlimited)", maxCPU, maxMemory)
 
 	// Initialize worker tracker for PID tracking
 	workerTracker, err := NewWorkerTracker(".")
@@ -410,6 +437,28 @@ func NewOverseer(config *Config) *Overseer {
 		workerTimeout = config.Overseer.WorkerTimeout
 	}
 	o.orphanJanitor = NewCharon(o.beadsClient.(*beads.Client), o.workerTracker, workerTimeout)
+
+	// Initialize agent connector (Pi by default)
+	piConfig := agents.PiConfig{
+		Provider:      config.Agents.Pi.Provider,
+		Model:         config.Agents.Pi.Model,
+		ThinkingLevel: config.Agents.Pi.ThinkingLevel,
+		Timeout:       config.Agents.Pi.Timeout,
+		ApiKeyName:    config.Agents.Pi.ApiKeyName,
+	}
+	o.agentConnector = agents.NewPiConnector(piConfig)
+	log.Printf("[AgentConnector] Initialized Pi connector (provider: %s, model: %s, apiKey: %s)",
+		piConfig.Provider, piConfig.Model, piConfig.ApiKeyName)
+
+	// Initialize settled-state detection service if enabled
+	if config.Intelligence.SettledState.Enabled {
+		o.initializeSettledStateService()
+	}
+
+	// Initialize chain completion detector if enabled
+	if config.Overseer.ChainDetection.Enabled {
+		o.initializeChainCompletionDetector()
+	}
 
 	// Override defaults if configured
 	if config.Overseer.WorkerTimeout > 0 {
@@ -441,13 +490,14 @@ func (o *Overseer) initializeIntelligenceClients() {
 			intellConfig.CassMemory.QueryLimit, intellConfig.CassMemory.Timeout)
 	}
 
-	// Initialize TLDR client if enabled
+	// Initialize TLDR client if enabled (CLI mode)
 	if intellConfig.TLDR.Enabled {
-		o.tldrClient = NewTLDRClient(
+		o.tldrClient = intelligence.NewTLDRClient(
 			intellConfig.TLDR.BaseURL,
+			true, // useCLI
+			"llm-tldr",
+			"",
 			intellConfig.TLDR.Timeout,
-			intellConfig.TLDR.MaxFiles,
-			intellConfig.TLDR.MaxTokens,
 		)
 		log.Printf("[Intelligence] TLDR client initialized (baseURL: %s, maxFiles: %d)",
 			intellConfig.TLDR.BaseURL, intellConfig.TLDR.MaxFiles)
@@ -462,6 +512,79 @@ func (o *Overseer) initializeIntelligenceClients() {
 		log.Printf("[Intelligence] GPTCache client initialized (server: %s)",
 			intellConfig.GPTCache.ServerURL)
 	}
+}
+
+// initializeSettledStateService creates and configures the settled-state detection service
+func (o *Overseer) initializeSettledStateService() {
+	config := o.config.Intelligence.SettledState
+
+	// Create the service
+	o.settledStateSvc = NewSettledStateService(config, o.beadsClient, o)
+
+	// Set up pattern extractor if enabled
+	if o.config.Intelligence.Patterns.Enabled {
+		extractorConfig := intelligence.DefaultPatternExtractorConfig()
+		extractorConfig.Enabled = o.config.Intelligence.Patterns.Enabled
+		extractorConfig.MinConfidence = o.config.Intelligence.Patterns.MinConfidence
+		extractorConfig.MaxPatternsPerBead = o.config.Intelligence.Patterns.MaxPatternsPerBead
+		extractorConfig.ExtractCodeSnippets = o.config.Intelligence.Patterns.ExtractCodeSnippets
+
+		if o.config.Intelligence.Patterns.StoragePath != "" {
+			extractorConfig.StoragePath = o.config.Intelligence.Patterns.StoragePath
+		}
+
+		extractor, err := intelligence.NewBeadPatternExtractor(extractorConfig)
+		if err != nil {
+			log.Printf("[SettledState] Failed to create pattern extractor: %v", err)
+		} else {
+			o.settledStateSvc.SetPatternExtractor(extractor)
+			log.Printf("[SettledState] Pattern extractor initialized (storage: %s)", extractorConfig.StoragePath)
+		}
+	}
+
+	// Register callback for when beads become settled
+	o.settledStateSvc.OnSettled(func(beadID types.BeadID, info *types.SettledBeadInfo) {
+		log.Printf("[Overseer] Bead settled: %s (stability: %.2f)", beadID, info.StabilityScore)
+	})
+
+	log.Printf("[SettledState] Service initialized (check interval: %v, settlement delay: %v)",
+		config.CheckInterval, config.SettlementDelay)
+}
+
+// initializeChainCompletionDetector creates and configures the chain completion detector
+func (o *Overseer) initializeChainCompletionDetector() {
+	config := ChainCompletionConfig{
+		Enabled:           o.config.Overseer.ChainDetection.Enabled,
+		DetectionInterval: o.config.Overseer.ChainDetection.Interval,
+		Timeout:           o.config.Overseer.ChainDetection.Timeout,
+	}
+
+	if config.DetectionInterval == 0 {
+		config.DetectionInterval = 10 * time.Second
+	}
+	if config.Timeout == 0 {
+		config.Timeout = 10 * time.Minute
+	}
+
+	o.chainCompletionDetector = NewChainCompletionDetector(config, o)
+
+	o.chainCompletionDetector.Start() // Start the polling loop
+
+	extractor := NewChainPatternExtractor(
+		o,
+		intelligence.NewQualityGateService(),
+		nil,
+	)
+
+	o.chainCompletionDetector.SetCallback(func(event ChainCompletedEvent) {
+		log.Printf("[Overseer] Chain completed: root=%s", event.ChainInfo.RootBeadID)
+		if err := extractor.ExtractPatterns(event); err != nil {
+			log.Printf("[Overseer] Chain pattern extraction failed: %v", err)
+		}
+	})
+
+	log.Printf("[ChainCompletion] Detector initialized (interval: %v, timeout: %v)",
+		config.DetectionInterval, config.Timeout)
 }
 
 // runPreExecutionIntelligence gathers intelligence before executing a bead
@@ -562,37 +685,62 @@ func (o *Overseer) queryCassMemoryContext(client *CassMemoryClient, bead *types.
 }
 
 // analyzeImpactWithTLDR performs impact analysis using TLDR service
-func (o *Overseer) analyzeImpactWithTLDR(client *TLDRClient, bead *types.Bead, files []string) (*ImpactAnalysis, error) {
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), o.config.Intelligence.TLDR.Timeout)
-	defer cancel()
-
+func (o *Overseer) analyzeImpactWithTLDR(client *intelligence.TLDRClient, bead *types.Bead, files []string) (*ImpactAnalysis, error) {
 	// Find project path for the bead
 	projectPath := o.findProjectPath(bead)
 	if projectPath == "" {
 		return nil, fmt.Errorf("could not find project path for bead %s", bead.ID)
 	}
 
-	// Run analysis in goroutine to allow cancellation
-	type result struct {
-		analysis *ImpactAnalysis
-		err      error
+	// Set search path for CLI mode
+	client.SetSearchPath(projectPath)
+
+	// Analyze first file (TLDR analyzes one file at a time)
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no files to analyze")
 	}
 
-	resultChan := make(chan result, 1)
-
-	go func() {
-		// Use depth 2 for moderate analysis depth
-		analysis, err := client.AnalyzeImpact(projectPath, files, 2)
-		resultChan <- result{analysis: analysis, err: err}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil, fmt.Errorf("TLDR analysis timed out: %w", ctx.Err())
-	case res := <-resultChan:
-		return res.analysis, res.err
+	// Use depth 2 for moderate analysis depth
+	resp, err := client.ImpactAnalysis(files[0], 2)
+	if err != nil {
+		return nil, fmt.Errorf("TLDR impact analysis failed: %w", err)
 	}
+
+	// Convert TLDRImpactResponse to ImpactAnalysis
+	analysis := &ImpactAnalysis{
+		TargetFiles: files,
+	}
+
+	// Build call graph from TLDR response
+	if len(resp.Impact.Callers) > 0 || len(resp.Impact.Callees) > 0 {
+		callGraph := &CallGraph{}
+
+		// Add caller nodes
+		for _, caller := range resp.Impact.Callers {
+			nodeID := fmt.Sprintf("%s:%s", caller.File, caller.Function)
+			callGraph.Nodes = append(callGraph.Nodes, CallNode{
+				ID:       nodeID,
+				Name:     caller.Function,
+				File:     caller.File,
+				NodeType: "caller",
+			})
+		}
+
+		// Add callee nodes
+		for _, callee := range resp.Impact.Callees {
+			nodeID := fmt.Sprintf("%s:%s", callee.File, callee.Function)
+			callGraph.Nodes = append(callGraph.Nodes, CallNode{
+				ID:       nodeID,
+				Name:     callee.Function,
+				File:     callee.File,
+				NodeType: "callee",
+			})
+		}
+
+		analysis.CallGraph = callGraph
+	}
+
+	return analysis, nil
 }
 
 // extractTargetFiles extracts target file paths from bead metadata and description
@@ -813,8 +961,17 @@ func (o *Overseer) Start(ctx context.Context) error {
 
 	log.Printf("📁 Discovered %d projects", len(o.projects))
 
+	// Start settled-state detection service if enabled
+	if o.settledStateSvc != nil {
+		if err := o.settledStateSvc.Start(ctx); err != nil {
+			log.Printf("[SettledState] Failed to start service: %v", err)
+		} else {
+			log.Println("🔒 Settled-state detection service started")
+		}
+	}
+
 	o.running = true
-	ticker := time.NewTicker(o.pollInterval)
+	ticker := time.NewTicker(o.beadDiscoveryInterval)
 	defer ticker.Stop()
 
 	for {
@@ -824,6 +981,14 @@ func (o *Overseer) Start(ctx context.Context) error {
 			// Stop orphan janitor
 			if o.orphanJanitor != nil {
 				o.orphanJanitor.Stop()
+			}
+			// Stop settled-state detection service
+			if o.settledStateSvc != nil {
+				if err := o.settledStateSvc.Stop(); err != nil {
+					log.Printf("[SettledState] Error stopping service: %v", err)
+				} else {
+					log.Println("🔒 Settled-state detection service stopped")
+				}
 			}
 			return nil
 		case <-ticker.C:
@@ -955,9 +1120,19 @@ func (o *Overseer) tick() error {
 	o.workerMutex.RUnlock()
 
 	maxWorkers := o.GetMaxWorkers()
-	availableSlots := maxWorkers - activeCount
-	if availableSlots <= 0 {
-		return nil
+
+	// Handle max_workers = 0 as "unlimited"
+	var availableSlots int
+	if maxWorkers == 0 {
+		// Unlimited mode: allow spawning based on available CPU/Memory resources only
+		// Still limit to reasonable batch size to prevent overwhelming the system
+		availableSlots = 20 // Reasonable default batch size for unlimited mode
+		log.Printf("📊 Unlimited worker mode active (max_workers=0), allowing up to %d slots per tick", availableSlots)
+	} else {
+		availableSlots = maxWorkers - activeCount
+		if availableSlots <= 0 {
+			return nil
+		}
 	}
 
 	// Build/refresh DAG from all beads
@@ -965,6 +1140,13 @@ func (o *Overseer) tick() error {
 		// Graceful degradation: log error and continue with existing DAG
 		o.logGracefulDegradation("Overseer", "buildDAG", "using existing DAG", err)
 		// Continue with existing DAG if rebuild fails
+	}
+
+	// Register chains only ONCE at startup (not on every discovery cycle)
+	// This is called from the main loop but we track registration state
+	if o.chainCompletionDetector != nil && !o.chainsRegistered {
+		o.registerChainsFromBeadsClient()
+		o.chainsRegistered = true
 	}
 
 	// Get ready beads using beadsClient (calls 'br ready' directly)
@@ -992,15 +1174,48 @@ func (o *Overseer) tick() error {
 		log.Printf("📊 Active workers: %d/%d, Ready beads from DAG: %d", activeCount, maxWorkers, len(retryBeads))
 	}
 
+	// Apply 70% batch spawning rule: only spawn up to 70% of available slots per tick
+	// This prevents overwhelming the system and allows for better resource management
+	batchLimit := int(float64(availableSlots) * 0.7)
+	if batchLimit < 1 {
+		batchLimit = 1 // Always allow at least 1 worker to spawn
+	}
+	log.Printf("📊 Batch spawning limit: %d workers (70%% of %d available slots)", batchLimit, availableSlots)
+
+	// Register chains before spawning workers (to catch beads just before execution)
+	// This ensures we track chains even when beads complete in milliseconds
+	if o.chainCompletionDetector != nil && !o.chainsRegistered && o.dag != nil {
+		o.registerChainsFromBeadsClient()
+		o.chainsRegistered = true
+		log.Printf("[ChainCompletion] Registered chains before worker spawn")
+	}
+
 	// Spawn workers for ready beads
+	spawnedCount := 0
 	for _, bead := range retryBeads {
-		if availableSlots <= 0 {
+		// CRITICAL: Recalculate available slots before each spawn
+		// This prevents race conditions where workers complete between spawns
+		o.workerMutex.RLock()
+		currentActive := len(o.activeWorkers)
+		o.workerMutex.RUnlock()
+
+		currentAvailable := maxWorkers - currentActive
+		if maxWorkers == 0 {
+			currentAvailable = 20 // Unlimited mode
+		}
+
+		if currentAvailable <= 0 || spawnedCount >= batchLimit {
+			if spawnedCount >= batchLimit {
+				log.Printf("📊 Reached batch limit (%d workers), deferring remaining beads to next tick", batchLimit)
+			} else if currentAvailable <= 0 {
+				log.Printf("📊 No available slots (active: %d/%d), breaking spawn loop", currentActive, maxWorkers)
+			}
 			break
 		}
 
 		beadIDStr := string(bead.ID)
 
-		// Check if this is a retry and log appropriately
+		// Check if this is a retry
 		if retryInfo, exists := o.retries[beadIDStr]; exists {
 			log.Printf("[Retry] Attempting retry %d/%d for bead %s",
 				retryInfo.count+1, o.config.Overseer.DefaultRetries, bead.ID)
@@ -1032,16 +1247,39 @@ func (o *Overseer) tick() error {
 			continue
 		}
 
+		// Check rate limiting: max 5 workers per 10 seconds
+		if !o.canSpawnWithinRateLimit() {
+			log.Printf("[RateLimit] Blocking spawn for bead %s: rate limit exceeded", bead.ID)
+			// Break the loop - no more spawns in this window
+			break
+		}
+
 		if err := o.spawnWorker(bead); err != nil {
-			// Record retry and log error
-			o.recordRetry(beadIDStr, err)
+			// Don't record retry for worker limit or rate limit - these are resource constraints, not failures
+			// The bead will naturally be retried in the next tick without accumulating failure counts
+			errMsg := err.Error()
+			isResourceConstraint := strings.Contains(errMsg, "worker limit reached") ||
+				strings.Contains(errMsg, "rate limit exceeded") ||
+				strings.Contains(errMsg, "resource limits exceeded")
+
+			if !isResourceConstraint {
+				o.recordRetry(beadIDStr, err)
+			}
 			o.logError("Overseer", "spawnWorker", beadIDStr, err, "error")
 			continue
 		}
 
+		// Record successful spawn for rate limiting
+		o.recordWorkerSpawn()
+
 		// Clear retry state on successful spawn
 		o.clearRetry(beadIDStr)
 		availableSlots--
+		spawnedCount++
+	}
+
+	if spawnedCount > 0 {
+		log.Printf("📊 Spawned %d workers this tick (batch limit: %d)", spawnedCount, batchLimit)
 	}
 
 	return nil
@@ -1273,17 +1511,238 @@ func (o *Overseer) buildDAG() error {
 	return nil
 }
 
-// getReadyBeads retrieves beads that are ready to execute using 'br ready'
-// This is more reliable than DAG as it queries the actual bead status
+// registerChainsFromBeadsClient registers chains by reading beads directly from .beads/issues.jsonl
+// This gets ALL beads regardless of status (open/closed), unlike br list which only returns open
+func (o *Overseer) registerChainsFromBeadsClient() {
+	if o.chainCompletionDetector == nil {
+		return
+	}
+
+	allBeadMap := make(map[string]types.Bead)
+	dependsOnMap := make(map[string][]string) // beadID -> list of beads that depend on it
+
+	for _, project := range o.projects {
+		issuesFile := filepath.Join(project.Path, ".beads", "issues.jsonl")
+		beads, err := o.readBeadsFromFile(issuesFile)
+		if err != nil {
+			log.Printf("[ChainCompletion] Could not read beads from %s: %v", issuesFile, err)
+			continue
+		}
+		log.Printf("[ChainCompletion] Read %d beads from %s", len(beads), project.Name)
+		for _, bead := range beads {
+			allBeadMap[string(bead.ID)] = bead
+			// Build inverse map: what depends on this bead
+			// If bead B has depends_on_id = A, then B depends on A, so A is blocked by B
+			// We want to find: given A, what beads depend on A?
+			for _, dep := range bead.Dependencies {
+				depStr := string(dep)
+				dependsOnMap[depStr] = append(dependsOnMap[depStr], string(bead.ID))
+			}
+		}
+	}
+
+	if len(allBeadMap) == 0 {
+		log.Printf("[ChainCompletion] No beads found, skipping chain registration")
+		return
+	}
+
+	// Find roots (beads with no dependencies - they don't depend on anything)
+	roots := make([]types.Bead, 0)
+	for _, bead := range allBeadMap {
+		if len(bead.Dependencies) == 0 {
+			roots = append(roots, bead)
+		}
+	}
+
+	log.Printf("[ChainCompletion] Found %d root beads", len(roots))
+
+	chainCount := 0
+	visited := make(map[string]bool)
+
+	// For each root, traverse down to find all dependents
+	for _, root := range roots {
+		var chainBeads []types.BeadID
+
+		var dfs func(beadID string)
+		dfs = func(beadID string) {
+			if visited[beadID] {
+				return
+			}
+			visited[beadID] = true
+
+			bid, _ := types.ParseBeadID(beadID)
+			chainBeads = append(chainBeads, bid)
+
+			// Find all beads that depend on this one (inverse lookup)
+			for _, dependent := range dependsOnMap[beadID] {
+				dfs(dependent)
+			}
+		}
+
+		dfs(string(root.ID))
+
+		if len(chainBeads) > 1 {
+			o.chainCompletionDetector.RegisterChain(chainBeads[0], chainBeads)
+			chainCount++
+			log.Printf("[ChainCompletion] Registered chain with %d beads starting from %s", len(chainBeads), root.ID)
+		}
+	}
+
+	log.Printf("[ChainCompletion] Registered %d chains from %d total beads", chainCount, len(allBeadMap))
+}
+
+// GetBeadFromFile reads a single bead from issues.jsonl
+func (o *Overseer) GetBeadFromFile(beadID string) *types.Bead {
+	for _, project := range o.projects {
+		issuesFile := filepath.Join(project.Path, ".beads", "issues.jsonl")
+		beads, err := o.readBeadsFromFile(issuesFile)
+		if err != nil {
+			continue
+		}
+		for _, bead := range beads {
+			if string(bead.ID) == beadID {
+				return &bead
+			}
+		}
+	}
+	return nil
+}
+
+// readBeadsFromFile reads beads from .beads/issues.jsonl file
+func (o *Overseer) readBeadsFromFile(filepath string) ([]types.Bead, error) {
+	data, err := os.ReadFile(filepath)
+	if err != nil {
+		return nil, err
+	}
+
+	var beads []types.Bead
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Parse as generic map first to handle the nested dependencies
+		var raw map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			continue
+		}
+
+		var bead types.Bead
+		// Manually map fields
+		if id, ok := raw["id"].(string); ok {
+			bead.ID = types.BeadID(id)
+		}
+		if title, ok := raw["title"].(string); ok {
+			bead.Title = title
+		}
+		if desc, ok := raw["description"].(string); ok {
+			bead.Description = desc
+		}
+		if t, ok := raw["type"].(string); ok {
+			bead.Type = t
+		}
+		if status, ok := raw["status"].(string); ok {
+			bead.Status = types.BeadStatus(status)
+		}
+		if project, ok := raw["project"].(string); ok {
+			bead.Project = project
+		}
+		if repo, ok := raw["source_repo"].(string); ok {
+			bead.Repo = repo
+		}
+
+		// Extract depends_on (what this bead needs to complete first)
+		// This is the INVERSE of Dependencies - it tells us what this bead DEPENDS on
+		if deps, ok := raw["dependencies"].([]interface{}); ok {
+			for _, d := range deps {
+				if depMap, ok := d.(map[string]interface{}); ok {
+					if dependsOn, ok := depMap["depends_on_id"].(string); ok {
+						// Store as DependsOn (what this bead depends on)
+						bead.Dependencies = append(bead.Dependencies, types.BeadID(dependsOn))
+					}
+				}
+			}
+		}
+
+		beads = append(beads, bead)
+	}
+
+	log.Printf("[ChainCompletion] Parsed %d beads from %s", len(beads), filepath)
+	return beads, nil
+}
+
+func (o *Overseer) getAllDescendants(nodeID string) []string {
+	var descendants []string
+	visited := make(map[string]bool)
+
+	var dfs func(id string)
+	dfs = func(id string) {
+		if visited[id] {
+			return
+		}
+		visited[id] = true
+
+		node, exists := o.dag.GetNode(id)
+		if !exists {
+			return
+		}
+
+		for _, outEdge := range node.OutEdges {
+			descendants = append(descendants, outEdge)
+			dfs(outEdge)
+		}
+	}
+
+	dfs(nodeID)
+	return descendants
+}
+
+// getReadyBeads retrieves beads that are ready to execute
+// Primary: uses br ready for maximum parallelism (returns all unblocked beads)
+// Falls back to bv --robot-triage for intelligent prioritization if br returns insufficient beads
 func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
+	// Try br ready first for maximum parallelism (returns all 20+ unblocked beads)
+	// This is more reliable than BV triage which filters to only 1-2 beads
+	brBeads, brErr := o.getReadyBeadsFromBR()
+	if brErr != nil {
+		log.Printf("⚠️  br ready failed: %v", brErr)
+	}
+
+	// If br ready worked and returned beads, use them
+	if brErr == nil && len(brBeads) > 0 {
+		log.Printf("✅ Using br ready: found %d unblocked beads", len(brBeads))
+		return brBeads, nil
+	}
+
+	// Fallback to bv triage if br ready failed or returned no beads
+	if o.bvClient != nil {
+		log.Printf("⚠️  br ready failed or returned 0 beads, falling back to bv triage")
+		beads, err := o.getReadyBeadsFromBV()
+		if err != nil {
+			return nil, fmt.Errorf("bv triage failed: %w", err)
+		}
+		return beads, nil
+	}
+
+	// If both fail, return error
+	if brErr != nil {
+		return nil, fmt.Errorf("both br ready and bv triage failed: br: %w, bv: nil", brErr)
+	}
+
+	return nil, fmt.Errorf("no beads found")
+}
+
+// getReadyBeadsFromBR retrieves beads using br ready (legacy method)
+func (o *Overseer) getReadyBeadsFromBR() ([]types.Bead, error) {
 	var allReadyBeads []types.Bead
 
 	for _, project := range o.projects {
 		if project.Type == types.RepoTypeSingle {
 			beads, err := o.beadsClient.GetReadyBeads(project.Name, project.Path, "")
 			if err != nil {
-				log.Printf("⚠️  Could not get beads for project %s: %v", project.Name, err)
-				continue
+				return nil, fmt.Errorf("could not get beads for project %s: %w", project.Name, err)
 			}
 			allReadyBeads = append(allReadyBeads, beads...)
 		} else {
@@ -1291,8 +1750,7 @@ func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
 			for _, repo := range project.Repos {
 				beads, err := o.beadsClient.GetReadyBeads(project.Name, project.Path, repo.Name)
 				if err != nil {
-					log.Printf("⚠️  Could not get beads for repo %s/%s: %v", project.Name, repo.Name, err)
-					continue
+					return nil, fmt.Errorf("could not get beads for repo %s/%s: %w", project.Name, repo.Name, err)
 				}
 				allReadyBeads = append(allReadyBeads, beads...)
 			}
@@ -1325,6 +1783,13 @@ func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
 			continue
 		}
 
+		// CRITICAL: Skip beads with unresolved dependencies
+		// br ready may return beads that have dependencies not yet satisfied
+		if len(bead.Dependencies) > 0 {
+			log.Printf("⏸️  [BR] Skipping bead with unresolved dependencies: %s (depends on: %v)", beadIDStr, bead.Dependencies)
+			continue
+		}
+
 		readyBeads = append(readyBeads, bead)
 	}
 	o.workerMutex.RUnlock()
@@ -1339,18 +1804,266 @@ func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
 	return readyBeads, nil
 }
 
+// getReadyBeadsFromBV retrieves beads that are ready to execute using bv --robot-triage
+// This provides intelligent prioritization with PageRank, critical path, and dependency analysis
+// Falls back to br ready if bv is not available (fail hard if bv fails when enabled)
+func (o *Overseer) getReadyBeadsFromBV() ([]types.Bead, error) {
+	if o.bvClient == nil {
+		return nil, fmt.Errorf("bv client not initialized")
+	}
+
+	var allReadyBeads []types.Bead
+
+	for _, project := range o.projects {
+		// Get triage from bv for this project
+		triage, err := o.bvClient.GetTriage(project.Path)
+		if err != nil {
+			return nil, fmt.Errorf("bv triage failed for project %s: %w", project.Name, err)
+		}
+
+		log.Printf("[BV] Triage for %s: %d recommendations, %d ready, %d blocked",
+			project.Name, len(triage.Recommendations), triage.ReadyCount, triage.BlockedCount)
+
+		// Process each recommendation
+		for _, rec := range triage.Recommendations {
+			beadID := types.BeadID(rec.BeadID)
+			beadIDStr := string(beadID)
+
+			// Filter: not already running
+			o.workerMutex.RLock()
+			if _, isRunning := o.activeWorkers[beadIDStr]; isRunning {
+				o.workerMutex.RUnlock()
+				continue
+			}
+			o.workerMutex.RUnlock()
+
+			// Filter: not already completed in this session
+			if o.completed[beadIDStr] {
+				continue
+			}
+
+			// Skip beads that are blocked by dependencies
+			if len(rec.BlockedBy) > 0 {
+				log.Printf("⏸️  [BV] Skipping blocked bead: %s (blocked by: %v)", beadID, rec.BlockedBy)
+				continue
+			}
+
+			// Skip approval gates
+			if rec.Type == "approval-gate" {
+				log.Printf("⏸️  [BV] Skipping approval gate: %s", beadID)
+				continue
+			}
+
+			// Fetch full bead details from database (triage only has summary)
+			var repoName string
+			if project.Type != types.RepoTypeSingle && len(project.Repos) > 0 {
+				repoName = project.Repos[0].Name // Use first repo for multi-repo projects
+			}
+
+			bead, err := o.beadsClient.GetBead(project.Path, repoName, beadID)
+			if err != nil {
+				log.Printf("⚠️  [BV] Could not get bead details for %s: %v", beadID, err)
+				// Create minimal bead from triage data as fallback
+				bead = &types.Bead{
+					ID:          beadID,
+					Title:       rec.Title,
+					Type:        rec.Type,
+					Priority:    rec.Priority,
+					Project:     project.Name,
+					Repo:        repoName,
+					Status:      types.StatusOpen, // Assume open since bv recommended it
+					Labels:      rec.Labels,
+					Description: rec.Reason, // Use reason as description
+					Metadata: map[string]string{
+						"bv_confidence":     fmt.Sprintf("%f", rec.Confidence),
+						"bv_reason":         rec.Reason,
+						"bv_estimated_time": rec.EstimatedTime,
+					},
+				}
+			}
+
+			// Skip approval beads that are in progress (waiting for user approval)
+			if bead.Type == "approval" && bead.Status == types.StatusInProgress {
+				log.Printf("⏸️  [BV] Skipping approval bead (waiting for user approval): %s", beadID)
+				continue
+			}
+
+			// Add confidence score to metadata for logging/debugging
+			if bead.Metadata == nil {
+				bead.Metadata = make(map[string]string)
+			}
+			bead.Metadata["bv_confidence"] = fmt.Sprintf("%f", rec.Confidence)
+			bead.Metadata["bv_reason"] = rec.Reason
+
+			allReadyBeads = append(allReadyBeads, *bead)
+		}
+
+		// Also process blockers_to_clear for actionable beads not in recommendations
+		for _, blocker := range triage.BlockersToClear {
+			if !blocker.Actionable {
+				continue // Skip non-actionable blockers
+			}
+
+			beadID := types.BeadID(blocker.BeadID)
+			beadIDStr := string(beadID)
+
+			// Filter: not already running
+			o.workerMutex.RLock()
+			if _, isRunning := o.activeWorkers[beadIDStr]; isRunning {
+				o.workerMutex.RUnlock()
+				continue
+			}
+			o.workerMutex.RUnlock()
+
+			// Filter: not already completed
+			if o.completed[beadIDStr] {
+				continue
+			}
+
+			// Skip if already in allReadyBeads (avoid duplicates)
+			alreadyAdded := false
+			for _, existing := range allReadyBeads {
+				if existing.ID == beadID {
+					alreadyAdded = true
+					break
+				}
+			}
+			if alreadyAdded {
+				continue
+			}
+
+			// Skip if blocked
+			if len(blocker.BlockedBy) > 0 {
+				log.Printf("⏸️  [BV] Skipping blocked bead from blockers_to_clear: %s (blocked by: %v)", beadID, blocker.BlockedBy)
+				continue
+			}
+
+			log.Printf("[BV] Found actionable blocker to clear: %s - %s", beadID, blocker.Title)
+
+			// Fetch full bead details
+			var repoName string
+			if project.Type != types.RepoTypeSingle && len(project.Repos) > 0 {
+				repoName = project.Repos[0].Name
+			}
+
+			bead, err := o.beadsClient.GetBead(project.Path, repoName, beadID)
+			if err != nil {
+				log.Printf("⚠️  [BV] Could not get bead details for blocker %s: %v", beadID, err)
+				// Create minimal bead as fallback
+				bead = &types.Bead{
+					ID:       beadID,
+					Title:    blocker.Title,
+					Type:     "task",
+					Priority: 3, // Default priority
+					Project:  project.Name,
+					Repo:     repoName,
+					Status:   types.StatusOpen,
+					Metadata: map[string]string{
+						"bv_source":     "blockers_to_clear",
+						"bv_unblocks":   fmt.Sprintf("%d", blocker.UnblocksCount),
+						"bv_confidence": "0.8",
+						"bv_reason":     fmt.Sprintf("Unblocks %d items", blocker.UnblocksCount),
+					},
+				}
+			}
+
+			// Add metadata for sorting
+			if bead.Metadata == nil {
+				bead.Metadata = make(map[string]string)
+			}
+			bead.Metadata["bv_source"] = "blockers_to_clear"
+			bead.Metadata["bv_unblocks"] = fmt.Sprintf("%d", blocker.UnblocksCount)
+			bead.Metadata["bv_confidence"] = "0.8" // High confidence for unblocking beads
+			bead.Metadata["bv_reason"] = fmt.Sprintf("Unblocks %d items: %v", blocker.UnblocksCount, blocker.UnblocksIDs)
+
+			allReadyBeads = append(allReadyBeads, *bead)
+		}
+	}
+
+	// Sort by bv confidence (highest first), then by priority
+	sort.Slice(allReadyBeads, func(i, j int) bool {
+		confI := 0.0
+		confJ := 0.0
+		if c, err := fmt.Sscanf(allReadyBeads[i].Metadata["bv_confidence"], "%f", &confI); err == nil && c == 1 {
+			// parsed
+		}
+		if c, err := fmt.Sscanf(allReadyBeads[j].Metadata["bv_confidence"], "%f", &confJ); err == nil && c == 1 {
+			// parsed
+		}
+
+		// Higher confidence first, then higher priority
+		if confI != confJ {
+			return confI > confJ
+		}
+		return allReadyBeads[i].Priority > allReadyBeads[j].Priority
+	})
+
+	log.Printf("📋 [BV] Found %d ready beads from triage (after filtering)", len(allReadyBeads))
+
+	return allReadyBeads, nil
+}
+
 // spawnWorker creates and starts a worker for a bead using the configured spawner
 func (o *Overseer) spawnWorker(bead types.Bead) error {
+	log.Printf("[DEBUG] spawnWorker called with bead: ID='%s', Title='%s', Project='%s'", bead.ID, bead.Title, bead.Project)
 	beadIDStr := bead.ID.String()
-
-	// Check if worker already exists
-	o.workerMutex.RLock()
-	if _, exists := o.activeWorkers[beadIDStr]; exists {
-		o.workerMutex.RUnlock()
-		o.logError("spawnWorker", "duplicate_check", beadIDStr, fmt.Errorf("worker already exists"), "warn")
-		return fmt.Errorf("worker already exists for bead %s", beadIDStr)
+	if beadIDStr == "" {
+		log.Printf("[ERROR] spawnWorker called with empty bead ID! Bead: %+v", bead)
+		return fmt.Errorf("cannot spawn worker for bead with empty ID")
 	}
-	o.workerMutex.RUnlock()
+
+	// CRITICAL: Atomic check-and-reserve pattern to prevent race conditions
+	// Hold lock during check AND registration to ensure accurate worker count
+	o.workerMutex.Lock()
+
+	// Check if worker already exists in activeWorkers
+	if _, exists := o.activeWorkers[beadIDStr]; exists {
+		// Check if worker is actually still running via WorkerTracker
+		if o.workerTracker != nil {
+			if workerRecord, found := o.workerTracker.GetWorkerByBead(beadIDStr); found {
+				// If worker is marked as completed/failed in tracker, clean it up
+				if workerRecord.Status == "completed" || workerRecord.Status == "failed" {
+					log.Printf("[Overseer] Cleaning up stale worker %s (status: %s) from activeWorkers", beadIDStr, workerRecord.Status)
+					delete(o.activeWorkers, beadIDStr)
+					// Fall through to create new worker
+				} else {
+					// Worker is still tracked and not completed - it exists
+					o.workerMutex.Unlock()
+					o.logError("spawnWorker", "duplicate_check", beadIDStr, fmt.Errorf("worker already exists"), "warn")
+					return fmt.Errorf("worker already exists for bead %s", beadIDStr)
+				}
+			} else {
+				// Worker in activeWorkers but not in tracker - stale entry, clean it up
+				log.Printf("[Overseer] Cleaning up orphan worker %s (not in tracker)", beadIDStr)
+				delete(o.activeWorkers, beadIDStr)
+				// Fall through to create new worker
+			}
+		} else {
+			// No worker tracker, just check activeWorkers
+			o.workerMutex.Unlock()
+			o.logError("spawnWorker", "duplicate_check", beadIDStr, fmt.Errorf("worker already exists"), "warn")
+			return fmt.Errorf("worker already exists for bead %s", beadIDStr)
+		}
+	}
+
+	// Check worker limit
+	activeCount := len(o.activeWorkers)
+	maxWorkers := o.GetMaxWorkers()
+	if activeCount >= maxWorkers {
+		o.workerMutex.Unlock()
+		log.Printf("[Overseer] BLOCKING spawn for %s: at worker limit (%d/%d)", beadIDStr, activeCount, maxWorkers)
+		return fmt.Errorf("worker limit reached: %d/%d workers active", activeCount, maxWorkers)
+	}
+
+	// Pre-register worker slot (will be updated with actual worker after spawn)
+	// This prevents other ticks from spawning workers beyond the limit
+	placeholderWorker := &types.Worker{
+		ID:     beadIDStr,
+		Status: "spawning",
+	}
+	o.activeWorkers[beadIDStr] = placeholderWorker
+	log.Printf("[WorkerTracking] Added placeholder for %s to activeWorkers. Count: %d", beadIDStr, len(o.activeWorkers))
+	o.workerMutex.Unlock()
 
 	// Check if bead has exhausted retries
 	if retryInfo, exists := o.retries[beadIDStr]; exists {
@@ -1369,13 +2082,17 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		}
 	}
 
-	// Create the worker directly using internal implementation
-	worker, err := o.spawnWorkerInternal(bead)
+	// Create the worker using the agent connector
+	worker, err := o.spawnWorkerViaAgent(bead)
 	if err != nil {
+		// Remove placeholder on spawn failure
+		o.workerMutex.Lock()
+		delete(o.activeWorkers, beadIDStr)
+		o.workerMutex.Unlock()
 		return err
 	}
 
-	// Track worker
+	// Update placeholder with real worker
 	o.workerMutex.Lock()
 	o.activeWorkers[beadIDStr] = worker
 	o.workerMutex.Unlock()
@@ -1417,6 +2134,15 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 	projectPath := o.findProjectPath(&bead)
 	if projectPath == "" {
 		projectPath = bead.Project // Fallback to project name
+	}
+
+	// Mark bead as in_progress before spawning worker
+	if o.beadsClient != nil && projectPath != "" {
+		log.Printf("[Overseer] Marking bead %s as in_progress", beadIDStr)
+		if err := o.beadsClient.UpdateBeadStatus(projectPath, bead.ID, types.StatusInProgress); err != nil {
+			log.Printf("[Overseer] Warning: failed to mark bead %s as in_progress: %v", beadIDStr, err)
+			// Continue anyway - this is not fatal
+		}
 	}
 
 	// Build worker command - use compiled binary if available, otherwise fallback to go run
@@ -1470,6 +2196,8 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		return nil, spawnErr
 	}
 
+	log.Printf("[Worker] Process started with PID %d for bead %s (workerTracker nil: %v)", cmd.Process.Pid, beadIDStr, o.workerTracker == nil)
+
 	// Create worker record
 	worker := &types.Worker{
 		ID:          beadIDStr,
@@ -1483,9 +2211,14 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 
 	// Track worker PID for orphan detection
 	if o.workerTracker != nil {
+		log.Printf("[Overseer] Tracking worker PID %d for bead %s", cmd.Process.Pid, beadIDStr)
 		if err := o.workerTracker.TrackWorker(cmd.Process.Pid, beadIDStr, projectPath); err != nil {
 			log.Printf("[Overseer] Warning: failed to track worker PID %d: %v", cmd.Process.Pid, err)
+		} else {
+			log.Printf("[Overseer] Successfully tracked worker PID %d for bead %s", cmd.Process.Pid, beadIDStr)
 		}
+	} else {
+		log.Printf("[Overseer] Warning: workerTracker is nil, cannot track worker PID %d", cmd.Process.Pid)
 	}
 
 	// Monitor in goroutine
@@ -1512,15 +2245,41 @@ func (o *Overseer) monitorWorker(worker *types.Worker, cmd *exec.Cmd) {
 
 // waitForWorker waits for a worker process to complete and returns completion details
 func (o *Overseer) waitForWorker(worker *types.Worker, cmd *exec.Cmd) workerCompletion {
-	err := cmd.Wait()
+	log.Printf("[DEBUG] waitForWorker: waiting for worker %s (PID %d)", worker.ID, worker.PID)
+
+	// Create timeout channel
+	timeout := o.config.Overseer.WorkerTimeout
+	done := make(chan error, 1)
+
+	// Wait for process in goroutine
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	// Wait for either process completion or timeout
+	var err error
+	select {
+	case err = <-done:
+		// Process completed normally
+	case <-time.After(timeout):
+		// Timeout - kill the process
+		log.Printf("[Overseer] Worker %s timed out after %v, killing process", worker.ID, timeout)
+		if err := cmd.Process.Kill(); err != nil {
+			log.Printf("[Overseer] Failed to kill timed out worker: %v", err)
+		}
+		err = fmt.Errorf("worker timeout after %v", timeout)
+	}
 
 	exitCode := extractExitCode(err)
 	success := exitCode == 0
 	duration := time.Since(worker.StartTime)
+	log.Printf("[DEBUG] waitForWorker: worker %s finished with exitCode=%d, success=%v", worker.ID, exitCode, success)
 
 	var newlyReady []string
 	if success {
+		log.Printf("[DEBUG] waitForWorker: calling handleWorkerSuccess for %s", worker.ID)
 		newlyReady = o.handleWorkerSuccess(worker, duration)
+		log.Printf("[DEBUG] waitForWorker: handleWorkerSuccess returned for %s", worker.ID)
 	} else {
 		o.handleWorkerFailure(worker, exitCode, duration)
 	}
@@ -1577,6 +2336,17 @@ func (o *Overseer) handleWorkerSuccess(worker *types.Worker, duration time.Durat
 	}
 
 	o.completed[worker.ID] = true
+
+	// Track bead for settled-state detection
+	log.Printf("[DEBUG] handleWorkerSuccess: settledStateSvc=%v, BeadID=%s", o.settledStateSvc != nil, worker.BeadID)
+	if o.settledStateSvc != nil {
+		if err := o.settledStateSvc.TrackBead(worker.BeadID); err != nil {
+			log.Printf("[SettledState] Failed to track bead %s: %v", worker.BeadID, err)
+		}
+	} else {
+		log.Printf("[DEBUG] handleWorkerSuccess: settledStateSvc is NIL, cannot track bead %s", worker.BeadID)
+	}
+
 	return newlyReady
 }
 
@@ -1620,7 +2390,10 @@ func (o *Overseer) getMaxRetries() int {
 func (o *Overseer) removeActiveWorker(workerID string) {
 	o.workerMutex.Lock()
 	defer o.workerMutex.Unlock()
+	countBefore := len(o.activeWorkers)
 	delete(o.activeWorkers, workerID)
+	countAfter := len(o.activeWorkers)
+	log.Printf("[WorkerTracking] Removed worker %s from activeWorkers. Count: %d -> %d", workerID, countBefore, countAfter)
 }
 
 // handleWorkerCompletion handles the final steps after worker completion
@@ -1742,6 +2515,12 @@ func (o *Overseer) triggerImmediateSchedule() {
 		return
 	}
 
+	// Check rate limit before spawning (same as tick())
+	if !o.canSpawnWithinRateLimit() {
+		log.Println("[RateLimit] Immediate scheduling blocked: rate limit exceeded")
+		return
+	}
+
 	availableSlots := o.getAvailableWorkerSlots()
 	if availableSlots <= 0 {
 		return
@@ -1786,7 +2565,28 @@ func (o *Overseer) getReadyNodes() []*Node {
 func (o *Overseer) spawnWorkersForNodes(nodes []*Node, maxSlots int) int {
 	spawned := 0
 	for _, node := range nodes {
-		if spawned >= maxSlots {
+		// CRITICAL: Recalculate available slots before each spawn
+		// This prevents race conditions between multiple callers
+		o.workerMutex.RLock()
+		currentActive := len(o.activeWorkers)
+		o.workerMutex.RUnlock()
+
+		maxWorkers := o.GetMaxWorkers()
+		currentAvailable := maxWorkers - currentActive
+		if maxWorkers == 0 {
+			currentAvailable = 20 // Unlimited mode
+		}
+
+		// Use minimum of maxSlots (batch limit) and currentAvailable (real-time)
+		effectiveLimit := maxSlots
+		if currentAvailable < effectiveLimit {
+			effectiveLimit = currentAvailable
+		}
+
+		if spawned >= effectiveLimit {
+			if currentAvailable <= 0 {
+				log.Printf("📊 spawnWorkersForNodes: No available slots (active: %d/%d), stopping", currentActive, maxWorkers)
+			}
 			break
 		}
 
@@ -1856,6 +2656,16 @@ func (o *Overseer) GetActiveWorkers() []types.Worker {
 // GetProjects returns the list of discovered projects
 func (o *Overseer) GetProjects() []types.Project {
 	return o.projects
+}
+
+// GetProjectPath returns the project path for a given project name
+func (o *Overseer) GetProjectPath(projectName string) string {
+	for _, project := range o.projects {
+		if project.Name == projectName {
+			return project.Path
+		}
+	}
+	return ""
 }
 
 // IsRunning returns whether the overseer is currently running
@@ -1981,15 +2791,15 @@ func (o *Overseer) GetBeadFromDAG(beadID string) (types.Bead, error) {
 	return node.Bead, nil
 }
 
-// SetPollInterval updates the poll interval for the overseer
-func (o *Overseer) SetPollInterval(interval time.Duration) {
-	o.pollInterval = interval
-	log.Printf("🔧 Poll interval set to %v", interval)
+// SetBeadDiscoveryInterval updates the bead discovery interval for the overseer
+func (o *Overseer) SetBeadDiscoveryInterval(interval time.Duration) {
+	o.beadDiscoveryInterval = interval
+	log.Printf("🔧 Bead discovery interval set to %v", interval)
 }
 
-// GetPollInterval returns the current poll interval
-func (o *Overseer) GetPollInterval() time.Duration {
-	return o.pollInterval
+// GetBeadDiscoveryInterval returns the current bead discovery interval
+func (o *Overseer) GetBeadDiscoveryInterval() time.Duration {
+	return o.beadDiscoveryInterval
 }
 
 // SetRetryDelay updates the base retry delay for the overseer
@@ -2078,12 +2888,13 @@ func (o *Overseer) refreshTLDRClient(change ToolConfigChange) {
 		return
 	}
 
-	// Reinitialize the client with new settings
-	o.tldrClient = NewTLDRClient(
+	// Reinitialize the client with new settings (CLI mode)
+	o.tldrClient = intelligence.NewTLDRClient(
 		config.BaseURL,
+		true, // useCLI
+		"llm-tldr",
+		"",
 		config.Timeout,
-		config.MaxFiles,
-		config.MaxTokens,
 	)
 
 	if change.EnabledBefore && change.EnabledAfter {
@@ -2239,6 +3050,12 @@ func (o *Overseer) GetDAG() *DAG {
 	o.dagMu.RLock()
 	defer o.dagMu.RUnlock()
 	return o.dag
+}
+
+// GetSettledStateService returns the settled-state detection service.
+// This provides access to settled-state tracking for field resolvers.
+func (o *Overseer) GetSettledStateService() *SettledStateService {
+	return o.settledStateSvc
 }
 
 // initializeMCP initializes the MCP client and reservation manager
@@ -2568,4 +3385,75 @@ func (o *Overseer) sendMCPWorkerCompletion(worker *types.Worker, success bool, e
 	} else {
 		log.Printf("[MCP] Task completion broadcast: bead=%s, status=%s", worker.ID, status)
 	}
+}
+
+// spawnWorkerWithContextEnrichment spawns a worker with CASS context enrichment
+// It searches CASS for relevant sessions based on bead title and includes them in environment
+func (o *Overseer) spawnWorkerWithContextEnrichment(bead types.Bead) (*types.Worker, error) {
+	// Check if CASS client has search capability (for testing)
+	if o.cassClient != nil && o.cassClient.searchClient != nil {
+		// Search CASS for relevant sessions
+		if o.cassClient.searchClient != nil && o.cassClient.searchClient.IsEnabled() {
+			// Search with 2 second timeout and limit of 3
+			result, err := o.cassClient.searchClient.SearchSessions(bead.Title, 3, 2*time.Second)
+			if err == nil && result != nil && len(result.Hits) > 0 {
+				// Format sessions as context
+				sessions := make([]map[string]interface{}, 0, len(result.Hits))
+				for _, hit := range result.Hits {
+					sessions = append(sessions, map[string]interface{}{
+						"agent":       hit.Agent,
+						"title":       hit.Title,
+						"content":     hit.Content,
+						"score":       hit.Score,
+						"source_path": hit.SourcePath,
+						"line_number": hit.LineNumber,
+						"created_at":  hit.CreatedAt,
+					})
+				}
+
+				// Marshal to JSON and store in metadata
+				if contextJSON, err := json.Marshal(sessions); err == nil {
+					if bead.Metadata == nil {
+						bead.Metadata = make(map[string]string)
+					}
+					bead.Metadata["HYDRA_CASS_CONTEXT"] = string(contextJSON)
+				}
+			}
+		}
+	}
+
+	// Call spawnWorkerInternal to create the worker
+	return o.spawnWorkerInternal(bead)
+}
+
+// buildWorkerEnvironmentWithContext builds worker environment with CASS context enrichment
+// It searches CASS for sessions related to the bead and includes top results
+func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead, cassClient interface{}) []string {
+	// Start with basic environment
+	env := []string{
+		fmt.Sprintf("HYDRA_BEAD_ID=%s", bead.ID),
+		fmt.Sprintf("HYDRA_PROJECT=%s", bead.Project),
+		fmt.Sprintf("HYDRA_REPO=%s", bead.Repo),
+		fmt.Sprintf("HYDRA_BEAD_TITLE=%s", bead.Title),
+		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
+	}
+
+	// If CASS client is provided and enabled, search for relevant sessions
+	if cassClient != nil {
+		if searcher, ok := cassClient.(interface {
+			SearchSessions(query string, limit int, timeout time.Duration) (*CASSSearchResult, error)
+			IsEnabled() bool
+		}); ok && searcher.IsEnabled() {
+			// Search with 2 second timeout as per requirements
+			result, err := searcher.SearchSessions(bead.Title, 3, 2*time.Second)
+			if err == nil && result != nil && len(result.Hits) > 0 {
+				// Marshal the entire result (including Count and TotalMatches) to JSON and add to environment
+				if contextJSON, err := json.Marshal(result); err == nil {
+					env = append(env, fmt.Sprintf("HYDRA_CASS_CONTEXT=%s", string(contextJSON)))
+				}
+			}
+		}
+	}
+
+	return env
 }

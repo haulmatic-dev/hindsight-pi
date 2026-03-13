@@ -287,7 +287,7 @@ func (r *queryResolver) Config(ctx context.Context) (*model.Config, error) {
 
 	return &model.Config{
 		MaxWorkers:    int32(r.Overseer.GetMaxWorkers()),
-		PollInterval:  int32(r.Overseer.GetPollInterval().Seconds()),
+		PollInterval:  int32(r.Overseer.GetBeadDiscoveryInterval().Seconds()),
 		RetryDelay:    int32(r.Overseer.GetRetryDelay().Seconds()),
 		WorkerTimeout: 1800, // 30 minutes default
 		APIPort:       8080, // Default API port
@@ -445,7 +445,7 @@ func (r *mutationResolver) UpdateConfig(ctx context.Context, input model.ConfigI
 		if *input.PollInterval < 1 {
 			return nil, fmt.Errorf("poll interval must be at least 1 second")
 		}
-		r.Overseer.SetPollInterval(time.Duration(*input.PollInterval) * time.Second)
+		r.Overseer.SetBeadDiscoveryInterval(time.Duration(*input.PollInterval) * time.Second)
 	}
 	if input.RetryDelay != nil {
 		if *input.RetryDelay < 1 {
@@ -455,7 +455,7 @@ func (r *mutationResolver) UpdateConfig(ctx context.Context, input model.ConfigI
 	}
 	return &model.Config{
 		MaxWorkers:    int32(r.Overseer.GetMaxWorkers()),
-		PollInterval:  int32(r.Overseer.GetPollInterval().Seconds()),
+		PollInterval:  int32(r.Overseer.GetBeadDiscoveryInterval().Seconds()),
 		RetryDelay:    int32(r.Overseer.GetRetryDelay().Seconds()),
 		WorkerTimeout: 1800, // 30 minutes default
 		APIPort:       8080, // Default API port

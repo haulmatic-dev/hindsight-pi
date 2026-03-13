@@ -88,7 +88,7 @@ func NewTestSuite(t *testing.T) *TestSuite {
 	// Create test configuration
 	config := core.DefaultConfig()
 	config.Overseer.MaxWorkers = 5
-	config.Overseer.PollInterval = 100 * time.Millisecond
+	config.Overseer.BeadDiscoveryInterval = 100 * time.Millisecond
 	config.Overseer.DefaultRetries = 3
 	config.Overseer.WorkerTimeout = 30 * time.Second
 	config.API.Enabled = true

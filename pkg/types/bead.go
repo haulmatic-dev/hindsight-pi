@@ -337,3 +337,51 @@ const (
 	// WorkerStatusRetryPending indicates the worker failed but will be retried.
 	WorkerStatusRetryPending WorkerStatus = "retry_pending"
 )
+
+// SettledState represents the immutability state of a bead
+type SettledState string
+
+const (
+	// SettledStateUnsettled indicates the bead is still mutable/changing
+	SettledStateUnsettled SettledState = "unsettled"
+	// SettledStateSettling indicates the bead is transitioning to settled
+	SettledStateSettling SettledState = "settling"
+	// SettledStateSettled indicates the bead is immutable and safe for extraction
+	SettledStateSettled SettledState = "settled"
+	// SettledStateExtracted indicates patterns have been extracted
+	SettledStateExtracted SettledState = "extracted"
+)
+
+// IsValid returns true if the settled state is valid
+func (s SettledState) IsValid() bool {
+	switch s {
+	case SettledStateUnsettled, SettledStateSettling, SettledStateSettled, SettledStateExtracted:
+		return true
+	}
+	return false
+}
+
+// IsTerminal returns true if the settled state is terminal (no more transitions)
+func (s SettledState) IsTerminal() bool {
+	return s == SettledStateExtracted
+}
+
+// SettledBeadInfo tracks the settled-state information for a bead
+type SettledBeadInfo struct {
+	BeadID           BeadID            `json:"bead_id"`
+	State            SettledState      `json:"state"`
+	SettledAt        *time.Time        `json:"settled_at,omitempty"`
+	ExtractedAt      *time.Time        `json:"extracted_at,omitempty"`
+	CheckCount       int               `json:"check_count"`
+	LastCheckedAt    time.Time         `json:"last_checked_at"`
+	StabilityScore   float64           `json:"stability_score"`   // 0.0-1.0
+	ImmutabilityHash string            `json:"immutability_hash"` // Hash of state at settlement
+	Metadata         map[string]string `json:"metadata,omitempty"`
+}
+
+// CUFeedbackConfig contains feedback loop settings for Collective Unconscious
+type CUFeedbackConfig struct {
+	TrackOutcomes           bool    `yaml:"track_outcomes"`
+	CollectExplicitFeedback bool    `yaml:"collect_explicit_feedback"`
+	DecayRate               float64 `yaml:"decay_rate"` // Per day
+}

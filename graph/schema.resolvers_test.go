@@ -489,7 +489,7 @@ func TestWorkersQuery(t *testing.T) {
 	config := &core.Config{
 		Overseer: core.OverseerConfig{
 			MaxWorkers:     10,
-			PollInterval:   5 * time.Second,
+			BeadDiscoveryInterval:   5 * time.Second,
 			DefaultRetries: 3,
 		},
 	}
@@ -518,7 +518,7 @@ func TestWorkerQuery(t *testing.T) {
 	config := &core.Config{
 		Overseer: core.OverseerConfig{
 			MaxWorkers:     10,
-			PollInterval:   5 * time.Second,
+			BeadDiscoveryInterval:   5 * time.Second,
 			DefaultRetries: 3,
 		},
 	}
@@ -617,7 +617,7 @@ func TestHealthQuery(t *testing.T) {
 	config := &core.Config{
 		Overseer: core.OverseerConfig{
 			MaxWorkers:     10,
-			PollInterval:   5 * time.Second,
+			BeadDiscoveryInterval:   5 * time.Second,
 			DefaultRetries: 3,
 		},
 	}

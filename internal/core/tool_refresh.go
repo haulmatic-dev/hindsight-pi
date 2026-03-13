@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"time"
+
+	"github.com/haulmatic-dev/hydra/internal/intelligence"
 )
 
 // ToolType identifies which tool configuration has changed
@@ -189,7 +191,7 @@ func (d *ConfigChangeDetector) mcpChanged(old, new MCPConfig) bool {
 // RefreshHandler creates and manages tool clients based on config changes
 type RefreshHandler struct {
 	cassClient *CassMemoryClient
-	tldrClient *TLDRClient
+	tldrClient *intelligence.TLDRClient
 	gptCache   *GPTCacheClient
 	config     *Config
 	logger     *log.Logger
@@ -250,11 +252,13 @@ func (h *RefreshHandler) refreshTLDR(change ToolConfigChange) {
 		return
 	}
 
-	h.tldrClient = NewTLDRClient(
+	// Use CLI mode for TLDR (HTTP daemon has issues)
+	h.tldrClient = intelligence.NewTLDRClient(
 		cfg.BaseURL,
-		time.Second*5,
-		cfg.MaxFiles,
-		cfg.MaxTokens,
+		true, // useCLI
+		"llm-tldr",
+		"",
+		cfg.Timeout,
 	)
 
 	h.logRefresh(change.Tool.String(), change.IsReconfigure(),
@@ -309,7 +313,7 @@ func (h *RefreshHandler) GetCassClient() *CassMemoryClient {
 }
 
 // GetTLDRClient returns the current TLDR client
-func (h *RefreshHandler) GetTLDRClient() *TLDRClient {
+func (h *RefreshHandler) GetTLDRClient() *intelligence.TLDRClient {
 	return h.tldrClient
 }
 
@@ -319,7 +323,7 @@ func (h *RefreshHandler) GetGPTCacheClient() *GPTCacheClient {
 }
 
 // SetClients allows injection of existing clients (for testing or initialization)
-func (h *RefreshHandler) SetClients(cass *CassMemoryClient, tldr *TLDRClient, gpt *GPTCacheClient) {
+func (h *RefreshHandler) SetClients(cass *CassMemoryClient, tldr *intelligence.TLDRClient, gpt *GPTCacheClient) {
 	h.cassClient = cass
 	h.tldrClient = tldr
 	h.gptCache = gpt

@@ -14,7 +14,7 @@ func TestLoadConfig_ValidYAML(t *testing.T) {
 
 	configContent := `
 overseer:
-  poll_interval: 10s
+  bead_discovery_interval: 10s
   max_workers: 5
   default_retries: 3
   worker_timeout: 5m
@@ -49,8 +49,8 @@ mcp:
 		t.Errorf("Expected MaxWorkers=5, got %d", config.Overseer.MaxWorkers)
 	}
 
-	if config.Overseer.PollInterval != 10*time.Second {
-		t.Errorf("Expected PollInterval=10s, got %v", config.Overseer.PollInterval)
+	if config.Overseer.BeadDiscoveryInterval != 10*time.Second {
+		t.Errorf("Expected BeadDiscoveryInterval=10s, got %v", config.Overseer.BeadDiscoveryInterval)
 	}
 
 	// Verify projects
@@ -83,7 +83,7 @@ func TestLoadConfig_ArrayFormat(t *testing.T) {
 
 	configContent := `
 overseer:
-  poll_interval: 5s
+  bead_discovery_interval: 5s
   max_workers: 3
 
 projects:
@@ -116,7 +116,7 @@ func TestLoadConfig_ObjectWithListFormat(t *testing.T) {
 
 	configContent := `
 overseer:
-  poll_interval: 5s
+  bead_discovery_interval: 5s
   max_workers: 3
 
 projects:
@@ -165,9 +165,9 @@ overseer:
 	}
 
 	// Verify default values are preserved
-	if config.Overseer.PollInterval != 0 {
+	if config.Overseer.BeadDiscoveryInterval != 0 {
 		// When not specified in YAML, it gets zero value
-		t.Logf("PollInterval not specified in YAML, got zero value: %v", config.Overseer.PollInterval)
+		t.Logf("BeadDiscoveryInterval not specified in YAML, got zero value: %v", config.Overseer.BeadDiscoveryInterval)
 	}
 
 	if config.Overseer.MaxWorkers != 10 {

@@ -27,6 +27,8 @@ func TestDependencyResolution_BeadsClientToDAGFlow(t *testing.T) {
 			Type:         "implement",
 			Status:       types.StatusOpen,
 			Dependencies: []types.BeadID{},
+			Project:      "test-project",
+			Repo:         "test-repo",
 		},
 		{
 			ID:           types.BeadID("hydra-002"),
@@ -34,6 +36,8 @@ func TestDependencyResolution_BeadsClientToDAGFlow(t *testing.T) {
 			Type:         "implement",
 			Status:       types.StatusOpen,
 			Dependencies: []types.BeadID{"hydra-001"},
+			Project:      "test-project",
+			Repo:         "test-repo",
 		},
 		{
 			ID:           types.BeadID("hydra-003"),
@@ -41,6 +45,8 @@ func TestDependencyResolution_BeadsClientToDAGFlow(t *testing.T) {
 			Type:         "implement",
 			Status:       types.StatusOpen,
 			Dependencies: []types.BeadID{"hydra-002"},
+			Project:      "test-project",
+			Repo:         "test-repo",
 		},
 	}
 

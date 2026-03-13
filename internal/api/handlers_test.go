@@ -23,10 +23,10 @@ func setupTestServer(t *testing.T) (*httptest.Server, *core.Overseer, func()) {
 			Port:    0,
 		},
 		Overseer: core.OverseerConfig{
-			MaxWorkers:     5,
-			PollInterval:   10 * time.Second,
-			DefaultRetries: 3,
-			WorkerTimeout:  30 * time.Minute,
+			MaxWorkers:            5,
+			BeadDiscoveryInterval: 10 * time.Second,
+			DefaultRetries:        3,
+			WorkerTimeout:         30 * time.Minute,
 		},
 		MCP: core.MCPConfig{
 			Enabled: false,

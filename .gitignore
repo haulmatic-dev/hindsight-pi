@@ -6,6 +6,10 @@ dist/
 *.so
 *.dylib
 
+# Root-level binaries (always build to bin/)
+/hydra
+/worker
+
 # Go
 *.test
 *.out
@@ -54,6 +58,10 @@ coverage.html
 # opencode
 .opencode/
 
+# Cass (cache directory)
+.cass/
+
 # Beads
 .beads/
 .hydra/
+hydra.pid

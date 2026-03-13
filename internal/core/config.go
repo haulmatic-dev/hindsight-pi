@@ -16,6 +16,24 @@ type Config struct {
 	MCP          MCPConfig          `yaml:"mcp"`
 	API          APIConfig          `yaml:"api"`
 	Intelligence IntelligenceConfig `yaml:"intelligence"`
+	Agents       AgentsConfig       `yaml:"agents"`
+}
+
+// AgentsConfig contains agent connector settings
+type AgentsConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	DefaultAgent string   `yaml:"default_agent"`
+	Pi           PiConfig `yaml:"pi"`
+}
+
+// PiConfig contains Pi coding agent settings
+type PiConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	Provider      string `yaml:"provider"`
+	Model         string `yaml:"model"`
+	ThinkingLevel string `yaml:"thinking_level"`
+	Timeout       string `yaml:"timeout"`
+	ApiKeyName    string `yaml:"api_key_name"`
 }
 
 // rawConfig is used for YAML parsing to handle the nested projects structure
@@ -25,6 +43,7 @@ type rawConfig struct {
 	MCP          MCPConfig          `yaml:"mcp"`
 	API          APIConfig          `yaml:"api"`
 	Intelligence IntelligenceConfig `yaml:"intelligence"`
+	Agents       AgentsConfig       `yaml:"agents"`
 }
 
 // projectsListConfig handles the case where projects is an object with 'list' field
@@ -35,9 +54,73 @@ type projectsListConfig struct {
 
 // IntelligenceConfig contains configuration for intelligence services
 type IntelligenceConfig struct {
-	CassMemory CassMemoryConfig `yaml:"cass_memory"`
-	TLDR       TLDRConfig       `yaml:"tldr"`
-	GPTCache   GPTCacheConfig   `yaml:"gptcache"`
+	CassMemory            CassMemoryConfig            `yaml:"cass_memory"`
+	TLDR                  TLDRConfig                  `yaml:"tldr"`
+	GPTCache              GPTCacheConfig              `yaml:"gptcache"`
+	SettledState          SettledStateConfig          `yaml:"settled_state"`
+	Patterns              PatternConfig               `yaml:"patterns"`
+	CollectiveUnconscious CollectiveUnconsciousConfig `yaml:"collective_unconscious"`
+}
+
+// PatternConfig contains pattern extraction settings
+type PatternConfig struct {
+	Enabled             bool    `yaml:"enabled"`
+	StoragePath         string  `yaml:"storage_path"`
+	MinConfidence       float64 `yaml:"min_confidence"`
+	MaxPatternsPerBead  int     `yaml:"max_patterns_per_bead"`
+	ExtractCodeSnippets bool    `yaml:"extract_code_snippets"`
+}
+
+// CollectiveUnconsciousConfig contains Collective Unconscious settings
+type CollectiveUnconsciousConfig struct {
+	Enabled  bool             `yaml:"enabled"`
+	Storage  CUStorageConfig  `yaml:"storage"`
+	Matching CUMatchingConfig `yaml:"matching"`
+	Review   CUReviewConfig   `yaml:"review"`
+	Feedback CUFeedbackConfig `yaml:"feedback"`
+	Security CUSecurityConfig `yaml:"security"`
+}
+
+// CUStorageConfig contains storage settings for Collective Unconscious
+type CUStorageConfig struct {
+	Backend  string        `yaml:"backend"` // "cass_memory", "postgres", "hybrid"
+	CacheTTL time.Duration `yaml:"cache_ttl"`
+}
+
+// CUMatchingConfig contains pattern matching settings
+type CUMatchingConfig struct {
+	Enabled                bool          `yaml:"enabled"`
+	BlockOnFailure         bool          `yaml:"block_on_failure"`
+	MaxPatternsInPrompt    int           `yaml:"max_patterns_in_prompt"`
+	MinConfidenceThreshold float64       `yaml:"min_confidence_threshold"`
+	CacheEnabled           bool          `yaml:"cache_enabled"`
+	CacheTTL               time.Duration `yaml:"cache_ttl"`
+	QueryTimeout           time.Duration `yaml:"query_timeout"`
+}
+
+// CUReviewConfig contains pattern review settings
+type CUReviewConfig struct {
+	Enabled              bool          `yaml:"enabled"`
+	AutoApproveThreshold float64       `yaml:"auto_approve_threshold"`
+	AutoDiscardThreshold float64       `yaml:"auto_discard_threshold"`
+	RequireHumanReview   bool          `yaml:"require_human_review"`
+	MaxPatternsInReview  int           `yaml:"max_patterns_in_review"`
+	DuplicateThreshold   float64       `yaml:"duplicate_threshold"`
+	ReviewTimeout        time.Duration `yaml:"review_timeout"`
+}
+
+// CUFeedbackConfig contains feedback loop settings
+type CUFeedbackConfig struct {
+	TrackOutcomes           bool    `yaml:"track_outcomes"`
+	CollectExplicitFeedback bool    `yaml:"collect_explicit_feedback"`
+	DecayRate               float64 `yaml:"decay_rate"` // Per day
+}
+
+// CUSecurityConfig contains security settings for patterns
+type CUSecurityConfig struct {
+	ScanForSecrets   bool     `yaml:"scan_for_secrets"`
+	AllowedLicenses  []string `yaml:"allowed_licenses"`
+	SanitizePatterns bool     `yaml:"sanitize_patterns"`
 }
 
 // CassMemoryConfig contains cass_memory service settings
@@ -65,13 +148,20 @@ type GPTCacheConfig struct {
 
 // OverseerConfig contains overseer-specific settings
 type OverseerConfig struct {
-	PollInterval       time.Duration            `yaml:"poll_interval"`
-	MaxWorkers         int                      `yaml:"max_workers"`
-	DefaultRetries     int                      `yaml:"default_retries"`
-	MaxRetries         int                      `yaml:"max_retries"`
-	WorkerTimeout      time.Duration            `yaml:"worker_timeout"`
-	RetryDelay         time.Duration            `yaml:"retry_delay"`
-	ResourceMonitoring ResourceMonitoringConfig `yaml:"resource_monitoring"`
+	BeadDiscoveryInterval time.Duration            `yaml:"bead_discovery_interval"`
+	MaxWorkers            int                      `yaml:"max_workers"`
+	DefaultRetries        int                      `yaml:"default_retries"`
+	MaxRetries            int                      `yaml:"max_retries"`
+	WorkerTimeout         time.Duration            `yaml:"worker_timeout"`
+	RetryDelay            time.Duration            `yaml:"retry_delay"`
+	ResourceMonitoring    ResourceMonitoringConfig `yaml:"resource_monitoring"`
+	ChainDetection        ChainDetectionConfig     `yaml:"chain_detection"`
+}
+
+type ChainDetectionConfig struct {
+	Enabled  bool          `yaml:"enabled"`
+	Interval time.Duration `yaml:"interval"`
+	Timeout  time.Duration `yaml:"timeout"`
 }
 
 // ResourceMonitoringConfig contains resource monitoring settings
@@ -117,10 +207,15 @@ type APIConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Overseer: OverseerConfig{
-			PollInterval:   5 * time.Second,
-			MaxWorkers:     6,
-			DefaultRetries: 3,
-			WorkerTimeout:  30 * time.Minute,
+			BeadDiscoveryInterval: 5 * time.Second,
+			MaxWorkers:            6,
+			DefaultRetries:        3,
+			WorkerTimeout:         30 * time.Minute,
+			ChainDetection: ChainDetectionConfig{
+				Enabled:  true,
+				Interval: 10 * time.Second,
+				Timeout:  10 * time.Minute,
+			},
 		},
 		MCP: MCPConfig{
 			Enabled:              true,
@@ -154,6 +249,60 @@ func DefaultConfig() *Config {
 				Enabled:   true,
 				ServerURL: "http://127.0.0.1:8788",
 			},
+			SettledState: DefaultSettledStateConfig(),
+			Patterns: PatternConfig{
+				Enabled:             true,
+				StoragePath:         "",
+				MinConfidence:       0.7,
+				MaxPatternsPerBead:  10,
+				ExtractCodeSnippets: true,
+			},
+			CollectiveUnconscious: CollectiveUnconsciousConfig{
+				Enabled: true,
+				Storage: CUStorageConfig{
+					Backend:  "cass_memory",
+					CacheTTL: 5 * time.Minute,
+				},
+				Matching: CUMatchingConfig{
+					Enabled:                true,
+					BlockOnFailure:         true,
+					MaxPatternsInPrompt:    3,
+					MinConfidenceThreshold: 0.50, // Lowered from 0.70 for more pattern matches
+					CacheEnabled:           true,
+					CacheTTL:               5 * time.Minute,
+					QueryTimeout:           5 * time.Second,
+				},
+				Review: CUReviewConfig{
+					Enabled:              true,
+					AutoApproveThreshold: 0.75, // Lowered from 0.90 for more auto-approvals
+					AutoDiscardThreshold: 0.40, // Lowered from 0.50 to keep borderline patterns,
+					RequireHumanReview:   false,
+					MaxPatternsInReview:  100,
+					DuplicateThreshold:   0.95,
+					ReviewTimeout:        24 * time.Hour,
+				},
+				Feedback: CUFeedbackConfig{
+					TrackOutcomes:           true,
+					CollectExplicitFeedback: true,
+					DecayRate:               0.01, // Per day
+				},
+				Security: CUSecurityConfig{
+					ScanForSecrets:   true,
+					AllowedLicenses:  []string{"MIT", "Apache-2.0", "BSD-3-Clause"},
+					SanitizePatterns: true,
+				},
+			},
+		},
+		Agents: AgentsConfig{
+			Enabled:      true,
+			DefaultAgent: "pi",
+			Pi: PiConfig{
+				Enabled:       true,
+				Provider:      "kimi",
+				Model:         "k2.5",
+				ThinkingLevel: "medium",
+				Timeout:       "10m",
+			},
 		},
 	}
 }
@@ -179,6 +328,7 @@ func LoadConfig(path string) (*Config, error) {
 	config.MCP = raw.MCP
 	config.API = raw.API
 	config.Intelligence = raw.Intelligence
+	config.Agents = raw.Agents
 
 	// Handle projects field - can be:
 	// 1. An array of ProjectConfig (direct list)
@@ -288,17 +438,18 @@ func ValidateConfig(cfg *Config) ValidationErrors {
 	}
 
 	// Validate overseer settings
-	if cfg.Overseer.MaxWorkers < 1 {
+	// max_workers can be 0 (unlimited), but if set must be positive
+	if cfg.Overseer.MaxWorkers < 0 {
 		errors = append(errors, ValidationError{
 			Field:   "overseer.max_workers",
-			Message: "max_workers must be at least 1",
+			Message: "max_workers cannot be negative (use 0 for unlimited)",
 		})
 	}
 
-	if cfg.Overseer.PollInterval < 1*time.Second {
+	if cfg.Overseer.BeadDiscoveryInterval < 1*time.Second {
 		errors = append(errors, ValidationError{
-			Field:   "overseer.poll_interval",
-			Message: "poll_interval must be at least 1 second",
+			Field:   "overseer.bead_discovery_interval",
+			Message: "bead_discovery_interval must be at least 1 second",
 		})
 	}
 

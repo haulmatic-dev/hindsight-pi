@@ -156,7 +156,7 @@ func ToGraphQLConfig(config *core.Config) *model.Config {
 
 	return &model.Config{
 		MaxWorkers:    int32(config.Overseer.MaxWorkers),
-		PollInterval:  int32(config.Overseer.PollInterval.Seconds()),
+		PollInterval:  int32(config.Overseer.BeadDiscoveryInterval.Seconds()),
 		RetryDelay:    30, // Default retry delay in seconds - not directly in config
 		WorkerTimeout: int32(config.Overseer.WorkerTimeout.Seconds()),
 		APIPort:       int32(config.API.Port),

@@ -1,12 +1,16 @@
 overseer:
-  poll_interval: 5s
+  bead_discovery_interval: 10s
   max_workers: 10
   max_retries: 2
-  retry_delay: 5s
-  worker_timeout: 5m
+  retry_delay: 30s
+  worker_timeout: 2m
   resource_limits:
     max_cpu_percent: 70
     max_memory_percent: 70
+  chain_detection:
+    enabled: true
+    interval: 10s
+    timeout: 10m
 
 api:
   enabled: false
@@ -14,20 +18,48 @@ api:
 projects:
   auto_discover: false
   list:
-    - name: hydra
-      path: /Users/buddhi/source-code/personal/hydra
+    - name: opencode-simple-test
+      path: /Users/buddhi/source-code/personal/opencode-simple-test
+      type: single
+    - name: hydra-testing-folder
+      path: /Users/buddhi/source-code/personal/hydra-testing-folder
       type: single
 
 intelligence:
   cass_memory:
     enabled: true
+    timeout: 5s
+    query_limit: 10
   tldr:
     enabled: true
+    timeout: 30s
     max_files: 20  # Allow up to 20 files for intelligence gathering
   gptcache:
     enabled: true
+  patterns:
+    enabled: true
+    min_confidence: 0.7
+    max_patterns_per_bead: 5
+    extract_code_snippets: true
+    storage_path: ~/.hydra/patterns
+  settled_state:
+    enabled: true
+    extract_patterns_on_settle: true
+    settlement_delay: 2m
+    check_interval: 30s
+    retain_unsettled_beads: 1000
 
 mcp:
   enabled: true
   url: http://127.0.0.1:8765
   port: 8765
+
+agents:
+  enabled: true
+  default_agent: pi
+  pi:
+    enabled: true
+    provider: kimi-coding
+    model: k2.5
+    timeout: 10m
+    api_key_name: KIMI_API_KEY

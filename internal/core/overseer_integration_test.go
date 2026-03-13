@@ -112,14 +112,37 @@ func (m *mockBeadsClient) GetReadyBeads(projectName, projectPath, repoName strin
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Extract project name from path (basename)
-	projectName = filepath.Base(projectPath)
+	// Use the provided projectName, but fallback to extracting from path if empty
+	if projectName == "" {
+		projectName = filepath.Base(projectPath)
+	}
 
 	var result []types.Bead
 	for _, bead := range m.beads {
+		// Only consider open beads
 		if bead.Status != types.StatusOpen {
 			continue
 		}
+
+		// Check if bead has any dependencies
+		// A "ready" bead should have no unresolved dependencies
+		hasUnmetDependencies := false
+		for _, depID := range bead.Dependencies {
+			if dep, exists := m.beads[string(depID)]; exists {
+				// Check if dependency is completed (not open)
+				if dep.Status == types.StatusOpen {
+					hasUnmetDependencies = true
+					break
+				}
+			}
+		}
+
+		// Skip beads with unmet dependencies
+		if hasUnmetDependencies {
+			continue
+		}
+
+		// Filter by project/repo
 		if repoName != "" {
 			if bead.Project == projectName && bead.Repo == repoName {
 				result = append(result, bead)
@@ -143,6 +166,17 @@ func (m *mockBeadsClient) getCloseCalls() []closeCall {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return append([]closeCall{}, m.closeCalls...)
+}
+
+func (m *mockBeadsClient) UpdateBeadStatus(projectPath string, beadID types.BeadID, status types.BeadStatus) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if bead, exists := m.beads[string(beadID)]; exists {
+		bead.Status = status
+		m.beads[string(beadID)] = bead
+	}
+	return nil
 }
 
 // mockWorkerSpawner tracks worker spawn calls for testing
@@ -209,7 +243,7 @@ func setupTestOverseer(t *testing.T) *testOverseerWithMocks {
 
 	config := DefaultConfig()
 	config.Overseer.MaxWorkers = 4
-	config.Overseer.PollInterval = 100 * time.Millisecond
+	config.Overseer.BeadDiscoveryInterval = 100 * time.Millisecond
 
 	overseer := NewOverseer(config)
 

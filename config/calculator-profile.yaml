@@ -1,0 +1,81 @@
+# Calculator Domain Configuration
+# Optimized for calculator projects with shorter descriptions
+
+collective_unconscious:
+  enabled: true
+  
+  extraction:
+    trigger_on: ["on_settled"]
+    settling:
+      check_interval: "1h"
+      settling_window: "24h"
+      min_closed_duration: "7d"
+      require_all_dependents_terminal: true
+      auto_extract_on_merge: true
+    quality_threshold: 0.50  # Lowered for calculator domain (was: 0.75)
+    auto_approve_threshold: 0.75  # Lowered (was: 0.90)
+    max_patterns_per_project: 1000
+    require_human_review: false
+    discard_policy:
+      auto_discard_below_score: 0.35  # Lowered (was: 0.50)
+      auto_discard_security_failures: 3
+      auto_discard_duplicates: true
+      duplicate_similarity_threshold: 0.95
+
+  storage:
+    backend: "cass_memory"
+    cache_ttl: "5m"
+
+  matching:
+    enabled: true
+    block_on_failure: true
+    max_patterns_in_prompt: 3
+    min_confidence_threshold: 0.50  # Lowered for more matches (was: 0.70)
+    similarity_metric: "cosine"
+    cache_enabled: true
+    cache_ttl: "5m"
+    query_timeout: "500ms"
+    
+    # Adjusted relevance weights for calculator domain
+    relevance_weights:
+      semantic: 0.45    # Increased - titles/descriptions matter more (was: 0.35)
+      success:  0.20    # Decreased - less historical data (was: 0.25)
+      recency:  0.15    # Keep same
+      usage:    0.10    # Decreased - less usage history (was: 0.15)
+      context:  0.10    # Keep same
+
+  review:
+    enabled: true
+    auto_approve_threshold: 0.75  # Lowered (was: 0.90)
+    auto_discard_threshold: 0.40  # Lowered (was: 0.50)
+    require_human_review: false
+    max_patterns_in_review: 100
+    duplicate_threshold: 0.95
+    review_timeout: "24h"
+
+  feedback:
+    track_outcomes: true
+    collect_explicit_feedback: true
+    decay_rate: 0.01  # Per day
+
+  security:
+    scan_for_secrets: true
+    allowed_licenses: ["MIT", "Apache-2.0", "BSD-3-Clause"]
+    sanitize_patterns: true
+
+  # Quality gates - calculator domain optimized
+  quality_gates:
+    static_analysis:
+      threshold: 0.5  # Lowered (was: 0.7)
+      weight: 0.25
+    test_coverage:
+      threshold: 0.5  # Lowered (was: 0.8)
+      weight: 0.25
+    documentation:
+      threshold: 0.5  # Lowered (was: 0.7)
+      min_description_length: 50  # Lowered (was: 100)
+      min_tags: 2  # Lowered (was: 3)
+      weight: 0.15
+    review_score:
+      threshold: 0.5  # Lowered (was: 0.7)
+      weight: 0.15

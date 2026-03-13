@@ -29,8 +29,7 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 			check: func(changes []ToolConfigChange) bool {
 				return len(changes) == 1 &&
 					changes[0].Tool == ToolCassMemory &&
-					changes[0].HasTimeoutChange &&
-					changes[0].NewTimeout == 10
+					changes[0].HasChanged
 			},
 		},
 		{
@@ -41,8 +40,8 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 			check: func(changes []ToolConfigChange) bool {
 				return len(changes) == 1 &&
 					changes[0].Tool == ToolCassMemory &&
-					changes[0].WasEnabled == true &&
-					changes[0].IsEnabled == false
+					changes[0].EnabledBefore == true &&
+					changes[0].EnabledAfter == false
 			},
 		},
 		{
@@ -53,8 +52,7 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 			check: func(changes []ToolConfigChange) bool {
 				return len(changes) == 1 &&
 					changes[0].Tool == ToolTLDR &&
-					changes[0].HasTimeoutChange &&
-					changes[0].NewTimeout == 20
+					changes[0].HasChanged
 			},
 		},
 		{
@@ -74,8 +72,8 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 			check: func(changes []ToolConfigChange) bool {
 				return len(changes) == 1 &&
 					changes[0].Tool == ToolGPTCache &&
-					changes[0].WasEnabled == true &&
-					changes[0].IsEnabled == false
+					changes[0].EnabledBefore == true &&
+					changes[0].EnabledAfter == false
 			},
 		},
 		{
@@ -86,8 +84,8 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 			check: func(changes []ToolConfigChange) bool {
 				return len(changes) == 1 &&
 					changes[0].Tool == ToolMCP &&
-					changes[0].WasEnabled == true &&
-					changes[0].IsEnabled == false
+					changes[0].EnabledBefore == true &&
+					changes[0].EnabledAfter == false
 			},
 		},
 		{

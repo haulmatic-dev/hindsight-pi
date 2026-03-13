@@ -39,7 +39,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *core.Overseer, func()) {
 		},
 		Overseer: core.OverseerConfig{
 			MaxWorkers:     5,
-			PollInterval:   10 * time.Second,
+			BeadDiscoveryInterval:   10 * time.Second,
 			DefaultRetries: 3,
 			WorkerTimeout:  30 * time.Minute,
 		},
@@ -359,7 +359,7 @@ func setupGraphQLServer(t *testing.T) (*httptest.Server, *graph.Resolver, func()
 	config := &core.Config{
 		Overseer: core.OverseerConfig{
 			MaxWorkers:     5,
-			PollInterval:   10 * time.Second,
+			BeadDiscoveryInterval:   10 * time.Second,
 			DefaultRetries: 3,
 			WorkerTimeout:  30 * time.Minute,
 		},
@@ -711,7 +711,7 @@ func TestGraphQLSubscriptions(t *testing.T) {
 	config := &core.Config{
 		Overseer: core.OverseerConfig{
 			MaxWorkers:     5,
-			PollInterval:   10 * time.Second,
+			BeadDiscoveryInterval:   10 * time.Second,
 			DefaultRetries: 3,
 			WorkerTimeout:  30 * time.Minute,
 		},

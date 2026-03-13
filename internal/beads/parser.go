@@ -120,9 +120,29 @@ func derefString(s *string) string {
 }
 
 // parseJSON unmarshals JSON into the target type with consistent error handling
+// It strips log lines (starting with timestamps) to find the actual JSON
 func parseJSON[T any](data []byte, context string) (T, error) {
 	var result T
-	if err := json.Unmarshal(data, &result); err != nil {
+
+	// Convert to string and split by lines
+	str := string(data)
+	lines := strings.Split(str, "\n")
+
+	// Find the start of JSON (skip log lines that start with timestamps)
+	var jsonStart int
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// JSON starts with [ or {, skip lines starting with timestamps or empty lines
+		if len(trimmed) > 0 && (trimmed[0] == '[' || trimmed[0] == '{') {
+			jsonStart = i
+			break
+		}
+	}
+
+	// Join remaining lines as JSON
+	jsonData := strings.Join(lines[jsonStart:], "\n")
+
+	if err := json.Unmarshal([]byte(jsonData), &result); err != nil {
 		return result, fmt.Errorf("failed to parse %s JSON: %w", context, err)
 	}
 	return result, nil

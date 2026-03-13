@@ -218,7 +218,11 @@ func (c *Client) GetInsights(projectPath string) (*InsightsResponse, error) {
 
 // GetTriage retrieves unified triage recommendations
 func (c *Client) GetTriage(projectPath string) (*TriageResponse, error) {
-	return executeRobotCommand[TriageResponse](c, projectPath, "--robot-triage", nil)
+	wrapper, err := executeRobotCommand[TriageWrapper](c, projectPath, "--robot-triage", nil)
+	if err != nil {
+		return nil, err
+	}
+	return &wrapper.Triage, nil
 }
 
 // GetPlan retrieves dependency-respecting execution plan

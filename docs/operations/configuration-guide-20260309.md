@@ -351,6 +351,74 @@ mcp:
   file_reservation_ttl: 30m    # File locks expire after 30min
 ```
 
+### 6. Agents Configuration
+
+The agents section configures the **Agent Connector Architecture** for multi-agent support.
+
+#### `enabled`
+
+**Type**: `boolean`  
+**Default**: `true`  
+**Description**: Enable agent connector system.
+
+```yaml
+agents:
+  enabled: true
+```
+
+#### `default_agent`
+
+**Type**: `string`  
+**Default**: `pi`  
+**Description**: Default agent to use when spawning workers.
+
+```yaml
+agents:
+  default_agent: pi
+```
+
+**Supported Agents**:
+- `pi` - Pi coding agent via RPC mode (default)
+- `opencode` - Opencode via HTTP server mode
+- `claude` - Claude API (future)
+- `github_copilot` - GitHub Copilot (future)
+
+#### `pi`
+
+**Type**: `object`  
+**Description**: Pi coding agent configuration.
+
+```yaml
+agents:
+  pi:
+    enabled: true
+    provider: kimi          # AI provider (kimi, anthropic, openai, etc.)
+    model: k2.5             # Model to use
+    timeout: 10m            # Maximum execution time
+    thinking_level: medium  # Reasoning level (off, minimal, low, medium, high, xhigh)
+```
+
+**How It Works**:
+```mermaid
+flowchart LR
+    A[Hydra] --> B[PiConnector]
+    B --> C{Pi Installed?}
+    C -->|No| D[Auto-install via npm]
+    C -->|Yes| E[Spawn Pi Process]
+    D --> E
+    E --> F[RPC Session]
+    F --> G[Send Prompt]
+    G --> H[Monitor Activity]
+    H --> I{Activity?}
+    I -->|Yes| H
+    I -->|Timeout| J[Kill & Retry]
+```
+
+**Prerequisites**:
+- Node.js and npm must be installed
+- Pi will be auto-installed: `npm install -g @mariozechner/pi-coding-agent`
+- API key for chosen provider (e.g., `KIMI_API_KEY`)
+
 ## Configuration Examples
 
 ### Development Environment
@@ -381,6 +449,15 @@ intelligence:
 
 mcp:
   enabled: false
+
+agents:
+  enabled: true
+  default_agent: pi
+  pi:
+    enabled: true
+    provider: kimi
+    model: k2.5
+    timeout: 3m
 ```
 
 ### Production Environment
@@ -428,6 +505,15 @@ mcp:
   reconnect_interval: 5s
   max_reconnect_attempts: 10
   heartbeat_interval: 30s
+
+agents:
+  enabled: true
+  default_agent: pi
+  pi:
+    enabled: true
+    provider: kimi
+    model: k2.5
+    timeout: 5m
 ```
 
 ### High-Performance Environment
@@ -461,6 +547,15 @@ intelligence:
 mcp:
   enabled: true
   url: http://127.0.0.1:8765
+
+agents:
+  enabled: true
+  default_agent: pi
+  pi:
+    enabled: true
+    provider: kimi
+    model: k2.5
+    timeout: 10m
 ```
 
 ## Environment-Specific Configuration
@@ -480,6 +575,28 @@ projects:
   list:
     - name: my-project
       path: ${PROJECT_PATH:-/default/path}
+```
+
+### API Key Configuration
+
+Pi requires an API key for your chosen provider. Set it as an environment variable:
+
+```bash
+# For Kimi (default)
+export KIMI_API_KEY="sk-kimi-your-key-here"
+
+# For Anthropic
+export ANTHROPIC_API_KEY="sk-ant-your-key-here"
+
+# For OpenAI
+export OPENAI_API_KEY="sk-your-key-here"
+```
+
+Add to your shell profile (`.bashrc`, `.zshrc`, etc.) for persistence:
+
+```bash
+echo 'export KIMI_API_KEY="your-key"' >> ~/.zshrc
+source ~/.zshrc
 ```
 
 ### Configuration Profiles

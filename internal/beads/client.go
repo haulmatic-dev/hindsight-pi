@@ -66,7 +66,8 @@ type defaultExecutorWithDir struct {
 func (e *defaultExecutorWithDir) Execute(name string, arg ...string) ([]byte, error) {
 	cmd := exec.Command(name, arg...)
 	cmd.Dir = e.Dir
-	return cmd.Output()
+	// Capture both stdout and stderr so we can check for warnings
+	return cmd.CombinedOutput()
 }
 
 // Client wraps the beads CLI commands
@@ -114,9 +115,9 @@ func (c *Client) exec(cmd string, args ...string) ([]byte, error) {
 
 // execInDir executes a CLI command in a specific directory
 func (c *Client) execInDir(dir string, cmd string, args ...string) ([]byte, error) {
-	// For production, create a directory-aware executor
-	// For tests, the mock executor ignores the directory
-	output, err := c.executor.Execute(cmd, args...)
+	// Create a directory-aware executor for the command
+	executor := &defaultExecutorWithDir{Dir: dir}
+	output, err := executor.Execute(cmd, args...)
 	if err != nil {
 		return nil, &CLIError{
 			Command: cmd,
@@ -141,12 +142,33 @@ func (c *Client) GetReadyBeads(projectName, projectPath, repoName string) ([]typ
 	// Use project path as working directory so br commands find the .beads folder
 	output, err := c.execInDir(projectPath, "br", "ready", "--json")
 	if err != nil {
+		// Debug: log the error details
+		fmt.Printf("[DEBUG] GetReadyBeads ERROR for %s: %v\n", projectPath, err)
+		if cliErr, ok := err.(*CLIError); ok {
+			fmt.Printf("[DEBUG] stdout: %s\n", cliErr.Stdout)
+			fmt.Printf("[DEBUG] stderr: %s\n", cliErr.Stderr)
+		}
 		return nil, err
 	}
-	return c.parser.ParseReadyBeads(output, BeadContext{
+
+	// Debug: log raw output
+	outputStr := string(output)
+	fmt.Printf("[DEBUG] GetReadyBeads SUCCESS for %s (len=%d): %s\n", projectPath, len(output), outputStr)
+
+	// Check if output is empty or just []
+	if len(outputStr) < 5 || outputStr == "[]" {
+		fmt.Printf("[DEBUG] WARNING: Empty or minimal output for %s\n", projectPath)
+	}
+
+	beads, err := c.parser.ParseReadyBeads(output, BeadContext{
 		Project: projectName,
 		Repo:    repoName,
 	})
+
+	// Debug: log parsed results
+	fmt.Printf("[DEBUG] GetReadyBeads parsed %d beads for %s\n", len(beads), projectPath)
+
+	return beads, err
 }
 
 // GetBead retrieves full details of a bead by its string ID
@@ -158,9 +180,18 @@ func (c *Client) GetBead(projectPath, repoName string, beadID types.BeadID) (*ty
 	return c.parser.ParseBeadDetail(output, c.newContext(projectPath, repoName))
 }
 
+// UpdateBeadStatus updates the status of a bead (e.g., to "in_progress")
+func (c *Client) UpdateBeadStatus(projectPath string, beadID types.BeadID, status types.BeadStatus) error {
+	_, err := c.execInDir(projectPath, "br", "update", beadID.String(), "--status", string(status))
+	if err != nil {
+		return fmt.Errorf("update status failed for bead %s: %w", beadID.String(), err)
+	}
+	return nil
+}
+
 // CloseBead marks a bead as completed and verifies the closure
 func (c *Client) CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error {
-	output, err := c.exec("br", "close", beadID.String(), "-r", reason)
+	output, err := c.execInDir(projectPath, "br", "close", beadID.String(), "-r", reason)
 	if err != nil {
 		return fmt.Errorf("close failed for bead %s: %w", beadID.String(), err)
 	}
@@ -186,7 +217,7 @@ func (c *Client) CloseBead(projectPath, repoName string, beadID types.BeadID, re
 
 // ListBeads lists all beads in a project/repo
 func (c *Client) ListBeads(projectPath, repoName string) ([]types.Bead, error) {
-	output, err := c.exec("br", "list", "--json")
+	output, err := c.execInDir(projectPath, "br", "list", "--json")
 	if err != nil {
 		return nil, err
 	}
