@@ -190,12 +190,10 @@ func (o *Overseer) buildAgentPrompt(bead types.Bead) string {
 	buf.WriteString("When finished, ensure all files are saved and the solution is complete.\n\n")
 
 	buf.WriteString("## Available Skills\n")
-	buf.WriteString("You have access to the following skills to help with implementation:\n\n")
+	buf.WriteString("You have access to the code-search-and-intelligence skill to help with implementation:\n\n")
 	buf.WriteString("- **code-search-and-intelligence**: Query institutional knowledge (cass_memory) and search code semantically (TLDR)\\n")
 	buf.WriteString("  Use this skill to find patterns, anti-patterns, and understand the codebase before implementing.\n\n")
-	buf.WriteString("- **pattern-quality-reviewer**: Review extracted patterns before saving to institutional knowledge\\n")
-	buf.WriteString("  Use this skill after completing work to assess if any learnings should be preserved.\n\n")
-	buf.WriteString("**Use these skills as needed based on your judgment.**\n")
+	buf.WriteString("**Use this skill as needed based on your judgment.**\n")
 
 	return buf.String()
 }
