@@ -449,6 +449,7 @@ func NewOverseer(config *Config) *Overseer {
 		ThinkingLevel: config.Agents.Pi.ThinkingLevel,
 		Timeout:       config.Agents.Pi.Timeout,
 		ApiKeyName:    config.Agents.Pi.ApiKeyName,
+		ConfigDir:     config.Pi.ConfigDir,
 	}
 	o.agentConnector = agents.NewPiConnector(piConfig, log.Default())
 	log.Printf("[AgentConnector] Initialized Pi connector (provider: %s, model: %s, apiKey: %s)",
