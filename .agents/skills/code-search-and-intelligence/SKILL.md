@@ -22,13 +22,13 @@ Query for patterns and anti-patterns before starting any work.
 
 ```bash
 # Get context for your task
-cm context "<your exact task description>" --json
+cass-memory context "<your exact task description>" --json
 
 # Query with specific category
-cm context "authentication patterns" --category security --json
+cass-memory context "authentication patterns" --category security --json
 
 # List patterns by category
-cm list --category debugging --json
+cass-memory list --category debugging --json
 ```
 
 **When to use:**
@@ -48,13 +48,13 @@ Search for code by what it does, not what it's named.
 
 ```bash
 # Find code related to a concept
-llm-tldr search "user authentication logic"
+hydra-llm-tldr search "user authentication logic"
 
 # Search with limit
-llm-tldr search "database connection pooling" --limit 5
+hydra-llm-tldr search "database connection pooling" --limit 5
 
 # Search in specific directory
-llm-tldr search "rate limiting middleware" --path internal/middleware
+hydra-llm-tldr search "rate limiting middleware" --path internal/middleware
 ```
 
 **When to use:**
@@ -73,13 +73,13 @@ Understand what depends on code before changing it.
 
 ```bash
 # Basic impact analysis
-llm-tldr impact internal/auth/handler.go
+hydra-llm-tldr impact internal/auth/handler.go
 
 # Deeper analysis
-llm-tldr impact internal/auth/handler.go --depth 3
+hydra-llm-tldr impact internal/auth/handler.go --depth 3
 
 # Show full call graph
-llm-tldr impact internal/database/db.go --depth 2 --format json
+hydra-llm-tldr impact internal/database/db.go --depth 2 --format json
 ```
 
 **When to use:**
@@ -125,10 +125,10 @@ Implement with findings
 
 ```bash
 # Step 1: Check institutional knowledge
-cm context "REST API endpoint implementation" --json
+cass-memory context "REST API endpoint implementation" --json
 
 # Step 2: Find existing patterns  
-llm-tldr search "API endpoint handler implementation"
+hydra-llm-tldr search "API endpoint handler implementation"
 
 # Step 3: Implement following patterns
 ```
@@ -137,13 +137,13 @@ llm-tldr search "API endpoint handler implementation"
 
 ```bash
 # Step 1: Check for known auth issues
-cm context "authentication bug" --category security --json
+cass-memory context "authentication bug" --category security --json
 
 # Step 2: Find auth implementation
-llm-tldr search "user authentication logic"
+hydra-llm-tldr search "user authentication logic"
 
 # Step 3: Analyze impact before fixing
-llm-tldr impact internal/auth/handler.go --depth 2
+hydra-llm-tldr impact internal/auth/handler.go --depth 2
 
 # Step 4: Fix with full context
 ```
@@ -152,14 +152,14 @@ llm-tldr impact internal/auth/handler.go --depth 2
 
 ```bash
 # Step 1: Check for refactoring patterns
-cm context "database layer refactoring" --category architecture --json
+cass-memory context "database layer refactoring" --category architecture --json
 
 # Step 2: Find database implementations
-llm-tldr search "database access layer repository"
+hydra-llm-tldr search "database access layer repository"
 
 # Step 3: Check impact of each file
-llm-tldr impact internal/db/connection.go --depth 2
-llm-tldr impact internal/db/repository.go --depth 2
+hydra-llm-tldr impact internal/db/connection.go --depth 2
+hydra-llm-tldr impact internal/db/repository.go --depth 2
 
 # Step 4: Plan and execute carefully
 ```
@@ -193,31 +193,31 @@ llm-tldr impact internal/db/repository.go --depth 2
 **DO: Describe behavior, not keywords**
 ```bash
 # ✅ Good - describes what code does
-llm-tldr search "validates JWT tokens"
+hydra-llm-tldr search "validates JWT tokens"
 
 # ❌ Bad - just keywords
-llm-tldr search "JWT validation"
+hydra-llm-tldr search "JWT validation"
 ```
 
 **DO: Be specific but not too narrow**
 ```bash
 # ✅ Good
-llm-tldr search "database transaction rollback handling"
+hydra-llm-tldr search "database transaction rollback handling"
 
 # ❌ Too broad
-llm-tldr search "database"
+hydra-llm-tldr search "database"
 
 # ❌ Too narrow
-llm-tldr search "PostgreSQL transaction rollback with savepoints in user service"
+hydra-llm-tldr search "PostgreSQL transaction rollback with savepoints in user service"
 ```
 
 **DO: Use natural language**
 ```bash
 # ✅ Good
-llm-tldr search "implements circuit breaker pattern for external API calls"
+hydra-llm-tldr search "implements circuit breaker pattern for external API calls"
 
 # ❌ Bad - keyword soup
-llm-tldr search "circuit breaker api external"
+hydra-llm-tldr search "circuit breaker api external"
 ```
 
 ## Categories for cass_memory
@@ -236,7 +236,7 @@ llm-tldr search "circuit breaker api external"
 ❌ **Skipping research** - "I'll just wing it"
 → Result: Reinventing wheels, repeating mistakes
 
-❌ **Searching by filename** - `llm-tldr search "user.go"`
+❌ **Searching by filename** - `hydra-llm-tldr search "user.go"`
 → Result: Misses semantic matches, finds wrong files
 
 ❌ **No impact analysis** - Changing public APIs without checking
@@ -251,7 +251,7 @@ llm-tldr search "circuit breaker api external"
 ## Success Indicators
 
 **You're using skills correctly if:**
-- ✅ Every implementation starts with `cm context`
+- ✅ Every implementation starts with `cass-memory context`
 - ✅ New features include TLDR search
 - ✅ Refactors include impact analysis
 - ✅ You reference findings in your solution
@@ -273,14 +273,14 @@ llm-tldr search "circuit breaker api external"
 
 ```bash
 # Always run first
-cm context "<your task>" --json
+cass-memory context "<your task>" --json
 
 # Find code by behavior
-llm-tldr search "<what it does>"
+hydra-llm-tldr search "<what it does>"
 
 # Check impact before changing
-llm-tldr impact <file> --depth 2
+hydra-llm-tldr impact <file> --depth 2
 
 # List patterns by category
-cm list --category <category> --json
+cass-memory list --category <category> --json
 ```
