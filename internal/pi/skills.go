@@ -577,6 +577,27 @@ func buildSkillFlagsUncached(absConfigDir string, failOnMissing bool) (*SkillFla
 	hydraDir := filepath.Dir(absConfigDir) // configDir is <hydra>/config, so parent is <hydra>
 	localSkills := discoverLocalSkills(hydraDir)
 
+	// Create symlinks for local skills in pi-config/skills/
+	localSkillsDir := filepath.Join(hydraDir, ".agents", "skills")
+	skillsDir := filepath.Join(absConfigDir, "skills")
+	for _, skill := range localSkills {
+		sourcePath := filepath.Join(localSkillsDir, skill.Name)
+		targetPath := filepath.Join(skillsDir, skill.Name)
+
+		// Check if symlink already exists
+		if _, err := os.Lstat(targetPath); err == nil {
+			// Symlink exists, skip
+			continue
+		}
+
+		// Create symlink
+		if err := os.Symlink(sourcePath, targetPath); err != nil {
+			log.Printf("[BuildSkillFlags] ⚠️ Failed to create symlink for local skill %s: %v", skill.Name, err)
+		} else {
+			log.Printf("[BuildSkillFlags] ✅ Created symlink for local skill: %s", skill.Name)
+		}
+	}
+
 	// Merge DefaultSkills with local skills
 	allSkills := make([]Skill, len(DefaultSkills)+len(localSkills))
 	copy(allSkills, DefaultSkills)
@@ -590,7 +611,7 @@ func buildSkillFlagsUncached(absConfigDir string, failOnMissing bool) (*SkillFla
 		FailOnMissing: failOnMissing,
 	}
 
-	skillsDir := filepath.Join(absConfigDir, "skills")
+	// skillsDir already declared above for symlink creation
 
 	// Sort skills alphabetically by name for reproducibility
 	sortedSkills := make([]Skill, len(allSkills))
