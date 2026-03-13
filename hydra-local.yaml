@@ -63,3 +63,4 @@ agents:
     model: k2.5
     timeout: 10m
     api_key_name: KIMI_API_KEY
+    config_dir: /Users/buddhi/source-code/personal/hydra/pi-config
