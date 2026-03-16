@@ -182,6 +182,7 @@ flowchart TB
 - **📈 GraphQL API**: Real-time monitoring and control
 - **🎯 Smart Scheduling**: Processes beads in dependency order using DAG analysis
 - **📚 Pattern Learning**: Collective Unconscious system extracts and injects patterns from completed beads
+- **🎓 Pi Agent Skills**: Automatic installation and management of 16 specialized coding skills (Go, Angular, TypeScript, testing, debugging) for enhanced agent capabilities. See [Pi Agent Skills Implementation](docs/pi-agent-skills-implementation.md) for details.
 
 ## 🧠 Collective Unconscious
 
@@ -195,6 +196,7 @@ Hydra's Collective Unconscious is a cross-project pattern learning system that e
 - [Collective Unconscious](docs/collective-unconscious/test-results/TEST_RESULTS.md) - Pattern learning and injection
 - [Worker Lifecycle](docs/architecture/worker-lifecycle-20260309.md) - How workers are spawned, monitored, and terminated
 - [Bead Processing Flow](docs/architecture/bead-processing-flow-20260309.md) - End-to-end bead execution flow
+- [Pi Agent Skills](docs/pi-agent-skills-implementation.md) - Automatic installation and management of 16 specialized coding skills for Pi agents
 
 ### ⚙️ Operations
 - [Configuration Guide](docs/operations/configuration-guide-20260309.md) - hydra.yaml reference

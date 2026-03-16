@@ -47,24 +47,6 @@ func (o *Overseer) spawnWorkerViaAgent(bead types.Bead) (*types.Worker, error) {
 		}
 	}
 
-	// Gather intelligence
-	var patterns []agents.Pattern
-	var antiPatterns []agents.AntiPattern
-
-	if o.isIntelligenceEnabled() {
-		if intelBundle, _ := o.runPreExecutionIntelligence(&bead); intelBundle != nil {
-			// Convert intelligence bundle to agent patterns
-			for _, p := range intelBundle.Patterns {
-				patterns = append(patterns, agents.Pattern{
-					ID:         p.ID,
-					Title:      p.Description,
-					Content:    p.Description, // Use Description as Content
-					Confidence: p.Confidence,
-				})
-			}
-		}
-	}
-
 	// Create worker record
 	worker := &types.Worker{
 		ID:          beadIDStr,
@@ -86,11 +68,10 @@ func (o *Overseer) spawnWorkerViaAgent(bead types.Bead) (*types.Worker, error) {
 
 	// Start session
 	opts := agents.AgentOptions{
-		ProjectPath:  projectPath,
-		Timeout:      o.config.Overseer.WorkerTimeout,
-		AgentType:    string(agentType),
-		Patterns:     patterns,
-		AntiPatterns: antiPatterns,
+		ProjectPath: projectPath,
+		Timeout:     o.config.Overseer.WorkerTimeout,
+		AgentType:   string(agentType),
+		// Note: Patterns/AntiPatterns now accessed via cass-memory-insights skill on-demand
 	}
 
 	ctx := context.Background()
@@ -127,6 +108,17 @@ func (o *Overseer) monitorAgentSession(worker *types.Worker, connector agents.Ag
 
 	// Build prompt from bead
 	prompt := o.buildAgentPrompt(bead)
+
+	// Update worker tracker with actual PID now that session is started
+	if session.PID > 0 && o.workerTracker != nil {
+		if err := o.workerTracker.UpdateWorkerPID(0, session.PID, string(worker.BeadID)); err != nil {
+			log.Printf("[AgentWorker] Warning: Failed to update worker PID from 0 to %d: %v", session.PID, err)
+		} else {
+			log.Printf("[AgentWorker] Updated worker PID to %d for bead %s", session.PID, worker.BeadID)
+		}
+	} else if session.PID == 0 {
+		log.Printf("[AgentWorker] Warning: Session %s has PID 0, will be tracked as placeholder", session.ID)
+	}
 
 	// Create a context with timeout for the execution
 	workerTimeout := o.config.Overseer.WorkerTimeout
@@ -195,7 +187,13 @@ func (o *Overseer) buildAgentPrompt(bead types.Bead) string {
 
 	buf.WriteString("## Instructions\n")
 	buf.WriteString("Please complete this task based on the description above.\n")
-	buf.WriteString("When finished, ensure all files are saved and the solution is complete.\n")
+	buf.WriteString("When finished, ensure all files are saved and the solution is complete.\n\n")
+
+	buf.WriteString("## Available Skills\n")
+	buf.WriteString("You have access to the code-search-and-intelligence skill to help with implementation:\n\n")
+	buf.WriteString("- **code-search-and-intelligence**: Query institutional knowledge (cass_memory) and search code semantically (TLDR)\\n")
+	buf.WriteString("  Use this skill to find patterns, anti-patterns, and understand the codebase before implementing.\n\n")
+	buf.WriteString("**Use this skill as needed based on your judgment.**\n")
 
 	return buf.String()
 }

@@ -173,7 +173,8 @@ func (c *Client) GetReadyBeads(projectName, projectPath, repoName string) ([]typ
 
 // GetBead retrieves full details of a bead by its string ID
 func (c *Client) GetBead(projectPath, repoName string, beadID types.BeadID) (*types.Bead, error) {
-	output, err := c.exec("br", "show", beadID.String(), "--json")
+	// Must run in project directory to find .beads folder
+	output, err := c.execInDir(projectPath, "br", "show", beadID.String(), "--json")
 	if err != nil {
 		return nil, err
 	}

@@ -20,6 +20,7 @@ import (
 	"github.com/haulmatic-dev/hydra/internal/bv"
 	"github.com/haulmatic-dev/hydra/internal/intelligence"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
+	"github.com/haulmatic-dev/hydra/internal/pi"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -372,9 +373,20 @@ type Overseer struct {
 	spawnTimestamps []time.Time // Timestamps of recent worker spawns
 	spawnRateMu     sync.Mutex  // Mutex for spawn rate tracking
 
+	// Spawn backoff tracking
+	lastSpawnFailure time.Time  // Last time a spawn failed (for exponential backoff)
+	spawnFailures    int        // Consecutive spawn failures count
+	spawnBackoffMu   sync.Mutex // Mutex for spawn backoff state
+
 	// Agent connector for modular agent support
 	agentConnector agents.AgentConnector // Agent connector interface
 	agentConnMu    sync.RWMutex          // Mutex for agent connector
+
+	// Skill updater for periodic skill updates
+	skillUpdater *pi.SkillUpdater // Skill updater for background updates
+
+	// TLDR indexer for deterministic code indexing
+	tldrIndexer *TLDRIndexer // Indexes repositories after code changes
 }
 
 // NewOverseer creates a new overseer instance
@@ -445,8 +457,9 @@ func NewOverseer(config *Config) *Overseer {
 		ThinkingLevel: config.Agents.Pi.ThinkingLevel,
 		Timeout:       config.Agents.Pi.Timeout,
 		ApiKeyName:    config.Agents.Pi.ApiKeyName,
+		ConfigDir:     config.Pi.ConfigDir,
 	}
-	o.agentConnector = agents.NewPiConnector(piConfig)
+	o.agentConnector = agents.NewPiConnector(piConfig, log.Default())
 	log.Printf("[AgentConnector] Initialized Pi connector (provider: %s, model: %s, apiKey: %s)",
 		piConfig.Provider, piConfig.Model, piConfig.ApiKeyName)
 
@@ -460,6 +473,13 @@ func NewOverseer(config *Config) *Overseer {
 		o.initializeChainCompletionDetector()
 	}
 
+	// Initialize skill updater if auto-update is enabled
+	if config.Pi.Skills.AutoUpdate {
+		if err := o.initializeSkillUpdater(); err != nil {
+			log.Printf("[Overseer] Warning: failed to initialize skill updater: %v", err)
+		}
+	}
+
 	// Override defaults if configured
 	if config.Overseer.WorkerTimeout > 0 {
 		// WorkerTimeout can be used to derive maxDelay
@@ -470,6 +490,29 @@ func NewOverseer(config *Config) *Overseer {
 	}
 
 	return o
+}
+
+// initializeSkillUpdater creates and configures the skill updater
+func (o *Overseer) initializeSkillUpdater() error {
+	configDir := o.config.Pi.ConfigDir
+	if configDir == "" {
+		configDir = "./pi-config"
+	}
+
+	updateInterval := o.config.Pi.Skills.UpdateInterval
+	if updateInterval == "" {
+		updateInterval = "24h"
+	}
+
+	setupManager := pi.NewSetupManager(configDir, configDir)
+	skillUpdater, err := pi.NewSkillUpdater(setupManager, updateInterval)
+	if err != nil {
+		return fmt.Errorf("failed to create skill updater: %w", err)
+	}
+
+	o.skillUpdater = skillUpdater
+	log.Printf("[SkillUpdater] Initialized with interval: %s", updateInterval)
+	return nil
 }
 
 // initializeIntelligenceClients creates intelligence service clients based on config
@@ -501,6 +544,18 @@ func (o *Overseer) initializeIntelligenceClients() {
 		)
 		log.Printf("[Intelligence] TLDR client initialized (baseURL: %s, maxFiles: %d)",
 			intellConfig.TLDR.BaseURL, intellConfig.TLDR.MaxFiles)
+
+		// Initialize TLDR indexer if enabled
+		if intellConfig.TLDR.Indexing.Enabled {
+			o.tldrIndexer = NewTLDRIndexer(
+				intellConfig.TLDR.Indexing.MaxConcurrent,
+				intellConfig.TLDR.Indexing.RetryAttempts,
+				intellConfig.TLDR.Indexing.RetryDelay,
+				"llm-tldr",
+			)
+			log.Printf("[Intelligence] TLDR indexer initialized (maxConcurrent: %d, queueSize: %d)",
+				intellConfig.TLDR.Indexing.MaxConcurrent, intellConfig.TLDR.Indexing.QueueSize)
+		}
 	}
 
 	// Initialize GPTCache client if enabled
@@ -585,72 +640,6 @@ func (o *Overseer) initializeChainCompletionDetector() {
 
 	log.Printf("[ChainCompletion] Detector initialized (interval: %v, timeout: %v)",
 		config.DetectionInterval, config.Timeout)
-}
-
-// runPreExecutionIntelligence gathers intelligence before executing a bead
-// This method is designed to be non-blocking and degrades gracefully if services are unavailable
-func (o *Overseer) runPreExecutionIntelligence(bead *types.Bead) (*IntelligenceBundle, error) {
-	startTime := time.Now()
-	bundle := &IntelligenceBundle{
-		Patterns:       make([]Pattern, 0),
-		ContextEntries: make([]ContextEntry, 0),
-		GatheredAt:     time.Now(),
-		ScopeValidated: true, // Default to true, will set to false if validation fails
-	}
-
-	beadIDStr := string(bead.ID)
-	log.Printf("[Intelligence] Starting pre-execution intelligence for bead: %s", beadIDStr)
-
-	o.intelMutex.RLock()
-	cassClient := o.cassClient
-	tldrClient := o.tldrClient
-	o.intelMutex.RUnlock()
-
-	// Extract target files from bead metadata or description
-	targetFiles := o.extractTargetFiles(bead)
-	if len(targetFiles) > 0 {
-		log.Printf("[Intelligence] Extracted %d target files for analysis", len(targetFiles))
-	}
-
-	// 1. Query cass_memory for relevant context (if enabled)
-	if cassClient != nil && o.config.Intelligence.CassMemory.Enabled {
-		ctxEntries, err := o.queryCassMemoryContext(cassClient, bead, targetFiles)
-		if err != nil {
-			// Graceful degradation: log error but continue
-			o.logGracefulDegradation("Intelligence", "cass_memory query",
-				"continuing without context", err)
-		} else {
-			bundle.ContextEntries = ctxEntries
-			log.Printf("[Intelligence] Retrieved %d context entries from cass_memory", len(ctxEntries))
-		}
-	}
-
-	// 2. Analyze impact with TLDR (if enabled and files available)
-	if tldrClient != nil && o.config.Intelligence.TLDR.Enabled && len(targetFiles) > 0 {
-		impact, err := o.analyzeImpactWithTLDR(tldrClient, bead, targetFiles)
-		if err != nil {
-			// Graceful degradation: log error but continue
-			o.logGracefulDegradation("Intelligence", "TLDR impact analysis",
-				"continuing without impact analysis", err)
-		} else {
-			bundle.ImpactAnalysis = impact
-			log.Printf("[Intelligence] TLDR impact analysis complete: %d files affected, risk: %s",
-				len(impact.AffectedFiles), impact.RiskLevel)
-		}
-	}
-
-	// 3. Validate scope against limits
-	if err := o.validateScope(bundle, targetFiles); err != nil {
-		bundle.ScopeValidated = false
-		bundle.ValidationError = err.Error()
-		log.Printf("[Intelligence] Scope validation failed for bead %s: %v", beadIDStr, err)
-	}
-
-	duration := time.Since(startTime)
-	log.Printf("[Intelligence] Pre-execution intelligence complete for %s (duration: %v, entries: %d, validated: %t)",
-		beadIDStr, duration, len(bundle.ContextEntries), bundle.ScopeValidated)
-
-	return bundle, nil
 }
 
 // queryCassMemoryContext queries cass_memory for relevant context with error handling
@@ -908,6 +897,63 @@ func (o *Overseer) getRetryCount(beadID string) int {
 	return 0
 }
 
+// recordSpawnFailure records a spawn failure and calculates backoff
+func (o *Overseer) recordSpawnFailure() time.Duration {
+	o.spawnBackoffMu.Lock()
+	defer o.spawnBackoffMu.Unlock()
+
+	o.spawnFailures++
+	o.lastSpawnFailure = time.Now()
+
+	// Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 60s
+	backoff := time.Duration(1<<uint(o.spawnFailures-1)) * time.Second
+	if backoff > 60*time.Second {
+		backoff = 60 * time.Second
+	}
+
+	log.Printf("[Overseer] Spawn failure recorded (%d consecutive). Backoff: %v",
+		o.spawnFailures, backoff)
+
+	return backoff
+}
+
+// clearSpawnFailures resets the spawn failure count after a successful spawn
+func (o *Overseer) clearSpawnFailures() {
+	o.spawnBackoffMu.Lock()
+	defer o.spawnBackoffMu.Unlock()
+
+	if o.spawnFailures > 0 {
+		log.Printf("[Overseer] Spawn failures cleared (was %d)", o.spawnFailures)
+		o.spawnFailures = 0
+	}
+}
+
+// shouldSpawnBackoff returns true if we should wait before spawning more workers
+func (o *Overseer) shouldSpawnBackoff() bool {
+	o.spawnBackoffMu.Lock()
+	defer o.spawnBackoffMu.Unlock()
+
+	if o.spawnFailures == 0 {
+		return false
+	}
+
+	// Calculate backoff duration
+	backoff := time.Duration(1<<uint(o.spawnFailures-1)) * time.Second
+	if backoff > 60*time.Second {
+		backoff = 60 * time.Second
+	}
+
+	elapsed := time.Since(o.lastSpawnFailure)
+	shouldWait := elapsed < backoff
+
+	if shouldWait {
+		remaining := backoff - elapsed
+		log.Printf("[Overseer] Spawn backoff active: %v remaining", remaining)
+	}
+
+	return shouldWait
+}
+
 // logError logs an error with structured context information
 func (o *Overseer) logError(component, operation, beadID string, err error, severity string) {
 	retryCount := o.getRetryCount(beadID)
@@ -954,6 +1000,12 @@ func (o *Overseer) Start(ctx context.Context) error {
 		log.Println("🧹 Orphan janitor started")
 	}
 
+	// Run Pi ecosystem setup
+	if err := o.runPiSetup(); err != nil {
+		log.Printf("[Overseer] Pi setup warning: %v", err)
+		// Continue even if Pi setup fails - not critical for Hydra operation
+	}
+
 	// Discover projects
 	if err := o.discoverProjects(); err != nil {
 		return fmt.Errorf("failed to discover projects: %w", err)
@@ -968,6 +1020,21 @@ func (o *Overseer) Start(ctx context.Context) error {
 		} else {
 			log.Println("🔒 Settled-state detection service started")
 		}
+	}
+
+	// Start skill updater if initialized
+	if o.skillUpdater != nil {
+		o.skillUpdater.Start()
+		log.Println("📚 Skill updater started")
+	}
+
+	// Start TLDR indexer if enabled
+	if o.tldrIndexer != nil {
+		o.tldrIndexer.Start()
+		log.Println("📇 TLDR indexer started")
+
+		// Queue initial indexing for all project repos
+		o.queueInitialIndexing()
 	}
 
 	o.running = true
@@ -990,12 +1057,58 @@ func (o *Overseer) Start(ctx context.Context) error {
 					log.Println("🔒 Settled-state detection service stopped")
 				}
 			}
+			// Stop skill updater
+			if o.skillUpdater != nil {
+				o.skillUpdater.Stop()
+				log.Println("📚 Skill updater stopped")
+			}
+			// Stop TLDR indexer
+			if o.tldrIndexer != nil {
+				o.tldrIndexer.Stop()
+				log.Println("📇 TLDR indexer stopped")
+			}
 			return nil
 		case <-ticker.C:
 			if err := o.tick(); err != nil {
 				log.Printf("Error during tick: %v", err)
 			}
 		}
+	}
+}
+
+// queueInitialIndexing queues all project repositories for initial TLDR indexing
+func (o *Overseer) queueInitialIndexing() {
+	if o.tldrIndexer == nil {
+		return
+	}
+
+	log.Printf("[TLDRIndexer] Queueing initial indexing for %d projects", len(o.projects))
+
+	for _, project := range o.projects {
+		if project.Type == "multi" {
+			// Multi-repo project: index each repo
+			for _, repo := range project.Repos {
+				if o.tldrIndexer.QueueIndex(repo.Path) {
+					log.Printf("[TLDRIndexer] Queued for indexing: %s/%s", project.Name, repo.Name)
+				}
+			}
+		} else {
+			// Single repo project: index project path
+			if o.tldrIndexer.QueueIndex(project.Path) {
+				log.Printf("[TLDRIndexer] Queued for indexing: %s", project.Name)
+			}
+		}
+	}
+}
+
+// queueRepoIndexing queues a repository for TLDR indexing after bead completion
+func (o *Overseer) queueRepoIndexing(projectName, repoPath string) {
+	if o.tldrIndexer == nil {
+		return
+	}
+
+	if o.tldrIndexer.QueueIndex(repoPath) {
+		log.Printf("[TLDRIndexer] Queued for indexing: %s (%s)", projectName, repoPath)
 	}
 }
 
@@ -2012,6 +2125,17 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		return fmt.Errorf("cannot spawn worker for bead with empty ID")
 	}
 
+	// Check if we should back off due to recent spawn failures
+	if o.shouldSpawnBackoff() {
+		o.spawnBackoffMu.Lock()
+		backoff := time.Duration(1<<uint(o.spawnFailures-1)) * time.Second
+		if backoff > 60*time.Second {
+			backoff = 60 * time.Second
+		}
+		o.spawnBackoffMu.Unlock()
+		return fmt.Errorf("spawn backoff active: waiting %v before retry", backoff)
+	}
+
 	// CRITICAL: Atomic check-and-reserve pattern to prevent race conditions
 	// Hold lock during check AND registration to ensure accurate worker count
 	o.workerMutex.Lock()
@@ -2097,6 +2221,9 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 	o.activeWorkers[beadIDStr] = worker
 	o.workerMutex.Unlock()
 
+	// Clear spawn failure count on successful spawn
+	o.clearSpawnFailures()
+
 	return nil
 }
 
@@ -2120,14 +2247,6 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		log.Printf("[Worker] Spawning retry worker for bead: %s (attempt %d, agent: %s)", beadIDStr, retryCount+1, agentType)
 	} else {
 		log.Printf("[Worker] Spawning worker for bead: %s (agent: %s)", beadIDStr, agentType)
-	}
-
-	// Gather pre-execution intelligence (non-blocking, graceful degradation)
-	var intelBundle *IntelligenceBundle
-	if o.isIntelligenceEnabled() {
-		intelBundle, _ = o.runPreExecutionIntelligence(&bead)
-		// Intelligence errors are logged within runPreExecutionIntelligence
-		// We continue with nil bundle if gathering fails
 	}
 
 	// Find project path
@@ -2171,15 +2290,10 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
 	)
 
-	// Pass intelligence bundle to worker if available
-	if intelBundle != nil {
-		intelJSON, err := json.Marshal(intelBundle)
-		if err == nil {
-			env = append(env, fmt.Sprintf("HYDRA_INTELLIGENCE=%s", string(intelJSON)))
-			log.Printf("[Worker] Intelligence bundle passed to worker for bead %s (%d bytes)",
-				beadIDStr, len(intelJSON))
-		} else {
-			log.Printf("[Worker] Failed to marshal intelligence bundle: %v", err)
+	// Pass API key to worker if configured
+	if o.config != nil && o.config.Agents.Pi.ApiKeyName != "" {
+		if apiKey := os.Getenv(o.config.Agents.Pi.ApiKeyName); apiKey != "" {
+			env = append(env, fmt.Sprintf("%s=%s", o.config.Agents.Pi.ApiKeyName, apiKey))
 		}
 	}
 
@@ -2193,6 +2307,14 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 			Err:       err,
 		}
 		o.logError("spawnWorker", "process_start", beadIDStr, spawnErr, "error")
+
+		// Record spawn failure for exponential backoff
+		if strings.Contains(err.Error(), "resource temporarily unavailable") ||
+			strings.Contains(err.Error(), "EAGAIN") ||
+			strings.Contains(err.Error(), "fork") {
+			o.recordSpawnFailure()
+		}
+
 		return nil, spawnErr
 	}
 
@@ -2211,11 +2333,16 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 
 	// Track worker PID for orphan detection
 	if o.workerTracker != nil {
-		log.Printf("[Overseer] Tracking worker PID %d for bead %s", cmd.Process.Pid, beadIDStr)
-		if err := o.workerTracker.TrackWorker(cmd.Process.Pid, beadIDStr, projectPath); err != nil {
-			log.Printf("[Overseer] Warning: failed to track worker PID %d: %v", cmd.Process.Pid, err)
+		if cmd.Process.Pid <= 0 {
+			// Skip tracking placeholder PIDs
+			log.Printf("[Overseer] Skipping tracking of invalid PID %d for bead %s", cmd.Process.Pid, beadIDStr)
 		} else {
-			log.Printf("[Overseer] Successfully tracked worker PID %d for bead %s", cmd.Process.Pid, beadIDStr)
+			log.Printf("[Overseer] Tracking worker PID %d for bead %s", cmd.Process.Pid, beadIDStr)
+			if err := o.workerTracker.TrackWorker(cmd.Process.Pid, beadIDStr, projectPath); err != nil {
+				log.Printf("[Overseer] Warning: failed to track worker PID %d: %v", cmd.Process.Pid, err)
+			} else {
+				log.Printf("[Overseer] Successfully tracked worker PID %d for bead %s", cmd.Process.Pid, beadIDStr)
+			}
 		}
 	} else {
 		log.Printf("[Overseer] Warning: workerTracker is nil, cannot track worker PID %d", cmd.Process.Pid)
@@ -2440,6 +2567,7 @@ func (o *Overseer) scheduleAfterCompletion(worker *types.Worker, success bool, n
 
 // closeBead closes the bead via beadsClient based on worker completion status.
 // It determines the appropriate status reason and handles project path resolution.
+// On successful completion, it queues the repository for TLDR indexing.
 func (o *Overseer) closeBead(worker *types.Worker, success bool) error {
 	projectName := worker.BeadID.Project()
 	repoName := worker.BeadID.Repo()
@@ -2455,7 +2583,37 @@ func (o *Overseer) closeBead(worker *types.Worker, success bool) error {
 	reason := statusReason(success)
 	log.Printf("[closeBead] Closing with reason: %s (path: %s)", reason, projectPath)
 
+	// Queue TLDR indexing on successful completion
+	if success && o.config.Intelligence.TLDR.Indexing.Enabled {
+		// Find the repo path
+		repoPath := o.resolveRepoPath(projectName, repoName, projectPath)
+		if repoPath != "" {
+			o.queueRepoIndexing(projectName, repoPath)
+		}
+	}
+
 	return o.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason)
+}
+
+// resolveRepoPath finds the repository path for a given project and repo
+func (o *Overseer) resolveRepoPath(projectName, repoName, projectPath string) string {
+	// Find the project
+	for _, p := range o.projects {
+		if p.Name == projectName {
+			if p.Type == "multi" {
+				// Multi-repo: find specific repo
+				for _, r := range p.Repos {
+					if r.Name == repoName {
+						return r.Path
+					}
+				}
+			}
+			// Single repo or default to project path
+			return p.Path
+		}
+	}
+	// Fallback to project path
+	return projectPath
 }
 
 // resolveProjectPath determines the project path using multiple resolution strategies
@@ -3456,4 +3614,54 @@ func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead, cassClient
 	}
 
 	return env
+}
+
+// runPiSetup initializes and runs the Pi ecosystem setup
+func (o *Overseer) runPiSetup() error {
+	log.Println("[Overseer] Initializing Pi ecosystem setup...")
+
+	// Import the pi package and create setup manager
+	configDir := o.config.Pi.ConfigDir
+	piConfigDir := o.config.Pi.PiConfigDir
+	if configDir == "" {
+		configDir = ""
+	}
+	if piConfigDir == "" {
+		piConfigDir = "pi-config"
+	}
+	setupManager := pi.NewSetupManager(configDir, piConfigDir)
+
+	// Run setup
+	result, err := setupManager.RunSetup()
+	if err != nil {
+		return fmt.Errorf("pi setup failed: %w", err)
+	}
+
+	// Log results
+	if result.PiInstalled {
+		log.Println("[Overseer] ✅ Pi agent ready")
+	} else {
+		log.Println("[Overseer] ⚠️  Pi agent not installed")
+	}
+
+	if result.LSPInstalled {
+		log.Println("[Overseer] ✅ LSP servers ready")
+	} else {
+		log.Println("[Overseer] ⚠️  LSP servers may be missing")
+	}
+
+	if result.SkillsInstalled {
+		log.Println("[Overseer] ✅ Pi skills ready")
+	} else {
+		log.Println("[Overseer] ⚠️  Pi skills may be missing")
+	}
+
+	if len(result.Errors) > 0 {
+		log.Printf("[Overseer] Pi setup completed with %d errors", len(result.Errors))
+		for _, err := range result.Errors {
+			log.Printf("[Overseer]   - %s", err)
+		}
+	}
+
+	return nil
 }

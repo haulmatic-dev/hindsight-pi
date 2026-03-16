@@ -1,0 +1,9 @@
+{
+  "pi_installed": true,
+  "lsp_installed": false,
+  "skills_installed": true,
+  "errors": [
+    "LSP installation: failed to install LSP packages: [LSP CLI]"
+  ],
+  "timestamp": "2026-03-12T19:46:12.084403+05:30"
+}
