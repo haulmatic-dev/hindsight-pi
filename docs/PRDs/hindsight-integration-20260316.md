@@ -102,157 +102,373 @@ This PRD specifies the integration of **Hindsight** (vectorize-io/hindsight) int
 - Query can filter by project when needed
 - Cross-project patterns available within 24 hours of extraction
 
-### US-006: Configurable LLM Provider
-> As an operations engineer, I want to configure any LLM provider (Kimi, MiniMax, OpenAI, etc.), so we can use our preferred models and control costs.
+### US-006: Context-Processor Intelligence Analysis
+> As a Hydra overseer, I want a context-processor agent to analyze beads before execution using Hindsight, so that each bead gets optimal routing and enriched context.
 
 **Acceptance Criteria:**
-- Support OpenAI-compatible APIs (Kimi K2.5, GLM-5.0)
-- Support native MiniMax integration
-- Configuration via `hydra.yaml` and environment variables
-- Per-operation LLM selection (retain, recall, reflect)
+- Context-processor runs before every bead execution
+- Queries Hindsight for patterns matching bead description
+- Decides routing strategy: direct execution, specialist routing, or consensus
+- Enriches prompt with relevant patterns and anti-patterns from Hindsight
+- Stores analysis results in Hindsight with metadata
+
+### US-007: Multi-Agent Consensus with Hindsight
+> As an architect, I want complex beads to trigger multi-agent consensus with decisions stored in Hindsight, so that architectural decisions are well-vetted and learnable.
+
+**Acceptance Criteria:**
+- Context-processor triggers consensus for complex beads (>5 files or architectural changes)
+- Facilitator agent spawns 2-4 expert reviewers
+- Reviewers analyze independently using Hindsight context
+- Vote to approve, reject, or request changes
+- Store consensus results in Hindsight for future reference
 
 ---
 
 ## 3. Functional Requirements
 
-### FR-001: Embedded Hindsight Server Lifecycle Management
+### FR-001a: Embedded Hindsight Server Lifecycle Management (Part 1/2)
 Initialize and manage the Hindsight embedded Python server as a mandatory dependency of Hydra.
 
 **Acceptance Criteria:**
 - Server starts automatically when Hydra initializes
 - Health check validates server is ready before accepting beads
 - Server stops gracefully on Hydra shutdown
+
+### FR-001b: Embedded Hindsight Server Lifecycle Management (Part 2/2)
+Initialize and manage the Hindsight embedded Python server as a mandatory dependency of Hydra.
+
+**Acceptance Criteria:**
 - If server fails to start, Hydra exits with error (fail-fast)
 - Server runs on configurable port (default: 8888)
 
-### FR-002: Hindsight Go Client Implementation
+### FR-002a: Hindsight Go Client Implementation (Part 1/2)
 Create a Go HTTP client to communicate with Hindsight REST API for all memory operations.
 
 **Acceptance Criteria:**
 - Client supports `Recall()`, `Retain()`, and `Reflect()` operations
 - Client handles connection pooling and retry logic
 - Client includes timeout configuration (default: 30s)
+
+### FR-002b: Hindsight Go Client Implementation (Part 2/2)
+Create a Go HTTP client to communicate with Hindsight REST API for all memory operations.
+
+**Acceptance Criteria:**
 - Client provides health check method
 - Errors include detailed context for debugging
 
-### FR-003: Configuration System Integration
+### FR-003a: Configuration System Integration (Part 1/2)
 Add Hindsight configuration to existing Hydra configuration system with validation.
 
 **Acceptance Criteria:**
 - Configuration added to `IntelligenceConfig` struct
 - Support YAML configuration in `hydra.yaml`
 - Environment variable overrides available
+
+### FR-003b: Configuration System Integration (Part 2/2)
+Add Hindsight configuration to existing Hydra configuration system with validation.
+
+**Acceptance Criteria:**
 - Configuration validation at startup
 - Sensible defaults provided for all options
 
-### FR-004: Pre-Execution Context Retrieval Integration
+### FR-004a: Pre-Execution Context Retrieval Integration (Part 1/2)
 Integrate Hindsight `Recall()` before worker spawning to provide historical context.
 
 **Acceptance Criteria:**
 - Overseer calls `Recall()` in `spawnWorkerInternal()` before worker creation
 - Query includes bead title, type, and target files
 - Results limited to 5 memories with similarity ≥0.75
+
+### FR-004b: Pre-Execution Context Retrieval Integration (Part 2/2)
+Integrate Hindsight `Recall()` before worker spawning to provide historical context.
+
+**Acceptance Criteria:**
 - Context serialized to JSON and added to worker environment
 - Duration logged: `[HINDSIGHT] Recalled N memories for bead X`
 
-### FR-005: Worker Context Parsing
+### FR-005a: Worker Context Parsing (Part 1/2)
 Parse Hindsight context from environment variables in the worker process.
 
 **Acceptance Criteria:**
 - Worker reads `HYDRA_HISTORIESIGHT_CONTEXT` environment variable
 - Context deserialized from JSON format
 - Parsed context logged at worker startup
+
+### FR-005b: Worker Context Parsing (Part 2/2)
+Parse Hindsight context from environment variables in the worker process.
+
+**Acceptance Criteria:**
 - Graceful handling if context is missing or malformed
 
-### FR-006: Post-Execution Memory Retention
+### FR-006a: Post-Execution Memory Retention (Part 1/2)
 Replace `cass_memory.AddPattern()` with Hindsight `Retain()` in worker completion flow.
 
 **Acceptance Criteria:**
 - `recordExecutionResult()` calls `hindsight.Retain()` instead of `cass_memory`
 - Memory includes structured data: bead ID, title, type, success, output, error, files, duration
 - Metadata includes timestamp, project, agent type
+
+### FR-006b: Post-Execution Memory Retention (Part 2/2)
+Replace `cass_memory.AddPattern()` with Hindsight `Retain()` in worker completion flow.
+
+**Acceptance Criteria:**
 - If retention fails, result.Success set to false and error recorded
 - Worker retry triggered on retention failure
 
-### FR-007: Mandatory Retention Error Handling
+### FR-007a: Mandatory Retention Error Handling (Part 1/2)
 Implement fail-fast behavior when Hindsight retention fails.
 
 **Acceptance Criteria:**
 - Retention errors logged: `[ERROR] Hindsight retention failed: <error>`
 - Bead marked as failed when retention fails
 - Retry mechanism triggered according to configured policy
+
+### FR-007b: Mandatory Retention Error Handling (Part 2/2)
+Implement fail-fast behavior when Hindsight retention fails.
+
+**Acceptance Criteria:**
 - No silent failures or data loss
 - Error propagated to overseer for visibility
 
-### FR-008: Pattern Quality Scoring Enhancement
+### FR-008a: Pattern Quality Scoring Enhancement (Part 1/2)
 Enhance pattern quality scoring using Hindsight historical success data.
 
 **Acceptance Criteria:**
 - `calculateQualityScore()` queries Hindsight for similar patterns
 - Historical success rate retrieved for pattern type
 - Quality score formula: `adjusted = base * 0.7 + success_rate * 0.3`
+
+### FR-008b: Pattern Quality Scoring Enhancement (Part 2/2)
+Enhance pattern quality scoring using Hindsight historical success data.
+
+**Acceptance Criteria:**
 - Minimum 3 similar patterns required for adjustment
 - Scores capped at 1.0 maximum
 
-### FR-009: Settled-State Reflection Integration
+### FR-009a: Settled-State Reflection Integration (Part 1/2)
 Add Hindsight `Reflect()` call after bead settlement detection.
 
 **Acceptance Criteria:**
 - Reflection triggered in `settleBead()` after immutability confirmed
 - `Reflect()` called with bead ID and execution context
 - Generated insights stored as new memories
+
+### FR-009b: Settled-State Reflection Integration (Part 2/2)
+Add Hindsight `Reflect()` call after bead settlement detection.
+
+**Acceptance Criteria:**
 - Each insight linked to source bead via metadata
 - Non-blocking execution (reflection failure doesn't fail settlement)
 
-### FR-010: Cross-Project Memory Bank
+### FR-010a: Cross-Project Memory Bank (Part 1/2)
 Configure single memory bank shared across all Hydra projects.
 
 **Acceptance Criteria:**
 - Bank ID: "hydra" used for all operations
 - Metadata includes project attribution for every memory
 - Query results include project information
+
+### FR-010b: Cross-Project Memory Bank (Part 2/2)
+Configure single memory bank shared across all Hydra projects.
+
+**Acceptance Criteria:**
 - Ability to filter queries by project when needed
 - No project isolation (intentional for knowledge sharing)
 
-### FR-011: LLM Provider Abstraction
+### FR-011a: LLM Provider Abstraction (Part 1/2)
 Support multiple LLM providers through configuration with modular API key extraction.
 
 **Acceptance Criteria:**
 - Support OpenAI-compatible APIs (base_url configuration)
 - Support native MiniMax integration
 - API key retrieved via modular extraction function (reuses existing `KIMI_API_KEY` pattern)
+
+### FR-011b: LLM Provider Abstraction (Part 2/2)
+Support multiple LLM providers through configuration with modular API key extraction.
+
+**Acceptance Criteria:**
 - Environment variable name configurable via `llm_api_key_env` setting
 - API key logged with length only (never expose key value)
 
-### FR-012: SQLite Storage Backend
+### FR-012a: SQLite Storage Backend (Part 1/2)
 Use SQLite for embedded Hindsight storage in local development.
 
 **Acceptance Criteria:**
 - SQLite database stored at configurable path (default: ~/.hydra/hindsight.db)
 - Automatic schema migration on startup
 - pgvector extension not required for SQLite
+
+### FR-012b: SQLite Storage Backend (Part 2/2)
+Use SQLite for embedded Hindsight storage in local development.
+
+**Acceptance Criteria:**
 - Database file permissions set to 0600
 - Backup/restore utilities documented
 
-### FR-013: Observability and Logging
+### FR-013a: Observability and Logging (Part 1/2)
 Implement comprehensive logging for Hindsight operations.
 
 **Acceptance Criteria:**
 - Server lifecycle events logged (start, stop, health check)
 - All memory operations logged with duration and result count
 - Error logs include detailed context and stack traces
+
+### FR-013b: Observability and Logging (Part 2/2)
+Implement comprehensive logging for Hindsight operations.
+
+**Acceptance Criteria:**
 - Log format: `[HINDSIGHT] <operation> <bead_id> <result>`
 - No sensitive data (API keys, secrets) logged
 
-### FR-014: cass_memory Deprecation and Removal
+### FR-014a: cass_memory Deprecation and Removal (Part 1/2)
 Remove all cass_memory dependencies and code.
 
 **Acceptance Criteria:**
 - `internal/intelligence/cass_memory.go` deleted
 - All cass_memory imports removed from codebase
 - cass_memory client initialization removed from overseer
+
+### FR-014b: cass_memory Deprecation and Removal (Part 2/2)
+Remove all cass_memory dependencies and code.
+
+**Acceptance Criteria:**
 - cass_memory calls replaced with Hindsight equivalents
 - Documentation updated to remove cass_memory references
+
+### FR-015a: Context-Processor Agent Integration (Part 1/2)
+Create dedicated context-processor agent that runs before each bead execution.
+
+**Acceptance Criteria:**
+- New agent type: context-processor
+- Agent defined in .agents/prompts/context-processor.md
+- Accepts bead via environment variables (HYDRA_BEAD_ID, etc.)
+
+### FR-015b: Context-Processor Agent Integration (Part 2/2)
+Create dedicated context-processor agent that runs before each bead execution.
+
+**Acceptance Criteria:**
+- Outputs JSON with routing decision and enriched context
+- Integration point: called by overseer before worker spawn
+
+### FR-016a: Context-Processor Hindsight Queries (Part 1/2)
+Implement intelligence gathering from Hindsight.
+
+**Acceptance Criteria:**
+- Query Hindsight for patterns matching bead description
+- Query Hindsight for similar past executions
+- Aggregate results into structured context
+
+### FR-016b: Context-Processor Hindsight Queries (Part 2/2)
+Implement intelligence gathering from Hindsight.
+
+**Acceptance Criteria:**
+- Handle query failures gracefully (log warning, continue without enrichment)
+- Query latency < 500ms with caching
+
+### FR-017a: Context-Processor Decision Engine (Part 1/2)
+Implement routing decision logic based on gathered intelligence.
+
+**Acceptance Criteria:**
+- Direct execution: 1-2 files, clear scope, no dependencies
+- Specialist routing: 3-5 files, specific domain (testing, security, etc.)
+- Consensus trigger: >5 files, architectural changes, 3+ dependencies
+
+### FR-017b: Context-Processor Decision Engine (Part 2/2)
+Implement routing decision logic based on gathered intelligence.
+
+**Acceptance Criteria:**
+- Include decision rationale in output
+- Confidence score for each decision (0.0-1.0)
+
+### FR-018a: Context-Processor Prompt Enrichment (Part 1/2)
+Enrich execution prompts with gathered intelligence from Hindsight.
+
+**Acceptance Criteria:**
+- Inject relevant patterns from Hindsight query results
+- Include anti-patterns to avoid
+- Add execution context from similar past beads
+
+### FR-018b: Context-Processor Prompt Enrichment (Part 2/2)
+Enrich execution prompts with gathered intelligence from Hindsight.
+
+**Acceptance Criteria:**
+- Log enriched prompt to file for debugging
+- Enrichment overhead < 10 seconds per bead
+
+### FR-019a: Context-Processor Result Storage (Part 1/2)
+Store context-processor results in Hindsight for learning.
+
+**Acceptance Criteria:**
+- Store under type "context-analysis"
+- Include: bead_id, strategy, patterns_found, decision_rationale, confidence
+- Timestamp all entries
+
+### FR-019b: Context-Processor Result Storage (Part 2/2)
+Store context-processor results in Hindsight for learning.
+
+**Acceptance Criteria:**
+- Reference original bead for traceability
+- Retention: forever (part of institutional knowledge)
+
+### FR-020a: Multi-Agent Consensus Facilitation (Part 1/2)
+Implement consensus facilitator agent for complex beads.
+
+**Acceptance Criteria:**
+- Spawn when context-processor decides consensus needed
+- Select 2-4 expert reviewers based on bead characteristics
+- Coordinate research phase (parallel Hindsight queries)
+
+### FR-020b: Multi-Agent Consensus Facilitation (Part 2/2)
+Implement consensus facilitator agent for complex beads.
+
+**Acceptance Criteria:**
+- Manage discussion rounds (3 rounds max)
+- Collect and tally votes
+
+### FR-021a: Multi-Agent Consensus Reviewer Selection (Part 1/2)
+Implement dynamic reviewer selection based on bead analysis.
+
+**Acceptance Criteria:**
+- Testing beads → test-specialist + code-reviewer
+- Security beads → security-auditor + code-reviewer
+- Performance beads → performance-analyst + test-specialist
+
+### FR-021b: Multi-Agent Consensus Reviewer Selection (Part 2/2)
+Implement dynamic reviewer selection based on bead analysis.
+
+**Acceptance Criteria:**
+- Architecture beads → orchestrator + code-reviewer + test-specialist
+- Select from available healthy agents only
+
+### FR-022a: Multi-Agent Consensus Voting (Part 1/2)
+Implement voting mechanism for consensus decisions.
+
+**Acceptance Criteria:**
+- Reviewers vote: approve, reject, or needs_work
+- Approve if 2/3 majority and no blocking concerns
+- Reject if majority rejects
+
+### FR-022b: Multi-Agent Consensus Voting (Part 2/2)
+Implement voting mechanism for consensus decisions.
+
+**Acceptance Criteria:**
+- Needs_work if split or blocking concerns raised
+- Store vote details: reviewer_id, vote, rationale, confidence
+
+### FR-023a: Multi-Agent Consensus Result Storage (Part 1/2)
+Store consensus results in Hindsight for learning.
+
+**Acceptance Criteria:**
+- Store under type "consensus-decisions"
+- Include: bead_id, proposal, votes, outcome, dissenting_views
+- Timestamp and duration
+
+### FR-023b: Multi-Agent Consensus Result Storage (Part 2/2)
+Store consensus results in Hindsight for learning.
+
+**Acceptance Criteria:**
+- Reference all participating agents
+- Link to related context-analysis memory
 
 ---
 
@@ -484,6 +700,46 @@ map[string]interface{}{
 }
 ```
 
+**Context-Processor Result:**
+```go
+type ContextResult struct {
+    BeadID            string                 `json:"bead_id"`
+    Strategy          string                 `json:"strategy"` // direct|specialist|consensus
+    AgentType         string                 `json:"agent_type,omitempty"`
+    ConsensusRequired bool                   `json:"consensus_required"`
+    Patterns          []Pattern              `json:"patterns"`
+    AntiPatterns      []Pattern              `json:"anti_patterns"`
+    Context           map[string]interface{} `json:"context"`
+    DecisionRationale string                 `json:"decision_rationale"`
+    Confidence        float64                `json:"confidence"`
+    Timestamp         time.Time              `json:"timestamp"`
+}
+```
+
+**Consensus Vote:**
+```go
+type ConsensusVote struct {
+    ReviewerID string  `json:"reviewer_id"`
+    Vote       string  `json:"vote"` // approve|reject|needs_work
+    Rationale  string  `json:"rationale"`
+    Confidence float64 `json:"confidence"`
+}
+```
+
+**Consensus Result:**
+```go
+type ConsensusResult struct {
+    BeadID          string          `json:"bead_id"`
+    Proposal        string          `json:"proposal"`
+    Votes           []ConsensusVote `json:"votes"`
+    Outcome         string          `json:"outcome"` // approved|rejected|needs_work
+    DissentingViews []string        `json:"dissenting_views"`
+    Participants    []string        `json:"participants"`
+    Duration        time.Duration   `json:"duration"`
+    Timestamp       time.Time       `json:"timestamp"`
+}
+```
+
 ---
 
 ## 6. Risks and Mitigation
@@ -550,29 +806,36 @@ map[string]interface{}{
 ## 7. MoSCoW Prioritization
 
 ### Must Have (M)
-- **M1:** Embedded Hindsight server lifecycle management (FR-001)
-- **M2:** Hindsight Go client implementation (FR-002)
-- **M3:** Configuration system integration (FR-003)
-- **M4:** Pre-execution context retrieval (FR-004)
-- **M5:** Post-execution memory retention (FR-006)
-- **M6:** Mandatory retention error handling (FR-007)
-- **M7:** cass_memory deprecation and removal (FR-014)
-- **M8:** Performance requirements (NFR-001)
-- **M9:** Reliability and availability (NFR-002)
+- **M1:** Embedded Hindsight server lifecycle management (FR-001a/b)
+- **M2:** Hindsight Go client implementation (FR-002a/b)
+- **M3:** Configuration system integration (FR-003a/b)
+- **M4:** Pre-execution context retrieval (FR-004a/b)
+- **M5:** Post-execution memory retention (FR-006a/b)
+- **M6:** Mandatory retention error handling (FR-007a/b)
+- **M7:** Context-processor agent integration (FR-015a/b)
+- **M8:** Context-processor Hindsight queries (FR-016a/b)
+- **M9:** cass_memory deprecation and removal (FR-014a/b)
+- **M10:** Performance requirements (NFR-001)
+- **M11:** Reliability and availability (NFR-002)
 
 ### Should Have (S)
-- **S1:** Worker context parsing (FR-005)
-- **S2:** Pattern quality scoring enhancement (FR-008)
-- **S3:** Settled-state reflection (FR-009)
-- **S4:** Observability and logging (FR-013)
-- **S5:** Security requirements (NFR-005)
-- **S6:** Error handling and recovery (NFR-006)
+- **S1:** Worker context parsing (FR-005a/b)
+- **S2:** Pattern quality scoring enhancement (FR-008a/b)
+- **S3:** Settled-state reflection (FR-009a/b)
+- **S4:** Context-processor decision engine (FR-017a/b)
+- **S5:** Context-processor prompt enrichment (FR-018a/b)
+- **S6:** Context-processor result storage (FR-019a/b)
+- **S7:** Observability and logging (FR-013a/b)
+- **S8:** Security requirements (NFR-005)
+- **S9:** Error handling and recovery (NFR-006)
 
 ### Could Have (C)
-- **C1:** Cross-project memory bank (FR-010)
-- **C2:** LLM provider abstraction (FR-011)
-- **C3:** Scalability requirements (NFR-003)
-- **C4:** Data retention and storage (NFR-004)
+- **C1:** Cross-project memory bank (FR-010a/b)
+- **C2:** LLM provider abstraction (FR-011a/b)
+- **C3:** Multi-agent consensus facilitation (FR-020a/b)
+- **C4:** Multi-agent consensus voting (FR-022a/b)
+- **C5:** Scalability requirements (NFR-003)
+- **C6:** Data retention and storage (NFR-004)
 
 ### Won't Have (W)
 - **W1:** Hindsight skills for Pi agents (out of scope)
@@ -580,6 +843,7 @@ map[string]interface{}{
 - **W3:** Advanced analytics and reporting
 - **W4:** Multi-tenant isolation
 - **W5:** Configuration hot-reload
+- **W6:** Multi-agent consensus reviewer selection complexity (start with hardcoded mapping)
 
 ---
 
@@ -720,6 +984,7 @@ map[string]interface{}{
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | 2026-03-16 | Hydra Team | Initial PRD creation |
+| 1.1 | 2026-03-16 | Hydra Team | Validated and atomicity-compliant version |
 
 ---
 
