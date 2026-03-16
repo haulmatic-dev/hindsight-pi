@@ -5,8 +5,8 @@ overseer:
   retry_delay: 30s
   worker_timeout: 2m
   resource_limits:
-    max_cpu_percent: 70
-    max_memory_percent: 70
+    max_cpu_percent: 60
+    max_memory_percent: 60
   chain_detection:
     enabled: true
     interval: 10s
@@ -34,6 +34,12 @@ intelligence:
     enabled: true
     timeout: 30s
     max_files: 20  # Allow up to 20 files for intelligence gathering
+    indexing:
+      enabled: true
+      max_concurrent: 2        # Max concurrent indexing operations
+      queue_size: 100          # Max queue depth
+      retry_attempts: 3        # Number of retry attempts
+      retry_delay: 5s          # Delay between retries
   gptcache:
     enabled: true
   patterns:
@@ -63,3 +69,4 @@ agents:
     model: k2.5
     timeout: 10m
     api_key_name: KIMI_API_KEY
+    config_dir: /Users/buddhi/source-code/personal/hydra/pi-config

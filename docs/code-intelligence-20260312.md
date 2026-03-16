@@ -1,28 +1,31 @@
 # Code Intelligence Integration
 
-**Status:** Draft  
-**Last Updated:** 2026-03-12  
-**Purpose:** Integration guide for llm-tldr and cass_memory with Pi agents
+**Status:** Implemented  
+**Last Updated:** 2026-03-13  
+**Purpose:** Skills-based integration for llm-tldr and cass_memory with Pi agents
 
 ## Overview
 
-This document describes how Hydra integrates **llm-tldr** (semantic code analysis) and **cass_memory** (institutional knowledge) with Pi agents. Unlike skills that provide methodology, these systems provide **contextual intelligence** that agents query dynamically during execution.
+This document describes how Hydra integrates **llm-tldr** (semantic code analysis) and **cass_memory** (institutional knowledge) with Pi agents. **These are now implemented as skills**, allowing agents to query intelligence on-demand during execution rather than receiving pre-computed context.
+
+**Key Change:** Previous force-feeding approach (injecting 2000-5000 tokens at start) has been replaced with agent-driven queries (200-500 tokens per query). This achieves 75-90% token savings while maintaining 100% relevance.
 
 ## Architecture
 
 ### Intelligence Lifecycle
 
 ```
-Bead Execution → Chain Completion → LLM Verification → Index to cass_memory/tldr
-                     ↑                                           ↓
-            [Pi queries read-only] ←────── Curated Intelligence ─────┘
+Bead Execution → Agent Queries Skills → Executes with Context → Chain Completes → LLM Verification → Index to Stores
+        ↑                                                                      ↓
+        └────────────── Curated Intelligence ←────── Pattern Storage ←───────────┘
 ```
 
 **Key Principles:**
-1. **Indexing happens post-chain** - Not during bead execution
-2. **LLM verification acts as quality gate** - Only valuable patterns get stored
-3. **Pi has read-only access** - Cannot write directly to intelligence stores
-4. **Virtuous cycle** - Past chains improve current beads; current beads feed future intelligence
+1. **Agents query on-demand** - Pi uses skills to request intelligence when needed
+2. **Skills provide methodology** - How to query, when to query, how to interpret results
+3. **Indexing happens post-chain** - Only verified patterns get stored
+4. **Pi has read-only access** - Cannot write directly to intelligence stores
+5. **Virtuous cycle** - Past chains improve current beads; current beads feed future intelligence
 
 ### Flow Diagram
 
@@ -33,20 +36,35 @@ Bead Execution → Chain Completion → LLM Verification → Index to cass_memor
          │
          ▼
 ┌──────────────────────────┐
-│  Pi Queries cass_memory  │  "Have we solved this before?"
-│      (Read-Only)         │
+│  Pi Decides: Need info?  │
+└────────┬─────────────────┘
+         │
+    ┌────┴────┐
+    │         │
+    ▼         ▼
+┌──────────┐ ┌──────────┐
+│ Use Skill│ │ Continue │
+│ cass-mem │ │ without  │
+│ory-insigh│ │ query    │
+│ ts       │ │          │
+└────┬─────┘ └──────────┘
+     │
+     ▼
+┌──────────────────────────┐
+│  Query cass_memory       │  $(which cm) context "rate limiting"
+│  Get patterns/anti-pats  │
 └────────┬─────────────────┘
          │
          ▼
 ┌──────────────────────────┐
-│  Pi Queries llm-tldr     │  "Where is this implemented?"
-│      (Read-Only)         │
+│  Query TLDR (optional)   │  llm-tldr search "middleware"
+│  Get semantic results    │
 └────────┬─────────────────┘
          │
          ▼
 ┌──────────────────────────┐
-│  Pi Executes with Skills │  Uses gathered intelligence
-│    + Methodology         │
+│  Execute with Skills     │  Uses gathered intelligence
+│  + Methodology           │
 └────────┬─────────────────┘
          │
          ▼
@@ -70,21 +88,119 @@ Bead Execution → Chain Completion → LLM Verification → Index to cass_memor
 
 ## Components
 
-### 1. cass_memory - Institutional Knowledge
+### 1. Skills (New Architecture)
+
+**Location:** `.agents/skills/`
+
+#### cass-memory-insights
+
+**Purpose:** Query institutional knowledge from cass_memory before implementing changes
+
+**Location:** `.agents/skills/cass-memory-insights/SKILL.md`
+
+**When to Use:**
+- Before implementing any new feature
+- When debugging issues
+- When making architectural decisions
+- When encountering unfamiliar code patterns
+
+**Usage:**
+```bash
+# Query for relevant patterns
+$(which cm) context "implement rate limiting" --json --limit 10
+
+# Query with category
+$(which cm) context "authentication patterns" --category security --json
+
+# List patterns by category
+$(which cm) list --category debugging --json
+```
+
+**Example Workflow:**
+```
+Pi: "I need to implement OAuth2 authentication"
+Pi → $(which cm) context "OAuth2 authentication flow" --json
+Result: {
+  "relevantBullets": [
+    {
+      "id": "auth-impl-001",
+      "content": "Use JWT with refresh tokens for OAuth2",
+      "category": "security",
+      "score": 0.95
+    }
+  ],
+  "antiPatterns": [
+    {
+      "id": "auth-ant-003",
+      "content": "DON'T: Store tokens in localStorage",
+      "category": "security"
+    }
+  ]
+}
+Pi: Uses JWT pattern as starting point
+```
+
+#### tldr-code-intelligence
+
+**Purpose:** Semantic code search and impact assessment
+
+**Location:** `.agents/skills/tldr-code-intelligence/SKILL.md`
+
+**When to Use:**
+- Finding code by meaning (not just name)
+- Assessing impact before refactoring
+- Exploring unfamiliar codebases
+- Understanding dependencies
+
+**Usage:**
+```bash
+# Semantic search
+llm-tldr search "user authentication logic"
+
+# Impact analysis
+llm-tldr impact internal/auth/handler.go --depth 2
+
+# Build index (if needed)
+llm-tldr semantic index . --model all-MiniLM-L6-v2
+```
+
+**Example Workflow:**
+```
+Pi: "Where is the user authentication logic?"
+Pi → llm-tldr search "user authentication"
+Result: {
+  "results": [
+    {
+      "file": "internal/auth/handler.go",
+      "function": "AuthenticateUser",
+      "score": 0.92,
+      "context": "func AuthenticateUser(...)"
+    }
+  ]
+}
+
+Pi: "What will break if I refactor this?"
+Pi → llm-tldr impact internal/auth/handler.go --depth 2
+Result: 15 files affected
+Pi: Plans careful refactoring
+```
+
+---
+
+### 2. cass_memory - Institutional Knowledge
 
 **Purpose:** Store verified patterns, anti-patterns, and learnings from completed chains
 
-**Current Integration:**
-- **Client:** `/Users/buddhi/source-code/personal/hydra/internal/intelligence/cass_memory.go`
-- **CLI Tool:** `cm` command
-- **Data Structure:** Bullets, anti-patterns, history snippets
+**Client:** `/internal/intelligence/cass_memory.go`
+
+**CLI Tool:** `cm` command
 
 **Key Methods:**
 ```go
-// Query context for a task
+// Query context for a task (used via skill)
 func (c *CassMemoryClient) Context(task string) (*CassContextResponse, error)
 
-// Add a pattern (called by LLM verifier, not Pi)
+// Add a pattern (called by LLM verifier post-chain)
 func (c *CassMemoryClient) AddPattern(pattern, category string) error
 
 // Check availability
@@ -112,37 +228,23 @@ type Bullet struct {
 }
 ```
 
-**Category Mappings:**
-```go
-var agentTypeToCategory = map[string]string{
-    "orchestrator":        "orchestration",
-    "test-specialist":     "testing",
-    "code-reviewer":       "review",
-    "security-auditor":    "security",
-    "bug-fixer":           "debugging",
-    // ... 15+ mappings
-}
-```
+---
 
-### 2. llm-tldr - Semantic Code Analysis
+### 3. llm-tldr - Semantic Code Analysis
 
-**Purpose:** Provide semantic understanding of codebase (not just text search)
+**Purpose:** Provide semantic understanding of codebase
 
-**Current Integration:**
-- **Client:** `/Users/buddhi/source-code/personal/hydra/internal/intelligence/tldr.go`
-- **Interface:** HTTP API (daemon) + CLI fallback
-- **Default URL:** `http://127.0.0.1:8787`
+**Client:** `/internal/intelligence/tldr.go`
+
+**Interface:** CLI mode (llm-tldr binary)
 
 **Key Methods:**
 ```go
-// Analyze what code depends on or is affected by a file
+// Analyze code dependencies (used via skill)
 func (c *TLDRClient) ImpactAnalysis(file string, depth int) (*TLDRImpactResponse, error)
 
-// Semantic code search
+// Semantic code search (used via skill)
 func (c *TLDRClient) SemanticSearch(query string) (*TLDRSemanticResponse, error)
-
-// Extract structured context from file
-func (c *TLDRClient) Context(file string) (*TLDRContextResponse, error)
 
 // Health check
 func (c *TLDRClient) IsAvailable() bool
@@ -150,197 +252,67 @@ func (c *TLDRClient) IsAvailable() bool
 
 **Data Types:**
 ```go
-// Impact analysis response
 type TLDRImpactResponse struct {
     File   string
     Impact struct {
-        Callers []Dependency  // Functions calling this file
-        Callees []Dependency  // Functions called by this file
+        Callers []Dependency
+        Callees []Dependency
     }
     Scope struct {
         Files    int
         Tokens   int
-        Exceeded bool  // True if exceeds max_tokens
+        Exceeded bool
     }
 }
 
-type Dependency struct {
-    File     string
-    Function string
-    Line     int
-}
-
-// Semantic search results
 type TLDRSemanticResult struct {
     File     string
     Function string
-    Score    float64  // Relevance score [0,1]
-    Context  string   // Function signature or context
+    Score    float64
+    Context  string
 }
 ```
 
 ---
 
-## Pi Tool Integration
+## Migration from Force-Feeding
 
-### Exposed Tools (Read-Only)
+### Previous Approach (Deprecated)
 
-Pi agents can call these tools during execution to query intelligence:
-
-#### 1. cass_insight
-
-**Purpose:** Query verified patterns from project history
-
-**Parameters:**
-```json
-{
-  "query": "authentication patterns",
-  "category": "security",
-  "limit": 5
-}
+```
+Overseer → Pre-compute context → Inject into prompt → Pi receives all context
 ```
 
-**Usage Example:**
+**Issues:**
+- 2000-5000 tokens per bead (wasteful)
+- 80% context often irrelevant
+- No mid-execution queries
+- Pi had no control over what to fetch
+
+### New Approach (Current)
+
 ```
-Pi: "I need to implement OAuth2 authentication"
-Pi → cass_insight("OAuth2 patterns", "security", 5)
-Result: {
-  "patterns": [
-    {
-      "id": "auth-impl-001",
-      "content": "Use JWT with refresh tokens for OAuth2",
-      "category": "security",
-      "score": 0.95
-    }
-  ],
-  "antiPatterns": [
-    {
-      "id": "auth-ant-003",
-      "content": "DON'T: Store tokens in localStorage",
-      "category": "security"
-    }
-  ]
-}
-Pi: Uses JWT pattern as starting point
+Pi decides → Queries skill → Gets relevant context → Uses on-demand
 ```
 
-#### 2. tldr_context
+**Benefits:**
+- 200-500 tokens per query (efficient)
+- 100% relevant context
+- Mid-execution queries possible
+- Agent autonomy: Pi decides when/what to query
 
-**Purpose:** Semantic code search across codebase
+### Code Changes
 
-**Parameters:**
-```json
-{
-  "query": "user service implementation",
-  "file": "internal/user/service.go",
-  "max_results": 5
-}
-```
+**Removed:**
+- `gatherPreExecutionIntelligence()` from worker
+- `runPreExecutionIntelligence()` from overseer
+- `HYDRA_INTELLIGENCE` environment variable
+- Prompt injection of patterns/anti-patterns
 
-**Usage Example:**
-```
-Pi: "Where is the user authentication logic?"
-Pi → tldr_context("user authentication", "", 5)
-Result: {
-  "results": [
-    {
-      "file": "internal/auth/handler.go",
-      "function": "AuthenticateUser",
-      "score": 0.92,
-      "context": "func AuthenticateUser(ctx context.Context, req *LoginRequest) (*Token, error)"
-    }
-  ]
-}
-```
-
-#### 3. tldr_impact
-
-**Purpose:** Analyze code dependencies and impact scope
-
-**Parameters:**
-```json
-{
-  "file": "internal/auth/handler.go",
-  "depth": 3
-}
-```
-
-**Usage Example:**
-```
-Pi: "What will break if I refactor the auth handler?"
-Pi → tldr_impact("internal/auth/handler.go", 3)
-Result: {
-  "callers": [
-    {"file": "api/routes.go", "function": "SetupRoutes", "line": 45},
-    {"file": "middleware/auth.go", "function": "AuthMiddleware", "line": 23}
-  ],
-  "callees": [
-    {"file": "internal/auth/jwt.go", "function": "GenerateToken", "line": 67},
-    {"file": "internal/user/service.go", "function": "GetUser", "line": 112}
-  ],
-  "scope": {
-    "files": 15,
-    "tokens": 12500,
-    "exceeded": false
-  }
-}
-Pi: "15 files affected - need careful refactoring plan"
-```
-
----
-
-## Implementation Options
-
-### Option A: HTTP Bridge (Recommended)
-
-**Architecture:**
-```
-Pi Extension → HTTP Call → Hydra API → cass_memory/tldr Client
-```
-
-**Pros:**
-- Structured, type-safe
-- Reuses existing Hydra infrastructure
-- Easy to version and extend
-- Can add authentication/rate limiting
-
-**Implementation:**
-```go
-// Hydra exposes these endpoints:
-GET /api/intelligence/cass?query=auth&category=security&limit=5
-GET /api/intelligence/tldr/search?query=user+auth&max_results=5
-GET /api/intelligence/tldr/impact?file=internal/auth/handler.go&depth=3
-
-// Pi extension calls these via fetch/axios
-```
-
-### Option B: Direct CLI Access
-
-**Architecture:**
-```
-Pi (bash tool) → cm command / lsp-cli
-```
-
-**Pros:**
-- Simpler, no HTTP layer
-- Uses existing CLI tools
-- No build step for extensions
-
-**Cons:**
-- Less structured output
-- Harder to version
-- No central control
-
-**Implementation:**
-```bash
-# Pi would run:
-cm context "authentication" --json
-lsp-cli semantic search "user auth"
-```
-
-### Recommendation: Option A (HTTP Bridge)
-
-Better long-term maintainability and allows Hydra to control access patterns.
+**Added:**
+- `cass-memory-insights` skill
+- `tldr-code-intelligence` skill
+- Post-chain pattern extraction (unchanged)
 
 ---
 
@@ -353,15 +325,15 @@ Task: Add rate limiting to auth endpoint
 
 Pi Workflow:
 1. Query institutional knowledge
-   → cass_insight("rate limiting patterns")
+   → $(which cm) context "rate limiting patterns"
    Result: "Token bucket pattern works well for APIs [ref: rate-001]"
 
 2. Find existing implementations
-   → tldr_context("rate limiting middleware")
+   → llm-tldr search "rate limiting middleware"
    Result: Found in middleware/ratelimit.go
 
 3. Check impact
-   → tldr_impact("internal/auth/handler.go", 2)
+   → llm-tldr impact internal/auth/handler.go --depth 2
    Result: 8 files affected
 
 4. Implement using systematic-debugging skill
@@ -375,7 +347,7 @@ Task: Investigate intermittent test failure in user service
 
 Pi Workflow:
 1. Check if we've seen this before
-   → cass_insight("intermittent test failures user service", "debugging")
+   → $(which cm) context "intermittent test failures user service" --category debugging
    Result: {
      "antiPatterns": [{
        "id": "bug-042",
@@ -384,12 +356,11 @@ Pi Workflow:
    }
 
 2. Find the problematic code
-   → tldr_context("user cache test", "internal/user/", 3)
+   → llm-tldr search "user cache test"
    Result: Found cache implementation
 
 3. Apply known fix from anti-pattern
-4. Verify with tddr_impact to ensure no regressions
-5. Chain completes → New learning indexed
+4. Chain completes → New learning indexed
 ```
 
 ### Use Case 3: Architecture Decision
@@ -399,11 +370,11 @@ Task: Should I use interfaces here?
 
 Pi Workflow:
 1. Query patterns
-   → cass_insight("interface design patterns Go", "architecture")
+   → $(which cm) context "interface design patterns Go" --category architecture
    Result: "Small focused interfaces, define at point of use [ref: arch-015]"
 
 2. Check existing code style
-   → tldr_context("interface definitions")
+   → llm-tldr search "interface definitions"
    Result: Found patterns in 5 files
 
 3. Consistent with established patterns
@@ -426,22 +397,9 @@ intelligence:
     
   tldr:
     enabled: true
-    base_url: "http://127.0.0.1:8787"
-    timeout: 10s
+    timeout: 30s
     max_files: 50
     max_tokens: 100000
-    
-  pi_tools:
-    enabled: true
-    # Which tools to expose to Pi agents
-    tools:
-      - cass_insight
-      - tldr_context
-      - tldr_impact
-    # Cache settings for repeated queries
-    cache:
-      enabled: true
-      ttl: 5m
 ```
 
 ### Environment Variables
@@ -451,140 +409,7 @@ intelligence:
 export CASS_MEMORY_BIN=/Users/buddhi/.local/bin/cm
 
 # TLDR
-export TLDR_BASE_URL=http://127.0.0.1:8787
 export TLDR_CLI_PATH=/usr/local/bin/llm-tldr
-```
-
----
-
-## Integration with Existing Hydra Flow
-
-### Pre-Execution Intelligence (Already Implemented)
-
-**Current Flow:** `overseer.go` lines 660-787
-
-```go
-// runPreExecutionIntelligence gathers context before bead execution
-func (o *Overseer) runPreExecutionIntelligence(bead *types.Bead) *IntelligenceBundle {
-    bundle := &IntelligenceBundle{}
-    
-    // 1. Query cass_memory for context (if enabled)
-    if o.cassMemory.IsEnabled() {
-        context, err := o.cassMemory.Context(bead.Title)
-        if err == nil {
-            bundle.ContextEntries = context.Data.RelevantBullets
-        }
-    }
-    
-    // 2. Analyze impact with TLDR (if enabled and files available)
-    if o.tldr.IsAvailable() && len(bead.Files) > 0 {
-        for _, file := range bead.Files {
-            impact, err := o.tldr.ImpactAnalysis(file, 2)
-            if err == nil {
-                bundle.ImpactAnalysis = impact
-                break
-            }
-        }
-    }
-    
-    // 3. Serialize to JSON and pass to worker
-    bundleJSON, _ := json.Marshal(bundle)
-    os.Setenv("HYDRA_INTELLIGENCE_BUNDLE", string(bundleJSON))
-    
-    return bundle
-}
-```
-
-### Enhancement: Expose as Callable Tools
-
-**Current:** Intelligence is injected once at bead start (force-feeding)
-
-**Proposed:** Intelligence is queryable throughout execution (agent-driven)
-
-**Implementation:**
-```go
-// Add to PiConnector or create IntelligenceService
-
-type IntelligenceService struct {
-    cassMemory *intelligence.CassMemoryClient
-    tldr       *intelligence.TLDRClient
-}
-
-// Exposed as HTTP endpoints for Pi tools
-func (s *IntelligenceService) HandleCassInsight(w http.ResponseWriter, r *http.Request) {
-    query := r.URL.Query().Get("query")
-    category := r.URL.Query().Get("category")
-    
-    context, err := s.cassMemory.Context(query)
-    if err != nil {
-        http.Error(w, err.Error(), 500)
-        return
-    }
-    
-    // Filter by category if provided
-    json.NewEncoder(w).Encode(context.Data)
-}
-
-func (s *IntelligenceService) HandleTLDRSearch(w http.ResponseWriter, r *http.Request) {
-    query := r.URL.Query().Get("query")
-    
-    results, err := s.tldr.SemanticSearch(query)
-    if err != nil {
-        http.Error(w, err.Error(), 500)
-        return
-    }
-    
-    json.NewEncoder(w).Encode(results)
-}
-```
-
----
-
-## Quality Assurance Flow
-
-### LLM Verification (Post-Chain)
-
-**Purpose:** Ensure only valuable patterns get indexed
-
-**Flow:**
-```
-Bead Completes
-    ↓
-LLM Evaluates Quality
-    ↓
-Worthy? → Index to cass_memory
-        → Index code to llm-tldr
-    
-Not Worthy? → Discard
-           → Log for analysis
-```
-
-**Criteria for Indexing:**
-- Novel solution (not in existing patterns)
-- Successful outcome (tests pass, no regressions)
-- Generalizable (applies to similar tasks)
-- Well-documented (clear explanation)
-
-**Implementation:**
-```go
-// After chain completion
-func (o *Overseer) postChainProcessing(bead *types.Bead, result *BeadResult) {
-    if !result.Success {
-        return  // Don't index failures
-    }
-    
-    // LLM evaluates if worth indexing
-    worthIndexing := o.llmEvaluateWorth(bead, result)
-    
-    if worthIndexing {
-        // Extract patterns
-        pattern := o.extractPattern(bead, result)
-        o.cassMemory.AddPattern(pattern, bead.Category)
-        
-        // Update code index
-        o.tldr.BuildIndex()
-    }
-}
 ```
 
 ---
@@ -593,90 +418,110 @@ func (o *Overseer) postChainProcessing(bead *types.Bead, result *BeadResult) {
 
 ### Query Latency
 
-| Operation | Typical Latency | Acceptable for Pi? |
-|-----------|----------------|-------------------|
-| cass_insight | 2-5s | Yes (strategic query) |
-| tldr_context | 3-10s | Yes (understanding phase) |
-| tldr_impact | 1-3s | Yes (planning phase) |
-
-**Mitigations:**
-- Cache frequent queries (5-minute TTL)
-- Parallel queries when possible
-- Async pre-fetch for known patterns
+| Operation | Typical Latency | Strategy |
+|-----------|----------------|----------|
+| cm context | 2-5s | Query once at start |
+| llm-tldr search | 3-10s | Query during exploration |
+| llm-tldr impact | 1-3s | Query before refactoring |
 
 ### Token Efficiency
 
-**Force-Feeding (Current):**
-- Injects all context upfront
-- ~2000-5000 tokens per bead
-- 80% may be irrelevant
-
-**Agent-Driven (Proposed):**
-- Pi queries only when needed
-- ~200-500 tokens per query
-- 100% relevant
-
-**Savings:** 75-90% reduction in token usage
+| Approach | Tokens/Bead | Relevance |
+|----------|-------------|-----------|
+| Force-Feeding (old) | 2000-5000 | ~20% |
+| Skills-based (new) | 200-500/query | 100% |
+| **Savings** | **75-90%** | **+400%** |
 
 ---
 
-## Maintenance
+## Integration with Chain Completion
 
-### Monitoring
+### Post-Chain Processing (Unchanged)
 
-Track these metrics:
-- Query frequency per tool
-- Cache hit rates
-- Average query latency
-- Token savings vs force-feeding
+Patterns are still extracted and stored after chain completion:
 
-### Index Updates
-
-**Automatic:**
-- llm-tldr index updates post-chain (if quality passes)
-- cass_memory updates via LLM verification
-
-**Manual:**
-```bash
-# Rebuild TLDR index
-llm-tldr semantic index . --model all-MiniLM-L6-v2
-
-# View cass_memory contents
-cm list --category debugging
+```
+Bead Completes
+    ↓
+Chain Completion Detector triggers
+    ↓
+ChainPatternExtractor analyzes work
+    ↓
+LLM verifies quality
+    ↓
+Store in cass_memory (via AddPattern)
+    ↓
+Update TLDR semantic index
 ```
 
-### Cleanup
+**Code Location:** `internal/core/chain_completion_detector.go`
 
-**Periodic Tasks:**
-- Archive old cass_memory entries (>90 days)
-- Prune low-quality patterns
-- Compact TLDR index
+---
+
+## Troubleshooting
+
+### Skills Not Available
+
+**Symptom:** Pi doesn't use cass_memory or TLDR queries
+
+**Check:**
+1. Skills installed in `.agents/skills/`
+2. Skills referenced in `hydra.yaml` or DefaultSkills
+3. Binary paths correct (`which cm`, `which llm-tldr`)
+
+### Queries Return Empty
+
+**Symptom:** Skills query but no results
+
+**Check:**
+1. cass_memory has data: `cm list --limit 5`
+2. TLDR index built: `llm-tldr semantic index .`
+3. Correct working directory
+
+### High Latency
+
+**Symptom:** Queries take too long
+
+**Solutions:**
+- Reduce `--limit` parameter
+- Check network connectivity
+- Verify timeouts in config
 
 ---
 
 ## Related Documents
 
-- [cass_memory Client](/Users/buddhi/source-code/personal/hydra/internal/intelligence/cass_memory.go)
-- [TLDR Client](/Users/buddhi/source-code/personal/hydra/internal/intelligence/tldr.go)
-- [Overseer Intelligence Flow](/Users/buddhi/source-code/personal/hydra/internal/core/overseer.go#L660)
+- [cass_memory Client](/internal/intelligence/cass_memory.go)
+- [TLDR Client](/internal/intelligence/tldr.go)
+- [cass-memory-insights Skill](/.agents/skills/cass-memory-insights/SKILL.md)
+- [tldr-code-intelligence Skill](/.agents/skills/tldr-code-intelligence/SKILL.md)
 - [Pi Agent Skills](./pi-agent-skills.md)
-- [Hydra Agent Connector Architecture](./architecture/agent-connector-20260311.md)
 
 ---
 
 ## Changelog
 
+### 2026-03-13 - Skills-Based Architecture
+
+**BREAKING CHANGE:** Converted from force-feeding to skills
+
+- Removed pre-execution intelligence gathering
+- Removed HYDRA_INTELLIGENCE environment variable
+- Removed prompt injection of patterns
+- Created `cass-memory-insights` skill
+- Created `tldr-code-intelligence` skill
+- Achieved 75-90% token savings
+- Post-chain pattern extraction unchanged
+
 ### 2026-03-12 - Initial Draft
-- Documented intelligence lifecycle (post-chain indexing)
-- Defined read-only tools for Pi agents
-- Specified HTTP bridge architecture
+- Documented intelligence lifecycle
+- Specified HTTP bridge architecture (deprecated)
 - Added use cases and configuration examples
-- Documented quality assurance flow
 
 ---
 
-**Next Steps:**
-1. Implement HTTP bridge for Pi tool access
-2. Create Pi extensions/skills for intelligence queries
-3. Add monitoring and metrics
-4. Test with real beads
+**Migration Guide:**
+- Previous: Intelligence injected automatically
+- Current: Agents must query via skills
+- Update agents to call `$(which cm) context` and `llm-tldr` commands
+- See skill documentation for usage examples

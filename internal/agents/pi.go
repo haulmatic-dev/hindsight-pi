@@ -9,12 +9,35 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/pi"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
+
+// Executor interface abstracts exec operations for testability
+type Executor interface {
+	LookPath(file string) (string, error)
+	Command(name string, arg ...string) *exec.Cmd
+}
+
+// DefaultExecutor implements Executor using the standard exec package
+type DefaultExecutor struct{}
+
+func (e *DefaultExecutor) LookPath(file string) (string, error) {
+	return exec.LookPath(file)
+}
+
+func (e *DefaultExecutor) Command(name string, arg ...string) *exec.Cmd {
+	return exec.Command(name, arg...)
+}
+
+// Cache TTL for installation status and path lookups
+const installationCacheTTL = 5 * time.Minute
 
 // PiConnector implements AgentConnector for Pi coding agent
 // Uses RPC mode (JSON protocol over stdin/stdout) for synchronous operation
@@ -24,11 +47,21 @@ type PiConnector struct {
 	thinkingLevel string
 	timeout       time.Duration
 	apiKeyName    string
+	configDir     string
+	logger        *log.Logger
+	executor      Executor
 
-	// Installation check
-	mu           sync.RWMutex
-	installed    bool
-	installCheck bool
+	// Installation check with TTL-based caching
+	mu               sync.RWMutex
+	installed        bool
+	installCheck     bool
+	installCheckTime time.Time
+
+	// Cached paths to reduce PATH lookups
+	piPath         string
+	npmPath        string
+	pathsCached    bool
+	pathsCacheTime time.Time
 }
 
 // PiConfig contains configuration for Pi connector
@@ -38,10 +71,15 @@ type PiConfig struct {
 	ThinkingLevel string `yaml:"thinking_level"`
 	Timeout       string `yaml:"timeout"`
 	ApiKeyName    string `yaml:"api_key_name"`
+	ConfigDir     string `yaml:"config_dir"`
 }
 
 // NewPiConnector creates a new Pi connector with the given configuration
-func NewPiConnector(config PiConfig) *PiConnector {
+func NewPiConnector(config PiConfig, logger *log.Logger) *PiConnector {
+	if logger == nil {
+		logger = log.Default()
+	}
+
 	timeout := 10 * time.Minute
 	if config.Timeout != "" {
 		if d, err := time.ParseDuration(config.Timeout); err == nil {
@@ -55,6 +93,9 @@ func NewPiConnector(config PiConfig) *PiConnector {
 		thinkingLevel: config.ThinkingLevel,
 		timeout:       timeout,
 		apiKeyName:    config.ApiKeyName,
+		configDir:     config.ConfigDir,
+		logger:        logger,
+		executor:      &DefaultExecutor{},
 	}
 }
 
@@ -66,20 +107,6 @@ func (c *PiConnector) Start(ctx context.Context, bead types.Bead, opts AgentOpti
 		return nil, fmt.Errorf("pi not available: %w", err)
 	}
 
-	// Build command arguments
-	args := []string{
-		"--mode", "rpc",
-		"--no-session",
-	}
-
-	if c.provider != "" {
-		args = append(args, "--provider", c.provider)
-	}
-
-	if c.model != "" {
-		args = append(args, "--model", c.model)
-	}
-
 	// Create session ID
 	sessionID := fmt.Sprintf("hydra-%s", bead.ID)
 
@@ -89,9 +116,11 @@ func (c *PiConnector) Start(ctx context.Context, bead types.Bead, opts AgentOpti
 		StartTime: time.Now(),
 		connector: c,
 		metadata: map[string]interface{}{
-			"provider": c.provider,
-			"model":    c.model,
-			"project":  opts.ProjectPath,
+			"provider":         c.provider,
+			"model":            c.model,
+			"project":          opts.ProjectPath,
+			"bead_title":       bead.Title,
+			"bead_description": bead.Description,
 		},
 	}
 
@@ -120,6 +149,24 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 		args = append(args, "--model", c.model)
 	}
 
+	// Add skill flags if configDir is set
+	if c.configDir != "" {
+		skillResult, err := pi.BuildSkillFlags(c.configDir)
+		if err != nil {
+			log.Printf("[PiConnector] Warning: failed to build skill flags: %v", err)
+		} else {
+			args = append(args, skillResult.Flags...)
+			log.Printf("[PiConnector] Added %d skill flags (%d found, %d missing)",
+				len(skillResult.Flags)/2, len(skillResult.Found), len(skillResult.Missing))
+
+			// Log warnings for missing skills but continue execution
+			if skillResult.HasWarnings() {
+				skillResult.WarnMissingSkills()
+				log.Printf("[PiConnector] ⚠️ Continuing with available skills (missing: %d)", len(skillResult.Missing))
+			}
+		}
+	}
+
 	// Get project path from session metadata
 	projectPath := ""
 	if path, ok := session.metadata["project"].(string); ok {
@@ -135,16 +182,50 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 		cmd.Dir = projectPath
 	}
 
+	// Create new process group so we can kill the entire tree (pi + children)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
+	// Prepare environment variables
+	envVars := os.Environ()
+
+	// Set PI_CODING_AGENT_DIR if configDir is set
+	if c.configDir != "" {
+		agentDir := filepath.Join(c.configDir, "agent")
+		absAgentDir, err := filepath.Abs(agentDir)
+		if err == nil {
+			envVars = append(envVars, fmt.Sprintf("PI_CODING_AGENT_DIR=%s", absAgentDir))
+			log.Printf("[PiConnector] Set PI_CODING_AGENT_DIR=%s for bead %s", absAgentDir, session.BeadID)
+		} else {
+			log.Printf("[PiConnector] Warning: failed to resolve absolute path for agent dir: %v", err)
+			envVars = append(envVars, fmt.Sprintf("PI_CODING_AGENT_DIR=%s", agentDir))
+		}
+	}
+
+	// Set HYDRA_BEAD_TITLE and HYDRA_BEAD_DESCRIPTION from session metadata
+	if title, ok := session.metadata["bead_title"].(string); ok && title != "" {
+		envVars = append(envVars, fmt.Sprintf("HYDRA_BEAD_TITLE=%s", title))
+		log.Printf("[PiConnector] Set HYDRA_BEAD_TITLE for bead %s", session.BeadID)
+	}
+
+	if description, ok := session.metadata["bead_description"].(string); ok && description != "" {
+		envVars = append(envVars, fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", description))
+		log.Printf("[PiConnector] Set HYDRA_BEAD_DESCRIPTION for bead %s", session.BeadID)
+	}
+
 	// Set API key from environment if configured
 	if c.apiKeyName != "" {
 		apiKey := os.Getenv(c.apiKeyName)
 		if apiKey != "" {
-			cmd.Env = append(os.Environ(), fmt.Sprintf("%s=%s", c.apiKeyName, apiKey))
+			envVars = append(envVars, fmt.Sprintf("%s=%s", c.apiKeyName, apiKey))
 			log.Printf("[PiConnector] Set API key %s for bead %s", c.apiKeyName, session.BeadID)
 		} else {
 			log.Printf("[PiConnector] Warning: API key %s not found in environment", c.apiKeyName)
 		}
 	}
+
+	cmd.Env = envVars
 
 	// Store command in session metadata for potential restart
 	session.metadata["cmd"] = cmd
@@ -200,6 +281,11 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 	// Update session with PID
 	session.PID = cmd.Process.Pid
 
+	// Notify about PID availability through callback if provided
+	if pidCallback, ok := session.metadata["pidCallback"].(func(int)); ok {
+		pidCallback(session.PID)
+	}
+
 	// Send prompt command
 	promptCmd := map[string]interface{}{
 		"type":    "prompt",
@@ -250,7 +336,15 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 		case <-time.After(5 * time.Second):
 			// Timeout waiting for process exit
 			log.Printf("[PiConnector] Timeout waiting for process exit after read completion")
-			cmd.Process.Kill()
+			// Kill entire process group using negative PID
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+				log.Printf("[PiConnector] Failed to kill process group: %v", err)
+				// Fallback: kill just the main process
+				cmd.Process.Kill()
+			}
+			// Additional cleanup: kill any remaining children
+			cleanupCmd := exec.Command("pkill", "-P", fmt.Sprintf("%d", cmd.Process.Pid))
+			cleanupCmd.Run() // Ignore errors - best effort cleanup
 		}
 	case exitErr = <-exitChan:
 		// Process exited, now wait for read completion with timeout
@@ -498,22 +592,29 @@ func scanLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	return 0, nil, nil
 }
 
-// Abort forcibly stops the Pi session
+// Abort forcibly stops the Pi session and its process group
 func (c *PiConnector) Abort(ctx context.Context, session *AgentSession) error {
 	if session.PID == 0 {
 		return fmt.Errorf("no process to abort")
 	}
 
-	// Kill the process
-	log.Printf("[PiConnector] Aborting session %s (PID: %d)", session.ID, session.PID)
+	// Kill the process group
+	log.Printf("[PiConnector] Aborting session %s (PID: %d, PGID: %d)", session.ID, session.PID, -session.PID)
 
-	// Try graceful termination first
-	if process, err := exec.Command("kill", fmt.Sprintf("%d", session.PID)).Output(); err != nil {
-		// Force kill if graceful fails
-		exec.Command("kill", "-9", fmt.Sprintf("%d", session.PID)).Run()
-	} else {
-		_ = process // suppress unused variable warning
+	// Try graceful termination of process group first
+	if err := syscall.Kill(-session.PID, syscall.SIGTERM); err != nil {
+		log.Printf("[PiConnector] Graceful kill of process group failed: %v", err)
+		// Force kill the process group
+		if err := syscall.Kill(-session.PID, syscall.SIGKILL); err != nil {
+			log.Printf("[PiConnector] Force kill of process group failed: %v", err)
+			// Fallback: kill just the main process
+			exec.Command("kill", "-9", fmt.Sprintf("%d", session.PID)).Run()
+		}
 	}
+
+	// Additional cleanup: kill any remaining children
+	cleanupCmd := exec.Command("pkill", "-P", fmt.Sprintf("%d", session.PID))
+	cleanupCmd.Run() // Ignore errors - best effort cleanup
 
 	return nil
 }
@@ -558,10 +659,115 @@ func (c *PiConnector) IsHealthy() bool {
 	return c.ensureInstalled() == nil
 }
 
+// CheckInstallation checks if Pi agent is installed and available in PATH
+// Returns nil if pi is installed, error otherwise
+// escapeForJSON escapes a string for safe inclusion in JSON
+func escapeForJSON(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	s = strings.ReplaceAll(s, "\t", `\t`)
+	return s
+}
+
+func (c *PiConnector) CheckInstallation() error {
+	c.logger.Printf(`{"event": "pi_installation_check", "message": "Checking Pi agent installation...", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))
+
+	// Check cached path first (with TTL)
+	c.mu.RLock()
+	if c.pathsCached && time.Since(c.pathsCacheTime) < installationCacheTTL && c.piPath != "" {
+		c.mu.RUnlock()
+		c.logger.Printf(`{"event": "pi_installation_check", "status": "found", "path": "%s", "cached": true, "timestamp": "%s"}`, c.piPath, time.Now().Format(time.RFC3339))
+		return nil
+	}
+	c.mu.RUnlock()
+
+	// Check if pi command exists
+	piPath, err := c.executor.LookPath("pi")
+	if err != nil {
+		c.logger.Printf(`{"event": "pi_installation_check", "status": "not_found", "error": "%s", "timestamp": "%s"}`, err.Error(), time.Now().Format(time.RFC3339))
+		return fmt.Errorf("pi command not found in PATH: %w", err)
+	}
+
+	// Cache the path
+	c.mu.Lock()
+	c.piPath = piPath
+	c.pathsCached = true
+	c.pathsCacheTime = time.Now()
+	c.mu.Unlock()
+
+	c.logger.Printf(`{"event": "pi_installation_check", "status": "found", "path": "%s", "timestamp": "%s"}`, piPath, time.Now().Format(time.RFC3339))
+	return nil
+}
+
+// Install installs Pi agent via npm globally
+// Returns error if npm is not available or installation fails
+// Uses cached npm path when available to reduce PATH lookups
+func (c *PiConnector) Install() error {
+	c.logger.Printf(`{"event": "pi_installation_start", "message": "Installing Pi agent via npm...", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))
+
+	// Check cached npm path first (with TTL)
+	var npmPath string
+	var err error
+
+	c.mu.RLock()
+	if c.pathsCached && time.Since(c.pathsCacheTime) < installationCacheTTL && c.npmPath != "" {
+		npmPath = c.npmPath
+		c.mu.RUnlock()
+		c.logger.Printf(`{"event": "pi_installation_step", "step": "npm_check", "status": "success", "npm_path": "%s", "cached": true, "timestamp": "%s"}`, npmPath, time.Now().Format(time.RFC3339))
+	} else {
+		c.mu.RUnlock()
+
+		// Check if npm is available
+		npmPath, err = c.executor.LookPath("npm")
+		if err != nil {
+			c.logger.Printf(`{"event": "pi_installation_error", "error": "npm not found in PATH", "details": "%s", "timestamp": "%s"}`, err.Error(), time.Now().Format(time.RFC3339))
+			return fmt.Errorf("npm not found in PATH, cannot install pi. Please install Node.js and npm first: %w", err)
+		}
+
+		// Cache the npm path
+		c.mu.Lock()
+		c.npmPath = npmPath
+		c.pathsCached = true
+		c.pathsCacheTime = time.Now()
+		c.mu.Unlock()
+
+		c.logger.Printf(`{"event": "pi_installation_step", "step": "npm_check", "status": "success", "npm_path": "%s", "timestamp": "%s"}`, npmPath, time.Now().Format(time.RFC3339))
+	}
+
+	// Install Pi globally
+	c.logger.Printf(`{"event": "pi_installation_step", "step": "npm_install", "message": "Running npm install -g @mariozechner/pi-coding-agent", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))
+	cmd := c.executor.Command("npm", "install", "-g", "@mariozechner/pi-coding-agent")
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		outputStr := escapeForJSON(string(output))
+		c.logger.Printf(`{"event": "pi_installation_error", "error": "%s", "npm_output": "%s", "timestamp": "%s"}`, err.Error(), outputStr, time.Now().Format(time.RFC3339))
+		return fmt.Errorf("npm install failed: %w\nOutput: %s", err, string(output))
+	}
+
+	outputStr := escapeForJSON(string(output))
+	c.logger.Printf(`{"event": "pi_installation_step", "step": "npm_install", "status": "success", "npm_output": "%s", "timestamp": "%s"}`, outputStr, time.Now().Format(time.RFC3339))
+
+	// Verify installation
+	c.logger.Printf(`{"event": "pi_installation_step", "step": "verification", "message": "Verifying Pi installation...", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))
+	if verifyErr := c.CheckInstallation(); verifyErr != nil {
+		c.logger.Printf(`{"event": "pi_installation_error", "error": "verification failed", "details": "%s", "timestamp": "%s"}`, verifyErr.Error(), time.Now().Format(time.RFC3339))
+		return fmt.Errorf("pi installation verification failed: %w", verifyErr)
+	}
+
+	c.logger.Printf(`{"event": "pi_installation_complete", "status": "success", "message": "Pi agent installed and verified successfully", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))
+	return nil
+}
+
 // ensureInstalled checks if Pi is installed, attempts installation if not
+// This is the internal method used by Start() and IsHealthy()
+// Uses TTL-based caching for performance: cached results return in <1ms
 func (c *PiConnector) ensureInstalled() error {
 	c.mu.RLock()
-	if c.installCheck {
+	// Check cached installation status with TTL
+	if c.installCheck && time.Since(c.installCheckTime) < installationCacheTTL {
 		installed := c.installed
 		c.mu.RUnlock()
 		if installed {
@@ -575,7 +781,7 @@ func (c *PiConnector) ensureInstalled() error {
 	defer c.mu.Unlock()
 
 	// Double-check after acquiring lock
-	if c.installCheck {
+	if c.installCheck && time.Since(c.installCheckTime) < installationCacheTTL {
 		if c.installed {
 			return nil
 		}
@@ -583,37 +789,30 @@ func (c *PiConnector) ensureInstalled() error {
 	}
 
 	c.installCheck = true
+	c.installCheckTime = time.Now()
 
-	// Check if pi command exists
-	if _, err := exec.LookPath("pi"); err == nil {
+	// Check if pi command exists using internal check to avoid lock reentrancy
+	// Note: We hold the write lock, so we can't call CheckInstallation() which acquires its own locks
+	piPath, lookErr := c.executor.LookPath("pi")
+	if lookErr == nil {
+		// Pi is installed - cache the path
+		c.piPath = piPath
+		c.pathsCached = true
+		c.pathsCacheTime = time.Now()
 		c.installed = true
 		return nil
 	}
 
-	// Try to install Pi
-	log.Printf("[PiConnector] Pi not found, attempting installation...")
+	// Pi not found - try to install (release lock during install to avoid deadlock)
+	c.mu.Unlock()
+	installErr := c.Install()
+	c.mu.Lock()
 
-	// Check if npm is available
-	if _, err := exec.LookPath("npm"); err != nil {
+	if installErr != nil {
 		c.installed = false
-		return fmt.Errorf("npm not found, cannot install pi. Please install Node.js and npm first")
+		return installErr
 	}
 
-	// Install Pi globally
-	cmd := exec.Command("npm", "install", "-g", "@mariozechner/pi-coding-agent")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		c.installed = false
-		return fmt.Errorf("failed to install pi: %v\nOutput: %s", err, string(output))
-	}
-
-	// Verify installation
-	if _, err := exec.LookPath("pi"); err != nil {
-		c.installed = false
-		return fmt.Errorf("pi installation failed: command not found after install")
-	}
-
-	log.Printf("[PiConnector] Pi installed successfully")
 	c.installed = true
 	return nil
 }

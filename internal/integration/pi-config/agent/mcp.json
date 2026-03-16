@@ -1,0 +1,65 @@
+{
+  "version": "1.0",
+  "servers": {
+    "go": {
+      "command": "gopls",
+      "args": ["serve", "-rpc.trace"],
+      "enabled": true,
+      "rootUri": "file://${workspaceFolder}",
+      "settings": {
+        "gopls": {
+          "formatting.gofumpt": false,
+          "ui.diagnostic.annotations": {
+            "bounds": true,
+            "escape": true,
+            "inline": true,
+            "nil": true
+          }
+        }
+      }
+    },
+    "typescript": {
+      "command": "typescript-language-server",
+      "args": ["--stdio"],
+      "enabled": true,
+      "rootUri": "file://${workspaceFolder}",
+      "settings": {
+        "typescript": {
+          "format.enable": true,
+          "suggest.completeFunctionCalls": true
+        }
+      }
+    }
+  },
+  "capabilities": {
+    "textDocumentSync": 1,
+    "hoverProvider": true,
+    "definitionProvider": {
+      "enabled": true
+    },
+    "referencesProvider": {
+      "enabled": true
+    },
+    "documentSymbolProvider": {
+      "enabled": true
+    },
+    "completionProvider": {
+      "triggerCharacters": [".", ":", ">"],
+      "resolveProvider": true
+    }
+  },
+  "lspCommands": {
+    "definition": {
+      "description": "Get definition location for symbol at position",
+      "usage": "lsp definition <file> <line>:<column>"
+    },
+    "reference": {
+      "description": "Find all references to symbol at position",
+      "usage": "lsp reference <file> <line>:<column>"
+    },
+    "outline": {
+      "description": "Get document outline (symbols)",
+      "usage": "lsp outline <file>"
+    }
+  }
+}

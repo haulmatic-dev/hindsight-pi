@@ -110,6 +110,41 @@ func (wt *WorkerTracker) TrackWorker(pid int, beadID string, projectPath string)
 	return nil
 }
 
+// UpdateWorkerPID updates a worker's PID from placeholder (0) to actual PID
+// This is used when a worker is initially tracked with PID 0 and later gets a real PID
+func (wt *WorkerTracker) UpdateWorkerPID(oldPID int, newPID int, beadID string) error {
+	wt.mu.Lock()
+	defer wt.mu.Unlock()
+
+	// Find and remove the old entry
+	record, exists := wt.workers[oldPID]
+	if !exists {
+		return fmt.Errorf("worker with PID %d not found", oldPID)
+	}
+
+	// Verify this is the correct bead
+	if record.BeadID != beadID {
+		return fmt.Errorf("bead ID mismatch: expected %s, got %s", record.BeadID, beadID)
+	}
+
+	// Remove old entry and create new one with correct PID
+	delete(wt.workers, oldPID)
+	wt.workers[newPID] = &WorkerRecord{
+		PID:         newPID,
+		BeadID:      record.BeadID,
+		ProjectPath: record.ProjectPath,
+		StartedAt:   record.StartedAt,
+		Status:      record.Status,
+	}
+
+	if err := wt.save(); err != nil {
+		return fmt.Errorf("failed to update worker PID from %d to %d: %w", oldPID, newPID, err)
+	}
+
+	log.Printf("[WorkerTracker] Updated worker PID from %d to %d for bead %s", oldPID, newPID, record.BeadID)
+	return nil
+}
+
 // MarkWorkerCompleted marks a worker as completed
 func (wt *WorkerTracker) MarkWorkerCompleted(pid int, exitCode int) error {
 	wt.mu.Lock()
