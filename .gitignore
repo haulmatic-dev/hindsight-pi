@@ -38,6 +38,7 @@ logs/
 # Database
 *.db
 *.sqlite
+storage.sqlite3*
 
 # Temporary files
 tmp/
