@@ -61,7 +61,10 @@ coverage.html
 # Cass (cache directory)
 .cass/
 
-# Beads
-.beads/
-.hydra/
-hydra.pid
+# Pi agent runtime directories
+internal/pi/.agents/
+internal/pi/.claude/
+internal/pi/.factory/
+internal/pi/.goose/
+internal/pi/.pi/
+internal/pi/skills-lock.json
