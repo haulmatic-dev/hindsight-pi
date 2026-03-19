@@ -255,16 +255,54 @@ func generateAgentID() string {
 }
 
 // parseConfig parses configuration from environment variables
+// Supports both legacy individual env vars and new HYDRA_BEAD_JSON for full bead context
 func parseConfig() WorkerConfig {
 	var config WorkerConfig
 
-	config.BeadID = os.Getenv("HYDRA_BEAD_ID")
-	config.Project = os.Getenv("HYDRA_PROJECT")
-	config.ProjectPath = os.Getenv("HYDRA_PROJECT_PATH")
-	config.Repo = os.Getenv("HYDRA_REPO")
-	config.AgentType = os.Getenv("HYDRA_AGENT_TYPE")
-	config.BeadTitle = os.Getenv("HYDRA_BEAD_TITLE")
-	config.BeadDescription = os.Getenv("HYDRA_BEAD_DESCRIPTION")
+	// Check for full bead JSON first (new enhanced context)
+	if beadJSON := os.Getenv("HYDRA_BEAD_JSON"); beadJSON != "" {
+		var bead types.Bead
+		if err := json.Unmarshal([]byte(beadJSON), &bead); err == nil {
+			// Successfully parsed full bead JSON
+			config.BeadID = string(bead.ID)
+			config.Project = bead.Project
+			config.Repo = bead.Repo
+			// Use actual bead.Type instead of AgentType env var
+			config.AgentType = bead.Type
+			config.BeadTitle = bead.Title
+			config.BeadDescription = bead.Description
+			// Note: Metadata, Labels, Dependencies are available in the bead object
+			// but not in WorkerConfig. They're passed via the full bead object.
+		} else {
+			log.Printf("[WARN] Failed to parse HYDRA_BEAD_JSON: %v", err)
+		}
+	}
+
+	// Legacy env vars (override JSON values if explicitly set)
+	if v := os.Getenv("HYDRA_BEAD_ID"); v != "" {
+		config.BeadID = v
+	}
+	if v := os.Getenv("HYDRA_PROJECT"); v != "" {
+		config.Project = v
+	}
+	if v := os.Getenv("HYDRA_PROJECT_PATH"); v != "" {
+		config.ProjectPath = v
+	}
+	if v := os.Getenv("HYDRA_REPO"); v != "" {
+		config.Repo = v
+	}
+	// Only use legacy AGENT_TYPE if JSON wasn't parsed or bead.Type was empty
+	if v := os.Getenv("HYDRA_AGENT_TYPE"); v != "" && config.AgentType == "" {
+		config.AgentType = v
+	}
+	if v := os.Getenv("HYDRA_BEAD_TITLE"); v != "" {
+		config.BeadTitle = v
+	}
+	if v := os.Getenv("HYDRA_BEAD_DESCRIPTION"); v != "" {
+		config.BeadDescription = v
+	}
+
+	// Default agent type if still empty
 	if config.AgentType == "" {
 		config.AgentType = "orchestrator"
 	}

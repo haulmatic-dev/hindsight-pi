@@ -387,6 +387,9 @@ type Overseer struct {
 
 	// TLDR indexer for deterministic code indexing
 	tldrIndexer *TLDRIndexer // Indexes repositories after code changes
+
+	// Epic scanner for periodic epic auto-close
+	epicScanner *EpicScanner // Scans and closes epics when all tasks complete
 }
 
 // NewOverseer creates a new overseer instance
@@ -488,6 +491,10 @@ func NewOverseer(config *Config) *Overseer {
 			o.maxDelay = defaultMaxDelay
 		}
 	}
+
+	// Initialize epic scanner (5 minute interval)
+	o.epicScanner = NewEpicScanner(5*time.Minute, o.beadsClient)
+	log.Printf("[EpicScanner] Initialized with 5 minute scan interval")
 
 	return o
 }
@@ -1037,6 +1044,12 @@ func (o *Overseer) Start(ctx context.Context) error {
 		o.queueInitialIndexing()
 	}
 
+	// Start epic scanner
+	if o.epicScanner != nil {
+		o.epicScanner.Start()
+		log.Println("🏛️  Epic scanner started")
+	}
+
 	o.running = true
 	ticker := time.NewTicker(o.beadDiscoveryInterval)
 	defer ticker.Stop()
@@ -1066,6 +1079,11 @@ func (o *Overseer) Start(ctx context.Context) error {
 			if o.tldrIndexer != nil {
 				o.tldrIndexer.Stop()
 				log.Println("📇 TLDR indexer stopped")
+			}
+			// Stop epic scanner
+			if o.epicScanner != nil {
+				o.epicScanner.Stop()
+				log.Println("🏛️  Epic scanner stopped")
 			}
 			return nil
 		case <-ticker.C:
@@ -2290,6 +2308,14 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
 	)
 
+	// Add full bead JSON for enhanced worker context
+	beadJSON, err := json.Marshal(bead)
+	if err == nil {
+		env = append(env, fmt.Sprintf("HYDRA_BEAD_JSON=%s", string(beadJSON)))
+	} else {
+		log.Printf("[WARN] Failed to marshal bead to JSON: %v", err)
+	}
+
 	// Pass API key to worker if configured
 	if o.config != nil && o.config.Agents.Pi.ApiKeyName != "" {
 		if apiKey := os.Getenv(o.config.Agents.Pi.ApiKeyName); apiKey != "" {
@@ -2777,6 +2803,12 @@ func (o *Overseer) shouldSpawnWorker(node *Node) bool {
 	// Skip approval beads that are in progress (waiting for user approval)
 	if node.Bead.Type == "approval" && node.Bead.Status == types.StatusInProgress {
 		log.Printf("⏸️  Skipping approval bead (waiting for user approval): %s", beadID)
+		return false
+	}
+
+	// Skip epics (organizational containers, not actionable)
+	if node.Bead.Type == "epic" {
+		log.Printf("⏸️  Skipping epic (organizational): %s", beadID)
 		return false
 	}
 
