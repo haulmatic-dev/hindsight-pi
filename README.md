@@ -193,9 +193,10 @@ Hydra's Collective Unconscious is a cross-project pattern learning system that e
 ### 🏗️ Architecture
 - [System Architecture](docs/architecture/system-architecture-20260309.md) - High-level design and components
 - [Agent Connector Architecture](docs/architecture/agent-connector-20260311.md) - Multi-agent support system
-- [Collective Unconscious](docs/collective-unconscious/test-results/TEST_RESULTS.md) - Pattern learning and injection
+- [Bead Structure Guide](docs/architecture/bead-structure-guide.md) - JSON Context, epics, and TDD workflow structure
+- [Bead Processing Flow](docs/architecture/bead-processing-flow-20260309.md) - End-to-end bead execution flow including TDD phases
 - [Worker Lifecycle](docs/architecture/worker-lifecycle-20260309.md) - How workers are spawned, monitored, and terminated
-- [Bead Processing Flow](docs/architecture/bead-processing-flow-20260309.md) - End-to-end bead execution flow
+- [Collective Unconscious](docs/collective-unconscious/test-results/TEST_RESULTS.md) - Pattern learning and injection
 - [Pi Agent Skills](docs/pi-agent-skills-implementation.md) - Automatic installation and management of 16 specialized coding skills for Pi agents
 
 ### ⚙️ Operations

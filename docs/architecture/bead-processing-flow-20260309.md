@@ -156,6 +156,8 @@ graph TD
 3. Not currently running
 4. Not already completed
 5. Not an approval-gate (manual approval required)
+6. Not an epic (organizational only, not actionable)
+7. Only implementation tasks and TDD sub-tasks are actionable
 
 ### Ready Queue Management
 
@@ -170,15 +172,20 @@ func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
             continue  // Skip already running
         }
         
-        // 3. Skip approval gates
+        // 3. Skip approval gates (require manual intervention)
         if bead.Type == "approval-gate" {
+            continue
+        }
+        
+        // 4. Skip epics (organizational containers, not actionable)
+        if bead.Type == "epic" {
             continue
         }
         
         readyBeads = append(readyBeads, bead)
     }
     
-    // 4. Sort by priority (high to low)
+    // 5. Sort by priority (high to low)
     sort.Slice(readyBeads, func(i, j int) bool {
         return readyBeads[i].Priority > readyBeads[j].Priority
     })
@@ -186,6 +193,239 @@ func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
     return readyBeads, nil
 }
 ```
+
+## TDD Workflow Integration
+
+The Hydra system enforces strict Test-Driven Development (TDD) workflows through bead dependencies. Each implementation task follows a standardized RED→GREEN→REFACTOR→SYNTAX flow where each phase blocks the next.
+
+### TDD Phase Chain
+
+```mermaid
+graph LR
+    A[RED<br/>Write Tests] --> B[GREEN<br/>Implementation]
+    B --> C[REFACTOR<br/>Clean Code]
+    C --> D[SYNTAX<br/>Validation]
+    D --> E[COMPLETE]
+    
+    style A fill:#ffcdd2
+    style B fill:#c8e6c9
+    style C fill:#fff9c4
+    style D fill:#e1bee7
+    style E fill:#b2dfdb
+```
+
+### Phase Descriptions
+
+| Phase | Purpose | Output | Success Criteria |
+|-------|---------|--------|------------------|
+| **RED** | Write failing tests | Test files | Tests exist and fail |
+| **GREEN** | Implement to pass tests | Implementation | All tests pass |
+| **REFACTOR** | Clean up code | Clean implementation | Tests still pass, code improved |
+| **SYNTAX** | Validate syntax/lint | Validated code | No syntax/lint errors |
+
+### Blocking Mechanism
+
+Each TDD phase creates a hard dependency:
+
+```mermaid
+sequenceDiagram
+    participant RED
+    participant GREEN
+    participant REFACTOR
+    participant SYNTAX
+    participant Complete
+    
+    RED->>RED: Write failing tests
+    RED->>GREEN: Unblock after close
+    
+    GREEN->>GREEN: Implement solution
+    GREEN->>GREEN: Run tests (must pass)
+    GREEN->>REFACTOR: Unblock after close
+    
+    REFACTOR->>REFACTOR: Clean up code
+    REFACTOR->>REFACTOR: Run tests (must still pass)
+    REFACTOR->>SYNTAX: Unblock after close
+    
+    SYNTAX->>SYNTAX: Run linting/syntax checks
+    SYNTAX->>SYNTAX: Fix any violations
+    SYNTAX->>Complete: Task complete
+```
+
+### Example: Feature Implementation
+
+```mermaid
+graph TD
+    subgraph FR001["Feature FR-001"]
+        A[FR-001 Master Epic] --> B[FR-001-RED]
+        B --> C[FR-001-GREEN]
+        C --> D[FR-001-REFACTOR]
+        D --> E[FR-001-SYNTAX]
+    end
+    
+    style A fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    style B fill:#ffcdd2
+    style C fill:#c8e6c9
+    style D fill:#fff9c4
+    style E fill:#e1bee7
+```
+
+### Phase Transition Rules
+
+1. **RED→GREEN**: Green bead is ready only when Red bead status = "closed"
+2. **GREEN→REFACTOR**: Refactor bead is ready only when Green bead status = "closed"
+3. **REFACTOR→SYNTAX**: Syntax bead is ready only when Refactor bead status = "closed"
+4. **No skipping**: Cannot jump from RED to REFACTOR or GREEN to SYNTAX
+
+This ensures:
+- Tests are written before implementation
+- Implementation passes tests before refactoring
+- Code is validated before marking complete
+- Full TDD discipline is maintained automatically
+
+## Epic Handling
+
+Epics are organizational containers that group related tasks together. They are **not actionable** and will never be processed by workers.
+
+### Epic Types
+
+```mermaid
+graph TD
+    A[Master Epic] --> B[Phase Epic 1]
+    A --> C[Phase Epic 2]
+    A --> D[Phase Epic 3]
+    
+    B --> E[Task 1.1]
+    B --> F[Task 1.2]
+    C --> G[Task 2.1]
+    D --> H[Task 3.1]
+    D --> I[Task 3.2]
+    
+    style A fill:#e3f2fd,stroke:#1565c0,stroke-width:3px
+    style B fill:#f3e5f5
+    style C fill:#f3e5f5
+    style D fill:#f3e5f5
+    style E fill:#e8f5e9
+    style F fill:#e8f5e9
+    style G fill:#e8f5e9
+    style H fill:#e8f5e9
+    style I fill:#e8f5e9
+```
+
+| Epic Type | Purpose | Auto-Close Rule |
+|-----------|---------|-----------------|
+| **Master Epic** | Top-level feature/PRD | Closes when all phase epics complete |
+| **Phase Epic** | Groups tasks by phase | Closes when all child tasks complete |
+
+### Epic Behavior
+
+**Non-Actionable**:
+```go
+// Epics are skipped during ready bead discovery
+if bead.Type == "epic" {
+    continue  // Never spawn workers for epics
+}
+```
+
+**Auto-Close Rules**:
+```mermaid
+flowchart TB
+    subgraph AutoClose["Epic Auto-Close Logic"]
+        A[Child Task Closes] --> B{Any remaining<br/>open children?}
+        B -->|Yes| C[Keep Epic Open]
+        B -->|No| D[Auto-Close Epic]
+        D --> E{Parent is Epic?}
+        E -->|Yes| F[Check Parent Epic]
+        E -->|No| G[Done]
+    end
+```
+
+**Example Lifecycle**:
+```
+1. FR-001 Master Epic created (status: open)
+   ├── FR-001-Phase1 Epic (status: open)
+   │   ├── FR-001-1.1 Task (status: open)
+   │   └── FR-001-1.2 Task (status: open)
+   └── FR-001-Phase2 Epic (status: open)
+       └── FR-001-2.1 Task (status: open)
+
+2. FR-001-1.1 completes → Phase1 still has open children
+3. FR-001-1.2 completes → Phase1 auto-closes → Master still has open children
+4. FR-001-2.1 completes → Phase2 auto-closes → Master auto-closes
+```
+
+### Epic Best Practices
+
+1. **Master Epics**: Create one per PRD/major feature
+2. **Phase Epics**: Group by logical phases (design, implementation, testing)
+3. **Task Granularity**: Keep tasks atomic (2-4 hours of work)
+4. **Dependencies**: Set dependencies between phase epics for sequential work
+
+## JSON Context
+
+Each bead contains structured JSON Context that provides agents with task-specific metadata, acceptance criteria, and execution instructions.
+
+### Context Structure
+
+```json
+{
+  "bead_id": "proj-feature-001",
+  "title": "Implement User Authentication",
+  "description": "Add login/logout functionality",
+  "context": {
+    "acceptance_criteria": [
+      "Users can login with email/password",
+      "Passwords are hashed using bcrypt",
+      "Session tokens expire after 24h"
+    ],
+    "files_to_modify": ["src/auth.js", "src/middleware/auth.js"],
+    "test_requirements": {
+      "coverage_minimum": 80,
+      "test_files": ["tests/auth.test.js"]
+    },
+    "tdd_phase": "GREEN",
+    "parent_epic": "proj-auth-epic",
+    "estimated_effort": "2-4h"
+  }
+}
+```
+
+### Agent Parsing
+
+Agents receive the context through environment variables and parse it to understand task requirements:
+
+```go
+// Worker retrieves context from bead
+contextJSON := bead.Context
+var taskContext TaskContext
+if err := json.Unmarshal([]byte(contextJSON), &taskContext); err != nil {
+    log.Printf("[Worker] Failed to parse context: %v", err)
+    return err
+}
+
+// Agent uses context to guide execution
+prompt := fmt.Sprintf(`
+Task: %s
+Acceptance Criteria:
+%s
+Test Requirements: %v
+TDD Phase: %s
+`, bead.Title, 
+   strings.Join(taskContext.AcceptanceCriteria, "\n"),
+   taskContext.TestRequirements,
+   taskContext.TDDPhase)
+```
+
+### Context Usage
+
+The JSON Context enables:
+- **Acceptance Criteria Validation**: Agents verify completion against defined criteria
+- **File Targeting**: Context specifies which files to create/modify
+- **TDD Phase Awareness**: Agents know which TDD phase to execute
+- **Test Requirements**: Coverage minimums and test file locations
+- **Effort Estimation**: Helps with scheduling and resource allocation
+
+For complete details on context schema, validation, and best practices, see:
+**[Bead Structure Guide](./bead-structure-guide.md)**
 
 ## Phase 2: Scheduling
 
@@ -496,3 +736,4 @@ flowchart TB
 - [Worker Lifecycle](./worker-lifecycle-20260309.md) - Detailed worker states
 - [Configuration Guide](../operations/configuration-guide-20260309.md) - Tuning performance
 - [Troubleshooting](../operations/troubleshooting-20260309.md) - Debugging flow issues
+- [Bead Structure Guide](./bead-structure-guide.md) - Complete JSON Context reference
