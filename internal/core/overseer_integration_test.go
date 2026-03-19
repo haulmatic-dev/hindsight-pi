@@ -16,10 +16,11 @@ type mockBeadsClient struct {
 	listErr    error
 	getErr     error
 	closeErr   error
-	closeCalls []closeCall
+	closeCalls []mockCloseCall
 }
 
-type closeCall struct {
+// mockCloseCall tracks CloseBead invocations for testing
+type mockCloseCall struct {
 	projectPath string
 	repoName    string
 	beadID      types.BeadID
@@ -29,7 +30,7 @@ type closeCall struct {
 func newMockBeadsClient() *mockBeadsClient {
 	return &mockBeadsClient{
 		beads:      make(map[string]types.Bead),
-		closeCalls: make([]closeCall, 0),
+		closeCalls: make([]mockCloseCall, 0),
 	}
 }
 
@@ -82,7 +83,7 @@ func (m *mockBeadsClient) CloseBead(projectPath, repoName string, beadID types.B
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.closeCalls = append(m.closeCalls, closeCall{
+	m.closeCalls = append(m.closeCalls, mockCloseCall{
 		projectPath: projectPath,
 		repoName:    repoName,
 		beadID:      beadID,
@@ -162,10 +163,10 @@ func (m *mockBeadsClient) addBead(bead types.Bead) {
 	m.beads[string(bead.ID)] = bead
 }
 
-func (m *mockBeadsClient) getCloseCalls() []closeCall {
+func (m *mockBeadsClient) getCloseCalls() []mockCloseCall {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return append([]closeCall{}, m.closeCalls...)
+	return append([]mockCloseCall{}, m.closeCalls...)
 }
 
 func (m *mockBeadsClient) UpdateBeadStatus(projectPath string, beadID types.BeadID, status types.BeadStatus) error {

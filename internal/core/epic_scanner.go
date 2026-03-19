@@ -16,6 +16,26 @@ type EpicScanner struct {
 	ticker    *time.Ticker
 	stopChan  chan struct{}
 	isRunning bool
+	// For testing: mock beads storage
+	mockBeads map[string]types.Bead
+	// For testing: track close calls
+	closeCalls []closeCall
+}
+
+// closeCall tracks epic close operations for testing
+type closeCall struct {
+	beadID types.BeadID
+	reason string
+}
+
+// SetMockBeads sets mock beads for testing (only used in test mode)
+func (s *EpicScanner) SetMockBeads(beads map[string]types.Bead) {
+	s.mockBeads = beads
+}
+
+// GetCloseCalls returns recorded close calls for testing
+func (s *EpicScanner) GetCloseCalls() []closeCall {
+	return s.closeCalls
 }
 
 // NewEpicScanner creates a new epic scanner with the specified interval and client
@@ -36,19 +56,8 @@ func (s *EpicScanner) Start() {
 	s.isRunning = true
 	s.ticker = time.NewTicker(s.interval)
 
-	go func() {
-		for {
-			select {
-			case <-s.ticker.C:
-				s.scanAndCloseEpics()
-			case <-s.stopChan:
-				s.ticker.Stop()
-				return
-			}
-		}
-	}()
-
-	log.Printf("[EpicScanner] Started with %v interval", s.interval)
+	go s.scanLoop()
+	log.Printf("[EpicScanner] Started with interval %v", s.interval)
 }
 
 // Stop halts the periodic scanning
@@ -57,27 +66,30 @@ func (s *EpicScanner) Stop() {
 		return
 	}
 
-	s.isRunning = false
+	s.ticker.Stop()
 	close(s.stopChan)
-	log.Println("[EpicScanner] Stopped")
+	s.isRunning = false
+	log.Printf("[EpicScanner] Stopped")
 }
 
-// scanAndCloseEpics scans all open epics and closes those with no open tasks
-func (s *EpicScanner) scanAndCloseEpics() {
-	if s.client == nil {
-		log.Println("[EpicScanner] No client configured, skipping scan")
-		return
+// scanLoop is the main scanning loop
+func (s *EpicScanner) scanLoop() {
+	for {
+		select {
+		case <-s.ticker.C:
+			s.scanEpics()
+		case <-s.stopChan:
+			return
+		}
 	}
+}
 
-	log.Println("[EpicScanner] Starting epic scan...")
+// scanEpics performs a single scan of all epics
+func (s *EpicScanner) scanEpics() {
+	log.Printf("[EpicScanner] Scanning epics...")
 
 	// Get all open epics
 	openEpics := s.getOpenEpics()
-	if len(openEpics) == 0 {
-		log.Println("[EpicScanner] No open epics found")
-		return
-	}
-
 	log.Printf("[EpicScanner] Found %d open epics", len(openEpics))
 
 	// Check each epic
@@ -86,14 +98,13 @@ func (s *EpicScanner) scanAndCloseEpics() {
 	}
 }
 
-// getOpenEpics returns all beads with type "epic" and status "open"
+// getOpenEpics returns all open epics
 func (s *EpicScanner) getOpenEpics() []types.Bead {
 	var epics []types.Bead
 
-	// Query all beads - in real implementation, this would filter by type
-	// For now, we iterate through the mock or query via client
-	if mockClient, ok := s.client.(*mockBeadsClient); ok {
-		for _, bead := range mockClient.beads {
+	// Query all beads - use mock storage if set (for testing)
+	if s.mockBeads != nil {
+		for _, bead := range s.mockBeads {
 			if bead.Type == "epic" && (bead.Status == types.StatusOpen || bead.Status == types.StatusInProgress) {
 				epics = append(epics, bead)
 			}
@@ -144,8 +155,8 @@ func (s *EpicScanner) getEpicReqRange(epic types.Bead) *[2]int {
 func (s *EpicScanner) countOpenTasksInRange(reqRange *[2]int) int {
 	count := 0
 
-	if mockClient, ok := s.client.(*mockBeadsClient); ok {
-		for _, bead := range mockClient.beads {
+	if s.mockBeads != nil {
+		for _, bead := range s.mockBeads {
 			if bead.Type != "task" {
 				continue
 			}
@@ -173,13 +184,11 @@ func (s *EpicScanner) countOpenTasksInRange(reqRange *[2]int) int {
 func (s *EpicScanner) closeEpic(epic types.Bead) {
 	log.Printf("[EpicScanner] Closing epic %s - all tasks complete", epic.ID)
 
-	// For mock client, just record the call
-	if mockClient, ok := s.client.(*mockBeadsClient); ok {
-		mockClient.closeCalls = append(mockClient.closeCalls, closeCall{
-			beadID: epic.ID,
-			reason: "all dependencies resolved",
-		})
-	}
+	// Record the close call (for testing or logging)
+	s.closeCalls = append(s.closeCalls, closeCall{
+		beadID: epic.ID,
+		reason: "all dependencies resolved",
+	})
 }
 
 // getEpicForReq returns the epic ID for a given req number
