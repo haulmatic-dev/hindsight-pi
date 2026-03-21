@@ -190,7 +190,7 @@ func (d *ConfigChangeDetector) mcpChanged(old, new MCPConfig) bool {
 
 // RefreshHandler creates and manages tool clients based on config changes
 type RefreshHandler struct {
-	cassClient *CassMemoryClient
+	cassClient *intelligence.CassMemoryClient
 	tldrClient *intelligence.TLDRClient
 	gptCache   *GPTCacheClient
 	config     *Config
@@ -230,10 +230,10 @@ func (h *RefreshHandler) refreshCassMemory(change ToolConfigChange) {
 		return
 	}
 
-	h.cassClient = NewCassMemoryClient(
-		"http://127.0.0.1:5000",
-		time.Second*5,
-		cfg.QueryLimit,
+	h.cassClient = intelligence.NewCassMemoryClient(
+		intelligence.WithEnabled(true),
+		intelligence.WithTimeout(time.Second*5),
+		intelligence.WithQueryLimit(cfg.QueryLimit),
 	)
 
 	h.logRefresh(change.Tool.String(), change.IsReconfigure(),
@@ -308,7 +308,7 @@ func (h *RefreshHandler) logRefresh(toolName string, wasReconfigure bool, keyVal
 }
 
 // GetCassClient returns the current cass_memory client
-func (h *RefreshHandler) GetCassClient() *CassMemoryClient {
+func (h *RefreshHandler) GetCassClient() *intelligence.CassMemoryClient {
 	return h.cassClient
 }
 
@@ -323,7 +323,7 @@ func (h *RefreshHandler) GetGPTCacheClient() *GPTCacheClient {
 }
 
 // SetClients allows injection of existing clients (for testing or initialization)
-func (h *RefreshHandler) SetClients(cass *CassMemoryClient, tldr *intelligence.TLDRClient, gpt *GPTCacheClient) {
+func (h *RefreshHandler) SetClients(cass *intelligence.CassMemoryClient, tldr *intelligence.TLDRClient, gpt *GPTCacheClient) {
 	h.cassClient = cass
 	h.tldrClient = tldr
 	h.gptCache = gpt

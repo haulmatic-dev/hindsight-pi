@@ -674,6 +674,8 @@ func createTestOverseerWithCass(t *testing.T, cassClient *mockCassSearchClient) 
 		config:        config,
 		activeWorkers: make(map[string]*types.Worker),
 		retries:       make(map[string]*beadRetryInfo),
+		dag:           NewDAG(), // Initialize DAG to avoid nil pointer dereference
+		completed:     make(map[string]bool),
 	}
 
 	// Create CASS client only if mock is provided

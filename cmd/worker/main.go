@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/haulmatic-dev/hydra/internal/intelligence"
+	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -30,10 +30,75 @@ type WorkerConfig struct {
 	AgentType       string
 	BeadTitle       string
 	BeadDescription string
+	Hindsight       *HindsightContext
 	MCP             struct {
 		Enabled bool
 		URL     string
 	}
+}
+
+// HindsightContext represents context passed from the overseer about related
+// execution memories and patterns relevant to the current bead.
+type HindsightContext struct {
+	// RelatedMemories contains past execution memories that may be relevant
+	RelatedMemories []ExecutionMemoryReference `json:"related_memories,omitempty"`
+
+	// ProjectPatterns contains patterns learned from this project
+	ProjectPatterns []PatternReference `json:"project_patterns,omitempty"`
+
+	// CrossProjectPatterns contains patterns from other projects that may apply
+	CrossProjectPatterns []PatternReference `json:"cross_project_patterns,omitempty"`
+
+	// Metadata contains additional context information
+	Metadata map[string]string `json:"metadata,omitempty"`
+
+	// ContextID is a unique identifier for this context snapshot
+	ContextID string `json:"context_id,omitempty"`
+
+	// GeneratedAt is when this context was generated
+	GeneratedAt time.Time `json:"generated_at,omitempty"`
+}
+
+// ExecutionMemoryReference represents a reference to a past execution memory
+type ExecutionMemoryReference struct {
+	// MemoryID is the unique identifier of the memory
+	MemoryID string `json:"memory_id"`
+
+	// BeadID of the referenced execution
+	BeadID string `json:"bead_id"`
+
+	// Title of the referenced bead
+	Title string `json:"title,omitempty"`
+
+	// Type of the referenced bead
+	Type string `json:"type,omitempty"`
+
+	// Success indicates if the referenced execution succeeded
+	Success bool `json:"success"`
+
+	// RelevanceScore indicates how relevant this memory is (0.0 - 1.0)
+	RelevanceScore float64 `json:"relevance_score,omitempty"`
+
+	// Summary is a brief description of what was learned
+	Summary string `json:"summary,omitempty"`
+}
+
+// PatternReference represents a pattern that may be relevant to the current task
+type PatternReference struct {
+	// PatternID is the unique identifier of the pattern
+	PatternID string `json:"pattern_id"`
+
+	// Category of the pattern (e.g., "best-practice", "anti-pattern")
+	Category string `json:"category"`
+
+	// Description of the pattern
+	Description string `json:"description"`
+
+	// SourceProject indicates where this pattern was learned
+	SourceProject string `json:"source_project,omitempty"`
+
+	// RelevanceScore indicates how relevant this pattern is (0.0 - 1.0)
+	RelevanceScore float64 `json:"relevance_score,omitempty"`
 }
 
 // RetryPolicy defines the retry strategy for execution
@@ -153,6 +218,22 @@ func main() {
 	log.Printf("🚀 Worker starting for bead: %s", beadID)
 	log.Printf("   Project: %s (path: %s), Repo: %s, Agent: %s", config.Project, projectPath, config.Repo, config.AgentType)
 	log.Printf("   Agent ID: %s", agentID)
+
+	// Log Hindsight context if available
+	if config.Hindsight != nil {
+		logHindsightContext(config.Hindsight)
+	} else {
+		log.Printf("   Hindsight Context: (not provided)")
+	}
+
+	// Validate configuration after parsing
+	if validationErrs := validateWorkerConfig(config); len(validationErrs) > 0 {
+		log.Printf("❌ Configuration validation failed:")
+		for _, err := range validationErrs {
+			log.Printf("   - %s", err)
+		}
+		log.Fatalf("Worker cannot start due to configuration errors")
+	}
 
 	// Initialize MCP client
 	var mcpClient *mcp.Client
@@ -302,6 +383,9 @@ func parseConfig() WorkerConfig {
 		config.BeadDescription = v
 	}
 
+	// Parse Hindsight context from environment variable
+	config.Hindsight = parseHindsightContext()
+
 	// Default agent type if still empty
 	if config.AgentType == "" {
 		config.AgentType = "orchestrator"
@@ -324,6 +408,85 @@ func parseConfig() WorkerConfig {
 	}
 
 	return config
+}
+
+// parseHindsightContext parses the HYDRA_HISTORIESIGHT_CONTEXT environment variable
+// and deserializes it from JSON format. Returns nil if the variable is not set or
+// parsing fails.
+func parseHindsightContext() *HindsightContext {
+	contextJSON := os.Getenv("HYDRA_HISTORIESIGHT_CONTEXT")
+	if contextJSON == "" {
+		return nil
+	}
+
+	var ctx HindsightContext
+	if err := json.Unmarshal([]byte(contextJSON), &ctx); err != nil {
+		log.Printf("[WARN] Failed to parse HYDRA_HISTORIESIGHT_CONTEXT: %v", err)
+		return nil
+	}
+
+	return &ctx
+}
+
+// logHindsightContext logs the hindsight context information
+func logHindsightContext(ctx *HindsightContext) {
+	if ctx == nil {
+		return
+	}
+
+	log.Printf("   Hindsight Context: %s (generated: %s)", ctx.ContextID, ctx.GeneratedAt.Format(time.RFC3339))
+
+	if len(ctx.RelatedMemories) > 0 {
+		log.Printf("   Related Memories: %d", len(ctx.RelatedMemories))
+		for _, mem := range ctx.RelatedMemories {
+			status := "✓"
+			if !mem.Success {
+				status = "✗"
+			}
+			log.Printf("     %s %s (relevance: %.2f) - %s", status, mem.BeadID, mem.RelevanceScore, mem.Summary)
+		}
+	}
+
+	if len(ctx.ProjectPatterns) > 0 {
+		log.Printf("   Project Patterns: %d", len(ctx.ProjectPatterns))
+	}
+
+	if len(ctx.CrossProjectPatterns) > 0 {
+		log.Printf("   Cross-Project Patterns: %d", len(ctx.CrossProjectPatterns))
+	}
+}
+
+// validateWorkerConfig validates the worker configuration and returns a list of errors
+// It handles graceful error reporting for missing or malformed context
+func validateWorkerConfig(config WorkerConfig) []string {
+	var errors []string
+
+	// Validate required fields
+	if config.BeadID == "" {
+		errors = append(errors, "HYDRA_BEAD_ID is required (set HYDRA_BEAD_ID or HYDRA_BEAD_JSON)")
+	} else {
+		// Validate bead ID format
+		if _, err := types.ParseBeadID(config.BeadID); err != nil {
+			errors = append(errors, fmt.Sprintf("Invalid bead ID format %q: %v", config.BeadID, err))
+		}
+	}
+
+	// Validate project (warn but don't fail if missing)
+	if config.Project == "" {
+		log.Printf("[WARN] HYDRA_PROJECT not set, may cause issues with bead closure")
+	}
+
+	// Validate project path (warn if missing)
+	if config.ProjectPath == "" {
+		log.Printf("[WARN] HYDRA_PROJECT_PATH not set, will use project name as fallback")
+	}
+
+	// Validate agent type
+	if config.AgentType == "" {
+		log.Printf("[WARN] Agent type not specified, defaulting to 'orchestrator'")
+	}
+
+	return errors
 }
 
 // initializeMCP initializes and connects the MCP client
@@ -780,7 +943,7 @@ func buildOpencodeCommand(bead types.Bead, agentType string, projectPath string)
 	return cmd
 }
 
-// recordExecutionResult records the execution outcome to cass_memory
+// recordExecutionResult records the execution outcome to hindsight memory
 func recordExecutionResult(
 	bead types.Bead,
 	result *ExecutionResult,
@@ -791,36 +954,42 @@ func recordExecutionResult(
 		return
 	}
 
-	// Initialize cass_memory client
-	cassClient := intelligence.NewCassMemoryClient()
-	if !cassClient.IsEnabled() {
-		log.Println("ℹ️ cass_memory not enabled, skipping result recording")
+	// Initialize hindsight client
+	hindsightClient := hindsight.NewClient()
+	if !hindsightClient.IsEnabled() {
+		log.Println("ℹ️ Hindsight not enabled, skipping result recording")
 		return
 	}
 
-	// Determine status for recording
-	status := "failure"
-	if result.Success {
-		status = "success"
+	// Create execution memory with structured data
+	memory := hindsight.NewExecutionMemory(bead, agentID).
+		WithAgentType(result.AgentType).
+		WithOutcome(
+			result.Success,
+			result.ExitCode,
+			result.Output,
+			result.Error,
+			result.Duration,
+			result.Attempts,
+		)
+
+	// Add target files from bead metadata
+	targetFiles := extractTargetFiles(bead)
+	if len(targetFiles) > 0 {
+		memory.Files.TargetFiles = targetFiles
 	}
 
-	// Build success/failure pattern
-	pattern := buildSuccessPattern(bead, result)
-	if pattern == "" {
-		log.Println("[WARN] Empty pattern generated, skipping recording")
-		return
-	}
-
-	// Get category for agent type
-	category := intelligence.GetCategoryForAgentType(result.AgentType)
-
-	// Add pattern to cass_memory
-	if err := cassClient.AddPattern(pattern, category); err != nil {
-		log.Printf("[WARN] Failed to record pattern: %v", err)
-		streamLog(mcpClient, "warn", fmt.Sprintf("Failed to record pattern: %v", err))
+	// Retain the execution memory in hindsight
+	retainResult, err := hindsightClient.Retain(memory)
+	if err != nil {
+		log.Printf("[WARN] Failed to retain execution memory: %v", err)
+		streamLog(mcpClient, "warn", fmt.Sprintf("Failed to retain execution memory: %v", err))
+	} else if !retainResult.Success {
+		log.Printf("[WARN] Hindsight retention failed: %s", retainResult.Error)
+		streamLog(mcpClient, "warn", fmt.Sprintf("Hindsight retention failed: %s", retainResult.Error))
 	} else {
-		log.Printf("✅ Recorded %s pattern to cass_memory (category: %s)", status, category)
-		streamLog(mcpClient, "info", fmt.Sprintf("Recorded %s pattern to cass_memory", status))
+		log.Printf("✅ Retained execution memory in Hindsight (memory_id: %s)", retainResult.MemoryID)
+		streamLog(mcpClient, "info", fmt.Sprintf("Retained execution memory in Hindsight"))
 	}
 }
 

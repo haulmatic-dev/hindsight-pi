@@ -3,27 +3,27 @@
 /**
  * llm-tldr wrapper script with logging
  * Logs all llm-tldr commands and their responses
- * 
+ *
  * Usage: Same as llm-tldr command
  * Example: llm-tldr search "authentication"
  */
 
-const { spawn } = require('child_process');
-const path = require('path');
-const fs = require('fs');
+const { spawn } = require('node:child_process');
+const path = require('node:path');
+const fs = require('node:fs');
 
 // Find the real llm-tldr binary, excluding this wrapper script
 // Use 'which' command with modified PATH (excluding hydra/bin) to avoid recursion
-const { execSync } = require('child_process');
+const { execSync } = require('node:child_process');
 let TLDR_BINARY;
 try {
   // Get original PATH without hydra/bin to find the real binary
   const originalPath = process.env.PATH.replace(/[^:]*hydra\/bin:?/g, '');
-  TLDR_BINARY = execSync('which llm-tldr', { 
+  TLDR_BINARY = execSync('which llm-tldr', {
     encoding: 'utf8',
-    env: { ...process.env, PATH: originalPath }
+    env: { ...process.env, PATH: originalPath },
   }).trim();
-} catch (err) {
+} catch (_err) {
   console.error('[tldr-wrapper] ERROR: Could not find real llm-tldr binary');
   process.exit(1);
 }
@@ -47,20 +47,20 @@ function rotateLogIfNeeded() {
         console.error(`[tldr-wrapper] Rotated log to ${rotatedFile}`);
       }
     }
-  } catch (err) {
+  } catch (_err) {
     // Non-fatal, continue without rotation
   }
 }
 
 // Log entry format
 function createLogEntry(type, data) {
-  return JSON.stringify({
+  return `${JSON.stringify({
     timestamp: new Date().toISOString(),
     type,
     data,
     pid: process.pid,
-    cwd: process.cwd()
-  }) + '\n';
+    cwd: process.cwd(),
+  })}\n`;
 }
 
 // Main execution
@@ -77,8 +77,8 @@ async function main() {
     env: {
       HYDRA_BEAD_ID: process.env.HYDRA_BEAD_ID,
       HYDRA_PROJECT: process.env.HYDRA_PROJECT,
-      HYDRA_AGENT_TYPE: process.env.HYDRA_AGENT_TYPE
-    }
+      HYDRA_AGENT_TYPE: process.env.HYDRA_AGENT_TYPE,
+    },
   });
 
   try {
@@ -91,7 +91,7 @@ async function main() {
   const child = spawn(TLDR_BINARY, args, {
     stdio: ['inherit', 'pipe', 'pipe'],
     cwd: process.cwd(),
-    env: process.env
+    env: process.env,
   });
 
   let stdout = '';
@@ -119,7 +119,7 @@ async function main() {
       stdoutLength: stdout.length,
       stderrLength: stderr.length,
       stdout: stdout.substring(0, 10000), // Limit logged stdout
-      stderr: stderr.substring(0, 1000)   // Limit logged stderr
+      stderr: stderr.substring(0, 1000), // Limit logged stderr
     });
 
     try {
@@ -136,7 +136,7 @@ async function main() {
       command: 'llm-tldr',
       args,
       error: err.message,
-      duration: Date.now() - startTime
+      duration: Date.now() - startTime,
     });
 
     try {

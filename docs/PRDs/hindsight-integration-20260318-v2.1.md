@@ -582,22 +582,7 @@ Environment variable configuration and secure logging for LLM providers.
 - Environment variable name configurable via `llm_api_key_env` setting
 - API key logged with length only (never expose key value)
 
-### FR-027a: SQLite Storage Backend (Part 1/2)
-Use SQLite for embedded Hindsight storage in local development.
-
-**Acceptance Criteria:**
-- SQLite database stored at configurable path (default: ~/.hydra/hindsight.db)
-- Automatic schema migration on startup
-- pgvector extension not required for SQLite
-
-### FR-027b: SQLite Storage Backend (Part 2/2)
-Security and backup utilities for SQLite storage.
-
-**Acceptance Criteria:**
-- Database file permissions set to 0600
-- Backup/restore utilities documented
-
-### FR-028a: Observability and Logging (Part 1/2)
+### FR-027a: Observability and Logging (Part 1/2)
 Implement comprehensive logging for Hindsight operations.
 
 **Acceptance Criteria:**
@@ -605,14 +590,14 @@ Implement comprehensive logging for Hindsight operations.
 - All memory operations logged with duration and result count
 - Error logs include detailed context and stack traces
 
-### FR-028b: Observability and Logging (Part 2/2)
+### FR-027b: Observability and Logging (Part 2/2)
 Log format standardization and security for Hindsight operations.
 
 **Acceptance Criteria:**
 - Log format: `[HINDSIGHT] <operation> <bead_id> <result>`
 - No sensitive data (API keys, secrets) logged
 
-### FR-029a: cass_memory Deprecation and Removal (Part 1/2)
+### FR-028a: cass_memory Deprecation and Removal (Part 1/2)
 Remove all cass_memory dependencies and code.
 
 **Acceptance Criteria:**
@@ -620,7 +605,7 @@ Remove all cass_memory dependencies and code.
 - All cass_memory imports removed from codebase
 - cass_memory client initialization removed from overseer
 
-### FR-029b: cass_memory Deprecation and Removal (Part 2/2)
+### FR-028b: cass_memory Deprecation and Removal (Part 2/2)
 Code replacement and documentation update for cass_memory removal.
 
 **Acceptance Criteria:**
@@ -659,14 +644,14 @@ Support target scale of 200-500 beads/day across 10 developers.
 - Handle 50+ concurrent memory operations
 - Vector search latency remains <100ms with 100K vectors
 - Database size grows linearly with memory count
-- Horizontal scaling possible with external PostgreSQL
+- Horizontal scaling with read replicas
 
 ### NFR-004: Data Retention and Storage
 Define storage and retention policies for memory data.
 
 **Acceptance Criteria:**
 - Retention policy: utility-weighted (not time-based)
-- Storage format: SQLite for local, PostgreSQL for production
+- Storage: PostgreSQL with pgvector extension
 - Compression enabled for large memories (>10KB)
 - Automatic backup recommendations documented
 - Archive strategy for memories older than 2 years
@@ -677,7 +662,7 @@ Ensure secure handling of memory data and API keys.
 **Acceptance Criteria:**
 - LLM API keys stored in environment variables only
 - No secrets written to memory content or metadata
-- SQLite database permissions: 0600 (owner read/write only)
+- PostgreSQL connection credentials via environment variables
 - API key not logged in any output
 - Optional: API key authentication for Hindsight HTTP API
 
@@ -728,10 +713,9 @@ Define quality requirements for stored memories.
 │       │    HTTP API (localhost) │                               │
 │       │                         │                               │
 │  ┌────┴───────┐        ┌────────┴────────┐                      │
-│  │   Worker   │        │   SQLite DB     │                      │
-│  │  (Go)      │        │  ~/.hydra/      │                      │
-│  └────────────┘        │  hindsight.db   │                      │
-│                        └─────────────────┘                      │
+│  │   Worker   │        │  PostgreSQL DB  │                      │
+│  │  (Go)      │        │  + pgvector     │                      │
+│  └────────────┘        └─────────────────┘                      │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -766,8 +750,7 @@ Define quality requirements for stored memories.
 | Hindsight Server | Python | 3.10+ |
 | Hindsight Package | hindsight-all | Latest |
 | Go Client | HTTP REST | N/A |
-| Storage (Local) | SQLite | 3.35+ |
-| Storage (Prod) | PostgreSQL | 15+ |
+| Storage | PostgreSQL | 15+ |
 | Vector Extension | pgvector | 0.5+ |
 | LLM Provider | OpenAI-compatible | Any |
 
@@ -779,7 +762,11 @@ intelligence:
     enabled: true
     api_port: 8888
     bank_id: hydra
-    storage_path: ~/.hydra/hindsight.db
+    postgres_host: localhost
+    postgres_port: 5432
+    postgres_db: hindsight
+    postgres_user: hindsight
+    postgres_password_env: HINDSIGHT_DB_PASSWORD
     llm_provider: openai
     llm_model: kimi-k2-5
     llm_api_key_env: KIMI_API_KEY  # Reuses existing env var
@@ -1035,9 +1022,11 @@ var RetentionPeriods = map[int]time.Duration{
 **C1:** Utility-weighted retention policy (FR-024a, FR-024b, FR-024c)  
 **C2:** Expertise dashboard (FR-025a, FR-025b)  
 **C3:** LLM provider abstraction (FR-026a, FR-026b)  
-**C4:** SQLite storage backend (FR-027a, FR-027b)  
-**C5:** Observability and logging (FR-028a, FR-028b)  
-**C6:** cass_memory deprecation and removal (FR-029a, FR-029b)  
+**C4:** Observability and logging (FR-027a, FR-027b)  
+**C5:** cass_memory deprecation and removal (FR-028a, FR-028b)  
+**C6:** Scalability requirements (NFR-003)  
+**C7:** Data retention and storage (NFR-004)  
+**C8:** Configuration management (NFR-007)  
 **C7:** Scalability requirements (NFR-003)  
 **C8:** Data retention and storage (NFR-004)  
 **C9:** Configuration management (NFR-007)

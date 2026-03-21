@@ -107,6 +107,7 @@ type IntelligenceConfig struct {
 	SettledState          SettledStateConfig          `yaml:"settled_state"`
 	Patterns              PatternConfig               `yaml:"patterns"`
 	CollectiveUnconscious CollectiveUnconsciousConfig `yaml:"collective_unconscious"`
+	Hindsight             HindsightConfig             `yaml:"hindsight"`
 }
 
 // PatternConfig contains pattern extraction settings
@@ -201,6 +202,15 @@ type TLDRConfig struct {
 type GPTCacheConfig struct {
 	Enabled   bool   `yaml:"enabled"`
 	ServerURL string `yaml:"server_url"`
+}
+
+// HindsightConfig contains Hindsight memory service settings
+type HindsightConfig struct {
+	Enabled  bool          `yaml:"enabled"`
+	BaseURL  string        `yaml:"base_url"`
+	Timeout  time.Duration `yaml:"timeout"`
+	Limit    int           `yaml:"limit"`
+	MinScore float64       `yaml:"min_score"`
 }
 
 // OverseerConfig contains overseer-specific settings

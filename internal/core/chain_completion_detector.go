@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/internal/intelligence"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -227,8 +228,9 @@ type ChainPatternExtractor struct {
 	overseer         *Overseer
 	qualityGateSvc   *intelligence.QualityGateService
 	patternReviewSvc *intelligence.PatternReviewService
-	cassMemoryClient *intelligence.CassMemoryClient
+	hindsightClient  *hindsight.Client
 	tldrClient       *intelligence.TLDRClient
+	cassMemoryClient *intelligence.CassMemoryClient
 }
 
 func NewChainPatternExtractor(

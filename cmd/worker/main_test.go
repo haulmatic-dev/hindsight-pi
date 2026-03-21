@@ -3,13 +3,28 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
+// clearHydraEnvVars clears all HYDRA_* environment variables for test isolation
+func clearHydraEnvVars(t *testing.T) {
+	t.Helper()
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "HYDRA_") {
+			key := strings.SplitN(env, "=", 2)[0]
+			os.Unsetenv(key)
+		}
+	}
+}
+
 // TestParseConfig_WithBeadJSON verifies that parseConfig correctly deserializes HYDRA_BEAD_JSON
 func TestParseConfig_WithBeadJSON(t *testing.T) {
+	// Clear all HYDRA environment variables to ensure clean test isolation
+	clearHydraEnvVars(t)
+
 	// Create a full bead object
 	bead := types.Bead{
 		ID:          "hydra-test-123",
@@ -37,9 +52,8 @@ func TestParseConfig_WithBeadJSON(t *testing.T) {
 		t.Fatalf("Failed to marshal bead: %v", err)
 	}
 
-	// Set environment variable
-	os.Setenv("HYDRA_BEAD_JSON", string(beadJSON))
-	defer os.Unsetenv("HYDRA_BEAD_JSON")
+	// Set environment variable using t.Setenv for proper cleanup
+	t.Setenv("HYDRA_BEAD_JSON", string(beadJSON))
 
 	// Parse config
 	config := parseConfig()
@@ -72,24 +86,16 @@ func TestParseConfig_WithBeadJSON(t *testing.T) {
 
 // TestParseConfig_WithLegacyEnvVars verifies backward compatibility with legacy env vars
 func TestParseConfig_WithLegacyEnvVars(t *testing.T) {
-	// Clear any existing env vars
-	os.Unsetenv("HYDRA_BEAD_JSON")
+	// Clear all HYDRA environment variables to ensure clean test isolation
+	clearHydraEnvVars(t)
 
-	// Set legacy env vars
-	os.Setenv("HYDRA_BEAD_ID", "hydra-legacy-123")
-	os.Setenv("HYDRA_PROJECT", "legacy-project")
-	os.Setenv("HYDRA_REPO", "legacy-repo")
-	os.Setenv("HYDRA_AGENT_TYPE", "legacy-agent")
-	os.Setenv("HYDRA_BEAD_TITLE", "Legacy Title")
-	os.Setenv("HYDRA_BEAD_DESCRIPTION", "Legacy description")
-	defer func() {
-		os.Unsetenv("HYDRA_BEAD_ID")
-		os.Unsetenv("HYDRA_PROJECT")
-		os.Unsetenv("HYDRA_REPO")
-		os.Unsetenv("HYDRA_AGENT_TYPE")
-		os.Unsetenv("HYDRA_BEAD_TITLE")
-		os.Unsetenv("HYDRA_BEAD_DESCRIPTION")
-	}()
+	// Set legacy env vars using t.Setenv for proper cleanup
+	t.Setenv("HYDRA_BEAD_ID", "hydra-legacy-123")
+	t.Setenv("HYDRA_PROJECT", "legacy-project")
+	t.Setenv("HYDRA_REPO", "legacy-repo")
+	t.Setenv("HYDRA_AGENT_TYPE", "legacy-agent")
+	t.Setenv("HYDRA_BEAD_TITLE", "Legacy Title")
+	t.Setenv("HYDRA_BEAD_DESCRIPTION", "Legacy description")
 
 	// Parse config
 	config := parseConfig()

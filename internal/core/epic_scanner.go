@@ -98,6 +98,12 @@ func (s *EpicScanner) scanEpics() {
 	}
 }
 
+// scanAndCloseEpics performs a scan and closes epics with all tasks complete
+// This is a public method for testing purposes
+func (s *EpicScanner) scanAndCloseEpics() {
+	s.scanEpics()
+}
+
 // getOpenEpics returns all open epics
 func (s *EpicScanner) getOpenEpics() []types.Bead {
 	var epics []types.Bead
