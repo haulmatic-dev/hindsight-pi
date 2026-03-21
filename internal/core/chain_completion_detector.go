@@ -230,7 +230,6 @@ type ChainPatternExtractor struct {
 	patternReviewSvc *intelligence.PatternReviewService
 	hindsightClient  *hindsight.Client
 	tldrClient       *intelligence.TLDRClient
-	cassMemoryClient *intelligence.CassMemoryClient
 }
 
 func NewChainPatternExtractor(
@@ -238,10 +237,6 @@ func NewChainPatternExtractor(
 	qg *intelligence.QualityGateService,
 	prs *intelligence.PatternReviewService,
 ) *ChainPatternExtractor {
-	cassClient := intelligence.NewCassMemoryClient(
-		intelligence.WithEnabled(true),
-	)
-
 	// Use CLI mode for llm-tldr (HTTP daemon has Python compatibility issues)
 	tldrClient := intelligence.NewTLDRClient("", true, "llm-tldr", "", 30*time.Second)
 
@@ -249,7 +244,6 @@ func NewChainPatternExtractor(
 		overseer:         overseer,
 		qualityGateSvc:   qg,
 		patternReviewSvc: prs,
-		cassMemoryClient: cassClient,
 		tldrClient:       tldrClient,
 	}
 }
@@ -343,15 +337,6 @@ func (e *ChainPatternExtractor) reviewAndStore(pattern *intelligence.ExtractedPa
 			pattern.ID, entry.State)
 	}
 
-	if e.cassMemoryClient != nil && e.cassMemoryClient.IsEnabled() {
-		if err := e.cassMemoryClient.AddPattern(pattern.Description, "workflow"); err != nil {
-			log.Printf("[ChainPattern] Failed to store in cass_memory: %v", err)
-		} else {
-			log.Printf("[ChainPattern] Pattern stored in cass_memory: %s", pattern.ID)
-		}
-	} else {
-		log.Printf("[ChainPattern] CassMemory not available, storing locally")
-		log.Printf("[ChainPattern] Stored pattern locally: %s (confidence: %.2f)",
-			pattern.ID, pattern.Confidence)
-	}
+	log.Printf("[ChainPattern] Pattern stored locally: %s (confidence: %.2f)",
+		pattern.ID, pattern.Confidence)
 }

@@ -101,7 +101,6 @@ type projectsListConfig struct {
 
 // IntelligenceConfig contains configuration for intelligence services
 type IntelligenceConfig struct {
-	CassMemory            CassMemoryConfig            `yaml:"cass_memory"`
 	TLDR                  TLDRConfig                  `yaml:"tldr"`
 	GPTCache              GPTCacheConfig              `yaml:"gptcache"`
 	SettledState          SettledStateConfig          `yaml:"settled_state"`
@@ -131,7 +130,7 @@ type CollectiveUnconsciousConfig struct {
 
 // CUStorageConfig contains storage settings for Collective Unconscious
 type CUStorageConfig struct {
-	Backend  string        `yaml:"backend"` // "cass_memory", "postgres", "hybrid"
+	Backend  string        `yaml:"backend"` // "postgres", "hybrid"
 	CacheTTL time.Duration `yaml:"cache_ttl"`
 }
 
@@ -169,14 +168,6 @@ type CUSecurityConfig struct {
 	ScanForSecrets   bool     `yaml:"scan_for_secrets"`
 	AllowedLicenses  []string `yaml:"allowed_licenses"`
 	SanitizePatterns bool     `yaml:"sanitize_patterns"`
-}
-
-// CassMemoryConfig contains cass_memory service settings
-type CassMemoryConfig struct {
-	Enabled     bool          `yaml:"enabled"`
-	QueryLimit  int           `yaml:"query_limit"`
-	HistoryDays int           `yaml:"history_days"`
-	Timeout     time.Duration `yaml:"timeout"`
 }
 
 // TLDRIndexingConfig contains TLDR indexing settings
@@ -299,12 +290,6 @@ func DefaultConfig() *Config {
 			Port:    8080,
 		},
 		Intelligence: IntelligenceConfig{
-			CassMemory: CassMemoryConfig{
-				Enabled:     true,
-				QueryLimit:  10,
-				HistoryDays: 30,
-				Timeout:     5 * time.Second,
-			},
 			TLDR: TLDRConfig{
 				Enabled:   true,
 				BaseURL:   "http://127.0.0.1:8787",

@@ -36,7 +36,7 @@ type IntelligenceBundle struct {
 	GatheredAt      time.Time       `json:"gathered_at"`
 }
 
-// Pattern represents a learned pattern from cass_memory
+// Pattern represents a learned pattern from Hindsight
 type Pattern struct {
 	ID          string    `json:"id"`
 	Type        string    `json:"type"`
@@ -251,18 +251,17 @@ type Overseer struct {
 	spawner               WorkerSpawner // Interface for spawning workers (allows mocking in tests)
 	dag                   *DAG
 	dagMu                 sync.RWMutex
-	completed             map[string]bool                // Track completed beads for this session
-	retries               map[string]*beadRetryInfo      // Track retry state for failed beads
-	retriesMu             sync.RWMutex                   // Mutex for retries map
-	baseDelay             time.Duration                  // Base delay for exponential backoff
-	maxDelay              time.Duration                  // Maximum delay for exponential backoff
-	tldrClient            *intelligence.TLDRClient       // TLDR client for impact analysis
-	gptCache              *GPTCacheClient                // GPTCache client for caching
-	hindsightClient       HindsightClient                // Hindsight client for pre-execution context retrieval
-	cassClient            *intelligence.CassMemoryClient // cass_memory client for pattern storage/retrieval
-	bvClient              *bv.Client                     // BV client for graph analytics
-	intelMutex            sync.RWMutex                   // Mutex for intelligence clients
-	settledStateSvc       *SettledStateService           // Settled-state detection service
+	completed             map[string]bool           // Track completed beads for this session
+	retries               map[string]*beadRetryInfo // Track retry state for failed beads
+	retriesMu             sync.RWMutex              // Mutex for retries map
+	baseDelay             time.Duration             // Base delay for exponential backoff
+	maxDelay              time.Duration             // Maximum delay for exponential backoff
+	tldrClient            *intelligence.TLDRClient  // TLDR client for impact analysis
+	gptCache              *GPTCacheClient           // GPTCache client for caching
+	hindsightClient       HindsightClient           // Hindsight client for pre-execution context retrieval
+	bvClient              *bv.Client                // BV client for graph analytics
+	intelMutex            sync.RWMutex              // Mutex for intelligence clients
+	settledStateSvc       *SettledStateService      // Settled-state detection service
 
 	// MCP (Model Context Protocol) fields
 	mcpClient          *mcp.HTTPClient             // MCP HTTP client (Streamable HTTP)
@@ -452,17 +451,6 @@ func (o *Overseer) initializeIntelligenceClients() {
 
 	intellConfig := o.config.Intelligence
 
-	// Initialize cass_memory client if enabled
-	if intellConfig.CassMemory.Enabled {
-		o.cassClient = intelligence.NewCassMemoryClient(
-			intelligence.WithEnabled(intellConfig.CassMemory.Enabled),
-			intelligence.WithTimeout(intellConfig.CassMemory.Timeout),
-			intelligence.WithQueryLimit(intellConfig.CassMemory.QueryLimit),
-		)
-		log.Printf("[Intelligence] cass_memory client initialized (limit: %d, timeout: %v)",
-			intellConfig.CassMemory.QueryLimit, intellConfig.CassMemory.Timeout)
-	}
-
 	// Initialize TLDR client if enabled (CLI mode)
 	if intellConfig.TLDR.Enabled {
 		o.tldrClient = intelligence.NewTLDRClient(
@@ -570,49 +558,6 @@ func (o *Overseer) initializeChainCompletionDetector() {
 
 	log.Printf("[ChainCompletion] Detector initialized (interval: %v, timeout: %v)",
 		config.DetectionInterval, config.Timeout)
-}
-
-// queryCassMemoryContext queries cass_memory for relevant context with error handling
-func (o *Overseer) queryCassMemoryContext(client *intelligence.CassMemoryClient, bead *types.Bead, files []string) ([]ContextEntry, error) {
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), o.config.Intelligence.CassMemory.Timeout)
-	defer cancel()
-
-	// Run query in goroutine to allow cancellation
-	type result struct {
-		entries []intelligence.ContextEntry
-		err     error
-	}
-
-	resultChan := make(chan result, 1)
-
-	go func() {
-		entries, err := client.QueryContext(
-			bead.Type,
-			files,
-			o.config.Intelligence.CassMemory.HistoryDays,
-		)
-		resultChan <- result{entries: entries, err: err}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil, fmt.Errorf("cass_memory query timed out: %w", ctx.Err())
-	case res := <-resultChan:
-		// Convert intelligence.ContextEntry to core.ContextEntry
-		converted := make([]ContextEntry, len(res.entries))
-		for i, e := range res.entries {
-			converted[i] = ContextEntry{
-				ID:        e.ID,
-				BeadType:  e.BeadType,
-				Files:     e.Files,
-				Summary:   e.Summary,
-				Relevance: e.Relevance,
-				CreatedAt: e.CreatedAt,
-			}
-		}
-		return converted, res.err
-	}
 }
 
 // analyzeImpactWithTLDR performs impact analysis using TLDR service
@@ -927,8 +872,7 @@ func (o *Overseer) isIntelligenceEnabled() bool {
 	o.intelMutex.RLock()
 	defer o.intelMutex.RUnlock()
 
-	return o.config.Intelligence.CassMemory.Enabled ||
-		o.config.Intelligence.TLDR.Enabled ||
+	return o.config.Intelligence.TLDR.Enabled ||
 		o.config.Intelligence.GPTCache.Enabled
 }
 
@@ -2974,46 +2918,12 @@ func (o *Overseer) RefreshToolClients(changes []ToolConfigChange) {
 // applyToolConfigChange applies a single tool configuration change
 func (o *Overseer) applyToolConfigChange(change ToolConfigChange) {
 	switch change.Tool {
-	case ToolCassMemory:
-		o.refreshCassMemoryClient(change)
 	case ToolTLDR:
 		o.refreshTLDRClient(change)
 	case ToolGPTCache:
 		o.refreshGPTCacheClient(change)
 	case ToolMCP:
 		o.refreshMCPClient(change)
-	}
-}
-
-// refreshCassMemoryClient reinitializes the cass_memory client
-func (o *Overseer) refreshCassMemoryClient(change ToolConfigChange) {
-	o.intelMutex.Lock()
-	defer o.intelMutex.Unlock()
-
-	config := o.config.Intelligence.CassMemory
-
-	if !config.Enabled {
-		// Disable the client
-		if o.cassClient != nil {
-			o.cassClient = nil
-			log.Printf("[Intelligence] cass_memory client disabled")
-		}
-		return
-	}
-
-	// Reinitialize the client with new settings
-	o.cassClient = intelligence.NewCassMemoryClient(
-		intelligence.WithEnabled(true),
-		intelligence.WithTimeout(config.Timeout),
-		intelligence.WithQueryLimit(config.QueryLimit),
-	)
-
-	if change.EnabledBefore && change.EnabledAfter {
-		log.Printf("[Intelligence] cass_memory client reinitialized (timeout: %v, limit: %d)",
-			config.Timeout, config.QueryLimit)
-	} else {
-		log.Printf("[Intelligence] cass_memory client initialized (timeout: %v, limit: %d)",
-			config.Timeout, config.QueryLimit)
 	}
 }
 
@@ -3532,45 +3442,16 @@ func (o *Overseer) sendMCPWorkerCompletion(worker *types.Worker, success bool, e
 	}
 }
 
-// spawnWorkerWithContextEnrichment spawns a worker with CASS context enrichment
-// It searches CASS for relevant sessions based on bead title and includes them in environment
+// spawnWorkerWithContextEnrichment spawns a worker with context enrichment
+// (Legacy function - CASS memory integration removed, now just calls spawnWorkerInternal)
 func (o *Overseer) spawnWorkerWithContextEnrichment(bead types.Bead) (*types.Worker, error) {
-	// Check if CASS client is available and enabled
-	if o.cassClient != nil && o.cassClient.IsEnabled() {
-		// Search CASS for relevant sessions
-		result, err := o.cassClient.SearchSessions(bead.Title, 3, 2*time.Second)
-		if err == nil && result != nil && len(result.Hits) > 0 {
-			// Format sessions as context
-			sessions := make([]map[string]interface{}, 0, len(result.Hits))
-			for _, hit := range result.Hits {
-				sessions = append(sessions, map[string]interface{}{
-					"agent":       hit.Agent,
-					"title":       hit.Title,
-					"content":     hit.Content,
-					"score":       hit.Score,
-					"source_path": hit.SourcePath,
-					"line_number": hit.LineNumber,
-					"created_at":  hit.CreatedAt,
-				})
-			}
-
-			// Marshal to JSON and store in metadata
-			if contextJSON, err := json.Marshal(sessions); err == nil {
-				if bead.Metadata == nil {
-					bead.Metadata = make(map[string]string)
-				}
-				bead.Metadata["HYDRA_CASS_CONTEXT"] = string(contextJSON)
-			}
-		}
-	}
-
 	// Call spawnWorkerInternal to create the worker
 	return o.spawnWorkerInternal(bead)
 }
 
-// buildWorkerEnvironmentWithContext builds worker environment with CASS context enrichment
-// It searches CASS for sessions related to the bead and includes top results
-func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead, cassClient *intelligence.CassMemoryClient) []string {
+// buildWorkerEnvironmentWithContext builds worker environment with context enrichment
+// (Legacy function - CASS memory integration removed, now returns basic environment)
+func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead) []string {
 	// Start with basic environment
 	env := []string{
 		fmt.Sprintf("HYDRA_BEAD_ID=%s", bead.ID),
@@ -3578,35 +3459,6 @@ func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead, cassClient
 		fmt.Sprintf("HYDRA_REPO=%s", bead.Repo),
 		fmt.Sprintf("HYDRA_BEAD_TITLE=%s", bead.Title),
 		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
-	}
-
-	// If CASS client is provided and enabled, search for relevant sessions
-	if cassClient != nil && cassClient.IsEnabled() {
-		// Search with 2 second timeout as per requirements
-		result, err := cassClient.SearchSessions(bead.Title, 3, 2*time.Second)
-		if err == nil && result != nil && len(result.Hits) > 0 {
-			// Sort hits by score in descending order for relevance ranking
-			// This ensures highest relevance sessions are included when we truncate to top 3
-			sortedHits := make([]intelligence.SessionHit, len(result.Hits))
-			copy(sortedHits, result.Hits)
-			sort.Slice(sortedHits, func(i, j int) bool {
-				return sortedHits[i].Score > sortedHits[j].Score
-			})
-			result.Hits = sortedHits
-
-			// Truncate content to limit token usage (500 chars max per session including "...")
-			const maxContentLength = 500
-			for i := range result.Hits {
-				if len(result.Hits[i].Content) > maxContentLength {
-					result.Hits[i].Content = result.Hits[i].Content[:maxContentLength-3] + "..."
-				}
-			}
-
-			// Marshal the entire result (including Count and TotalMatches) to JSON and add to environment
-			if contextJSON, err := json.Marshal(result); err == nil {
-				env = append(env, fmt.Sprintf("HYDRA_CASS_CONTEXT=%s", string(contextJSON)))
-			}
-		}
 	}
 
 	return env

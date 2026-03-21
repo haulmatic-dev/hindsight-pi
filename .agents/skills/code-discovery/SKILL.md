@@ -31,12 +31,12 @@ This skill depends on **code-search-and-intelligence**. Load it first:
 Check for existing patterns and anti-patterns:
 
 ```bash
-cass-memory context "<bead title>: <bead description>" --json
+hindsight search "<bead title>: <bead description>" --limit 5
 ```
 
 **Example:**
 ```bash
-cass-memory context "Hindsight server lifecycle: Initialize and manage embedded Python server" --json
+hindsight search "Hindsight server lifecycle: Initialize and manage embedded Python server" --limit 5
 ```
 
 ### Step 2: Search Code Semantically
@@ -96,7 +96,7 @@ Document discovered files in your implementation summary:
 
 ## Best Practices
 
-1. **Always run cass-memory first** - Learn from past patterns
+1. **Always run hindsight search first** - Learn from past patterns
 2. **Search multiple queries** - Try different descriptions of the same task
 3. **Check 3-5 results** - Don't rely on the first result alone
 4. **Save findings** - Document which files you actually used
@@ -115,7 +115,7 @@ Document discovered files in your implementation summary:
 @skill_use skill_names=["code-search-and-intelligence"]
 
 # 2. Query patterns
-cass-memory context "<task>" --json
+hindsight search "<task>" --limit 5
 
 # 3. Search code
 hydra-llm-tldr search "<query>" --limit 10

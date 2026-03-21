@@ -15,7 +15,6 @@ const (
 	ToolNone ToolType = iota
 	ToolBV
 	ToolBeads
-	ToolCassMemory
 	ToolTLDR
 	ToolGPTCache
 	ToolMCP
@@ -23,8 +22,6 @@ const (
 
 func (t ToolType) String() string {
 	switch t {
-	case ToolCassMemory:
-		return "cass_memory"
 	case ToolTLDR:
 		return "TLDR"
 	case ToolGPTCache:
@@ -80,15 +77,6 @@ func (d *ConfigChangeDetector) DetectChanges(oldCfg, newCfg *Config) []ToolConfi
 
 	var changes []ToolConfigChange
 
-	if d.cassMemoryChanged(oldCfg.Intelligence.CassMemory, newCfg.Intelligence.CassMemory) {
-		changes = append(changes, ToolConfigChange{
-			Tool:          ToolCassMemory,
-			EnabledBefore: oldCfg.Intelligence.CassMemory.Enabled,
-			EnabledAfter:  newCfg.Intelligence.CassMemory.Enabled,
-			HasChanged:    true,
-		})
-	}
-
 	if d.tldrChanged(oldCfg.Intelligence.TLDR, newCfg.Intelligence.TLDR) {
 		changes = append(changes, ToolConfigChange{
 			Tool:          ToolTLDR,
@@ -127,12 +115,6 @@ func (d *ConfigChangeDetector) detectAllChanges(cfg *Config) []ToolConfigChange 
 
 	return []ToolConfigChange{
 		{
-			Tool:          ToolCassMemory,
-			EnabledBefore: false,
-			EnabledAfter:  cfg.Intelligence.CassMemory.Enabled,
-			HasChanged:    true,
-		},
-		{
 			Tool:          ToolTLDR,
 			EnabledBefore: false,
 			EnabledAfter:  cfg.Intelligence.TLDR.Enabled,
@@ -151,14 +133,6 @@ func (d *ConfigChangeDetector) detectAllChanges(cfg *Config) []ToolConfigChange 
 			HasChanged:    true,
 		},
 	}
-}
-
-// cassMemoryChanged checks if cass_memory config has changed
-func (d *ConfigChangeDetector) cassMemoryChanged(old, new CassMemoryConfig) bool {
-	return old.Enabled != new.Enabled ||
-		old.Timeout != new.Timeout ||
-		old.QueryLimit != new.QueryLimit ||
-		old.HistoryDays != new.HistoryDays
 }
 
 // tldrChanged checks if TLDR config has changed
@@ -190,7 +164,6 @@ func (d *ConfigChangeDetector) mcpChanged(old, new MCPConfig) bool {
 
 // RefreshHandler creates and manages tool clients based on config changes
 type RefreshHandler struct {
-	cassClient *intelligence.CassMemoryClient
 	tldrClient *intelligence.TLDRClient
 	gptCache   *GPTCacheClient
 	config     *Config
@@ -211,35 +184,11 @@ func NewRefreshHandler(config *Config, logger *log.Logger) *RefreshHandler {
 // ApplyChange applies a single tool configuration change
 func (h *RefreshHandler) ApplyChange(change ToolConfigChange) {
 	switch change.Tool {
-	case ToolCassMemory:
-		h.refreshCassMemory(change)
 	case ToolTLDR:
 		h.refreshTLDR(change)
 	case ToolGPTCache:
 		h.refreshGPTCache(change)
 	}
-}
-
-// refreshCassMemory handles cass_memory client refresh
-func (h *RefreshHandler) refreshCassMemory(change ToolConfigChange) {
-	cfg := h.config.Intelligence.CassMemory
-
-	if change.IsDisable() {
-		h.cassClient = nil
-		h.logger.Printf("[Intelligence] %s client disabled", change.Tool)
-		return
-	}
-
-	h.cassClient = intelligence.NewCassMemoryClient(
-		intelligence.WithEnabled(true),
-		intelligence.WithTimeout(time.Second*5),
-		intelligence.WithQueryLimit(cfg.QueryLimit),
-	)
-
-	h.logRefresh(change.Tool.String(), change.IsReconfigure(),
-		"timeout",
-		"limit", cfg.QueryLimit,
-	)
 }
 
 // refreshTLDR handles TLDR client refresh
@@ -307,11 +256,6 @@ func (h *RefreshHandler) logRefresh(toolName string, wasReconfigure bool, keyVal
 	h.logger.Printf("[Intelligence] %s client %s (%s)", toolName, action, pairs)
 }
 
-// GetCassClient returns the current cass_memory client
-func (h *RefreshHandler) GetCassClient() *intelligence.CassMemoryClient {
-	return h.cassClient
-}
-
 // GetTLDRClient returns the current TLDR client
 func (h *RefreshHandler) GetTLDRClient() *intelligence.TLDRClient {
 	return h.tldrClient
@@ -323,8 +267,7 @@ func (h *RefreshHandler) GetGPTCacheClient() *GPTCacheClient {
 }
 
 // SetClients allows injection of existing clients (for testing or initialization)
-func (h *RefreshHandler) SetClients(cass *intelligence.CassMemoryClient, tldr *intelligence.TLDRClient, gpt *GPTCacheClient) {
-	h.cassClient = cass
+func (h *RefreshHandler) SetClients(tldr *intelligence.TLDRClient, gpt *GPTCacheClient) {
 	h.tldrClient = tldr
 	h.gptCache = gpt
 }
