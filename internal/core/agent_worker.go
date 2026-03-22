@@ -109,12 +109,16 @@ func (o *Overseer) monitorAgentSession(worker *types.Worker, connector agents.Ag
 	// Build prompt from bead
 	prompt := o.buildAgentPrompt(bead)
 
-	// Update worker tracker with actual PID now that session is started
+	// Update worker tracker with actual PID and PGID now that session is started
 	if session.PID > 0 && o.workerTracker != nil {
-		if err := o.workerTracker.UpdateWorkerPID(0, session.PID, string(worker.BeadID)); err != nil {
+		pgid := session.PGID
+		if pgid == 0 {
+			pgid = session.PID // Fallback to PID if PGID not set
+		}
+		if err := o.workerTracker.UpdateWorkerPIDWithPGID(0, session.PID, pgid, string(worker.BeadID)); err != nil {
 			log.Printf("[AgentWorker] Warning: Failed to update worker PID from 0 to %d: %v", session.PID, err)
 		} else {
-			log.Printf("[AgentWorker] Updated worker PID to %d for bead %s", session.PID, worker.BeadID)
+			log.Printf("[AgentWorker] Updated worker PID to %d (PGID %d) for bead %s", session.PID, pgid, worker.BeadID)
 		}
 	} else if session.PID == 0 {
 		log.Printf("[AgentWorker] Warning: Session %s has PID 0, will be tracked as placeholder", session.ID)

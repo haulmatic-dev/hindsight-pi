@@ -278,8 +278,9 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 		}, nil
 	}
 
-	// Update session with PID
+	// Update session with PID and PGID
 	session.PID = cmd.Process.Pid
+	session.PGID = cmd.Process.Pid // When Setpgid is true, PGID = leader PID
 
 	// Notify about PID availability through callback if provided
 	if pidCallback, ok := session.metadata["pidCallback"].(func(int)); ok {

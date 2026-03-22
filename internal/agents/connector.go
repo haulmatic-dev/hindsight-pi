@@ -62,6 +62,7 @@ type AgentSession struct {
 	ID        string
 	BeadID    types.BeadID
 	PID       int
+	PGID      int // Process Group ID for cleanup
 	StartTime time.Time
 	connector AgentConnector
 	metadata  map[string]interface{}

@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/beads"
@@ -25,13 +27,15 @@ type Charon struct {
 
 // JanitorStats tracks cleanup statistics
 type JanitorStats struct {
-	TotalScans      int
-	OrphansFound    int
-	StuckFound      int
-	ProcessesKilled int
-	LastScanTime    time.Time
-	LastOrphanTime  time.Time
-	LastStuckTime   time.Time
+	TotalScans            int
+	OrphansFound          int
+	StuckFound            int
+	ProcessesKilled       int
+	ProcessGroupsCleaned  int
+	OrphanedChildrenFound int
+	LastScanTime          time.Time
+	LastOrphanTime        time.Time
+	LastStuckTime         time.Time
 }
 
 // NewCharon creates a new orphan process janitor with timeout for stuck worker detection
@@ -122,14 +126,33 @@ func (j *Charon) performCleanup() {
 			j.stats.LastOrphanTime = time.Now()
 			log.Printf("[Charon] 🚨 ORPHAN DETECTED: PID %d (bead %s is closed but process still running)", pid, beadID)
 
-			if err := j.killProcess(pid); err != nil {
-				log.Printf("[Charon] ❌ Failed to kill PID %d: %v", pid, err)
-			} else {
-				killCount++
-				j.stats.ProcessesKilled++
-				j.workerTracker.MarkWorkerCompleted(pid, -1)
-				log.Printf("[Charon] ✅ Killed orphaned process PID %d", pid)
+			// First try graceful termination of process group
+			pgid := record.PGID
+			if pgid == 0 {
+				pgid = pid // Fallback to PID if PGID not set
 			}
+
+			// Kill entire process group gracefully first
+			if err := j.killProcessGroupGraceful(pgid); err != nil {
+				log.Printf("[Charon] ⚠️ Graceful kill of PGID %d failed: %v", pgid, err)
+				// Fallback to force kill
+				if err := j.killProcessGroupForce(pgid); err != nil {
+					log.Printf("[Charon] ❌ Failed to force kill PGID %d: %v", pgid, err)
+				}
+			}
+
+			// Also kill the main process if still running
+			if j.isProcessRunning(pid) {
+				if err := j.killProcess(pid); err != nil {
+					log.Printf("[Charon] ❌ Failed to kill PID %d: %v", pid, err)
+				}
+			}
+
+			j.stats.ProcessGroupsCleaned++
+			killCount++
+			j.stats.ProcessesKilled++
+			j.workerTracker.MarkWorkerCompleted(pid, -1)
+			log.Printf("[Charon] ✅ Cleaned up orphan process group PGID %d for bead %s", pgid, beadID)
 			continue
 		}
 
@@ -143,17 +166,30 @@ func (j *Charon) performCleanup() {
 				log.Printf("[Charon] 😵 STUCK WORKER DETECTED: PID %d (bead %s) has been running for %v (exceeds timeout %v)",
 					pid, beadID, runtime, j.workerTimeout)
 
-				if err := j.killProcess(pid); err != nil {
-					log.Printf("[Charon] ❌ Failed to kill stuck worker PID %d: %v", pid, err)
-				} else {
-					killCount++
-					j.stats.ProcessesKilled++
-					// Mark as completed with timeout exit code
-					j.workerTracker.MarkWorkerCompleted(pid, -2) // -2 indicates timeout
-					// Mark bead as failed so it can be retried
-					j.markBeadFailed(beadID, fmt.Sprintf("Worker timed out after %v", runtime))
-					log.Printf("[Charon] ✅ Killed stuck worker PID %d, marked bead %s as failed for retry", pid, beadID)
+				// Get PGID for process group cleanup
+				pgid := record.PGID
+				if pgid == 0 {
+					pgid = pid
 				}
+
+				// Kill entire process group
+				if err := j.killProcessGroupForce(pgid); err != nil {
+					log.Printf("[Charon] ❌ Failed to kill stuck worker process group PGID %d: %v", pgid, err)
+					// Fallback to single process kill
+					if err := j.killProcess(pid); err != nil {
+						log.Printf("[Charon] ❌ Failed to kill stuck worker PID %d: %v", pid, err)
+						continue
+					}
+				}
+
+				killCount++
+				j.stats.ProcessesKilled++
+				j.stats.ProcessGroupsCleaned++
+				// Mark as completed with timeout exit code
+				j.workerTracker.MarkWorkerCompleted(pid, -2) // -2 indicates timeout
+				// Mark bead as failed so it can be retried
+				j.markBeadFailed(beadID, fmt.Sprintf("Worker timed out after %v", runtime))
+				log.Printf("[Charon] ✅ Killed stuck worker process group PGID %d, marked bead %s as failed for retry", pgid, beadID)
 			}
 		}
 	}
@@ -243,11 +279,76 @@ func (j *Charon) killProcess(pid int) error {
 	return nil
 }
 
+// killProcessGroupGraceful sends SIGTERM to entire process group
+func (j *Charon) killProcessGroupGraceful(pgid int) error {
+	// Send SIGTERM to process group using negative PID
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+		return fmt.Errorf("SIGTERM to process group %d failed: %w", pgid, err)
+	}
+
+	// Give processes time to cleanup (10 seconds)
+	time.Sleep(10 * time.Second)
+
+	// Check if any processes in the group are still running
+	pids := j.getProcessGroupPids(pgid)
+	if len(pids) > 0 {
+		return fmt.Errorf("process group %d still has %d running processes after SIGTERM", pgid, len(pids))
+	}
+
+	return nil
+}
+
+// killProcessGroupForce sends SIGKILL to entire process group
+func (j *Charon) killProcessGroupForce(pgid int) error {
+	// Send SIGKILL to process group using negative PID
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		return fmt.Errorf("SIGKILL to process group %d failed: %w", pgid, err)
+	}
+
+	// Give it a moment
+	time.Sleep(2 * time.Second)
+
+	// Also try pkill as fallback
+	cleanupCmd := exec.Command("pkill", "-9", "-g", strconv.Itoa(pgid))
+	cleanupCmd.Run() // Ignore errors - best effort
+
+	return nil
+}
+
+// getProcessGroupPids returns all PIDs in a process group
+func (j *Charon) getProcessGroupPids(pgid int) []int {
+	var pids []int
+
+	// Use ps to find processes in the group
+	cmd := exec.Command("ps", "-e", "-o", "pid,pgid", "-g", strconv.Itoa(pgid))
+	output, err := cmd.Output()
+	if err != nil {
+		return pids
+	}
+
+	// Parse output (skip header line)
+	lines := strings.Split(string(output), "\n")
+	for i, line := range lines {
+		if i == 0 || strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			pid, _ := strconv.Atoi(fields[0])
+			pids = append(pids, pid)
+		}
+	}
+
+	return pids
+}
+
 // logStats logs current statistics
 func (j *Charon) logStats() {
 	running, completed := j.workerTracker.GetStats()
-	log.Printf("[Charon] 📊 Stats: scans=%d, orphans_found=%d, stuck_found=%d, killed=%d, tracked=%d running, %d completed",
-		j.stats.TotalScans, j.stats.OrphansFound, j.stats.StuckFound, j.stats.ProcessesKilled, running, completed)
+	log.Printf("[Charon] 📊 Stats: scans=%d, orphans_found=%d, stuck_found=%d, killed=%d, pg_cleaned=%d, orphan_children=%d, tracked=%d running, %d completed",
+		j.stats.TotalScans, j.stats.OrphansFound, j.stats.StuckFound, j.stats.ProcessesKilled,
+		j.stats.ProcessGroupsCleaned, j.stats.OrphanedChildrenFound, running, completed)
 }
 
 // GetStats returns current janitor statistics
