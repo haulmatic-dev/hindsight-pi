@@ -62,11 +62,6 @@ api:
   port: 8080
 
 intelligence:
-  cass_memory:
-    enabled: true
-    query_limit: 10
-    history_days: 30
-    timeout: 5s
   tldr:
     enabled: true
     base_url: http://127.0.0.1:8787
@@ -87,18 +82,7 @@ intelligence:
     max_patterns_per_bead: 10
     extract_code_snippets: true
   collective_unconscious:
-    enabled: true
-    storage:
-      backend: cass_memory
-      cache_ttl: 5m
-    matching:
-      enabled: true
-      block_on_failure: true
-      max_patterns_in_prompt: 3
-      min_confidence_threshold: 0.5
-      cache_enabled: true
-      cache_ttl: 5m
-      query_timeout: 5s
+    enabled: false
     review:
       enabled: true
       auto_approve_threshold: 0.75

@@ -120,44 +120,6 @@ func (m *fieldMockOverseer) addWorker(worker types.Worker) {
 	m.workers = append(m.workers, worker)
 }
 
-	enabled     bool
-	returnError bool
-}
-
-		enabled:  true,
-	}
-}
-
-	return m.enabled
-}
-
-	if !m.enabled {
-			Success: true,
-			Data: struct {
-				HistorySnippets []intelligence.Snippet `json:"history_snippets"`
-			}{
-				HistorySnippets: []intelligence.Snippet{},
-			},
-		}, nil
-	}
-
-	if m.returnError {
-		return nil, fmt.Errorf("mock cass_memory error")
-	}
-
-	if m.response != nil {
-		return m.response, nil
-	}
-
-		Success: true,
-		Data: struct {
-			HistorySnippets []intelligence.Snippet `json:"history_snippets"`
-		}{
-			HistorySnippets: []intelligence.Snippet{},
-		},
-	}, nil
-}
-
 // fieldMockTLDR is a mock implementation of the TLDRClient for testing
 type fieldMockTLDR struct {
 	returnError bool
@@ -191,17 +153,14 @@ type fieldOverseerInterface interface {
 	GetActiveWorkers() []types.Worker
 }
 
-	IsEnabled() bool
-}
-
 type fieldTLDRInterface interface {
 	ImpactAnalysis(file string, depth int) (*intelligence.TLDRImpactResponse, error)
 }
 
 // fieldTestBeadResolver wraps beadResolver with test-specific dependencies
 type fieldTestBeadResolver struct {
-	overseer   fieldOverseerInterface
-	tldr       fieldTLDRInterface
+	overseer fieldOverseerInterface
+	tldr     fieldTLDRInterface
 }
 
 func (r *fieldTestBeadResolver) Dependencies(ctx context.Context, obj *model.Bead) ([]*model.Bead, error) {
@@ -267,30 +226,8 @@ func (r *fieldTestBeadResolver) Worker(ctx context.Context, obj *model.Bead) (*m
 }
 
 func (r *fieldTestBeadResolver) Patterns(ctx context.Context, obj *model.Bead) ([]*model.Pattern, error) {
-		return []*model.Pattern{}, nil
-	}
-
-	query := fmt.Sprintf("%s %s", obj.Type, obj.Title)
-	if obj.Description != nil && *obj.Description != "" {
-		query = fmt.Sprintf("%s %s", query, *obj.Description)
-	}
-
-	if err != nil {
-		return []*model.Pattern{}, nil
-	}
-
-	patterns := make([]*model.Pattern, 0, len(response.Data.RelevantBullets))
-	for _, bullet := range response.Data.RelevantBullets {
-		score := bullet.Score
-		patterns = append(patterns, &model.Pattern{
-			ID:       bullet.ID,
-			Content:  bullet.Content,
-			Category: bullet.Category,
-			Score:    &score,
-		})
-	}
-
-	return patterns, nil
+	// Patterns not implemented in test resolver - return empty
+	return []*model.Pattern{}, nil
 }
 
 func (r *fieldTestBeadResolver) Impact(ctx context.Context, obj *model.Bead) (*model.ImpactAnalysis, error) {
@@ -796,136 +733,30 @@ func TestBeadWorker(t *testing.T) {
 }
 
 func TestBeadPatterns(t *testing.T) {
-	tests := []struct {
-		name          string
-		bead          *model.Bead
-		expectedCount int
-		expectedIDs   []string
-	}{
-		{
-			name: "queries cass_memory and returns patterns",
-				m.enabled = true
-					Success: true,
-					Data: struct {
-						HistorySnippets []intelligence.Snippet `json:"history_snippets"`
-					}{
-							{ID: "bullet-1", Content: "Pattern 1", Category: "testing", Score: 0.95},
-							{ID: "bullet-2", Content: "Pattern 2", Category: "testing", Score: 0.85},
-						},
-					},
-				}
-			},
-			bead: &model.Bead{
-				ID:      "test-project-A",
-				Title:   "Test Bead",
-				Type:    "test",
-				Project: "test-project",
-			},
-			expectedCount: 2,
-			expectedIDs:   []string{"bullet-1", "bullet-2"},
-		},
-		{
-			name: "returns empty when cass_memory unavailable",
-				m.enabled = false
-			},
-			bead: &model.Bead{
-				ID:      "test-project-A",
-				Title:   "Test Bead",
-				Type:    "test",
-				Project: "test-project",
-			},
-			expectedCount: 0,
-		},
-		{
-			name: "returns empty when cass_memory returns error",
-				m.enabled = true
-				m.returnError = true
-			},
-			bead: &model.Bead{
-				ID:      "test-project-A",
-				Title:   "Test Bead",
-				Type:    "test",
-				Project: "test-project",
-			},
-			expectedCount: 0,
-		},
-		{
-			name: "returns patterns with scores",
-				m.enabled = true
-					Success: true,
-					Data: struct {
-						HistorySnippets []intelligence.Snippet `json:"history_snippets"`
-					}{
-							{ID: "bullet-1", Content: "High relevance", Category: "review", Score: 0.99},
-							{ID: "bullet-2", Content: "Medium relevance", Category: "review", Score: 0.75},
-							{ID: "bullet-3", Content: "Low relevance", Category: "review", Score: 0.50},
-						},
-					},
-				}
-			},
-			bead: &model.Bead{
-				ID:      "test-project-A",
-				Title:   "Review Bead",
-				Type:    "review",
-				Project: "test-project",
-			},
-			expectedCount: 3,
-			expectedIDs:   []string{"bullet-1", "bullet-2", "bullet-3"},
-		},
-		{
-			name: "includes description in query",
-				m.enabled = true
-					Success: true,
-					Data: struct {
-						HistorySnippets []intelligence.Snippet `json:"history_snippets"`
-					}{
-							{ID: "bullet-1", Content: "Pattern for database queries", Category: "database", Score: 0.90},
-						},
-					},
-				}
-			},
-			bead: &model.Bead{
-				ID:          "test-project-A",
-				Title:       "Database Migration",
-				Type:        "database",
-				Project:     "test-project",
-				Description: fieldStrPtr("Create users table with indexes"),
-			},
-			expectedCount: 1,
-			expectedIDs:   []string{"bullet-1"},
-		},
+	// Test that Patterns() returns empty slice (Hindsight integration removed cass_memory)
+	resolver := &fieldTestBeadResolver{}
+
+	bead := &model.Bead{
+		ID:          "test-project-A",
+		Title:       "Test Bead",
+		Type:        "test",
+		Project:     "test-project",
+		Description: fieldStrPtr("Test description"),
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	ctx := context.Background()
+	patterns, err := resolver.Patterns(ctx, bead)
 
-			resolver := &fieldTestBeadResolver{
-			}
+	if err != nil {
+		t.Fatalf("Patterns() unexpected error: %v", err)
+	}
 
-			ctx := context.Background()
-			patterns, err := resolver.Patterns(ctx, tt.bead)
+	if patterns == nil {
+		t.Error("Patterns() returned nil, expected empty slice")
+	}
 
-			if err != nil {
-				t.Fatalf("Patterns() unexpected error: %v", err)
-			}
-
-			if len(patterns) != tt.expectedCount {
-				t.Errorf("Patterns() returned %d patterns, expected %d", len(patterns), tt.expectedCount)
-			}
-
-			for i, expectedID := range tt.expectedIDs {
-				if i < len(patterns) && patterns[i].ID != expectedID {
-					t.Errorf("Patterns()[%d].ID = %s, expected %s", i, patterns[i].ID, expectedID)
-				}
-			}
-
-			// Verify scores are present
-			for i, pattern := range patterns {
-				if pattern.Score == nil {
-					t.Errorf("Patterns()[%d].Score is nil, expected a value", i)
-				}
-			}
-		})
+	if len(patterns) != 0 {
+		t.Errorf("Patterns() returned %d patterns, expected 0 (Hindsight integration removed cass_memory)", len(patterns))
 	}
 }
 
@@ -1373,30 +1204,6 @@ func TestBeadDependenciesWithOverseerNil(t *testing.T) {
 
 	if dependencies == nil || len(dependencies) != 0 {
 		t.Errorf("Expected empty slice when overseer is nil, got %v", dependencies)
-	}
-}
-
-	resolver := &beadResolver{
-		Resolver: &Resolver{
-		},
-	}
-
-	bead := &model.Bead{
-		ID:      "test-project-A",
-		Title:   "Test Bead",
-		Type:    "implement",
-		Project: "test-project",
-	}
-
-	ctx := context.Background()
-	patterns, err := resolver.Patterns(ctx, bead)
-
-	if err != nil {
-		t.Fatalf("Patterns() unexpected error: %v", err)
-	}
-
-	if patterns == nil || len(patterns) != 0 {
-		t.Errorf("Expected empty slice when cass_memory is nil, got %v", patterns)
 	}
 }
 

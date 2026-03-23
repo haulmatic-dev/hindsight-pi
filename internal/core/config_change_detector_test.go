@@ -102,22 +102,19 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 				if len(changes) != 2 {
 					return false
 				}
-				foundCass := false
 				foundTLDR := false
 				for _, c := range changes {
-						foundCass = true
-					}
 					if c.Tool == ToolTLDR {
 						foundTLDR = true
 					}
 				}
-				return foundCass && foundTLDR
+				return foundTLDR
 			},
 		},
 		{
-			name:     "nil old config returns all as changes",
-			oldCfg:   nil,
-			newCfg:   createTestConfig(),
+			name:   "nil old config returns all as changes",
+			oldCfg: nil,
+			newCfg: createTestConfig(),
 		},
 		{
 			name:     "nil new config returns no changes",
@@ -137,43 +134,6 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 
 			if tt.check != nil && !tt.check(changes) {
 				t.Errorf("changes validation failed: %+v", changes)
-			}
-		})
-	}
-}
-
-	detector := NewConfigChangeDetector()
-
-	tests := []struct {
-		name     string
-		expected bool
-	}{
-		{
-			name:     "no change",
-			expected: false,
-		},
-		{
-			name:     "timeout changed",
-			expected: true,
-		},
-		{
-			name:     "enabled changed",
-			expected: true,
-		},
-		{
-			name:     "query limit changed",
-			expected: true,
-		},
-		{
-			name:     "history days changed",
-			expected: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if result != tt.expected {
-				t.Errorf("expected %v, got %v", tt.expected, result)
 			}
 		})
 	}
@@ -331,11 +291,6 @@ func TestConfigChangeDetector_mcpChanged(t *testing.T) {
 func createTestConfig() *Config {
 	return &Config{
 		Intelligence: IntelligenceConfig{
-				Enabled:     true,
-				Timeout:     5 * time.Second,
-				QueryLimit:  10,
-				HistoryDays: 30,
-			},
 			TLDR: TLDRConfig{
 				Enabled:   true,
 				BaseURL:   "http://localhost:8787",

@@ -355,3 +355,30 @@ func (j *Charon) logStats() {
 func (j *Charon) GetStats() JanitorStats {
 	return j.stats
 }
+
+// isSystemProcess checks if a process is a system process that should not be killed
+// Uses a whitelist of known system process names
+func (j *Charon) isSystemProcess(comm string) bool {
+	// Strip path prefix if present (e.g., /usr/sbin/sshd -> sshd)
+	name := comm
+	if idx := strings.LastIndex(comm, "/"); idx != -1 {
+		name = comm[idx+1:]
+	}
+
+	// System process whitelist - these should never be killed
+	systemProcesses := map[string]bool{
+		"sshd":           true,
+		"systemd":        true,
+		"init":           true,
+		"kernel_task":    true,
+		"launchd":        true,
+		"WindowServer":   true,
+		"loginwindow":    true,
+		"Dock":           true,
+		"Finder":         true,
+		"SystemUIServer": true,
+		"kernel":         true,
+	}
+
+	return systemProcesses[name]
+}
