@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // BankID is the identifier for the shared cross-project memory bank.
@@ -530,4 +532,160 @@ func TruncateMemories(memories []Memory, maxLen int) []Memory {
 		truncated[i].Content = TruncateContent(m.Content, maxLen)
 	}
 	return truncated
+}
+
+// Reflect generates insights by reflecting on existing memories in Hindsight.
+// This implements the HindsightReflector interface for settled-state reflection.
+//
+// Parameters:
+//   - beadID: The ID of the settled bead being reflected upon
+//   - context: Map containing bead metadata (title, description, project, etc.)
+//
+// Returns:
+//   - []ReflectionInsight: List of generated insights
+//   - error: Error if reflection fails
+func (c *Client) Reflect(beadID types.BeadID, reflectionCtx map[string]interface{}) ([]ReflectionInsight, error) {
+	if !c.IsEnabled() {
+		return nil, nil
+	}
+
+	// Build reflection query from context
+	query := c.buildReflectionQuery(reflectionCtx)
+	if query == "" {
+		return nil, fmt.Errorf("cannot build reflection query from empty context")
+	}
+
+	// Create reflection request
+	reqBody := ReflectRequest{
+		Query:     query,
+		Budget:    "low", // Use low budget for quick insights
+		MaxTokens: 2048,
+		Tags:      []string{"hydra", "execution"},
+		TagsMatch: "any",
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal reflect request: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	url := fmt.Sprintf("%s/v1/default/banks/%s/reflect", c.baseURL, BankID)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create reflect request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("hindsight reflect timed out after %v", c.timeout)
+		}
+		return nil, fmt.Errorf("hindsight reflect request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("hindsight reflect returned status %d", resp.StatusCode)
+	}
+
+	var result ReflectResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode hindsight reflect response: %w", err)
+	}
+
+	// Parse insights from reflection text
+	insights := c.parseReflectionInsights(result, beadID)
+
+	return insights, nil
+}
+
+// buildReflectionQuery constructs a reflection query from bead context
+func (c *Client) buildReflectionQuery(ctx map[string]interface{}) string {
+	parts := []string{}
+
+	// Add bead title if available
+	if title, ok := ctx["bead_title"].(string); ok && title != "" {
+		parts = append(parts, fmt.Sprintf("Task: %s", title))
+	}
+
+	// Add bead description if available
+	if desc, ok := ctx["bead_description"].(string); ok && desc != "" {
+		parts = append(parts, fmt.Sprintf("Description: %s", desc))
+	}
+
+	// Add project context
+	if project, ok := ctx["project"].(string); ok && project != "" {
+		parts = append(parts, fmt.Sprintf("Project: %s", project))
+	}
+
+	// Add completion context
+	if settledAt, ok := ctx["settled_at"].(time.Time); ok {
+		parts = append(parts, fmt.Sprintf("Completed at: %s", settledAt.Format(time.RFC3339)))
+	}
+
+	// Add stability info
+	if stability, ok := ctx["stability_score"].(float64); ok {
+		parts = append(parts, fmt.Sprintf("Stability score: %.2f", stability))
+	}
+
+	// Add the core reflection prompt
+	parts = append(parts, "\nBased on this completed task and historical memories, what key insights, patterns, or lessons learned can be extracted? Focus on:")
+	parts = append(parts, "1. What made this task successful or challenging?")
+	parts = append(parts, "2. What patterns from past executions apply here?")
+	parts = append(parts, "3. What mental models or best practices emerge?")
+
+	return strings.Join(parts, "\n")
+}
+
+// parseReflectionInsights extracts structured insights from reflection response
+func (c *Client) parseReflectionInsights(resp ReflectResponse, beadID types.BeadID) []ReflectionInsight {
+	var insights []ReflectionInsight
+
+	// If we have structured output with insights, use that
+	if resp.StructuredOutput != nil {
+		if insightsData, ok := resp.StructuredOutput["insights"].([]interface{}); ok {
+			for _, item := range insightsData {
+				if insightMap, ok := item.(map[string]interface{}); ok {
+					insight := ReflectionInsight{
+						Content: getString(insightMap, "content"),
+						Type:    getString(insightMap, "type"),
+					}
+					if tags, ok := insightMap["tags"].([]interface{}); ok {
+						for _, tag := range tags {
+							if tagStr, ok := tag.(string); ok {
+								insight.Tags = append(insight.Tags, tagStr)
+							}
+						}
+					}
+					if insight.Content != "" {
+						insights = append(insights, insight)
+					}
+				}
+			}
+		}
+	}
+
+	// If no structured insights, create one from the text response
+	if len(insights) == 0 && resp.Text != "" {
+		insights = append(insights, ReflectionInsight{
+			Content: resp.Text,
+			Type:    "reflection",
+			Tags:    []string{"hydra", "insight", string(beadID)},
+		})
+	}
+
+	return insights
+}
+
+// getString safely extracts a string value from a map
+func getString(m map[string]interface{}, key string) string {
+	if val, ok := m[key].(string); ok {
+		return val
+	}
+	return ""
 }

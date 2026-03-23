@@ -537,6 +537,12 @@ func (o *Overseer) initializeSettledStateService() {
 		}
 	}
 
+	// Set up Hindsight reflector for settled-state reflection
+	if o.hindsightClient != nil && o.hindsightClient.IsEnabled() {
+		o.settledStateSvc.SetReflector(o.hindsightClient)
+		log.Printf("[SettledState] Hindsight reflection enabled")
+	}
+
 	// Register callback for when beads become settled
 	o.settledStateSvc.OnSettled(func(beadID types.BeadID, info *types.SettledBeadInfo) {
 		log.Printf("[Overseer] Bead settled: %s (stability: %.2f)", beadID, info.StabilityScore)
@@ -2150,6 +2156,7 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 // HindsightClient defines the interface for Hindsight memory operations
 type HindsightClient interface {
 	SearchByBead(title, beadType string) (*hindsight.SearchResponse, error)
+	Reflect(beadID types.BeadID, context map[string]interface{}) ([]hindsight.ReflectionInsight, error)
 	IsEnabled() bool
 }
 

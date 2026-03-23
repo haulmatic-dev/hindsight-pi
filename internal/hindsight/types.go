@@ -607,3 +607,65 @@ func voteMatchesOutcome(vote, outcome string) bool {
 
 	return false
 }
+
+// ReflectRequest represents a request to generate insights through reflection
+// on existing memories in the Hindsight memory bank.
+type ReflectRequest struct {
+	// Query is the reflection query/prompt (required)
+	Query string `json:"query"`
+
+	// Budget controls the reflection depth (low/medium/high)
+	Budget string `json:"budget,omitempty"`
+
+	// MaxTokens limits the response length
+	MaxTokens int `json:"max_tokens,omitempty"`
+
+	// Tags filters memories by tags during reflection
+	Tags []string `json:"tags,omitempty"`
+
+	// TagsMatch determines how tags are matched (any/all/any_strict/all_strict)
+	TagsMatch string `json:"tags_match,omitempty"`
+}
+
+// ReflectResponse represents the response from a reflection operation
+type ReflectResponse struct {
+	// Text is the reflection response as markdown
+	Text string `json:"text"`
+
+	// BasedOn contains evidence used to generate the response
+	BasedOn *ReflectBasedOn `json:"based_on,omitempty"`
+
+	// StructuredOutput contains parsed response when schema was provided
+	StructuredOutput map[string]interface{} `json:"structured_output,omitempty"`
+
+	// Usage contains token usage metrics
+	Usage *TokenUsage `json:"usage,omitempty"`
+}
+
+// ReflectBasedOn contains the evidence used for reflection
+type ReflectBasedOn struct {
+	// Memories are the source memories used
+	Memories []ReflectMemory `json:"memories,omitempty"`
+}
+
+// ReflectMemory represents a memory used in reflection
+type ReflectMemory struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+	Type string `json:"type"`
+}
+
+// TokenUsage contains LLM token consumption metrics
+type TokenUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}
+
+// ReflectionInsight represents a single insight from reflection
+// This matches the interface expected by settled_state_service.go
+type ReflectionInsight struct {
+	Content string   `json:"content"`
+	Type    string   `json:"type"`
+	Tags    []string `json:"tags,omitempty"`
+}

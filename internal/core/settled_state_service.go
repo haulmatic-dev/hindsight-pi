@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -46,16 +47,12 @@ type PatternExtractor interface {
 
 // HindsightReflector defines the interface for generating insights from settled beads
 type HindsightReflector interface {
-	Reflect(beadID types.BeadID, context map[string]interface{}) ([]ReflectionInsight, error)
+	Reflect(beadID types.BeadID, context map[string]interface{}) ([]hindsight.ReflectionInsight, error)
 	IsEnabled() bool
 }
 
-// ReflectionInsight represents a single insight generated from reflection
-type ReflectionInsight struct {
-	Content string   `json:"content"`
-	Type    string   `json:"type"`
-	Tags    []string `json:"tags,omitempty"`
-}
+// ReflectionInsight is an alias for hindsight.ReflectionInsight for backward compatibility
+type ReflectionInsight = hindsight.ReflectionInsight
 
 // BeadChecker defines the interface for checking bead state
 type BeadChecker interface {
