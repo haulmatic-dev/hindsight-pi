@@ -2124,8 +2124,10 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		}
 	}
 
-	// Create the worker using the agent connector
-	worker, err := o.spawnWorkerViaAgent(bead)
+	// Create the worker using the internal worker binary (hybrid approach)
+	// This spawns the worker binary which handles Hindsight context retrieval
+	// and then executes opencode directly
+	worker, err := o.spawnWorkerInternal(bead)
 	if err != nil {
 		// Remove placeholder on spawn failure
 		o.workerMutex.Lock()
