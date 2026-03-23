@@ -13,7 +13,7 @@ import (
 	"github.com/haulmatic-dev/hydra/internal/beads"
 )
 
-// Charon continuously monitors and cleans up orphaned opencode processes
+// Charon continuously monitors and cleans up orphaned worker processes
 // Uses PID tracking instead of environment variable inspection for reliability
 // Also detects and kills "stuck" workers that have exceeded timeout
 type Charon struct {

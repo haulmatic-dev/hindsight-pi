@@ -275,8 +275,8 @@ type Overseer struct {
 	// Resource monitoring for adaptive scaling
 	resourceMonitor *ResourceMonitor // Monitors CPU/Memory usage
 
-	// Orphan process janitor for cleaning up orphaned opencode processes
-	orphanJanitor *Charon // Cleans up orphaned opencode processes
+	// Orphan process janitor for cleaning up orphaned worker processes
+	orphanJanitor *Charon // Cleans up orphaned worker processes
 
 	// Chain completion detector for end-of-chain pattern extraction
 	chainCompletionDetector *ChainCompletionDetector // Detects chain completion and triggers pattern extraction
@@ -2125,10 +2125,9 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		}
 	}
 
-	// Create the worker using the internal worker binary (hybrid approach)
-	// This spawns the worker binary which handles Hindsight context retrieval
-	// and then executes opencode directly
-	worker, err := o.spawnWorkerInternal(bead)
+	// Create the worker using the agent connector (Pi agent)
+	// This spawns Pi agent which handles execution through proper agent session management
+	worker, err := o.spawnWorkerViaAgent(bead)
 	if err != nil {
 		// Remove placeholder on spawn failure
 		o.workerMutex.Lock()

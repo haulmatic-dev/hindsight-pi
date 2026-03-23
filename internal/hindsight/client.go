@@ -262,7 +262,7 @@ func (c *Client) Search(query, beadType string, limit int) (*SearchResponse, err
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 
-	url := fmt.Sprintf("%s/api/v1/search", c.baseURL)
+	url := fmt.Sprintf("%s/v1/default/banks/hydra/memories/recall", c.baseURL)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -369,9 +369,8 @@ func (c *Client) Retain(memory *ExecutionMemory) (*RetentionResult, error) {
 		}
 	}
 
-	reqBody := RetainRequest{
-		Memory: *memory,
-	}
+	// Transform ExecutionMemory into Hindsight API format
+	reqBody := c.buildRetainRequest(memory)
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
@@ -385,7 +384,7 @@ func (c *Client) Retain(memory *ExecutionMemory) (*RetentionResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 
-	url := fmt.Sprintf("%s/api/v1/retain", c.baseURL)
+	url := fmt.Sprintf("%s/v1/default/banks/hydra/memories", c.baseURL)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, &ClientError{
@@ -437,6 +436,55 @@ func (c *Client) Retain(memory *ExecutionMemory) (*RetentionResult, error) {
 		MemoryID: result.MemoryID,
 		Error:    result.Error,
 	}, nil
+}
+
+// buildRetainRequest transforms ExecutionMemory into Hindsight API format
+func (c *Client) buildRetainRequest(memory *ExecutionMemory) map[string]interface{} {
+	// Build content from execution results
+	content := fmt.Sprintf("Bead: %s\nTitle: %s\nType: %s\nSuccess: %v\nDuration: %v\nAttempts: %d\n\nOutput:\n%s",
+		memory.BeadID,
+		memory.BeadMetadata.Title,
+		memory.BeadMetadata.Type,
+		memory.ExecutionResult.Success,
+		memory.ExecutionResult.Duration,
+		memory.ExecutionResult.Attempts,
+		memory.ExecutionResult.Output,
+	)
+
+	if memory.ExecutionResult.Error != "" {
+		content += fmt.Sprintf("\n\nError:\n%s", memory.ExecutionResult.Error)
+	}
+
+	// Build metadata
+	metadata := map[string]string{
+		"bead_id":    string(memory.BeadID),
+		"worker_id":  memory.WorkerID,
+		"agent_type": memory.BeadMetadata.AgentType,
+		"project":    memory.BeadMetadata.Project,
+		"repo":       memory.BeadMetadata.Repo,
+		"exit_code":  fmt.Sprintf("%d", memory.ExecutionResult.ExitCode),
+		"success":    fmt.Sprintf("%v", memory.ExecutionResult.Success),
+	}
+
+	// Build tags from bead metadata
+	tags := []string{"hydra", "execution", memory.BeadMetadata.Type}
+	if memory.BeadMetadata.Project != "" {
+		tags = append(tags, memory.BeadMetadata.Project)
+	}
+
+	return map[string]interface{}{
+		"items": []map[string]interface{}{
+			{
+				"content":     content,
+				"context":     memory.BeadMetadata.Title,
+				"document_id": string(memory.BeadID),
+				"metadata":    metadata,
+				"tags":        tags,
+				"timestamp":   memory.RecordedAt.Format(time.RFC3339),
+			},
+		},
+		"async": false,
+	}
 }
 
 // FilterByScore filters memories to only include those with score >= threshold

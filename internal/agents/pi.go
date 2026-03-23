@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/internal/pi"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -134,6 +135,9 @@ func (c *PiConnector) Start(ctx context.Context, bead types.Bead, opts AgentOpti
 // Uses JSONL protocol over stdin/stdout
 func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt string) (*AgentResult, error) {
 	startTime := time.Now()
+
+	// Query Hindsight for context enrichment before execution
+	enhancedPrompt := c.enrichPromptWithHindsight(session, prompt)
 
 	// Build command
 	args := []string{
@@ -300,7 +304,7 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 	// Send prompt command
 	promptCmd := map[string]interface{}{
 		"type":    "prompt",
-		"message": prompt,
+		"message": enhancedPrompt,
 	}
 
 	if c.thinkingLevel != "" {
@@ -826,4 +830,105 @@ func (c *PiConnector) ensureInstalled() error {
 
 	c.installed = true
 	return nil
+}
+
+// enrichPromptWithHindsight queries Hindsight for relevant context and adds it to the prompt
+func (c *PiConnector) enrichPromptWithHindsight(session *AgentSession, prompt string) string {
+	// Check if Hindsight is enabled
+	if os.Getenv("HYDRA_HISTORIESIGHT_ENABLED") != "true" {
+		return prompt
+	}
+
+	// Get Hindsight config from environment
+	baseURL := os.Getenv("HYDRA_HISTORIESIGHT_BASE_URL")
+	if baseURL == "" {
+		baseURL = "http://127.0.0.1:9418"
+	}
+
+	timeout := 5 * time.Second
+	if timeoutStr := os.Getenv("HYDRA_HISTORIESIGHT_TIMEOUT"); timeoutStr != "" {
+		if d, err := time.ParseDuration(timeoutStr); err == nil {
+			timeout = d
+		}
+	}
+
+	limit := 3
+	if limitStr := os.Getenv("HYDRA_HISTORIESIGHT_LIMIT"); limitStr != "" {
+		if n, err := fmt.Sscanf(limitStr, "%d", &limit); err != nil || n != 1 {
+			limit = 3
+		}
+	}
+
+	minScore := 0.7
+	if scoreStr := os.Getenv("HYDRA_HISTORIESIGHT_MIN_SCORE"); scoreStr != "" {
+		if n, err := fmt.Sscanf(scoreStr, "%f", &minScore); err != nil || n != 1 {
+			minScore = 0.7
+		}
+	}
+
+	// Create Hindsight client
+	client := hindsight.NewClient(
+		hindsight.WithBaseURL(baseURL),
+		hindsight.WithTimeout(timeout),
+	)
+
+	if !client.IsEnabled() {
+		return prompt
+	}
+
+	// Get bead info from session metadata
+	beadTitle := ""
+	beadType := ""
+	if title, ok := session.metadata["bead_title"].(string); ok {
+		beadTitle = title
+	}
+	if btype, ok := session.metadata["bead_type"].(string); ok {
+		beadType = btype
+	}
+
+	log.Printf("[PiConnector] Querying Hindsight for context (bead: %s)...", session.BeadID)
+
+	// Query Hindsight for relevant memories
+	resp, err := client.SearchByBead(beadTitle, beadType)
+	if err != nil {
+		log.Printf("[PiConnector] Warning: failed to query Hindsight: %v", err)
+		return prompt
+	}
+
+	if len(resp.Memories) == 0 {
+		log.Printf("[PiConnector] No relevant memories found in Hindsight")
+		return prompt
+	}
+
+	// Filter by score and limit
+	var relevantMemories []hindsight.Memory
+	for _, mem := range resp.Memories {
+		if mem.Score >= minScore || mem.Relevance >= minScore {
+			relevantMemories = append(relevantMemories, mem)
+			if len(relevantMemories) >= limit {
+				break
+			}
+		}
+	}
+
+	if len(relevantMemories) == 0 {
+		log.Printf("[PiConnector] No relevant memories found in Hindsight (after filtering)")
+		return prompt
+	}
+
+	log.Printf("[PiConnector] Found %d relevant memories in Hindsight", len(relevantMemories))
+
+	// Build context section
+	var contextParts []string
+	contextParts = append(contextParts, "\n--- Relevant Context from Previous Work ---")
+	for i, mem := range relevantMemories {
+		contextParts = append(contextParts, fmt.Sprintf("%d. %s (relevance: %.2f)\n   %s",
+			i+1, mem.ID, mem.Score, mem.Content))
+	}
+	contextParts = append(contextParts, "--- End Context ---\n")
+
+	// Prepend context to prompt
+	enhancedPrompt := strings.Join(contextParts, "\n") + "\n" + prompt
+
+	return enhancedPrompt
 }
