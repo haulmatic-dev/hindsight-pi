@@ -474,16 +474,16 @@ func parseHindsightClientConfig() HindsightClientConfig {
 		cfg.BaseURL = "http://127.0.0.1:8000" // Default Hindsight port
 	}
 
-	// Parse timeout
+	// Parse timeout (default 30s for async operations)
 	timeoutStr := os.Getenv("HYDRA_HISTORIESIGHT_TIMEOUT")
 	if timeoutStr != "" {
 		if d, err := time.ParseDuration(timeoutStr); err == nil {
 			cfg.Timeout = d
 		} else {
-			cfg.Timeout = 10 * time.Second
+			cfg.Timeout = 30 * time.Second
 		}
 	} else {
-		cfg.Timeout = 10 * time.Second
+		cfg.Timeout = 30 * time.Second
 	}
 
 	// Parse limit

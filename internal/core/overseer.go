@@ -23,6 +23,7 @@ import (
 	"github.com/haulmatic-dev/hydra/internal/intelligence"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/internal/pi"
+	"github.com/haulmatic-dev/hydra/internal/services"
 	"github.com/haulmatic-dev/hydra/internal/validation"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -252,17 +253,18 @@ type Overseer struct {
 	spawner               WorkerSpawner // Interface for spawning workers (allows mocking in tests)
 	dag                   *DAG
 	dagMu                 sync.RWMutex
-	completed             map[string]bool           // Track completed beads for this session
-	retries               map[string]*beadRetryInfo // Track retry state for failed beads
-	retriesMu             sync.RWMutex              // Mutex for retries map
-	baseDelay             time.Duration             // Base delay for exponential backoff
-	maxDelay              time.Duration             // Maximum delay for exponential backoff
-	tldrClient            *intelligence.TLDRClient  // TLDR client for impact analysis
-	gptCache              *GPTCacheClient           // GPTCache client for caching
-	hindsightClient       HindsightClient           // Hindsight client for pre-execution context retrieval
-	bvClient              *bv.Client                // BV client for graph analytics
-	intelMutex            sync.RWMutex              // Mutex for intelligence clients
-	settledStateSvc       *SettledStateService      // Settled-state detection service
+	completed             map[string]bool                 // Track completed beads for this session
+	retries               map[string]*beadRetryInfo       // Track retry state for failed beads
+	retriesMu             sync.RWMutex                    // Mutex for retries map
+	baseDelay             time.Duration                   // Base delay for exponential backoff
+	maxDelay              time.Duration                   // Maximum delay for exponential backoff
+	tldrClient            *intelligence.TLDRClient        // TLDR client for impact analysis
+	gptCache              *GPTCacheClient                 // GPTCache client for caching
+	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
+	batchRetentionSvc     *services.BatchRetentionService // Batch retention service for efficient memory storage
+	bvClient              *bv.Client                      // BV client for graph analytics
+	intelMutex            sync.RWMutex                    // Mutex for intelligence clients
+	settledStateSvc       *SettledStateService            // Settled-state detection service
 
 	// MCP (Model Context Protocol) fields
 	mcpClient          *mcp.HTTPClient             // MCP HTTP client (Streamable HTTP)
@@ -506,6 +508,11 @@ func (o *Overseer) initializeIntelligenceClients() {
 		os.Setenv("HYDRA_HISTORIESIGHT_LIMIT", fmt.Sprintf("%d", intellConfig.Hindsight.Limit))
 		os.Setenv("HYDRA_HISTORIESIGHT_MIN_SCORE", fmt.Sprintf("%.2f", intellConfig.Hindsight.MinScore))
 		log.Printf("[Intelligence] Hindsight environment variables set for child processes")
+
+		// Initialize batch retention service for efficient memory storage
+		o.batchRetentionSvc = services.NewBatchRetentionService(o.hindsightClient)
+		log.Printf("[Intelligence] Batch retention service initialized (batchSize: %d, flushInterval: %v)",
+			services.MemoryBatchSize, services.BatchFlushInterval)
 	}
 }
 
@@ -2157,6 +2164,7 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 type HindsightClient interface {
 	SearchByBead(title, beadType string) (*hindsight.SearchResponse, error)
 	Reflect(beadID types.BeadID, context map[string]interface{}) ([]hindsight.ReflectionInsight, error)
+	Retain(memory *hindsight.ExecutionMemory) (*hindsight.RetentionResult, error)
 	IsEnabled() bool
 }
 
@@ -2247,6 +2255,19 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_LIMIT=%d", h.Limit))
 		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_MIN_SCORE=%.2f", h.MinScore))
 		log.Printf("[Worker] Hindsight config passed to worker (baseURL: %s)", h.BaseURL)
+	}
+
+	// Add Pi configuration for Pi agent execution
+	if o.config != nil && o.config.Agents.Pi.Enabled {
+		p := o.config.Agents.Pi
+		env = append(env, fmt.Sprintf("HYDRA_PI_ENABLED=true"))
+		env = append(env, fmt.Sprintf("HYDRA_PI_PROVIDER=%s", p.Provider))
+		env = append(env, fmt.Sprintf("HYDRA_PI_MODEL=%s", p.Model))
+		env = append(env, fmt.Sprintf("HYDRA_PI_THINKING_LEVEL=%s", p.ThinkingLevel))
+		env = append(env, fmt.Sprintf("HYDRA_PI_TIMEOUT=%s", p.Timeout))
+		env = append(env, fmt.Sprintf("HYDRA_PI_API_KEY_NAME=%s", p.ApiKeyName))
+		env = append(env, fmt.Sprintf("HYDRA_PI_CONFIG_DIR=%s", o.config.Pi.ConfigDir))
+		log.Printf("[Worker] Pi config passed to worker (provider: %s, model: %s)", p.Provider, p.Model)
 	}
 
 	cmd.Env = env

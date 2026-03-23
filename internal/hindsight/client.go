@@ -485,7 +485,7 @@ func (c *Client) buildRetainRequest(memory *ExecutionMemory) map[string]interfac
 				"timestamp":   memory.RecordedAt.Format(time.RFC3339),
 			},
 		},
-		"async": false,
+		"async": true,
 	}
 }
 
