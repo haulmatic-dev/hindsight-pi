@@ -315,14 +315,21 @@ func main() {
 		}
 	}
 
-	// STEP 4: Record execution results
-	log.Printf("📝 Recording execution results...")
-	streamLog(mcpClient, "info", fmt.Sprintf("Recording results (status: %s)", status))
+	// STEP 4: Send execution results to overseer for batch retention
+	// The overseer's batch retention service will handle Hindsight storage efficiently
+	log.Printf("📝 Sending execution results to overseer for batch retention...")
+	streamLog(mcpClient, "info", fmt.Sprintf("Sending results to overseer (status: %s)", status))
 
-	recordExecutionResult(bead, result, mcpClient, config)
+	// Send full execution result to overseer via MCP
+	notifyTaskCompleteWithResult(mcpClient, bead, result, status, duration, exitCode, agentID)
 
-	// Notify task completion
-	notifyTaskComplete(mcpClient, bead, status, duration, exitCode)
+	// Optional: Also try direct retention as fallback (best-effort, non-blocking)
+	// This provides redundancy in case overseer batching fails
+	if config.HindsightClient.Enabled {
+		go func() {
+			recordExecutionResult(bead, result, mcpClient, config)
+		}()
+	}
 
 	// STEP 5: Close the bead using beads CLI (best-effort)
 	// Only close beads that succeeded - failed beads remain open for retry/investigation
@@ -1571,6 +1578,75 @@ func buildSuccessPattern(bead types.Bead, result *ExecutionResult) string {
 	}
 
 	return strings.Join(parts, " | ")
+}
+
+// notifyTaskCompleteWithResult sends task completion with full execution result via MCP
+func notifyTaskCompleteWithResult(
+	client *mcp.Client,
+	bead types.Bead,
+	result *ExecutionResult,
+	status string,
+	duration time.Duration,
+	exitCode int,
+	agentID string,
+) {
+	if client == nil {
+		return
+	}
+
+	// Validate status
+	if !mcp.IsValidStatus(status) {
+		status = "failure"
+	}
+
+	// Build comprehensive payload with all execution data
+	payload := map[string]interface{}{
+		"bead_id":    bead.ID.String(),
+		"bead_title": bead.Title,
+		"bead_type":  bead.Type,
+		"project":    bead.Project,
+		"repo":       bead.Repo,
+		"agent_id":   agentID,
+		"status":     status,
+		"duration":   duration.Seconds(),
+		"exit_code":  exitCode,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// Add execution result details if available
+	if result != nil {
+		payload["success"] = result.Success
+		payload["attempts"] = result.Attempts
+		payload["agent_type"] = result.AgentType
+		if result.Output != "" {
+			payload["output"] = result.Output
+		}
+		if result.Error != "" {
+			payload["error"] = result.Error
+		}
+	}
+
+	// Send to overseer
+	err := client.SendMessage(mcp.MsgTypeTaskComplete, "overseer", payload)
+	if err != nil {
+		log.Printf("[WARN] Failed to send task completion with result: %v", err)
+	} else {
+		log.Printf("✅ Sent execution result to overseer for batch retention")
+	}
+
+	// Also broadcast to all agents (without full output to reduce noise)
+	broadcastPayload := map[string]interface{}{
+		"bead_id":   bead.ID.String(),
+		"agent_id":  agentID,
+		"status":    status,
+		"duration":  duration.Seconds(),
+		"exit_code": exitCode,
+	}
+
+	broadcastErr := client.Broadcast(mcp.MsgTypeTaskComplete, broadcastPayload)
+	if broadcastErr != nil {
+		log.Printf("[WARN] Failed to broadcast task completion: %v", broadcastErr)
+	}
 }
 
 // notifyTaskComplete sends task completion notification via MCP

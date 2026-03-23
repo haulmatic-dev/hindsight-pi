@@ -3358,8 +3358,86 @@ func (o *Overseer) handleTaskCompleteMessage(msg *mcp.Message) {
 
 	log.Printf("[MCP] Task complete: bead=%s, status=%s, exit_code=%d", beadID, status, exitCode)
 
+	// Submit execution result to batch retention service for Hindsight storage
+	if o.batchRetentionSvc != nil {
+		o.submitExecutionResultToBatchRetention(msg)
+	} else {
+		log.Printf("[MCP] Warning: batch retention service not available, skipping Hindsight retention")
+	}
+
 	// Trigger scheduling cycle for next tasks
 	go o.triggerImmediateSchedule()
+}
+
+// submitExecutionResultToBatchRetention extracts execution result from MCP message
+// and submits it to the batch retention service for Hindsight storage
+func (o *Overseer) submitExecutionResultToBatchRetention(msg *mcp.Message) {
+	beadIDStr, ok := msg.Payload["bead_id"].(string)
+	if !ok || beadIDStr == "" {
+		return
+	}
+
+	// Parse bead ID
+	beadID := types.BeadID(beadIDStr)
+
+	// Extract execution result data
+	status, _ := msg.Payload["status"].(string)
+	success := status == "success"
+
+	exitCode := 0
+	if code, ok := msg.Payload["exit_code"].(float64); ok {
+		exitCode = int(code)
+	}
+
+	duration := 0 * time.Second
+	if dur, ok := msg.Payload["duration"].(float64); ok {
+		duration = time.Duration(dur * float64(time.Second))
+	}
+
+	attempts := 1
+	if att, ok := msg.Payload["attempts"].(float64); ok {
+		attempts = int(att)
+	}
+
+	agentType, _ := msg.Payload["agent_type"].(string)
+	output, _ := msg.Payload["output"].(string)
+	errorStr, _ := msg.Payload["error"].(string)
+	workerID, _ := msg.Payload["agent_id"].(string)
+
+	// Build bead struct with available info
+	bead := types.Bead{
+		ID:    beadID,
+		Title: getStringFromPayload(msg.Payload, "bead_title"),
+		Type:  getStringFromPayload(msg.Payload, "bead_type"),
+	}
+
+	// Build execution result
+	execResult := services.ExecutionResult{
+		BeadID:    beadID,
+		Success:   success,
+		ExitCode:  exitCode,
+		Output:    output,
+		Error:     errorStr,
+		Duration:  duration,
+		Attempts:  attempts,
+		AgentType: agentType,
+		Timestamp: time.Now(),
+	}
+
+	// Submit to batch retention service
+	if err := o.batchRetentionSvc.SubmitExecutionResult(bead, execResult, workerID); err != nil {
+		log.Printf("[MCP] Failed to submit execution result to batch retention: %v", err)
+	} else {
+		log.Printf("[MCP] Submitted execution result to batch retention for bead %s", beadIDStr)
+	}
+}
+
+// getStringFromPayload safely extracts a string value from a map
+func getStringFromPayload(payload map[string]interface{}, key string) string {
+	if val, ok := payload[key].(string); ok {
+		return val
+	}
+	return ""
 }
 
 // handleTaskStartMessage processes task start messages
