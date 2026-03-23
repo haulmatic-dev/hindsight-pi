@@ -21,6 +21,7 @@ import (
 	"github.com/haulmatic-dev/hydra/agents"
 	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
+	"github.com/haulmatic-dev/hydra/internal/pi"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -35,10 +36,22 @@ type WorkerConfig struct {
 	BeadDescription string
 	Hindsight       *HindsightContext
 	HindsightClient HindsightClientConfig
+	Pi              PiConfig
 	MCP             struct {
 		Enabled bool
 		URL     string
 	}
+}
+
+// PiConfig holds Pi agent configuration
+type PiConfig struct {
+	Enabled       bool
+	Provider      string
+	Model         string
+	ThinkingLevel string
+	Timeout       time.Duration
+	APIKeyName    string
+	ConfigDir     string
 }
 
 // HindsightClientConfig contains configuration for the Hindsight client
@@ -402,6 +415,9 @@ func parseConfig() WorkerConfig {
 	// Parse Hindsight client configuration
 	config.HindsightClient = parseHindsightClientConfig()
 
+	// Parse Pi configuration
+	config.Pi = parsePiConfig()
+
 	// Default agent type if still empty
 	if config.AgentType == "" {
 		config.AgentType = "orchestrator"
@@ -493,6 +509,56 @@ func parseHindsightClientConfig() HindsightClientConfig {
 	} else {
 		cfg.MinScore = 0.7
 	}
+
+	return cfg
+}
+
+// parsePiConfig parses Pi agent configuration from environment variables
+func parsePiConfig() PiConfig {
+	var cfg PiConfig
+
+	// Check if Pi is enabled
+	enabledStr := os.Getenv("HYDRA_PI_ENABLED")
+	cfg.Enabled = enabledStr == "true" || enabledStr == "1"
+
+	// Parse provider
+	cfg.Provider = os.Getenv("HYDRA_PI_PROVIDER")
+	if cfg.Provider == "" {
+		cfg.Provider = "kimi-coding" // Default provider
+	}
+
+	// Parse model
+	cfg.Model = os.Getenv("HYDRA_PI_MODEL")
+	if cfg.Model == "" {
+		cfg.Model = "k2.5" // Default model
+	}
+
+	// Parse thinking level
+	cfg.ThinkingLevel = os.Getenv("HYDRA_PI_THINKING_LEVEL")
+	if cfg.ThinkingLevel == "" {
+		cfg.ThinkingLevel = "on" // Default thinking level
+	}
+
+	// Parse timeout
+	timeoutStr := os.Getenv("HYDRA_PI_TIMEOUT")
+	if timeoutStr != "" {
+		if d, err := time.ParseDuration(timeoutStr); err == nil {
+			cfg.Timeout = d
+		} else {
+			cfg.Timeout = 10 * time.Minute
+		}
+	} else {
+		cfg.Timeout = 10 * time.Minute
+	}
+
+	// Parse API key name
+	cfg.APIKeyName = os.Getenv("HYDRA_PI_API_KEY_NAME")
+	if cfg.APIKeyName == "" {
+		cfg.APIKeyName = "KIMI_API_KEY" // Default API key name
+	}
+
+	// Parse config directory
+	cfg.ConfigDir = os.Getenv("HYDRA_PI_CONFIG_DIR")
 
 	return cfg
 }
@@ -714,7 +780,12 @@ func executeWithRetry(
 			hindsightContext = queryHindsightForContext(bead, config, mcpClient)
 		}
 
-		result, lastErr = executeWithOpencode(bead, agentType, mcpClient, projectPath, hindsightContext)
+		// Choose execution method based on configuration
+		if config.Pi.Enabled {
+			result, lastErr = executeWithPi(bead, config.Pi, mcpClient, projectPath, hindsightContext)
+		} else {
+			result, lastErr = executeWithOpencode(bead, agentType, mcpClient, projectPath, hindsightContext)
+		}
 		result.Attempts = attempt + 1
 
 		if lastErr == nil && result.Success {
@@ -1025,6 +1096,299 @@ func buildOpencodeCommand(bead types.Bead, agentType string, projectPath string,
 	)
 
 	return cmd
+}
+
+// executeWithPi executes the Pi agent CLI with activity-based timeout monitoring
+func executeWithPi(
+	bead types.Bead,
+	piConfig PiConfig,
+	mcpClient *mcp.Client,
+	projectPath string,
+	hindsightContext *agents.ContextEnrichment,
+) (*ExecutionResult, error) {
+	result := &ExecutionResult{
+		Success:   false,
+		AgentType: "pi",
+	}
+
+	// Activity-based timeout: 5 minutes of inactivity
+	activityTimeout := 5 * time.Minute
+	activityMonitor := NewActivityMonitor(activityTimeout)
+
+	// Build pi command
+	cmd := buildPiCommand(bead, piConfig, projectPath, hindsightContext)
+
+	log.Printf("🔧 Executing Pi: %s %s", cmd.Path, strings.Join(cmd.Args[1:], " "))
+	log.Printf("📁 Working directory: %s", cmd.Dir)
+	log.Printf("⏱️  Activity timeout: %v (resets on any output)", activityTimeout)
+	streamLog(mcpClient, "info", fmt.Sprintf("Executing Pi agent in %s with activity monitoring", cmd.Dir))
+
+	// Create pipes for stdout and stderr
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return result, fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+	defer stdoutPipe.Close()
+
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return result, fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+	defer stderrPipe.Close()
+
+	// Create stdin pipe for JSONL protocol
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return result, fmt.Errorf("failed to create stdin pipe: %w", err)
+	}
+	defer stdinPipe.Close()
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return result, fmt.Errorf("failed to start pi: %w", err)
+	}
+
+	// Build the prompt message
+	prompt := buildPiPrompt(bead, hindsightContext)
+
+	// Send prompt as JSONL
+	request := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "pi/execute",
+		"params": map[string]interface{}{
+			"prompt": prompt,
+		},
+		"id": 1,
+	}
+
+	encoder := json.NewEncoder(stdinPipe)
+	if err := encoder.Encode(request); err != nil {
+		return result, fmt.Errorf("failed to send prompt to pi: %w", err)
+	}
+	stdinPipe.Close()
+
+	// Capture output with activity monitoring
+	var stdoutBuf, stderrBuf bytes.Buffer
+	var wg sync.WaitGroup
+
+	// Monitor stdout
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			line := scanner.Text()
+			stdoutBuf.WriteString(line + "\n")
+			activityMonitor.RecordActivity()
+			// Also stream to MCP for real-time monitoring
+			if mcpClient != nil {
+				streamLog(mcpClient, "info", fmt.Sprintf("[pi-stdout] %s", line))
+			}
+		}
+	}()
+
+	// Monitor stderr
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			line := scanner.Text()
+			stderrBuf.WriteString(line + "\n")
+			activityMonitor.RecordActivity()
+			// Also stream to MCP for real-time monitoring
+			if mcpClient != nil {
+				streamLog(mcpClient, "warn", fmt.Sprintf("[pi-stderr] %s", line))
+			}
+		}
+	}()
+
+	// Wait for completion or timeout
+	done := make(chan error, 1)
+	go func() {
+		wg.Wait()
+		done <- cmd.Wait()
+	}()
+
+	// Monitor for timeout
+	timeoutTicker := time.NewTicker(10 * time.Second)
+	defer timeoutTicker.Stop()
+
+	var cmdErr error
+monitorLoop:
+	for {
+		select {
+		case cmdErr = <-done:
+			break monitorLoop
+		case <-timeoutTicker.C:
+			if activityMonitor.IsTimedOut() {
+				log.Printf("⏰ Activity timeout reached (no output for %v)", activityTimeout)
+				streamLog(mcpClient, "warn", fmt.Sprintf("Activity timeout after %v of inactivity", activityTimeout))
+
+				// Kill the entire process group
+				if cmd.Process != nil {
+					syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+					time.Sleep(2 * time.Second)
+					syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				}
+
+				cmdErr = fmt.Errorf("activity timeout: no output for %v", activityTimeout)
+				break monitorLoop
+			}
+		}
+	}
+
+	// Process result
+	result.ExitCode = 0
+	if cmdErr != nil {
+		if exitErr, ok := cmdErr.(*exec.ExitError); ok {
+			result.ExitCode = exitErr.ExitCode()
+		} else {
+			result.ExitCode = -1
+		}
+	}
+
+	// Store output
+	result.Output = stdoutBuf.String()
+	result.Error = stderrBuf.String()
+
+	// Determine success based on exit code
+	if cmdErr == nil && result.ExitCode == 0 {
+		result.Success = true
+		log.Printf("✅ Pi completed successfully (last activity %v ago)", activityMonitor.TimeSinceActivity())
+	} else {
+		result.Success = false
+		log.Printf("❌ Pi failed with exit code %d", result.ExitCode)
+		if stdoutStr := stdoutBuf.String(); stdoutStr != "" {
+			log.Printf("📤 STDOUT:\n%s", stdoutStr)
+		}
+		if stderrStr := stderrBuf.String(); stderrStr != "" {
+			log.Printf("📤 STDERR:\n%s", stderrStr)
+		}
+	}
+
+	return result, cmdErr
+}
+
+// buildPiCommand builds the Pi agent CLI command
+func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hindsightContext *agents.ContextEnrichment) *exec.Cmd {
+	// Find pi binary
+	piPath := os.Getenv("HYDRA_PI_PATH")
+	if piPath == "" {
+		piPath = "pi"
+	}
+
+	// Use project path if provided
+	path := projectPath
+	if path == "" {
+		path = bead.Project
+	}
+
+	// Build base args
+	args := []string{
+		"--mode", "rpc",
+		"--no-session",
+	}
+
+	// Add provider
+	if piConfig.Provider != "" {
+		args = append(args, "--provider", piConfig.Provider)
+	}
+
+	// Add model
+	if piConfig.Model != "" {
+		args = append(args, "--model", piConfig.Model)
+	}
+
+	// Build skill flags if configDir is set
+	if piConfig.ConfigDir != "" {
+		skillResult, err := pi.BuildSkillFlags(piConfig.ConfigDir)
+		if err != nil {
+			log.Printf("[Worker] Warning: failed to build skill flags: %v", err)
+		} else {
+			args = append(args, skillResult.Flags...)
+			log.Printf("[Worker] Added %d skill flags", len(skillResult.Flags)/2)
+		}
+	}
+
+	// Create command
+	cmd := exec.Command(piPath, args...)
+	cmd.Dir = path
+
+	// Create new process group
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
+	// Prepare environment
+	envVars := os.Environ()
+
+	// Set PI_CODING_AGENT_DIR if configDir is set
+	if piConfig.ConfigDir != "" {
+		agentDir := filepath.Join(piConfig.ConfigDir, "agent")
+		absAgentDir, err := filepath.Abs(agentDir)
+		if err == nil {
+			envVars = append(envVars, fmt.Sprintf("PI_CODING_AGENT_DIR=%s", absAgentDir))
+		}
+	}
+
+	// Set API key from environment if configured
+	if piConfig.APIKeyName != "" {
+		apiKey := os.Getenv(piConfig.APIKeyName)
+		if apiKey != "" {
+			envVars = append(envVars, fmt.Sprintf("%s=%s", piConfig.APIKeyName, apiKey))
+		}
+	}
+
+	// Set bead metadata
+	if bead.Title != "" {
+		envVars = append(envVars, fmt.Sprintf("HYDRA_BEAD_TITLE=%s", bead.Title))
+	}
+	if bead.Description != "" {
+		envVars = append(envVars, fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description))
+	}
+
+	// Set agent type
+	envVars = append(envVars, fmt.Sprintf("HYDRA_AGENT_TYPE=%s", bead.Type))
+	envVars = append(envVars, fmt.Sprintf("HYDRA_BEAD_TYPE=%s", bead.Type))
+
+	cmd.Env = envVars
+
+	return cmd
+}
+
+// buildPiPrompt builds the prompt message for Pi agent
+func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment) string {
+	var promptParts []string
+
+	// Add bead type and title
+	if bead.Title != "" {
+		promptParts = append(promptParts, fmt.Sprintf("%s: %s", bead.Type, bead.Title))
+	} else {
+		promptParts = append(promptParts, bead.Type)
+	}
+
+	// Add description
+	if bead.Description != "" {
+		promptParts = append(promptParts, bead.Description)
+	}
+
+	// Add target files if available
+	targetFiles := extractTargetFiles(bead)
+	if len(targetFiles) > 0 {
+		promptParts = append(promptParts, fmt.Sprintf("Files to modify: %v", targetFiles))
+	}
+
+	// Add Hindsight context if available
+	if hindsightContext != nil && len(hindsightContext.Memories) > 0 {
+		promptParts = append(promptParts, "\nRelevant past executions:")
+		for _, mem := range hindsightContext.Memories {
+			promptParts = append(promptParts, fmt.Sprintf("- %s (score: %.2f): %s",
+				mem.ID, mem.Score, truncateString(mem.Content, 200)))
+		}
+	}
+
+	return strings.Join(promptParts, "\n\n")
 }
 
 // queryHindsightForContext queries Hindsight for relevant context before agent execution

@@ -2131,9 +2131,9 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		}
 	}
 
-	// Create the worker using the agent connector (Pi agent)
-	// This spawns Pi agent which handles execution through proper agent session management
-	worker, err := o.spawnWorkerViaAgent(bead)
+	// Create the worker using the worker binary with Pi agent support
+	// This ensures Hindsight memory retention happens after execution
+	worker, err := o.spawnWorkerInternal(bead)
 	if err != nil {
 		// Remove placeholder on spawn failure
 		o.workerMutex.Lock()
@@ -3534,6 +3534,18 @@ func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead) []string {
 		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_TIMEOUT=%s", h.Timeout))
 		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_LIMIT=%d", h.Limit))
 		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_MIN_SCORE=%.2f", h.MinScore))
+	}
+
+	// Add Pi configuration if enabled
+	if o.config.Agents.Pi.Enabled {
+		p := o.config.Agents.Pi
+		env = append(env, fmt.Sprintf("HYDRA_PI_ENABLED=true"))
+		env = append(env, fmt.Sprintf("HYDRA_PI_PROVIDER=%s", p.Provider))
+		env = append(env, fmt.Sprintf("HYDRA_PI_MODEL=%s", p.Model))
+		env = append(env, fmt.Sprintf("HYDRA_PI_THINKING_LEVEL=%s", p.ThinkingLevel))
+		env = append(env, fmt.Sprintf("HYDRA_PI_TIMEOUT=%s", p.Timeout))
+		env = append(env, fmt.Sprintf("HYDRA_PI_API_KEY_NAME=%s", p.ApiKeyName))
+		env = append(env, fmt.Sprintf("HYDRA_PI_CONFIG_DIR=%s", o.config.Pi.ConfigDir))
 	}
 
 	return env
