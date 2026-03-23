@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -2244,6 +2245,16 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 
 	cmd.Env = env
 
+	// Capture stdout and stderr from worker
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+
 	// Start process
 	if err := cmd.Start(); err != nil {
 		spawnErr := &WorkerSpawnError{
@@ -2264,6 +2275,20 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 	}
 
 	log.Printf("[Worker] Process started with PID %d for bead %s (workerTracker nil: %v)", cmd.Process.Pid, beadIDStr, o.workerTracker == nil)
+
+	// Stream worker stdout/stderr to logs
+	go func() {
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			log.Printf("[Worker:%s] %s", beadIDStr, scanner.Text())
+		}
+	}()
+	go func() {
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			log.Printf("[Worker:%s] [stderr] %s", beadIDStr, scanner.Text())
+		}
+	}()
 
 	// Create worker record
 	worker := &types.Worker{
