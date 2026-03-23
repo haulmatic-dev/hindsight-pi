@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -405,9 +406,21 @@ func (s *SettledStateService) findProjectPath(beadID types.BeadID) string {
 		return ""
 	}
 
+	beadProject := beadID.Project()
+
 	// Try to find the project from overseer's projects
 	for _, project := range s.overseer.GetProjects() {
-		if project.Name == beadID.Project() {
+		// Exact match
+		if project.Name == beadProject {
+			if beadID.Repo() != "" && project.Type == types.RepoTypeMulti {
+				return project.Path + "/" + beadID.Repo()
+			}
+			return project.Path
+		}
+
+		// Prefix match: bead project starts with config project name
+		// e.g., bead "simple-calc-prd-new-XXX" -> project "simple-calc"
+		if strings.HasPrefix(beadProject, project.Name) {
 			if beadID.Repo() != "" && project.Type == types.RepoTypeMulti {
 				return project.Path + "/" + beadID.Repo()
 			}
