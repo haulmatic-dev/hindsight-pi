@@ -16,8 +16,6 @@ import (
 // Mock Intelligence Clients
 // ============================================================================
 
-// mockCassMemoryClient is a mock implementation of CassMemoryClient for testing
-type mockCassMemoryClient struct {
 	patterns       []Pattern
 	contextEntries []ContextEntry
 	queryErr       error
@@ -28,8 +26,6 @@ type mockCassMemoryClient struct {
 	available      bool
 }
 
-func newMockCassMemoryClient(available bool) *mockCassMemoryClient {
-	return &mockCassMemoryClient{
 		patterns: []Pattern{
 			{
 				ID:          "pattern-1",
@@ -54,7 +50,6 @@ func newMockCassMemoryClient(available bool) *mockCassMemoryClient {
 	}
 }
 
-func (m *mockCassMemoryClient) QueryContext(beadType string, files []string, days int) ([]ContextEntry, error) {
 	if !m.available {
 		return nil, fmt.Errorf("cass_memory service unavailable")
 	}
@@ -64,7 +59,6 @@ func (m *mockCassMemoryClient) QueryContext(beadType string, files []string, day
 	return m.contextEntries, nil
 }
 
-func (m *mockCassMemoryClient) AddPattern(pattern Pattern) error {
 	m.addCalled = true
 	m.addedPattern = &pattern
 	if !m.available {
@@ -73,7 +67,6 @@ func (m *mockCassMemoryClient) AddPattern(pattern Pattern) error {
 	return nil
 }
 
-func (m *mockCassMemoryClient) RecordOutcome(beadID string, success bool, ruleIDs []string) error {
 	m.outcomeCalled = true
 	m.outcomeRuleIDs = ruleIDs
 	if !m.available {
@@ -133,18 +126,15 @@ func (m *mockTLDRClient) SetImpactSize(affectedCount int) {
 func TestPreExecutionIntelligence_Success(t *testing.T) {
 	// Setup test overseer with intelligence enabled
 	config := DefaultConfig()
-	config.Intelligence.CassMemory.Enabled = true
 	config.Intelligence.TLDR.Enabled = true
 	config.Intelligence.TLDR.MaxFiles = 50
 
 	overseer := NewOverseer(config)
 
 	// Create mock clients
-	mockCass := newMockCassMemoryClient(true)
 	mockTLDR := newMockTLDRClient(true, 50)
 
 	// Inject mock clients
-	overseer.cassClient = &CassMemoryClient{
 		baseURL:    "http://mock-cass:5000",
 		httpClient: nil,
 		queryLimit: 10,
@@ -158,7 +148,6 @@ func TestPreExecutionIntelligence_Success(t *testing.T) {
 	)
 
 	// Override the query methods with our mocks
-	overseer.config.Intelligence.CassMemory.Enabled = true
 	overseer.config.Intelligence.TLDR.Enabled = true
 
 	// Create a test bead with file references (used for context)
@@ -235,24 +224,19 @@ func TestPreExecutionIntelligence_Success(t *testing.T) {
 }
 
 // ============================================================================
-// Test: Pre-Execution Intelligence - CassMemory Down
 // ============================================================================
 
-func TestPreExecutionIntelligence_CassMemoryDown(t *testing.T) {
 	config := DefaultConfig()
-	config.Intelligence.CassMemory.Enabled = true
 	config.Intelligence.TLDR.Enabled = true
 
 	overseer := NewOverseer(config)
 
 	// Simulate cass_memory being down by creating an unavailable mock
-	_ = newMockCassMemoryClient(false)      // unavailable - not used directly but documents intent
 	mockTLDR := newMockTLDRClient(true, 50) // available
 
 	// Create a test bead (for context documentation)
 	_ = &types.Bead{
 		ID:          "test-project-002",
-		Title:       "Test CassMemory Down",
 		Description: "Modify internal/core/config.go",
 		Type:        "implement",
 		Status:      types.StatusOpen,
@@ -318,13 +302,11 @@ func TestPreExecutionIntelligence_CassMemoryDown(t *testing.T) {
 
 func TestPreExecutionIntelligence_TLDRDown(t *testing.T) {
 	config := DefaultConfig()
-	config.Intelligence.CassMemory.Enabled = true
 	config.Intelligence.TLDR.Enabled = true
 
 	overseer := NewOverseer(config)
 
 	// Simulate TLDR being down
-	mockCass := newMockCassMemoryClient(true) // available
 	_ = newMockTLDRClient(false, 50)          // unavailable - documented for clarity
 
 	// Create a test bead (for context documentation)
@@ -393,7 +375,6 @@ func TestPreExecutionIntelligence_TLDRDown(t *testing.T) {
 
 func TestPreExecutionIntelligence_ScopeViolation(t *testing.T) {
 	config := DefaultConfig()
-	config.Intelligence.CassMemory.Enabled = true
 	config.Intelligence.TLDR.Enabled = true
 	config.Intelligence.TLDR.MaxFiles = 50 // Limit is 50 files
 
@@ -489,13 +470,11 @@ func TestPreExecutionIntelligence_ScopeViolation(t *testing.T) {
 
 func TestRecordSuccessPattern(t *testing.T) {
 	config := DefaultConfig()
-	config.Intelligence.CassMemory.Enabled = true
 
 	// Create overseer with config to verify initialization
 	_ = NewOverseer(config)
 
 	// Create mock cass_memory client
-	mockCass := newMockCassMemoryClient(true)
 
 	// Track if AddPattern and RecordOutcome are called
 	patternAdded := false
@@ -588,7 +567,6 @@ func extractRuleIDs(labels []string) []string {
 func TestIntelligenceConfigLoading(t *testing.T) {
 	tests := []struct {
 		name                  string
-		cassMemoryEnabled     bool
 		tldrEnabled           bool
 		gptCacheEnabled       bool
 		expectCassInitialized bool
@@ -597,7 +575,6 @@ func TestIntelligenceConfigLoading(t *testing.T) {
 	}{
 		{
 			name:                  "all services enabled",
-			cassMemoryEnabled:     true,
 			tldrEnabled:           true,
 			gptCacheEnabled:       true,
 			expectCassInitialized: true,
@@ -606,7 +583,6 @@ func TestIntelligenceConfigLoading(t *testing.T) {
 		},
 		{
 			name:                  "only cass_memory enabled",
-			cassMemoryEnabled:     true,
 			tldrEnabled:           false,
 			gptCacheEnabled:       false,
 			expectCassInitialized: true,
@@ -615,7 +591,6 @@ func TestIntelligenceConfigLoading(t *testing.T) {
 		},
 		{
 			name:                  "only TLDR enabled",
-			cassMemoryEnabled:     false,
 			tldrEnabled:           true,
 			gptCacheEnabled:       false,
 			expectCassInitialized: false,
@@ -624,7 +599,6 @@ func TestIntelligenceConfigLoading(t *testing.T) {
 		},
 		{
 			name:                  "only GPTCache enabled",
-			cassMemoryEnabled:     false,
 			tldrEnabled:           false,
 			gptCacheEnabled:       true,
 			expectCassInitialized: false,
@@ -633,7 +607,6 @@ func TestIntelligenceConfigLoading(t *testing.T) {
 		},
 		{
 			name:                  "all services disabled",
-			cassMemoryEnabled:     false,
 			tldrEnabled:           false,
 			gptCacheEnabled:       false,
 			expectCassInitialized: false,
@@ -645,14 +618,12 @@ func TestIntelligenceConfigLoading(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config := DefaultConfig()
-			config.Intelligence.CassMemory.Enabled = tt.cassMemoryEnabled
 			config.Intelligence.TLDR.Enabled = tt.tldrEnabled
 			config.Intelligence.GPTCache.Enabled = tt.gptCacheEnabled
 
 			overseer := NewOverseer(config)
 
 			// Check cass_memory client initialization
-			hasCass := overseer.cassClient != nil
 			if hasCass != tt.expectCassInitialized {
 				t.Errorf("cass_memory client initialized = %v, expected %v", hasCass, tt.expectCassInitialized)
 			}
@@ -671,7 +642,6 @@ func TestIntelligenceConfigLoading(t *testing.T) {
 
 			// Verify isIntelligenceEnabled reflects the config
 			isEnabled := overseer.isIntelligenceEnabled()
-			expectedEnabled := tt.cassMemoryEnabled || tt.tldrEnabled || tt.gptCacheEnabled
 			if isEnabled != expectedEnabled {
 				t.Errorf("isIntelligenceEnabled = %v, expected %v", isEnabled, expectedEnabled)
 			}
@@ -685,7 +655,6 @@ func TestIntelligenceConfigLoading(t *testing.T) {
 
 func TestIntelligenceBundlePassedToWorker(t *testing.T) {
 	config := DefaultConfig()
-	config.Intelligence.CassMemory.Enabled = true
 	config.Intelligence.TLDR.Enabled = true
 
 	// Create overseer to verify initialization with intelligence enabled
@@ -824,7 +793,6 @@ func stringSlicesEqual(a, b []string) bool {
 
 func TestPreExecutionIntelligence_NoTargetFiles(t *testing.T) {
 	config := DefaultConfig()
-	config.Intelligence.CassMemory.Enabled = true
 	config.Intelligence.TLDR.Enabled = true
 
 	overseer := NewOverseer(config)

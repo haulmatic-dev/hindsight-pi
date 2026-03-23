@@ -308,6 +308,13 @@ func DefaultConfig() *Config {
 				Enabled:   true,
 				ServerURL: "http://127.0.0.1:8788",
 			},
+			Hindsight: HindsightConfig{
+				Enabled:  true,
+				BaseURL:  "http://127.0.0.1:8000",
+				Timeout:  10 * time.Second,
+				Limit:    5,
+				MinScore: 0.7,
+			},
 			SettledState: DefaultSettledStateConfig(),
 			Patterns: PatternConfig{
 				Enabled:             true,

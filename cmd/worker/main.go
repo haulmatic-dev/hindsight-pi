@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,11 +12,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/agents"
 	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -31,10 +34,20 @@ type WorkerConfig struct {
 	BeadTitle       string
 	BeadDescription string
 	Hindsight       *HindsightContext
+	HindsightClient HindsightClientConfig
 	MCP             struct {
 		Enabled bool
 		URL     string
 	}
+}
+
+// HindsightClientConfig contains configuration for the Hindsight client
+type HindsightClientConfig struct {
+	Enabled  bool
+	BaseURL  string
+	Timeout  time.Duration
+	Limit    int
+	MinScore float64
 }
 
 // HindsightContext represents context passed from the overseer about related
@@ -272,7 +285,7 @@ func main() {
 	log.Printf("⚙️  Executing with retry policy (max %d retries)...", retryPolicy.MaxRetries)
 	streamLog(mcpClient, "info", fmt.Sprintf("Starting execution (max %d retries)", retryPolicy.MaxRetries))
 
-	result, err := executeWithRetry(bead, determinedAgentType, mcpClient, retryPolicy, projectPath)
+	result, err := executeWithRetry(bead, determinedAgentType, mcpClient, retryPolicy, projectPath, config)
 
 	// Calculate duration
 	duration := time.Since(startTime)
@@ -293,7 +306,7 @@ func main() {
 	log.Printf("📝 Recording execution results...")
 	streamLog(mcpClient, "info", fmt.Sprintf("Recording results (status: %s)", status))
 
-	recordExecutionResult(bead, result, mcpClient)
+	recordExecutionResult(bead, result, mcpClient, config)
 
 	// Notify task completion
 	notifyTaskComplete(mcpClient, bead, status, duration, exitCode)
@@ -386,6 +399,9 @@ func parseConfig() WorkerConfig {
 	// Parse Hindsight context from environment variable
 	config.Hindsight = parseHindsightContext()
 
+	// Parse Hindsight client configuration
+	config.HindsightClient = parseHindsightClientConfig()
+
 	// Default agent type if still empty
 	if config.AgentType == "" {
 		config.AgentType = "orchestrator"
@@ -426,6 +442,59 @@ func parseHindsightContext() *HindsightContext {
 	}
 
 	return &ctx
+}
+
+// parseHindsightClientConfig parses Hindsight client configuration from environment variables
+func parseHindsightClientConfig() HindsightClientConfig {
+	var cfg HindsightClientConfig
+
+	// Check if Hindsight is enabled
+	enabledStr := os.Getenv("HYDRA_HISTORIESIGHT_ENABLED")
+	cfg.Enabled = enabledStr != "" && enabledStr != "false" && enabledStr != "0"
+
+	// Parse base URL
+	cfg.BaseURL = os.Getenv("HYDRA_HISTORIESIGHT_BASE_URL")
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = "http://127.0.0.1:8000" // Default Hindsight port
+	}
+
+	// Parse timeout
+	timeoutStr := os.Getenv("HYDRA_HISTORIESIGHT_TIMEOUT")
+	if timeoutStr != "" {
+		if d, err := time.ParseDuration(timeoutStr); err == nil {
+			cfg.Timeout = d
+		} else {
+			cfg.Timeout = 10 * time.Second
+		}
+	} else {
+		cfg.Timeout = 10 * time.Second
+	}
+
+	// Parse limit
+	limitStr := os.Getenv("HYDRA_HISTORIESIGHT_LIMIT")
+	if limitStr != "" {
+		if n, err := strconv.Atoi(limitStr); err == nil {
+			cfg.Limit = n
+		} else {
+			cfg.Limit = 5
+		}
+	} else {
+		cfg.Limit = 5
+	}
+
+	// Parse min score
+	scoreStr := os.Getenv("HYDRA_HISTORIESIGHT_MIN_SCORE")
+	if scoreStr != "" {
+		if f, err := strconv.ParseFloat(scoreStr, 64); err == nil {
+			cfg.MinScore = f
+		} else {
+			cfg.MinScore = 0.7
+		}
+	} else {
+		cfg.MinScore = 0.7
+	}
+
+	return cfg
 }
 
 // logHindsightContext logs the hindsight context information
@@ -623,6 +692,7 @@ func executeWithRetry(
 	mcpClient *mcp.Client,
 	policy RetryPolicy,
 	projectPath string,
+	config WorkerConfig,
 ) (*ExecutionResult, error) {
 	var lastErr error
 	var result *ExecutionResult
@@ -638,7 +708,13 @@ func executeWithRetry(
 		log.Printf("🔄 Execution attempt %d/%d", attempt+1, policy.MaxRetries+1)
 		streamLog(mcpClient, "info", fmt.Sprintf("Execution attempt %d/%d", attempt+1, policy.MaxRetries+1))
 
-		result, lastErr = executeWithOpencode(bead, agentType, mcpClient, projectPath)
+		// Query Hindsight for context enrichment before execution (only on first attempt)
+		var hindsightContext *agents.ContextEnrichment
+		if attempt == 0 {
+			hindsightContext = queryHindsightForContext(bead, config, mcpClient)
+		}
+
+		result, lastErr = executeWithOpencode(bead, agentType, mcpClient, projectPath, hindsightContext)
 		result.Attempts = attempt + 1
 
 		if lastErr == nil && result.Success {
@@ -732,6 +808,7 @@ func executeWithOpencode(
 	agentType string,
 	mcpClient *mcp.Client,
 	projectPath string,
+	hindsightContext *agents.ContextEnrichment,
 ) (*ExecutionResult, error) {
 	result := &ExecutionResult{
 		Success:   false,
@@ -743,7 +820,7 @@ func executeWithOpencode(
 	activityMonitor := NewActivityMonitor(activityTimeout)
 
 	// Build opencode command
-	cmd := buildOpencodeCommand(bead, agentType, projectPath)
+	cmd := buildOpencodeCommand(bead, agentType, projectPath, hindsightContext)
 
 	log.Printf("🔧 Executing: %s %s", cmd.Path, strings.Join(cmd.Args[1:], " "))
 	log.Printf("📁 Working directory: %s", cmd.Dir)
@@ -877,7 +954,7 @@ monitorLoop:
 
 // buildOpencodeCommand builds the opencode CLI command for a bead
 // Opencode run syntax: echo "prompt" | opencode run --format json --dir <path>
-func buildOpencodeCommand(bead types.Bead, agentType string, projectPath string) *exec.Cmd {
+func buildOpencodeCommand(bead types.Bead, agentType string, projectPath string, hindsightContext *agents.ContextEnrichment) *exec.Cmd {
 	// Find opencode binary
 	opencodePath := os.Getenv("HYDRA_OPCODE_PATH")
 	if opencodePath == "" {
@@ -911,8 +988,15 @@ func buildOpencodeCommand(bead types.Bead, agentType string, projectPath string)
 		promptParts = append(promptParts, fmt.Sprintf("Files to modify: %v", targetFiles))
 	}
 
-	// Note: Intelligence context now accessed via skills on-demand, not force-fed
-	// Pi agents use cass-memory-insights and tldr-code-intelligence skills
+	// Add Hindsight context if available
+	if hindsightContext != nil && len(hindsightContext.Memories) > 0 {
+		promptParts = append(promptParts, "\n--- Relevant Context from Previous Work ---")
+		for i, mem := range hindsightContext.Memories {
+			promptParts = append(promptParts, fmt.Sprintf("%d. %s (relevance: %.2f)\n   %s",
+				i+1, mem.ID, mem.Score, mem.Content))
+		}
+		promptParts = append(promptParts, "--- End Context ---\n")
+	}
 
 	// Join all parts into single prompt
 	prompt := strings.Join(promptParts, "\n")
@@ -943,20 +1027,97 @@ func buildOpencodeCommand(bead types.Bead, agentType string, projectPath string)
 	return cmd
 }
 
+// queryHindsightForContext queries Hindsight for relevant context before agent execution
+// Returns the context enrichment data to be included in the prompt
+func queryHindsightForContext(
+	bead types.Bead,
+	config WorkerConfig,
+	mcpClient *mcp.Client,
+) *agents.ContextEnrichment {
+	// Skip if Hindsight is not enabled
+	if !config.HindsightClient.Enabled {
+		log.Println("ℹ️ Hindsight not enabled, skipping context query")
+		return nil
+	}
+
+	log.Printf("🔍 Querying Hindsight for context (bead: %s)...", bead.ID)
+	streamLog(mcpClient, "info", "Querying Hindsight for relevant context")
+
+	// Create Hindsight client with config
+	hindsightClient := hindsight.NewClient(
+		hindsight.WithBaseURL(config.HindsightClient.BaseURL),
+		hindsight.WithTimeout(config.HindsightClient.Timeout),
+		hindsight.WithDefaultLimit(config.HindsightClient.Limit),
+		hindsight.WithMinScore(config.HindsightClient.MinScore),
+		hindsight.WithEnabled(true),
+	)
+
+	// Create context processor
+	ctxProcessorConfig := agents.DefaultContextProcessorConfig()
+	ctxProcessorConfig.Enabled = true
+	ctxProcessor := agents.NewContextProcessor(hindsightClient, ctxProcessorConfig, nil)
+
+	// Query Hindsight for context
+	ctx := context.Background()
+	enrichment, err := ctxProcessor.EnrichBeadContext(ctx, bead)
+	if err != nil {
+		log.Printf("⚠️ Failed to query Hindsight for context: %v", err)
+		streamLog(mcpClient, "warn", fmt.Sprintf("Hindsight context query failed: %v", err))
+		return nil
+	}
+
+	// Log the results
+	if len(enrichment.Memories) > 0 {
+		log.Printf("✅ Retrieved %d relevant memories from Hindsight (query time: %v)",
+			len(enrichment.Memories), enrichment.QueryTime)
+		streamLog(mcpClient, "info", fmt.Sprintf("Retrieved %d relevant memories from Hindsight", len(enrichment.Memories)))
+
+		// Log each memory
+		for i, mem := range enrichment.Memories {
+			log.Printf("   Memory %d: %s (score: %.2f) - %s",
+				i+1, mem.ID, mem.Score, truncateString(mem.Content, 100))
+		}
+	} else {
+		log.Println("ℹ️ No relevant memories found in Hindsight")
+		streamLog(mcpClient, "info", "No relevant memories found in Hindsight")
+	}
+
+	return enrichment
+}
+
+// truncateString truncates a string to the specified length with ellipsis
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
 // recordExecutionResult records the execution outcome to hindsight memory
 func recordExecutionResult(
 	bead types.Bead,
 	result *ExecutionResult,
 	mcpClient *mcp.Client,
+	config WorkerConfig,
 ) {
 	if result == nil {
 		log.Println("[WARN] Cannot record nil result")
 		return
 	}
 
-	// Initialize hindsight client
-	hindsightClient := hindsight.NewClient()
-	if !hindsightClient.IsEnabled() {
+	// Initialize hindsight client with config from environment
+	var hindsightClient *hindsight.Client
+	if config.HindsightClient.Enabled {
+		hindsightClient = hindsight.NewClient(
+			hindsight.WithBaseURL(config.HindsightClient.BaseURL),
+			hindsight.WithTimeout(config.HindsightClient.Timeout),
+			hindsight.WithDefaultLimit(config.HindsightClient.Limit),
+			hindsight.WithMinScore(config.HindsightClient.MinScore),
+			hindsight.WithEnabled(true),
+		)
+		log.Printf("[Hindsight] Client initialized (baseURL: %s, limit: %d, minScore: %.2f)",
+			config.HindsightClient.BaseURL, config.HindsightClient.Limit, config.HindsightClient.MinScore)
+	} else {
 		log.Println("ℹ️ Hindsight not enabled, skipping result recording")
 		return
 	}

@@ -485,6 +485,27 @@ func (o *Overseer) initializeIntelligenceClients() {
 		log.Printf("[Intelligence] GPTCache client initialized (server: %s)",
 			intellConfig.GPTCache.ServerURL)
 	}
+
+	// Initialize Hindsight client if enabled
+	if intellConfig.Hindsight.Enabled {
+		o.hindsightClient = hindsight.NewClient(
+			hindsight.WithBaseURL(intellConfig.Hindsight.BaseURL),
+			hindsight.WithTimeout(intellConfig.Hindsight.Timeout),
+			hindsight.WithDefaultLimit(intellConfig.Hindsight.Limit),
+			hindsight.WithMinScore(intellConfig.Hindsight.MinScore),
+			hindsight.WithEnabled(true),
+		)
+		log.Printf("[Intelligence] Hindsight client initialized (baseURL: %s, limit: %d, minScore: %.2f)",
+			intellConfig.Hindsight.BaseURL, intellConfig.Hindsight.Limit, intellConfig.Hindsight.MinScore)
+
+		// Set environment variables so they're inherited by Pi connector and workers
+		os.Setenv("HYDRA_HISTORIESIGHT_ENABLED", "true")
+		os.Setenv("HYDRA_HISTORIESIGHT_BASE_URL", intellConfig.Hindsight.BaseURL)
+		os.Setenv("HYDRA_HISTORIESIGHT_TIMEOUT", intellConfig.Hindsight.Timeout.String())
+		os.Setenv("HYDRA_HISTORIESIGHT_LIMIT", fmt.Sprintf("%d", intellConfig.Hindsight.Limit))
+		os.Setenv("HYDRA_HISTORIESIGHT_MIN_SCORE", fmt.Sprintf("%.2f", intellConfig.Hindsight.MinScore))
+		log.Printf("[Intelligence] Hindsight environment variables set for child processes")
+	}
 }
 
 // initializeSettledStateService creates and configures the settled-state detection service
@@ -2208,6 +2229,17 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		}
 	}
 
+	// Add Hindsight configuration for memory-based context retrieval
+	if o.config != nil && o.config.Intelligence.Hindsight.Enabled {
+		h := o.config.Intelligence.Hindsight
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_ENABLED=true"))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_BASE_URL=%s", h.BaseURL))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_TIMEOUT=%s", h.Timeout))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_LIMIT=%d", h.Limit))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_MIN_SCORE=%.2f", h.MinScore))
+		log.Printf("[Worker] Hindsight config passed to worker (baseURL: %s)", h.BaseURL)
+	}
+
 	cmd.Env = env
 
 	// Start process
@@ -3450,7 +3482,7 @@ func (o *Overseer) spawnWorkerWithContextEnrichment(bead types.Bead) (*types.Wor
 }
 
 // buildWorkerEnvironmentWithContext builds worker environment with context enrichment
-// (Legacy function - CASS memory integration removed, now returns basic environment)
+// Includes Hindsight configuration for memory-based context retrieval
 func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead) []string {
 	// Start with basic environment
 	env := []string{
@@ -3459,6 +3491,16 @@ func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead) []string {
 		fmt.Sprintf("HYDRA_REPO=%s", bead.Repo),
 		fmt.Sprintf("HYDRA_BEAD_TITLE=%s", bead.Title),
 		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
+	}
+
+	// Add Hindsight configuration if enabled
+	if o.config.Intelligence.Hindsight.Enabled {
+		h := o.config.Intelligence.Hindsight
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_ENABLED=true"))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_BASE_URL=%s", h.BaseURL))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_TIMEOUT=%s", h.Timeout))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_LIMIT=%d", h.Limit))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_MIN_SCORE=%.2f", h.MinScore))
 	}
 
 	return env

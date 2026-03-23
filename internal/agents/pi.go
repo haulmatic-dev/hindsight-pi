@@ -225,6 +225,16 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 		}
 	}
 
+	// Pass Hindsight configuration to worker if enabled
+	if os.Getenv("HYDRA_HISTORIESIGHT_ENABLED") == "true" {
+		envVars = append(envVars, "HYDRA_HISTORIESIGHT_ENABLED=true")
+		envVars = append(envVars, fmt.Sprintf("HYDRA_HISTORIESIGHT_BASE_URL=%s", os.Getenv("HYDRA_HISTORIESIGHT_BASE_URL")))
+		envVars = append(envVars, fmt.Sprintf("HYDRA_HISTORIESIGHT_TIMEOUT=%s", os.Getenv("HYDRA_HISTORIESIGHT_TIMEOUT")))
+		envVars = append(envVars, fmt.Sprintf("HYDRA_HISTORIESIGHT_LIMIT=%s", os.Getenv("HYDRA_HISTORIESIGHT_LIMIT")))
+		envVars = append(envVars, fmt.Sprintf("HYDRA_HISTORIESIGHT_MIN_SCORE=%s", os.Getenv("HYDRA_HISTORIESIGHT_MIN_SCORE")))
+		log.Printf("[PiConnector] Passed Hindsight config to worker for bead %s", session.BeadID)
+	}
+
 	cmd.Env = envVars
 
 	// Store command in session metadata for potential restart

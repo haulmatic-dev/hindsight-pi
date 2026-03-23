@@ -20,8 +20,10 @@ intelligence:
     max_files: 10
   hindsight:
     enabled: true
-    server_url: "http://127.0.0.1:8000"
+    base_url: "http://127.0.0.1:9418"
     timeout: 10s
+    limit: 5
+    min_score: 0.7
 
 agents:
   enabled: true
