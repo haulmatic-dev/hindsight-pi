@@ -25,10 +25,11 @@ export HINDSIGHT_API_DB_POOL_MAX_SIZE=20
 # export HINDSIGHT_API_ENABLE_MENTAL_MODEL_HISTORY=false
 # export HINDSIGHT_API_ENABLE_OBSERVATION_HISTORY=false
 
-# LLM for retain/reflect operations
-export HINDSIGHT_API_LLM_PROVIDER=openai
-export HINDSIGHT_API_LLM_MODEL=gpt-4o-mini
-# Alternative: gpt-4o (better quality, higher cost)
+# LLM for retain/reflect operations (OPTIONAL - keep your existing Kimi setup!)
+# Only change if you want to use OpenAI instead of Kimi for LLM operations
+# export HINDSIGHT_API_LLM_PROVIDER=openai
+# export HINDSIGHT_API_LLM_MODEL=gpt-4o-mini
+# export HINDSIGHT_API_LLM_API_KEY=$OPENAI_API_KEY
 
 # ============================================
 # Quick Reference

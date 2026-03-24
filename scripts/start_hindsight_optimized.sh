@@ -69,18 +69,9 @@ if [ -z "$HINDSIGHT_API_DB_POOL_MAX_SIZE" ]; then
     export HINDSIGHT_API_DB_POOL_MAX_SIZE=20
 fi
 
-# LLM provider for retain/reflect
-if [ -z "$HINDSIGHT_API_LLM_PROVIDER" ]; then
-    export HINDSIGHT_API_LLM_PROVIDER=openai
-fi
-
-if [ -z "$HINDSIGHT_API_LLM_API_KEY" ]; then
-    export HINDSIGHT_API_LLM_API_KEY="$HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"
-fi
-
-if [ -z "$HINDSIGHT_API_LLM_MODEL" ]; then
-    export HINDSIGHT_API_LLM_MODEL=gpt-4o-mini
-fi
+# Note: LLM provider (for retain/reflect) is NOT changed
+# If you're using Kimi, keep using Kimi - we only optimize embeddings/reranking
+# The LLM provider should be set in your ~/.zshrc if you want to change it
 
 # Display configuration
 echo -e "${GREEN}📋 Active Configuration:${NC}"
@@ -89,7 +80,14 @@ echo "  • Embeddings Model: $HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL"
 echo "  • Reranker Provider: $HINDSIGHT_API_RERANKER_PROVIDER"
 echo "  • Reranker Model: $HINDSIGHT_API_RERANKER_FLASHRANK_MODEL"
 echo "  • DB Pool Size: $HINDSIGHT_API_DB_POOL_MAX_SIZE"
-echo "  • LLM Model: $HINDSIGHT_API_LLM_MODEL"
+
+# Show LLM configuration if set
+if [ -n "$HINDSIGHT_API_LLM_PROVIDER" ]; then
+    echo "  • LLM Provider: $HINDSIGHT_API_LLM_PROVIDER"
+fi
+if [ -n "$HINDSIGHT_API_LLM_MODEL" ]; then
+    echo "  • LLM Model: $HINDSIGHT_API_LLM_MODEL"
+fi
 echo ""
 
 # Check if Hindsight is available
