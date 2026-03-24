@@ -1820,26 +1820,40 @@ func (o *Overseer) getReadyBeadsFromBR() ([]types.Bead, error) {
 	// Filter out beads that are already running or completed
 	o.workerMutex.RLock()
 	var readyBeads []types.Bead
+	filteredCounts := map[string]int{
+		"activeWorkers":      0,
+		"completed":          0,
+		"approvalGate":       0,
+		"approvalInProgress": 0,
+	}
 	for _, bead := range allReadyBeads {
 		beadIDStr := string(bead.ID)
 
 		// Filter: not already running
 		if _, isRunning := o.activeWorkers[beadIDStr]; isRunning {
+			log.Printf("[FilterDebug] Filtering out %s: already in activeWorkers", beadIDStr)
+			filteredCounts["activeWorkers"]++
 			continue
 		}
 
 		// Filter: not already completed in this session
 		if o.completed[beadIDStr] {
+			log.Printf("[FilterDebug] Filtering out %s: already completed in this session", beadIDStr)
+			filteredCounts["completed"]++
 			continue
 		}
 
 		// Skip approval gates
 		if bead.Type == "approval-gate" {
+			log.Printf("[FilterDebug] Filtering out %s: approval-gate type", beadIDStr)
+			filteredCounts["approvalGate"]++
 			continue
 		}
 
 		// Skip approval beads that are in progress (waiting for user approval)
 		if bead.Type == "approval" && bead.Status == types.StatusInProgress {
+			log.Printf("[FilterDebug] Filtering out %s: approval in progress", beadIDStr)
+			filteredCounts["approvalInProgress"]++
 			continue
 		}
 
@@ -1850,6 +1864,16 @@ func (o *Overseer) getReadyBeadsFromBR() ([]types.Bead, error) {
 		readyBeads = append(readyBeads, bead)
 	}
 	o.workerMutex.RUnlock()
+
+	// Log filter statistics
+	if len(allReadyBeads) > 0 && len(readyBeads) < len(allReadyBeads) {
+		log.Printf("[FilterDebug] Filtered out %d beads: activeWorkers=%d, completed=%d, approvalGate=%d, approvalInProgress=%d",
+			len(allReadyBeads)-len(readyBeads),
+			filteredCounts["activeWorkers"],
+			filteredCounts["completed"],
+			filteredCounts["approvalGate"],
+			filteredCounts["approvalInProgress"])
+	}
 
 	// Sort by priority (high to low)
 	sort.Slice(readyBeads, func(i, j int) bool {
@@ -2471,7 +2495,8 @@ func (o *Overseer) handleWorkerSuccess(worker *types.Worker, duration time.Durat
 		log.Printf("[DAG] %d dependents now ready after %s completion", len(newlyReady), worker.ID)
 	}
 
-	o.completed[worker.ID] = true
+	// Note: Don't mark as completed here - wait for closeBead to succeed
+	// o.completed[worker.ID] = true
 
 	// Track bead for settled-state detection
 	log.Printf("[DEBUG] handleWorkerSuccess: settledStateSvc=%v, BeadID=%s", o.settledStateSvc != nil, worker.BeadID)
@@ -2544,6 +2569,10 @@ func (o *Overseer) handleWorkerCompletion(comp workerCompletion) {
 			success = false
 			exitCode = 1
 		}
+	} else if success {
+		// Only mark as completed if close succeeded and worker succeeded
+		o.completed[comp.worker.ID] = true
+		log.Printf("[Worker] Bead %s marked as completed in session", comp.worker.ID)
 	}
 
 	o.scheduleAfterCompletion(comp.worker, success, comp.newlyReady)
