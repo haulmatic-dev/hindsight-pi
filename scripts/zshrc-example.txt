@@ -1,0 +1,47 @@
+# Add these lines to your ~/.zshrc (or ~/.bashrc for bash users)
+# Then reload: source ~/.zshrc
+
+# ============================================
+# Hindsight Memory Optimization Configuration
+# ============================================
+
+# Required: Your OpenAI API key
+# Get yours at: https://platform.openai.com/api-keys
+export OPENAI_API_KEY=sk-your-openai-key-here
+
+# Embeddings: Use OpenAI instead of local models (saves 3-5 GB)
+export HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai
+export HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL=text-embedding-3-small
+# Alternative: text-embedding-3-large (higher quality, 3072 dims)
+
+# Reranking: Use FlashRank (CPU-based, free, saves 1-2 GB)
+export HINDSIGHT_API_RERANKER_PROVIDER=flashrank
+export HINDSIGHT_API_RERANKER_FLASHRANK_MODEL=ms-marco-MiniLM-L-12-v2
+
+# Reduce database connections (saves some memory)
+export HINDSIGHT_API_DB_POOL_MAX_SIZE=20
+
+# Optional: Disable history tracking to save storage space
+# export HINDSIGHT_API_ENABLE_MENTAL_MODEL_HISTORY=false
+# export HINDSIGHT_API_ENABLE_OBSERVATION_HISTORY=false
+
+# LLM for retain/reflect operations
+export HINDSIGHT_API_LLM_PROVIDER=openai
+export HINDSIGHT_API_LLM_MODEL=gpt-4o-mini
+# Alternative: gpt-4o (better quality, higher cost)
+
+# ============================================
+# Quick Reference
+# ============================================
+# After adding above, reload shell:
+#   source ~/.zshrc
+#
+# Then start Hindsight:
+#   cd /path/to/hydra
+#   ./scripts/start_hindsight_optimized.sh
+#
+# Expected memory usage: 3-6 GB (down from 10 GB)
+# Cost: ~$0.02 per 1M tokens (practically free for normal usage)
+#
+# Documentation: docs/HINDSIGHT_MEMORY_OPTIMIZATION.md
+# ============================================
