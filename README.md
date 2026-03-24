@@ -202,6 +202,8 @@ Hydra's Collective Unconscious is a cross-project pattern learning system that e
 ### ⚙️ Operations
 - [Configuration Guide](docs/operations/configuration-guide-20260309.md) - hydra.yaml reference
 - [Monitoring & Metrics](docs/operations/monitoring-metrics-20260309.md) - Observability and alerting
+- [Hindsight Memory Optimization](docs/HINDSIGHT_MEMORY_OPTIMIZATION.md) - Reduce memory usage from 10GB to 3-6GB using cloud providers
+- [Hindsight Memory Management](docs/HINDSIGHT_MEMORY_MANAGEMENT.md) - Understanding and managing Hindsight memory usage
 - [Troubleshooting](docs/operations/troubleshooting-20260309.md) - Common issues and solutions
 
 ### 💻 Development

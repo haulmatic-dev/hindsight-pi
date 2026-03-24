@@ -262,6 +262,7 @@ type Overseer struct {
 	gptCache              *GPTCacheClient                 // GPTCache client for caching
 	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
 	batchRetentionSvc     *services.BatchRetentionService // Batch retention service for efficient memory storage
+	hindsightLifecycle    *services.HindsightLifecycle    // Hindsight lifecycle manager for memory management
 	bvClient              *bv.Client                      // BV client for graph analytics
 	intelMutex            sync.RWMutex                    // Mutex for intelligence clients
 	settledStateSvc       *SettledStateService            // Settled-state detection service
@@ -513,6 +514,20 @@ func (o *Overseer) initializeIntelligenceClients() {
 		o.batchRetentionSvc = services.NewBatchRetentionService(o.hindsightClient)
 		log.Printf("[Intelligence] Batch retention service initialized (batchSize: %d, flushInterval: %v)",
 			services.MemoryBatchSize, services.BatchFlushInterval)
+
+		// Initialize Hindsight lifecycle manager for memory management
+		o.hindsightLifecycle = services.NewHindsightLifecycle(services.HindsightLifecycleConfig{
+			Port:          9418,
+			IdleTimeout:   10 * time.Minute, // Restart after 10 minutes idle
+			MaxMemoryMB:   8192,             // Restart if > 8GB RAM (GPU memory not counted)
+			CheckInterval: 60 * time.Second, // Check every minute
+			APIKey:        os.Getenv("KIMI_API_KEY"),
+			Provider:      "openai",
+			Model:         "kimi-k2-5",
+			BaseURL:       "https://api.moonshot.cn/v1",
+		})
+		log.Printf("[Intelligence] Hindsight lifecycle manager initialized (idleTimeout: %v, maxMemory: %d MB)",
+			10*time.Minute, 8192)
 	}
 }
 
