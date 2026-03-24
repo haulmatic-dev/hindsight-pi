@@ -1,136 +1,113 @@
-#!/bin/sh
+#!/bin/bash
 # Start Hindsight with memory-optimized configuration
-# Uses OpenAI for embeddings and FlashRank for reranking
-# Saves 4-7 GB of memory compared to local models
-# 
-# This script respects environment variables from ~/.zshrc, ~/.bashrc, or any shell
-# Required env vars: OPENAI_API_KEY or HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY
-#
-# Usage: ./start_hindsight_optimized.sh
 
-# POSIX-compliant color codes
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+set -e
 
-echo ""
-echo -e "${GREEN}🚀 Starting Hindsight with Memory Optimization${NC}"
+echo "🚀 Starting Hindsight with memory optimization..."
 echo ""
 
-# Check for OpenAI API key (works in any shell)
-if [ -z "$OPENAI_API_KEY" ] && [ -z "$HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY" ]; then
-    echo -e "${RED}❌ Error: OpenAI API key not found${NC}"
-    echo ""
-    echo "Please add to your ~/.zshrc or ~/.bashrc:"
-    echo -e "${BLUE}  export OPENAI_API_KEY=sk-your-key${NC}"
-    echo ""
-    echo "Then reload your shell:"
-    echo -e "${BLUE}  source ~/.zshrc  # or source ~/.bashrc${NC}"
-    echo ""
-    echo "Alternatively, set it temporarily:"
-    echo -e "${BLUE}  export OPENAI_API_KEY=sk-your-key${NC}"
+# Source .zshrc to get API keys (in case we're in a non-interactive shell)
+if [ -f "$HOME/.zshrc" ]; then
+    source "$HOME/.zshrc" 2>/dev/null || true
+fi
+
+# Source the environment configuration
+ENV_FILE="${0%/*}/hindsight_env.sh"
+if [ -f "$ENV_FILE" ]; then
+    echo "Loading configuration from: $ENV_FILE"
+    source "$ENV_FILE"
+else
+    echo "⚠️  Warning: Environment file not found at $ENV_FILE"
+    echo "   Using current environment variables"
+fi
+
+# Check required keys
+echo ""
+echo "Checking API keys..."
+
+if [ -z "$KIMI_API_KEY" ]; then
+    echo "❌ ERROR: KIMI_API_KEY is not set!"
+    echo "   Please set it: export KIMI_API_KEY='your-key'"
     exit 1
+else
+    echo "✅ KIMI_API_KEY is set"
 fi
 
-# Use OPENAI_API_KEY if HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY is not set
-if [ -z "$HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY" ] && [ -n "$OPENAI_API_KEY" ]; then
-    export HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY="$OPENAI_API_KEY"
-    echo -e "${YELLOW}⚠️  Using OPENAI_API_KEY for embeddings${NC}"
+if [ -z "$OPENAI_API_KEY" ]; then
+    echo "⚠️  WARNING: OPENAI_API_KEY is not set!"
+    echo "   Embeddings will use local models (uses more memory)"
+    echo "   Set it for cloud embeddings: export OPENAI_API_KEY='your-key'"
     echo ""
+    read -p "Continue without OpenAI? (y/N) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+else
+    echo "✅ OPENAI_API_KEY is set"
 fi
 
-# Set optimized configuration (only if not already set)
-# This allows ~/.zshrc values to override defaults
-
-# Embeddings provider
-if [ -z "$HINDSIGHT_API_EMBEDDINGS_PROVIDER" ]; then
-    export HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai
-fi
-
-# Embeddings model
-if [ -z "$HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL" ]; then
-    export HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL=text-embedding-3-small
-fi
-
-# Reranker provider
-if [ -z "$HINDSIGHT_API_RERANKER_PROVIDER" ]; then
-    export HINDSIGHT_API_RERANKER_PROVIDER=flashrank
-fi
-
-# Reranker model
-if [ -z "$HINDSIGHT_API_RERANKER_FLASHRANK_MODEL" ]; then
-    export HINDSIGHT_API_RERANKER_FLASHRANK_MODEL=ms-marco-MiniLM-L-12-v2
-fi
-
-# DB Pool size
-if [ -z "$HINDSIGHT_API_DB_POOL_MAX_SIZE" ]; then
-    export HINDSIGHT_API_DB_POOL_MAX_SIZE=20
-fi
-
-# Note: LLM provider (for retain/reflect) is NOT changed
-# If you're using Kimi, keep using Kimi - we only optimize embeddings/reranking
-# The LLM provider should be set in your ~/.zshrc if you want to change it
-
-# Display configuration
-echo -e "${GREEN}📋 Active Configuration:${NC}"
-echo "  • Embeddings Provider: $HINDSIGHT_API_EMBEDDINGS_PROVIDER"
-echo "  • Embeddings Model: $HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL"
-echo "  • Reranker Provider: $HINDSIGHT_API_RERANKER_PROVIDER"
-echo "  • Reranker Model: $HINDSIGHT_API_RERANKER_FLASHRANK_MODEL"
-echo "  • DB Pool Size: $HINDSIGHT_API_DB_POOL_MAX_SIZE"
-
-# Show LLM configuration if set
-if [ -n "$HINDSIGHT_API_LLM_PROVIDER" ]; then
-    echo "  • LLM Provider: $HINDSIGHT_API_LLM_PROVIDER"
-fi
-if [ -n "$HINDSIGHT_API_LLM_MODEL" ]; then
-    echo "  • LLM Model: $HINDSIGHT_API_LLM_MODEL"
-fi
+echo ""
+echo "Configuration:"
+echo "   LLM: Kimi (kimi-k2-5)"
+echo "   Embeddings: ${HINDSIGHT_API_EMBEDDINGS_PROVIDER:-openai}"
+echo "   Reranker: ${HINDSIGHT_API_RERANKER_PROVIDER:-flashrank}"
+echo "   Port: 9418"
 echo ""
 
-# Check if Hindsight is available
-if ! command -v python3 >/dev/null 2>&1; then
-    echo -e "${RED}❌ Error: python3 not found${NC}"
-    echo "Please install Python 3"
-    exit 1
+# Kill any existing Hindsight processes
+echo "Cleaning up existing processes..."
+pkill -9 -f hindsight-api 2>/dev/null || true
+pkill -9 -f start_hindsight.py 2>/dev/null || true
+sleep 2
+
+# Check if port is free
+if lsof -i :9418 >/dev/null 2>&1; then
+    echo "⚠️  Port 9418 is still in use. Trying to free it..."
+    lsof -ti :9418 | xargs -r kill -9 2>/dev/null || true
+    sleep 2
 fi
 
-echo -e "${GREEN}🔧 Starting Hindsight...${NC}"
+# Start Hindsight
+echo "Starting Hindsight server..."
+cd /Users/buddhi/source-code/personal/hydra
+python3 start_hindsight.py &
+PID=$!
+
+echo "Started with PID: $PID"
 echo ""
+echo "Waiting for server to be ready..."
 
-# Start Hindsight with embedded Python script
-python3 << 'PYTHON_SCRIPT'
-from hindsight import HindsightEmbedded
-import sys
-import os
-
-try:
-    client = HindsightEmbedded(profile='hydra')
-    print(f'✅ Hindsight started successfully at: {client.url}')
-    print('')
-    print('💾 Memory-optimized configuration active:')
-    print('  • Expected memory usage: 3-6 GB (down from 10 GB)')
-    print('  • Using cloud embeddings (OpenAI)')
-    print('  • Using CPU-based reranking (FlashRank)')
-    print('')
-    print('Press Ctrl+C to stop...')
-    
-    # Keep running
-    import time
-    while True:
-        time.sleep(1)
+# Wait for health check
+for i in {1..30}; do
+    if curl -s http://127.0.0.1:9418/health >/dev/null 2>&1; then
+        echo ""
+        echo "✅ Hindsight is running!"
+        echo "   URL: http://127.0.0.1:9418"
+        echo "   PID: $PID"
         
-except KeyboardInterrupt:
-    print('\n\n👋 Shutting down Hindsight...')
-    try:
-        client.close()
-    except:
-        pass
-    print('✅ Hindsight stopped')
-    sys.exit(0)
-except Exception as e:
-    print(f'\n❌ Error: {e}', file=sys.stderr)
-    sys.exit(1)
-PYTHON_SCRIPT
+        # Show memory usage
+        sleep 2
+        MEMORY_KB=$(ps -o rss= -p $PID 2>/dev/null | tr -d ' ')
+        if [ -n "$MEMORY_KB" ]; then
+            MEMORY_MB=$((MEMORY_KB / 1024))
+            echo "   Memory: ${MEMORY_MB} MB"
+        fi
+        
+        # Save PID for later
+        echo $PID > /tmp/hindsight.pid
+        
+        echo ""
+        echo "To stop: kill $PID"
+        echo "To monitor: ./scripts/monitor_hindsight.sh"
+        exit 0
+    fi
+    echo -n "."
+    sleep 1
+done
+
+echo ""
+echo "❌ Failed to start Hindsight within 30 seconds"
+echo "Check logs: tail -50 /tmp/hindsight.log"
+kill $PID 2>/dev/null || true
+exit 1
