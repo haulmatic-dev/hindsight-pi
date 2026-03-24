@@ -1828,12 +1828,9 @@ func (o *Overseer) getReadyBeadsFromBR() ([]types.Bead, error) {
 			continue
 		}
 
-		// CRITICAL: Skip beads with unresolved dependencies
-		// br ready may return beads that have dependencies not yet satisfied
-		if len(bead.Dependencies) > 0 {
-			log.Printf("⏸️  [BR] Skipping bead with unresolved dependencies: %s (depends on: %v)", beadIDStr, bead.Dependencies)
-			continue
-		}
+		// Note: br ready already returns beads with satisfied dependencies
+		// The bead.Dependencies field shows all dependencies, but br ready ensures
+		// they are resolved. We don't need to filter here - br ready did it already.
 
 		readyBeads = append(readyBeads, bead)
 	}
