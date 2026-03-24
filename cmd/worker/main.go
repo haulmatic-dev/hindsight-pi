@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,13 +12,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/haulmatic-dev/hydra/internal/intelligence"
+	"github.com/haulmatic-dev/hydra/agents"
+	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
+	"github.com/haulmatic-dev/hydra/internal/pi"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -30,10 +34,97 @@ type WorkerConfig struct {
 	AgentType       string
 	BeadTitle       string
 	BeadDescription string
+	Hindsight       *HindsightContext
+	HindsightClient HindsightClientConfig
+	Pi              PiConfig
 	MCP             struct {
 		Enabled bool
 		URL     string
 	}
+}
+
+// PiConfig holds Pi agent configuration
+type PiConfig struct {
+	Enabled       bool
+	Provider      string
+	Model         string
+	ThinkingLevel string
+	Timeout       time.Duration
+	APIKeyName    string
+	ConfigDir     string
+}
+
+// HindsightClientConfig contains configuration for the Hindsight client
+type HindsightClientConfig struct {
+	Enabled  bool
+	BaseURL  string
+	Timeout  time.Duration
+	Limit    int
+	MinScore float64
+}
+
+// HindsightContext represents context passed from the overseer about related
+// execution memories and patterns relevant to the current bead.
+type HindsightContext struct {
+	// RelatedMemories contains past execution memories that may be relevant
+	RelatedMemories []ExecutionMemoryReference `json:"related_memories,omitempty"`
+
+	// ProjectPatterns contains patterns learned from this project
+	ProjectPatterns []PatternReference `json:"project_patterns,omitempty"`
+
+	// CrossProjectPatterns contains patterns from other projects that may apply
+	CrossProjectPatterns []PatternReference `json:"cross_project_patterns,omitempty"`
+
+	// Metadata contains additional context information
+	Metadata map[string]string `json:"metadata,omitempty"`
+
+	// ContextID is a unique identifier for this context snapshot
+	ContextID string `json:"context_id,omitempty"`
+
+	// GeneratedAt is when this context was generated
+	GeneratedAt time.Time `json:"generated_at,omitempty"`
+}
+
+// ExecutionMemoryReference represents a reference to a past execution memory
+type ExecutionMemoryReference struct {
+	// MemoryID is the unique identifier of the memory
+	MemoryID string `json:"memory_id"`
+
+	// BeadID of the referenced execution
+	BeadID string `json:"bead_id"`
+
+	// Title of the referenced bead
+	Title string `json:"title,omitempty"`
+
+	// Type of the referenced bead
+	Type string `json:"type,omitempty"`
+
+	// Success indicates if the referenced execution succeeded
+	Success bool `json:"success"`
+
+	// RelevanceScore indicates how relevant this memory is (0.0 - 1.0)
+	RelevanceScore float64 `json:"relevance_score,omitempty"`
+
+	// Summary is a brief description of what was learned
+	Summary string `json:"summary,omitempty"`
+}
+
+// PatternReference represents a pattern that may be relevant to the current task
+type PatternReference struct {
+	// PatternID is the unique identifier of the pattern
+	PatternID string `json:"pattern_id"`
+
+	// Category of the pattern (e.g., "best-practice", "anti-pattern")
+	Category string `json:"category"`
+
+	// Description of the pattern
+	Description string `json:"description"`
+
+	// SourceProject indicates where this pattern was learned
+	SourceProject string `json:"source_project,omitempty"`
+
+	// RelevanceScore indicates how relevant this pattern is (0.0 - 1.0)
+	RelevanceScore float64 `json:"relevance_score,omitempty"`
 }
 
 // RetryPolicy defines the retry strategy for execution
@@ -154,6 +245,22 @@ func main() {
 	log.Printf("   Project: %s (path: %s), Repo: %s, Agent: %s", config.Project, projectPath, config.Repo, config.AgentType)
 	log.Printf("   Agent ID: %s", agentID)
 
+	// Log Hindsight context if available
+	if config.Hindsight != nil {
+		logHindsightContext(config.Hindsight)
+	} else {
+		log.Printf("   Hindsight Context: (not provided)")
+	}
+
+	// Validate configuration after parsing
+	if validationErrs := validateWorkerConfig(config); len(validationErrs) > 0 {
+		log.Printf("❌ Configuration validation failed:")
+		for _, err := range validationErrs {
+			log.Printf("   - %s", err)
+		}
+		log.Fatalf("Worker cannot start due to configuration errors")
+	}
+
 	// Initialize MCP client
 	var mcpClient *mcp.Client
 	if config.MCP.Enabled {
@@ -191,7 +298,7 @@ func main() {
 	log.Printf("⚙️  Executing with retry policy (max %d retries)...", retryPolicy.MaxRetries)
 	streamLog(mcpClient, "info", fmt.Sprintf("Starting execution (max %d retries)", retryPolicy.MaxRetries))
 
-	result, err := executeWithRetry(bead, determinedAgentType, mcpClient, retryPolicy, projectPath)
+	result, err := executeWithRetry(bead, determinedAgentType, mcpClient, retryPolicy, projectPath, config)
 
 	// Calculate duration
 	duration := time.Since(startTime)
@@ -208,14 +315,23 @@ func main() {
 		}
 	}
 
-	// STEP 4: Record execution results
-	log.Printf("📝 Recording execution results...")
-	streamLog(mcpClient, "info", fmt.Sprintf("Recording results (status: %s)", status))
+	// STEP 4: Record execution results to Hindsight (file-based, post-execution)
+	// After Pi agent exits, we write output to temp file and then do retention
+	// This is more reliable than real-time streaming and survives crashes
+	log.Printf("📝 Recording execution results to Hindsight...")
 
-	recordExecutionResult(bead, result, mcpClient)
-
-	// Notify task completion
-	notifyTaskComplete(mcpClient, bead, status, duration, exitCode)
+	// The executeWithPi function already wrote output to temp file
+	// Now we do retention with the complete execution data
+	if config.HindsightClient.Enabled {
+		log.Printf("🧠 Retaining execution memory in Hindsight...")
+		retainErr := recordExecutionResultSync(bead, result, config)
+		if retainErr != nil {
+			log.Printf("[WARN] Failed to retain execution memory: %v", retainErr)
+			// Non-fatal: bead completion is more important than retention
+		} else {
+			log.Printf("✅ Execution memory retained in Hindsight")
+		}
+	}
 
 	// STEP 5: Close the bead using beads CLI (best-effort)
 	// Only close beads that succeeded - failed beads remain open for retry/investigation
@@ -255,16 +371,63 @@ func generateAgentID() string {
 }
 
 // parseConfig parses configuration from environment variables
+// Supports both legacy individual env vars and new HYDRA_BEAD_JSON for full bead context
 func parseConfig() WorkerConfig {
 	var config WorkerConfig
 
-	config.BeadID = os.Getenv("HYDRA_BEAD_ID")
-	config.Project = os.Getenv("HYDRA_PROJECT")
-	config.ProjectPath = os.Getenv("HYDRA_PROJECT_PATH")
-	config.Repo = os.Getenv("HYDRA_REPO")
-	config.AgentType = os.Getenv("HYDRA_AGENT_TYPE")
-	config.BeadTitle = os.Getenv("HYDRA_BEAD_TITLE")
-	config.BeadDescription = os.Getenv("HYDRA_BEAD_DESCRIPTION")
+	// Check for full bead JSON first (new enhanced context)
+	if beadJSON := os.Getenv("HYDRA_BEAD_JSON"); beadJSON != "" {
+		var bead types.Bead
+		if err := json.Unmarshal([]byte(beadJSON), &bead); err == nil {
+			// Successfully parsed full bead JSON
+			config.BeadID = string(bead.ID)
+			config.Project = bead.Project
+			config.Repo = bead.Repo
+			// Use actual bead.Type instead of AgentType env var
+			config.AgentType = bead.Type
+			config.BeadTitle = bead.Title
+			config.BeadDescription = bead.Description
+			// Note: Metadata, Labels, Dependencies are available in the bead object
+			// but not in WorkerConfig. They're passed via the full bead object.
+		} else {
+			log.Printf("[WARN] Failed to parse HYDRA_BEAD_JSON: %v", err)
+		}
+	}
+
+	// Legacy env vars (override JSON values if explicitly set)
+	if v := os.Getenv("HYDRA_BEAD_ID"); v != "" {
+		config.BeadID = v
+	}
+	if v := os.Getenv("HYDRA_PROJECT"); v != "" {
+		config.Project = v
+	}
+	if v := os.Getenv("HYDRA_PROJECT_PATH"); v != "" {
+		config.ProjectPath = v
+	}
+	if v := os.Getenv("HYDRA_REPO"); v != "" {
+		config.Repo = v
+	}
+	// Only use legacy AGENT_TYPE if JSON wasn't parsed or bead.Type was empty
+	if v := os.Getenv("HYDRA_AGENT_TYPE"); v != "" && config.AgentType == "" {
+		config.AgentType = v
+	}
+	if v := os.Getenv("HYDRA_BEAD_TITLE"); v != "" {
+		config.BeadTitle = v
+	}
+	if v := os.Getenv("HYDRA_BEAD_DESCRIPTION"); v != "" {
+		config.BeadDescription = v
+	}
+
+	// Parse Hindsight context from environment variable
+	config.Hindsight = parseHindsightContext()
+
+	// Parse Hindsight client configuration
+	config.HindsightClient = parseHindsightClientConfig()
+
+	// Parse Pi configuration
+	config.Pi = parsePiConfig()
+
+	// Default agent type if still empty
 	if config.AgentType == "" {
 		config.AgentType = "orchestrator"
 	}
@@ -286,6 +449,188 @@ func parseConfig() WorkerConfig {
 	}
 
 	return config
+}
+
+// parseHindsightContext parses the HYDRA_HISTORIESIGHT_CONTEXT environment variable
+// and deserializes it from JSON format. Returns nil if the variable is not set or
+// parsing fails.
+func parseHindsightContext() *HindsightContext {
+	contextJSON := os.Getenv("HYDRA_HISTORIESIGHT_CONTEXT")
+	if contextJSON == "" {
+		return nil
+	}
+
+	var ctx HindsightContext
+	if err := json.Unmarshal([]byte(contextJSON), &ctx); err != nil {
+		log.Printf("[WARN] Failed to parse HYDRA_HISTORIESIGHT_CONTEXT: %v", err)
+		return nil
+	}
+
+	return &ctx
+}
+
+// parseHindsightClientConfig parses Hindsight client configuration from environment variables
+func parseHindsightClientConfig() HindsightClientConfig {
+	var cfg HindsightClientConfig
+
+	// Check if Hindsight is enabled
+	enabledStr := os.Getenv("HYDRA_HISTORIESIGHT_ENABLED")
+	cfg.Enabled = enabledStr != "" && enabledStr != "false" && enabledStr != "0"
+
+	// Parse base URL
+	cfg.BaseURL = os.Getenv("HYDRA_HISTORIESIGHT_BASE_URL")
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = "http://127.0.0.1:8000" // Default Hindsight port
+	}
+
+	// Parse timeout (default 30s for async operations)
+	timeoutStr := os.Getenv("HYDRA_HISTORIESIGHT_TIMEOUT")
+	if timeoutStr != "" {
+		if d, err := time.ParseDuration(timeoutStr); err == nil {
+			cfg.Timeout = d
+		} else {
+			cfg.Timeout = 30 * time.Second
+		}
+	} else {
+		cfg.Timeout = 30 * time.Second
+	}
+
+	// Parse limit
+	limitStr := os.Getenv("HYDRA_HISTORIESIGHT_LIMIT")
+	if limitStr != "" {
+		if n, err := strconv.Atoi(limitStr); err == nil {
+			cfg.Limit = n
+		} else {
+			cfg.Limit = 5
+		}
+	} else {
+		cfg.Limit = 5
+	}
+
+	// Parse min score
+	scoreStr := os.Getenv("HYDRA_HISTORIESIGHT_MIN_SCORE")
+	if scoreStr != "" {
+		if f, err := strconv.ParseFloat(scoreStr, 64); err == nil {
+			cfg.MinScore = f
+		} else {
+			cfg.MinScore = 0.7
+		}
+	} else {
+		cfg.MinScore = 0.7
+	}
+
+	return cfg
+}
+
+// parsePiConfig parses Pi agent configuration from environment variables
+func parsePiConfig() PiConfig {
+	var cfg PiConfig
+
+	// Check if Pi is enabled
+	enabledStr := os.Getenv("HYDRA_PI_ENABLED")
+	cfg.Enabled = enabledStr == "true" || enabledStr == "1"
+
+	// Parse provider
+	cfg.Provider = os.Getenv("HYDRA_PI_PROVIDER")
+	if cfg.Provider == "" {
+		cfg.Provider = "kimi-coding" // Default provider
+	}
+
+	// Parse model
+	cfg.Model = os.Getenv("HYDRA_PI_MODEL")
+	if cfg.Model == "" {
+		cfg.Model = "k2.5" // Default model
+	}
+
+	// Parse thinking level
+	cfg.ThinkingLevel = os.Getenv("HYDRA_PI_THINKING_LEVEL")
+	if cfg.ThinkingLevel == "" {
+		cfg.ThinkingLevel = "on" // Default thinking level
+	}
+
+	// Parse timeout
+	timeoutStr := os.Getenv("HYDRA_PI_TIMEOUT")
+	if timeoutStr != "" {
+		if d, err := time.ParseDuration(timeoutStr); err == nil {
+			cfg.Timeout = d
+		} else {
+			cfg.Timeout = 10 * time.Minute
+		}
+	} else {
+		cfg.Timeout = 10 * time.Minute
+	}
+
+	// Parse API key name
+	cfg.APIKeyName = os.Getenv("HYDRA_PI_API_KEY_NAME")
+	if cfg.APIKeyName == "" {
+		cfg.APIKeyName = "KIMI_API_KEY" // Default API key name
+	}
+
+	// Parse config directory
+	cfg.ConfigDir = os.Getenv("HYDRA_PI_CONFIG_DIR")
+
+	return cfg
+}
+
+// logHindsightContext logs the hindsight context information
+func logHindsightContext(ctx *HindsightContext) {
+	if ctx == nil {
+		return
+	}
+
+	log.Printf("   Hindsight Context: %s (generated: %s)", ctx.ContextID, ctx.GeneratedAt.Format(time.RFC3339))
+
+	if len(ctx.RelatedMemories) > 0 {
+		log.Printf("   Related Memories: %d", len(ctx.RelatedMemories))
+		for _, mem := range ctx.RelatedMemories {
+			status := "✓"
+			if !mem.Success {
+				status = "✗"
+			}
+			log.Printf("     %s %s (relevance: %.2f) - %s", status, mem.BeadID, mem.RelevanceScore, mem.Summary)
+		}
+	}
+
+	if len(ctx.ProjectPatterns) > 0 {
+		log.Printf("   Project Patterns: %d", len(ctx.ProjectPatterns))
+	}
+
+	if len(ctx.CrossProjectPatterns) > 0 {
+		log.Printf("   Cross-Project Patterns: %d", len(ctx.CrossProjectPatterns))
+	}
+}
+
+// validateWorkerConfig validates the worker configuration and returns a list of errors
+// It handles graceful error reporting for missing or malformed context
+func validateWorkerConfig(config WorkerConfig) []string {
+	var errors []string
+
+	// Validate required fields
+	if config.BeadID == "" {
+		errors = append(errors, "HYDRA_BEAD_ID is required (set HYDRA_BEAD_ID or HYDRA_BEAD_JSON)")
+	} else {
+		// Validate bead ID format
+		if _, err := types.ParseBeadID(config.BeadID); err != nil {
+			errors = append(errors, fmt.Sprintf("Invalid bead ID format %q: %v", config.BeadID, err))
+		}
+	}
+
+	// Validate project (warn but don't fail if missing)
+	if config.Project == "" {
+		log.Printf("[WARN] HYDRA_PROJECT not set, may cause issues with bead closure")
+	}
+
+	// Validate project path (warn if missing)
+	if config.ProjectPath == "" {
+		log.Printf("[WARN] HYDRA_PROJECT_PATH not set, will use project name as fallback")
+	}
+
+	// Validate agent type
+	if config.AgentType == "" {
+		log.Printf("[WARN] Agent type not specified, defaulting to 'orchestrator'")
+	}
+
+	return errors
 }
 
 // initializeMCP initializes and connects the MCP client
@@ -422,6 +767,7 @@ func executeWithRetry(
 	mcpClient *mcp.Client,
 	policy RetryPolicy,
 	projectPath string,
+	config WorkerConfig,
 ) (*ExecutionResult, error) {
 	var lastErr error
 	var result *ExecutionResult
@@ -437,7 +783,18 @@ func executeWithRetry(
 		log.Printf("🔄 Execution attempt %d/%d", attempt+1, policy.MaxRetries+1)
 		streamLog(mcpClient, "info", fmt.Sprintf("Execution attempt %d/%d", attempt+1, policy.MaxRetries+1))
 
-		result, lastErr = executeWithOpencode(bead, agentType, mcpClient, projectPath)
+		// Query Hindsight for context enrichment before execution (only on first attempt)
+		var hindsightContext *agents.ContextEnrichment
+		if attempt == 0 {
+			hindsightContext = queryHindsightForContext(bead, config, mcpClient)
+		}
+
+		// Choose execution method based on configuration
+		if config.Pi.Enabled {
+			result, lastErr = executeWithPi(bead, config.Pi, mcpClient, projectPath, hindsightContext)
+		} else {
+			result, lastErr = executeWithOpencode(bead, agentType, mcpClient, projectPath, hindsightContext)
+		}
 		result.Attempts = attempt + 1
 
 		if lastErr == nil && result.Success {
@@ -531,6 +888,7 @@ func executeWithOpencode(
 	agentType string,
 	mcpClient *mcp.Client,
 	projectPath string,
+	hindsightContext *agents.ContextEnrichment,
 ) (*ExecutionResult, error) {
 	result := &ExecutionResult{
 		Success:   false,
@@ -542,7 +900,7 @@ func executeWithOpencode(
 	activityMonitor := NewActivityMonitor(activityTimeout)
 
 	// Build opencode command
-	cmd := buildOpencodeCommand(bead, agentType, projectPath)
+	cmd := buildOpencodeCommand(bead, agentType, projectPath, hindsightContext)
 
 	log.Printf("🔧 Executing: %s %s", cmd.Path, strings.Join(cmd.Args[1:], " "))
 	log.Printf("📁 Working directory: %s", cmd.Dir)
@@ -676,7 +1034,7 @@ monitorLoop:
 
 // buildOpencodeCommand builds the opencode CLI command for a bead
 // Opencode run syntax: echo "prompt" | opencode run --format json --dir <path>
-func buildOpencodeCommand(bead types.Bead, agentType string, projectPath string) *exec.Cmd {
+func buildOpencodeCommand(bead types.Bead, agentType string, projectPath string, hindsightContext *agents.ContextEnrichment) *exec.Cmd {
 	// Find opencode binary
 	opencodePath := os.Getenv("HYDRA_OPCODE_PATH")
 	if opencodePath == "" {
@@ -710,8 +1068,15 @@ func buildOpencodeCommand(bead types.Bead, agentType string, projectPath string)
 		promptParts = append(promptParts, fmt.Sprintf("Files to modify: %v", targetFiles))
 	}
 
-	// Note: Intelligence context now accessed via skills on-demand, not force-fed
-	// Pi agents use cass-memory-insights and tldr-code-intelligence skills
+	// Add Hindsight context if available
+	if hindsightContext != nil && len(hindsightContext.Memories) > 0 {
+		promptParts = append(promptParts, "\n--- Relevant Context from Previous Work ---")
+		for i, mem := range hindsightContext.Memories {
+			promptParts = append(promptParts, fmt.Sprintf("%d. %s (relevance: %.2f)\n   %s",
+				i+1, mem.ID, mem.Score, mem.Content))
+		}
+		promptParts = append(promptParts, "--- End Context ---\n")
+	}
 
 	// Join all parts into single prompt
 	prompt := strings.Join(promptParts, "\n")
@@ -742,48 +1107,583 @@ func buildOpencodeCommand(bead types.Bead, agentType string, projectPath string)
 	return cmd
 }
 
-// recordExecutionResult records the execution outcome to cass_memory
+// executeWithPi executes the Pi agent CLI with activity-based timeout monitoring
+func executeWithPi(
+	bead types.Bead,
+	piConfig PiConfig,
+	mcpClient *mcp.Client,
+	projectPath string,
+	hindsightContext *agents.ContextEnrichment,
+) (*ExecutionResult, error) {
+	result := &ExecutionResult{
+		Success:   false,
+		AgentType: "pi",
+	}
+
+	// Activity-based timeout: 5 minutes of inactivity
+	activityTimeout := 5 * time.Minute
+	activityMonitor := NewActivityMonitor(activityTimeout)
+
+	// Build pi command
+	cmd := buildPiCommand(bead, piConfig, projectPath, hindsightContext)
+
+	log.Printf("🔧 Executing Pi: %s %s", cmd.Path, strings.Join(cmd.Args[1:], " "))
+	log.Printf("📁 Working directory: %s", cmd.Dir)
+	log.Printf("⏱️  Activity timeout: %v (resets on any output)", activityTimeout)
+	streamLog(mcpClient, "info", fmt.Sprintf("Executing Pi agent in %s with activity monitoring", cmd.Dir))
+
+	// Create pipes for stdout and stderr
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return result, fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+	defer stdoutPipe.Close()
+
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return result, fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+	defer stderrPipe.Close()
+
+	// Create stdin pipe for JSONL protocol
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return result, fmt.Errorf("failed to create stdin pipe: %w", err)
+	}
+	defer stdinPipe.Close()
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return result, fmt.Errorf("failed to start pi: %w", err)
+	}
+
+	// Build the prompt message
+	prompt := buildPiPrompt(bead, hindsightContext)
+
+	// Send prompt as JSONL
+	request := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "pi/execute",
+		"params": map[string]interface{}{
+			"prompt": prompt,
+		},
+		"id": 1,
+	}
+
+	encoder := json.NewEncoder(stdinPipe)
+	if err := encoder.Encode(request); err != nil {
+		return result, fmt.Errorf("failed to send prompt to pi: %w", err)
+	}
+	stdinPipe.Close()
+
+	// Capture output with activity monitoring
+	var stdoutBuf, stderrBuf bytes.Buffer
+	var wg sync.WaitGroup
+
+	// Monitor stdout
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			line := scanner.Text()
+			stdoutBuf.WriteString(line + "\n")
+			activityMonitor.RecordActivity()
+			// Also stream to MCP for real-time monitoring
+			if mcpClient != nil {
+				streamLog(mcpClient, "info", fmt.Sprintf("[pi-stdout] %s", line))
+			}
+		}
+	}()
+
+	// Monitor stderr
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			line := scanner.Text()
+			stderrBuf.WriteString(line + "\n")
+			activityMonitor.RecordActivity()
+			// Also stream to MCP for real-time monitoring
+			if mcpClient != nil {
+				streamLog(mcpClient, "warn", fmt.Sprintf("[pi-stderr] %s", line))
+			}
+		}
+	}()
+
+	// Wait for completion or timeout
+	done := make(chan error, 1)
+	go func() {
+		wg.Wait()
+		done <- cmd.Wait()
+	}()
+
+	// Monitor for timeout
+	timeoutTicker := time.NewTicker(10 * time.Second)
+	defer timeoutTicker.Stop()
+
+	var cmdErr error
+monitorLoop:
+	for {
+		select {
+		case cmdErr = <-done:
+			break monitorLoop
+		case <-timeoutTicker.C:
+			if activityMonitor.IsTimedOut() {
+				log.Printf("⏰ Activity timeout reached (no output for %v)", activityTimeout)
+				streamLog(mcpClient, "warn", fmt.Sprintf("Activity timeout after %v of inactivity", activityTimeout))
+
+				// Kill the entire process group
+				if cmd.Process != nil {
+					syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+					time.Sleep(2 * time.Second)
+					syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				}
+
+				cmdErr = fmt.Errorf("activity timeout: no output for %v", activityTimeout)
+				break monitorLoop
+			}
+		}
+	}
+
+	// Process result
+	result.ExitCode = 0
+	if cmdErr != nil {
+		if exitErr, ok := cmdErr.(*exec.ExitError); ok {
+			result.ExitCode = exitErr.ExitCode()
+		} else {
+			result.ExitCode = -1
+		}
+	}
+
+	// Store output
+	result.Output = stdoutBuf.String()
+	result.Error = stderrBuf.String()
+
+	// Determine success based on exit code
+	if cmdErr == nil && result.ExitCode == 0 {
+		result.Success = true
+		log.Printf("✅ Pi completed successfully (last activity %v ago)", activityMonitor.TimeSinceActivity())
+	} else {
+		result.Success = false
+		log.Printf("❌ Pi failed with exit code %d", result.ExitCode)
+		if stdoutStr := stdoutBuf.String(); stdoutStr != "" {
+			log.Printf("📤 STDOUT:\n%s", stdoutStr)
+		}
+		if stderrStr := stderrBuf.String(); stderrStr != "" {
+			log.Printf("📤 STDERR:\n%s", stderrStr)
+		}
+	}
+
+	// Write output to temp file for durability and post-processing
+	tempFile, err := writeExecutionOutputToFile(bead.ID.String(), result)
+	if err != nil {
+		log.Printf("[WARN] Failed to write execution output to file: %v", err)
+	} else {
+		log.Printf("📝 Execution output written to: %s", tempFile)
+
+		// Schedule file cleanup after retention (optional - can keep for debugging)
+		defer func() {
+			// Keep file for 1 hour then clean up
+			time.AfterFunc(1*time.Hour, func() {
+				if err := os.Remove(tempFile); err == nil {
+					log.Printf("🗑️  Cleaned up temp file: %s", tempFile)
+				}
+			})
+		}()
+	}
+
+	return result, cmdErr
+}
+
+// writeExecutionOutputToFile writes the execution result to a temp file for durability
+// and post-processing. Returns the file path or empty string on error.
+func writeExecutionOutputToFile(beadID string, result *ExecutionResult) (string, error) {
+	// Create temp directory if it doesn't exist
+	tempDir := filepath.Join(os.TempDir(), "hydra-executions")
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create temp directory: %w", err)
+	}
+
+	// Create temp file with timestamp and bead ID
+	timestamp := time.Now().Format("20060102-150405")
+	filename := fmt.Sprintf("%s-%s.json", beadID, timestamp)
+	filepath := filepath.Join(tempDir, filename)
+
+	// Build execution record
+	record := map[string]interface{}{
+		"bead_id":    beadID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"success":    result.Success,
+		"exit_code":  result.ExitCode,
+		"duration":   result.Duration.Seconds(),
+		"attempts":   result.Attempts,
+		"agent_type": result.AgentType,
+		"output":     result.Output,
+		"error":      result.Error,
+	}
+
+	// Marshal to JSON
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal execution record: %w", err)
+	}
+
+	// Write to file atomically (write to temp, then rename)
+	tempFile := filepath + ".tmp"
+	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+		return "", fmt.Errorf("failed to write temp file: %w", err)
+	}
+
+	if err := os.Rename(tempFile, filepath); err != nil {
+		os.Remove(tempFile) // Clean up on error
+		return "", fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	return filepath, nil
+}
+
+// readExecutionOutputFromFile reads an execution result from a temp file
+func readExecutionOutputFromFile(filepath string) (*ExecutionResult, error) {
+	data, err := os.ReadFile(filepath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	var record map[string]interface{}
+	if err := json.Unmarshal(data, &record); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal record: %w", err)
+	}
+
+	result := &ExecutionResult{}
+
+	if success, ok := record["success"].(bool); ok {
+		result.Success = success
+	}
+	if exitCode, ok := record["exit_code"].(float64); ok {
+		result.ExitCode = int(exitCode)
+	}
+	if agentType, ok := record["agent_type"].(string); ok {
+		result.AgentType = agentType
+	}
+	if output, ok := record["output"].(string); ok {
+		result.Output = output
+	}
+	if errStr, ok := record["error"].(string); ok {
+		result.Error = errStr
+	}
+	if attempts, ok := record["attempts"].(float64); ok {
+		result.Attempts = int(attempts)
+	}
+
+	return result, nil
+}
+
+// buildPiCommand builds the Pi agent CLI command
+func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hindsightContext *agents.ContextEnrichment) *exec.Cmd {
+	// Find pi binary
+	piPath := os.Getenv("HYDRA_PI_PATH")
+	if piPath == "" {
+		piPath = "pi"
+	}
+
+	// Use project path if provided
+	path := projectPath
+	if path == "" {
+		path = bead.Project
+	}
+
+	// Build base args
+	args := []string{
+		"--mode", "rpc",
+		"--no-session",
+	}
+
+	// Add provider
+	if piConfig.Provider != "" {
+		args = append(args, "--provider", piConfig.Provider)
+	}
+
+	// Add model
+	if piConfig.Model != "" {
+		args = append(args, "--model", piConfig.Model)
+	}
+
+	// Build skill flags if configDir is set
+	if piConfig.ConfigDir != "" {
+		skillResult, err := pi.BuildSkillFlags(piConfig.ConfigDir)
+		if err != nil {
+			log.Printf("[Worker] Warning: failed to build skill flags: %v", err)
+		} else {
+			args = append(args, skillResult.Flags...)
+			log.Printf("[Worker] Added %d skill flags", len(skillResult.Flags)/2)
+		}
+	}
+
+	// Create command
+	cmd := exec.Command(piPath, args...)
+	cmd.Dir = path
+
+	// Create new process group
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
+	// Prepare environment
+	envVars := os.Environ()
+
+	// Set PI_CODING_AGENT_DIR if configDir is set
+	if piConfig.ConfigDir != "" {
+		agentDir := filepath.Join(piConfig.ConfigDir, "agent")
+		absAgentDir, err := filepath.Abs(agentDir)
+		if err == nil {
+			envVars = append(envVars, fmt.Sprintf("PI_CODING_AGENT_DIR=%s", absAgentDir))
+		}
+	}
+
+	// Set API key from environment if configured
+	if piConfig.APIKeyName != "" {
+		apiKey := os.Getenv(piConfig.APIKeyName)
+		if apiKey != "" {
+			envVars = append(envVars, fmt.Sprintf("%s=%s", piConfig.APIKeyName, apiKey))
+		}
+	}
+
+	// Set bead metadata
+	if bead.Title != "" {
+		envVars = append(envVars, fmt.Sprintf("HYDRA_BEAD_TITLE=%s", bead.Title))
+	}
+	if bead.Description != "" {
+		envVars = append(envVars, fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description))
+	}
+
+	// Set agent type
+	envVars = append(envVars, fmt.Sprintf("HYDRA_AGENT_TYPE=%s", bead.Type))
+	envVars = append(envVars, fmt.Sprintf("HYDRA_BEAD_TYPE=%s", bead.Type))
+
+	cmd.Env = envVars
+
+	return cmd
+}
+
+// buildPiPrompt builds the prompt message for Pi agent
+func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment) string {
+	var promptParts []string
+
+	// Add bead type and title
+	if bead.Title != "" {
+		promptParts = append(promptParts, fmt.Sprintf("%s: %s", bead.Type, bead.Title))
+	} else {
+		promptParts = append(promptParts, bead.Type)
+	}
+
+	// Add description
+	if bead.Description != "" {
+		promptParts = append(promptParts, bead.Description)
+	}
+
+	// Add target files if available
+	targetFiles := extractTargetFiles(bead)
+	if len(targetFiles) > 0 {
+		promptParts = append(promptParts, fmt.Sprintf("Files to modify: %v", targetFiles))
+	}
+
+	// Add Hindsight context if available
+	if hindsightContext != nil && len(hindsightContext.Memories) > 0 {
+		promptParts = append(promptParts, "\nRelevant past executions:")
+		for _, mem := range hindsightContext.Memories {
+			promptParts = append(promptParts, fmt.Sprintf("- %s (score: %.2f): %s",
+				mem.ID, mem.Score, truncateString(mem.Content, 200)))
+		}
+	}
+
+	return strings.Join(promptParts, "\n\n")
+}
+
+// queryHindsightForContext queries Hindsight for relevant context before agent execution
+// Returns the context enrichment data to be included in the prompt
+func queryHindsightForContext(
+	bead types.Bead,
+	config WorkerConfig,
+	mcpClient *mcp.Client,
+) *agents.ContextEnrichment {
+	// Skip if Hindsight is not enabled
+	if !config.HindsightClient.Enabled {
+		log.Println("ℹ️ Hindsight not enabled, skipping context query")
+		return nil
+	}
+
+	log.Printf("🔍 Querying Hindsight for context (bead: %s)...", bead.ID)
+	streamLog(mcpClient, "info", "Querying Hindsight for relevant context")
+
+	// Create Hindsight client with config
+	hindsightClient := hindsight.NewClient(
+		hindsight.WithBaseURL(config.HindsightClient.BaseURL),
+		hindsight.WithTimeout(config.HindsightClient.Timeout),
+		hindsight.WithDefaultLimit(config.HindsightClient.Limit),
+		hindsight.WithMinScore(config.HindsightClient.MinScore),
+		hindsight.WithEnabled(true),
+	)
+
+	// Create context processor
+	ctxProcessorConfig := agents.DefaultContextProcessorConfig()
+	ctxProcessorConfig.Enabled = true
+	ctxProcessor := agents.NewContextProcessor(hindsightClient, ctxProcessorConfig, nil)
+
+	// Query Hindsight for context
+	ctx := context.Background()
+	enrichment, err := ctxProcessor.EnrichBeadContext(ctx, bead)
+	if err != nil {
+		log.Printf("⚠️ Failed to query Hindsight for context: %v", err)
+		streamLog(mcpClient, "warn", fmt.Sprintf("Hindsight context query failed: %v", err))
+		return nil
+	}
+
+	// Log the results
+	if len(enrichment.Memories) > 0 {
+		log.Printf("✅ Retrieved %d relevant memories from Hindsight (query time: %v)",
+			len(enrichment.Memories), enrichment.QueryTime)
+		streamLog(mcpClient, "info", fmt.Sprintf("Retrieved %d relevant memories from Hindsight", len(enrichment.Memories)))
+
+		// Log each memory
+		for i, mem := range enrichment.Memories {
+			log.Printf("   Memory %d: %s (score: %.2f) - %s",
+				i+1, mem.ID, mem.Score, truncateString(mem.Content, 100))
+		}
+	} else {
+		log.Println("ℹ️ No relevant memories found in Hindsight")
+		streamLog(mcpClient, "info", "No relevant memories found in Hindsight")
+	}
+
+	return enrichment
+}
+
+// truncateString truncates a string to the specified length with ellipsis
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+// recordExecutionResult records the execution outcome to hindsight memory
 func recordExecutionResult(
 	bead types.Bead,
 	result *ExecutionResult,
 	mcpClient *mcp.Client,
+	config WorkerConfig,
 ) {
 	if result == nil {
 		log.Println("[WARN] Cannot record nil result")
 		return
 	}
 
-	// Initialize cass_memory client
-	cassClient := intelligence.NewCassMemoryClient()
-	if !cassClient.IsEnabled() {
-		log.Println("ℹ️ cass_memory not enabled, skipping result recording")
-		return
-	}
-
-	// Determine status for recording
-	status := "failure"
-	if result.Success {
-		status = "success"
-	}
-
-	// Build success/failure pattern
-	pattern := buildSuccessPattern(bead, result)
-	if pattern == "" {
-		log.Println("[WARN] Empty pattern generated, skipping recording")
-		return
-	}
-
-	// Get category for agent type
-	category := intelligence.GetCategoryForAgentType(result.AgentType)
-
-	// Add pattern to cass_memory
-	if err := cassClient.AddPattern(pattern, category); err != nil {
-		log.Printf("[WARN] Failed to record pattern: %v", err)
-		streamLog(mcpClient, "warn", fmt.Sprintf("Failed to record pattern: %v", err))
+	// Initialize hindsight client with config from environment
+	var hindsightClient *hindsight.Client
+	if config.HindsightClient.Enabled {
+		hindsightClient = hindsight.NewClient(
+			hindsight.WithBaseURL(config.HindsightClient.BaseURL),
+			hindsight.WithTimeout(config.HindsightClient.Timeout),
+			hindsight.WithDefaultLimit(config.HindsightClient.Limit),
+			hindsight.WithMinScore(config.HindsightClient.MinScore),
+			hindsight.WithEnabled(true),
+		)
+		log.Printf("[Hindsight] Client initialized (baseURL: %s, limit: %d, minScore: %.2f)",
+			config.HindsightClient.BaseURL, config.HindsightClient.Limit, config.HindsightClient.MinScore)
 	} else {
-		log.Printf("✅ Recorded %s pattern to cass_memory (category: %s)", status, category)
-		streamLog(mcpClient, "info", fmt.Sprintf("Recorded %s pattern to cass_memory", status))
+		log.Println("ℹ️ Hindsight not enabled, skipping result recording")
+		return
 	}
+
+	// Create execution memory with structured data
+	memory := hindsight.NewExecutionMemory(bead, agentID).
+		WithAgentType(result.AgentType).
+		WithOutcome(
+			result.Success,
+			result.ExitCode,
+			result.Output,
+			result.Error,
+			result.Duration,
+			result.Attempts,
+		)
+
+	// Add target files from bead metadata
+	targetFiles := extractTargetFiles(bead)
+	if len(targetFiles) > 0 {
+		memory.Files.TargetFiles = targetFiles
+	}
+
+	// Retain the execution memory in hindsight
+	retainResult, err := hindsightClient.Retain(memory)
+	if err != nil {
+		log.Printf("[WARN] Failed to retain execution memory: %v", err)
+		streamLog(mcpClient, "warn", fmt.Sprintf("Failed to retain execution memory: %v", err))
+	} else if !retainResult.Success {
+		log.Printf("[WARN] Hindsight retention failed: %s", retainResult.Error)
+		streamLog(mcpClient, "warn", fmt.Sprintf("Hindsight retention failed: %s", retainResult.Error))
+	} else {
+		log.Printf("✅ Retained execution memory in Hindsight (memory_id: %s)", retainResult.MemoryID)
+		streamLog(mcpClient, "info", fmt.Sprintf("Retained execution memory in Hindsight"))
+	}
+}
+
+// recordExecutionResultSync is a synchronous version that doesn't require MCP
+// It blocks until retention completes or fails
+func recordExecutionResultSync(
+	bead types.Bead,
+	result *ExecutionResult,
+	config WorkerConfig,
+) error {
+	if result == nil {
+		return fmt.Errorf("cannot record nil result")
+	}
+
+	if !config.HindsightClient.Enabled {
+		log.Println("ℹ️ Hindsight not enabled, skipping result recording")
+		return nil
+	}
+
+	// Initialize hindsight client with config from environment
+	hindsightClient := hindsight.NewClient(
+		hindsight.WithBaseURL(config.HindsightClient.BaseURL),
+		hindsight.WithTimeout(config.HindsightClient.Timeout),
+		hindsight.WithDefaultLimit(config.HindsightClient.Limit),
+		hindsight.WithMinScore(config.HindsightClient.MinScore),
+		hindsight.WithEnabled(true),
+	)
+	log.Printf("[Hindsight] Client initialized for sync retention (baseURL: %s)", config.HindsightClient.BaseURL)
+
+	// Create execution memory with structured data
+	memory := hindsight.NewExecutionMemory(bead, agentID).
+		WithAgentType(result.AgentType).
+		WithOutcome(
+			result.Success,
+			result.ExitCode,
+			result.Output,
+			result.Error,
+			result.Duration,
+			result.Attempts,
+		)
+
+	// Add target files from bead metadata
+	targetFiles := extractTargetFiles(bead)
+	if len(targetFiles) > 0 {
+		memory.Files.TargetFiles = targetFiles
+	}
+
+	// Retain the execution memory in hindsight
+	retainResult, err := hindsightClient.Retain(memory)
+	if err != nil {
+		return fmt.Errorf("failed to retain execution memory: %w", err)
+	}
+
+	if !retainResult.Success {
+		return fmt.Errorf("hindsight retention failed: %s", retainResult.Error)
+	}
+
+	log.Printf("✅ Retained execution memory in Hindsight (memory_id: %s)", retainResult.MemoryID)
+	return nil
 }
 
 // buildSuccessPattern builds a success pattern string from the execution result
@@ -839,6 +1739,75 @@ func buildSuccessPattern(bead types.Bead, result *ExecutionResult) string {
 	}
 
 	return strings.Join(parts, " | ")
+}
+
+// notifyTaskCompleteWithResult sends task completion with full execution result via MCP
+func notifyTaskCompleteWithResult(
+	client *mcp.Client,
+	bead types.Bead,
+	result *ExecutionResult,
+	status string,
+	duration time.Duration,
+	exitCode int,
+	agentID string,
+) {
+	if client == nil {
+		return
+	}
+
+	// Validate status
+	if !mcp.IsValidStatus(status) {
+		status = "failure"
+	}
+
+	// Build comprehensive payload with all execution data
+	payload := map[string]interface{}{
+		"bead_id":    bead.ID.String(),
+		"bead_title": bead.Title,
+		"bead_type":  bead.Type,
+		"project":    bead.Project,
+		"repo":       bead.Repo,
+		"agent_id":   agentID,
+		"status":     status,
+		"duration":   duration.Seconds(),
+		"exit_code":  exitCode,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// Add execution result details if available
+	if result != nil {
+		payload["success"] = result.Success
+		payload["attempts"] = result.Attempts
+		payload["agent_type"] = result.AgentType
+		if result.Output != "" {
+			payload["output"] = result.Output
+		}
+		if result.Error != "" {
+			payload["error"] = result.Error
+		}
+	}
+
+	// Send to overseer
+	err := client.SendMessage(mcp.MsgTypeTaskComplete, "overseer", payload)
+	if err != nil {
+		log.Printf("[WARN] Failed to send task completion with result: %v", err)
+	} else {
+		log.Printf("✅ Sent execution result to overseer for batch retention")
+	}
+
+	// Also broadcast to all agents (without full output to reduce noise)
+	broadcastPayload := map[string]interface{}{
+		"bead_id":   bead.ID.String(),
+		"agent_id":  agentID,
+		"status":    status,
+		"duration":  duration.Seconds(),
+		"exit_code": exitCode,
+	}
+
+	broadcastErr := client.Broadcast(mcp.MsgTypeTaskComplete, broadcastPayload)
+	if broadcastErr != nil {
+		log.Printf("[WARN] Failed to broadcast task completion: %v", broadcastErr)
+	}
 }
 
 // notifyTaskComplete sends task completion notification via MCP

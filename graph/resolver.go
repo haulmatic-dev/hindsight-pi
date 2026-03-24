@@ -15,9 +15,8 @@ import (
 // It manages event broadcasting for real-time subscriptions
 
 type Resolver struct {
-	Overseer   *core.Overseer
-	CassMemory *intelligence.CassMemoryClient
-	TLDR       *intelligence.TLDRClient
+	Overseer *core.Overseer
+	TLDR     *intelligence.TLDRClient
 
 	// Event broadcasting system for subscriptions
 	eventChannel chan SubscriptionEvent
@@ -51,12 +50,11 @@ type EventSubscriber struct {
 
 // NewResolver creates a new Resolver with the given dependencies.
 // It initializes the event broadcasting system for subscriptions.
-func NewResolver(overseer *core.Overseer, cassMemory *intelligence.CassMemoryClient, tldr *intelligence.TLDRClient) *Resolver {
+func NewResolver(overseer *core.Overseer, tldr *intelligence.TLDRClient) *Resolver {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	r := &Resolver{
 		Overseer:     overseer,
-		CassMemory:   cassMemory,
 		TLDR:         tldr,
 		eventChannel: make(chan SubscriptionEvent, 100), // Buffered channel
 		subscribers:  make(map[string]*EventSubscriber),

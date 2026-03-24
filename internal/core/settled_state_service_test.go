@@ -61,6 +61,40 @@ func (m *MockPatternExtractor) IsEnabled() bool {
 	return m.enabled
 }
 
+// MockHindsightReflector implements HindsightReflector for testing
+type MockHindsightReflector struct {
+	reflectCalled    bool
+	reflectBeadID    types.BeadID
+	reflectContext   map[string]interface{}
+	insightsToReturn []ReflectionInsight
+	enabled          bool
+	storeMemoryFunc  func(insight ReflectionInsight) error
+}
+
+func NewMockHindsightReflector() *MockHindsightReflector {
+	return &MockHindsightReflector{
+		reflectCalled:    false,
+		insightsToReturn: make([]ReflectionInsight, 0),
+		enabled:          true,
+	}
+}
+
+func (m *MockHindsightReflector) Reflect(beadID types.BeadID, context map[string]interface{}) ([]ReflectionInsight, error) {
+	m.reflectCalled = true
+	m.reflectBeadID = beadID
+	m.reflectContext = context
+	return m.insightsToReturn, nil
+}
+
+func (m *MockHindsightReflector) IsEnabled() bool {
+	return m.enabled
+}
+
+// SetInsights configures the mock to return specific insights
+func (m *MockHindsightReflector) SetInsights(insights []ReflectionInsight) {
+	m.insightsToReturn = insights
+}
+
 // createMockBead creates a test bead with given status
 func createMockBead(id string, status types.BeadStatus, closedAt *time.Time) *types.Bead {
 	now := time.Now()

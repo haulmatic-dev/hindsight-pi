@@ -133,38 +133,11 @@ func (r *beadResolver) Worker(ctx context.Context, obj *model.Bead) (*model.Work
 }
 
 // Patterns resolves the patterns field for a Bead.
-// It queries cass_memory for relevant patterns based on bead type and description.
+// Returns empty patterns as cass_memory has been replaced by Hindsight.
 func (r *beadResolver) Patterns(ctx context.Context, obj *model.Bead) ([]*model.Pattern, error) {
-	if r.Resolver.CassMemory == nil || !r.Resolver.CassMemory.IsEnabled() {
-		return []*model.Pattern{}, nil
-	}
-
-	// Build query from bead type and description
-	query := fmt.Sprintf("%s %s", obj.Type, obj.Title)
-	if obj.Description != nil && *obj.Description != "" {
-		query = fmt.Sprintf("%s %s", query, *obj.Description)
-	}
-
-	// Query cass_memory for context
-	response, err := r.Resolver.CassMemory.Context(query)
-	if err != nil {
-		// Return empty slice on error (graceful degradation)
-		return []*model.Pattern{}, nil
-	}
-
-	// Convert bullets to patterns
-	patterns := make([]*model.Pattern, 0, len(response.Data.RelevantBullets))
-	for _, bullet := range response.Data.RelevantBullets {
-		score := bullet.Score
-		patterns = append(patterns, &model.Pattern{
-			ID:       bullet.ID,
-			Content:  bullet.Content,
-			Category: bullet.Category,
-			Score:    &score,
-		})
-	}
-
-	return patterns, nil
+	// Cass_memory has been removed in favor of Hindsight
+	// Return empty slice for backward compatibility
+	return []*model.Pattern{}, nil
 }
 
 // Impact resolves the impact field for a Bead.

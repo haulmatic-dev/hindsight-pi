@@ -488,9 +488,9 @@ func TestWorkersQuery(t *testing.T) {
 	// Create a test config
 	config := &core.Config{
 		Overseer: core.OverseerConfig{
-			MaxWorkers:     10,
-			BeadDiscoveryInterval:   5 * time.Second,
-			DefaultRetries: 3,
+			MaxWorkers:            10,
+			BeadDiscoveryInterval: 5 * time.Second,
+			DefaultRetries:        3,
 		},
 	}
 
@@ -517,9 +517,9 @@ func TestWorkersQuery(t *testing.T) {
 func TestWorkerQuery(t *testing.T) {
 	config := &core.Config{
 		Overseer: core.OverseerConfig{
-			MaxWorkers:     10,
-			BeadDiscoveryInterval:   5 * time.Second,
-			DefaultRetries: 3,
+			MaxWorkers:            10,
+			BeadDiscoveryInterval: 5 * time.Second,
+			DefaultRetries:        3,
 		},
 	}
 
@@ -616,9 +616,9 @@ func TestDagStatsQuery_EmptyDAG(t *testing.T) {
 func TestHealthQuery(t *testing.T) {
 	config := &core.Config{
 		Overseer: core.OverseerConfig{
-			MaxWorkers:     10,
-			BeadDiscoveryInterval:   5 * time.Second,
-			DefaultRetries: 3,
+			MaxWorkers:            10,
+			BeadDiscoveryInterval: 5 * time.Second,
+			DefaultRetries:        3,
 		},
 	}
 

@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/agents"
+	"github.com/haulmatic-dev/hydra/internal/pi"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -109,12 +109,16 @@ func (o *Overseer) monitorAgentSession(worker *types.Worker, connector agents.Ag
 	// Build prompt from bead
 	prompt := o.buildAgentPrompt(bead)
 
-	// Update worker tracker with actual PID now that session is started
+	// Update worker tracker with actual PID and PGID now that session is started
 	if session.PID > 0 && o.workerTracker != nil {
-		if err := o.workerTracker.UpdateWorkerPID(0, session.PID, string(worker.BeadID)); err != nil {
+		pgid := session.PGID
+		if pgid == 0 {
+			pgid = session.PID // Fallback to PID if PGID not set
+		}
+		if err := o.workerTracker.UpdateWorkerPIDWithPGID(0, session.PID, pgid, string(worker.BeadID)); err != nil {
 			log.Printf("[AgentWorker] Warning: Failed to update worker PID from 0 to %d: %v", session.PID, err)
 		} else {
-			log.Printf("[AgentWorker] Updated worker PID to %d for bead %s", session.PID, worker.BeadID)
+			log.Printf("[AgentWorker] Updated worker PID to %d (PGID %d) for bead %s", session.PID, pgid, worker.BeadID)
 		}
 	} else if session.PID == 0 {
 		log.Printf("[AgentWorker] Warning: Session %s has PID 0, will be tracked as placeholder", session.ID)
@@ -178,22 +182,41 @@ func (o *Overseer) monitorAgentSession(worker *types.Worker, connector agents.Ag
 	}
 }
 
-// buildAgentPrompt constructs the prompt for the agent
+// buildAgentPrompt constructs the prompt for the agent using template loader
 func (o *Overseer) buildAgentPrompt(bead types.Bead) string {
-	var buf strings.Builder
+	// Determine config directory - use config or default to ./pi-config
+	configDir := "./pi-config"
+	if o.config != nil && o.config.Pi.ConfigDir != "" {
+		configDir = o.config.Pi.ConfigDir
+	}
 
-	buf.WriteString(fmt.Sprintf("# Task: %s\n\n", bead.Title))
-	buf.WriteString(fmt.Sprintf("## Description\n%s\n\n", bead.Description))
+	// Create prompt loader
+	loader := pi.NewPromptLoader(configDir)
 
-	buf.WriteString("## Instructions\n")
-	buf.WriteString("Please complete this task based on the description above.\n")
-	buf.WriteString("When finished, ensure all files are saved and the solution is complete.\n\n")
+	// Build template data
+	data := pi.TemplateData{
+		Title:       bead.Title,
+		Description: bead.Description,
+		Type:        bead.Type,
+		Project:     bead.Project,
+		BeadID:      bead.ID.String(),
+		// Add available skills (this could be enhanced to load actual skills)
+		Skills: []pi.SkillInfo{
+			{Name: "code-search-and-intelligence", Description: "Query institutional knowledge (cass_memory) and search code semantically (TLDR)"},
+			{Name: "golang-pro", Description: "Go development patterns and best practices"},
+			{Name: "golang-testing", Description: "Go testing patterns and strategies"},
+			{Name: "test-driven-development", Description: "TDD methodology and practices"},
+			{Name: "systematic-debugging", Description: "Scientific debugging methodology"},
+		},
+	}
 
-	buf.WriteString("## Available Skills\n")
-	buf.WriteString("You have access to the code-search-and-intelligence skill to help with implementation:\n\n")
-	buf.WriteString("- **code-search-and-intelligence**: Query institutional knowledge (cass_memory) and search code semantically (TLDR)\\n")
-	buf.WriteString("  Use this skill to find patterns, anti-patterns, and understand the codebase before implementing.\n\n")
-	buf.WriteString("**Use this skill as needed based on your judgment.**\n")
+	// Try to load and render the Pi agent template
+	prompt, err := loader.GetPiAgentPrompt(data)
+	if err != nil {
+		log.Printf("[AgentWorker] Warning: Failed to load prompt template: %v. Using default.", err)
+		// Fall back to default hardcoded prompt
+		return pi.DefaultPiPrompt(data)
+	}
 
-	return buf.String()
+	return prompt
 }

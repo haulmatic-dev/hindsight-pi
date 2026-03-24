@@ -1,13 +1,13 @@
 ---
 name: code-search-and-intelligence
-description: Query institutional knowledge with cass-memory and search code semantically with hydra-llm-tldr. This skill provides actionable commands that MUST be executed before implementing any code. Run these commands first to discover patterns, avoid anti-patterns, and understand the codebase.
+description: Query institutional knowledge with Hindsight and search code semantically with hydra-llm-tldr. This skill provides actionable commands that MUST be executed before implementing any code. Run these commands first to discover patterns, avoid anti-patterns, and understand the codebase.
 ---
 
 # Code Search and Intelligence
 
 This skill provides **two intelligence commands** that you MUST run before implementing:
 
-1. **cass-memory** → query institutional knowledge
+1. **hindsight** → query institutional knowledge
 2. **hydra-llm-tldr** → search code semantically
 
 ## ⚠️  CRITICAL: Run These Commands FIRST
@@ -17,7 +17,7 @@ This skill provides **two intelligence commands** that you MUST run before imple
 ### Step 1: Query Institutional Knowledge (MANDATORY)
 
 ```bash
-cass-memory context "<your task description>" --json
+hindsight search "<your task description>" --limit 5
 ```
 
 **Run this FIRST for every task.** This retrieves:
@@ -27,7 +27,7 @@ cass-memory context "<your task description>" --json
 
 **Example:**
 ```bash
-cass-memory context "implement user authentication with JWT tokens" --json
+hindsight search "implement user authentication with JWT tokens" --limit 5
 ```
 
 ### Step 2: Search Code Semantically (MANDATORY for implementation)
@@ -65,13 +65,13 @@ hydra-llm-tldr impact internal/auth/handler.go --depth 2
 
 ## Query Best Practices
 
-### Good cass-memory Queries
+### Good Hindsight Queries
 ```bash
 # ✅ Be specific about intent
-cass-memory context "implement OAuth2 with refresh tokens" --json
+hindsight search "implement OAuth2 with refresh tokens" --limit 5
 
 # ✅ Include the problem context
-cass-memory context "debug memory leak in worker pool" --json
+hindsight search "debug memory leak in worker pool" --limit 5
 ```
 
 ### Good TLDR Search Queries
@@ -85,22 +85,26 @@ hydra-llm-tldr search "database transaction rollback handling"
 
 ## Available Commands Reference
 
-### cass-memory - Institutional Knowledge
+### hindsight - Institutional Knowledge
 
 Query patterns and anti-patterns from past work.
 
 ```bash
 # Query context for your task (ALWAYS RUN THIS FIRST)
-cass-memory context "<task description>" --json
+hindsight search "<task description>" --limit 5
 
-# Query with specific category
-cass-memory context "authentication" --category security --json
+# Search with minimum relevance threshold
+hindsight search "<task>" --min-relevance 0.7 --limit 5
 
-# List available patterns by category
-cass-memory list --category <category> --json
+# Get context for a specific bead
+hindsight context --bead-id <bead-id> --limit 5
 ```
 
-**Categories:** security, testing, debugging, performance, architecture, database
+**Relevance Scores:**
+- 0.8+ - Highly relevant (use immediately)
+- 0.6-0.8 - Moderately relevant (review carefully)
+- 0.4-0.6 - Weakly relevant (may not apply)
+- <0.4 - Not relevant (ignore)
 
 ### hydra-llm-tldr - Semantic Code Search
 
@@ -126,7 +130,7 @@ hydra-llm-tldr impact <file> --depth 2
 
 ```bash
 # 1. Query institutional knowledge FIRST
-cass-memory context "implement user authentication with JWT" --json
+hindsight search "implement user authentication with JWT" --limit 5
 
 # 2. Search for existing authentication code
 hydra-llm-tldr search "JWT authentication middleware"
@@ -146,7 +150,7 @@ hydra-llm-tldr impact internal/auth/middleware.js --depth 2
 
 ## Related Skills
 
-- **pattern-quality-reviewer** - Save patterns to cass_memory after completion
+- **pattern-quality-reviewer** - Review patterns before saving to Hindsight
 - **lsp-code-analysis** - Navigate code with LSP
 - **systematic-debugging** - Structured debugging methodology
 
@@ -154,7 +158,7 @@ hydra-llm-tldr impact internal/auth/middleware.js --depth 2
 
 ```bash
 # ALWAYS run first
-cass-memory context "<your task>" --json
+hindsight search "<your task>" --limit 5
 
 # For implementation tasks
 hydra-llm-tldr search "<what to implement>"

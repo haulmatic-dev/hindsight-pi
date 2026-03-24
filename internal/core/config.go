@@ -101,12 +101,12 @@ type projectsListConfig struct {
 
 // IntelligenceConfig contains configuration for intelligence services
 type IntelligenceConfig struct {
-	CassMemory            CassMemoryConfig            `yaml:"cass_memory"`
 	TLDR                  TLDRConfig                  `yaml:"tldr"`
 	GPTCache              GPTCacheConfig              `yaml:"gptcache"`
 	SettledState          SettledStateConfig          `yaml:"settled_state"`
 	Patterns              PatternConfig               `yaml:"patterns"`
 	CollectiveUnconscious CollectiveUnconsciousConfig `yaml:"collective_unconscious"`
+	Hindsight             HindsightConfig             `yaml:"hindsight"`
 }
 
 // PatternConfig contains pattern extraction settings
@@ -130,7 +130,7 @@ type CollectiveUnconsciousConfig struct {
 
 // CUStorageConfig contains storage settings for Collective Unconscious
 type CUStorageConfig struct {
-	Backend  string        `yaml:"backend"` // "cass_memory", "postgres", "hybrid"
+	Backend  string        `yaml:"backend"` // "postgres", "hybrid"
 	CacheTTL time.Duration `yaml:"cache_ttl"`
 }
 
@@ -170,14 +170,6 @@ type CUSecurityConfig struct {
 	SanitizePatterns bool     `yaml:"sanitize_patterns"`
 }
 
-// CassMemoryConfig contains cass_memory service settings
-type CassMemoryConfig struct {
-	Enabled     bool          `yaml:"enabled"`
-	QueryLimit  int           `yaml:"query_limit"`
-	HistoryDays int           `yaml:"history_days"`
-	Timeout     time.Duration `yaml:"timeout"`
-}
-
 // TLDRIndexingConfig contains TLDR indexing settings
 type TLDRIndexingConfig struct {
 	Enabled       bool          `yaml:"enabled"`
@@ -201,6 +193,15 @@ type TLDRConfig struct {
 type GPTCacheConfig struct {
 	Enabled   bool   `yaml:"enabled"`
 	ServerURL string `yaml:"server_url"`
+}
+
+// HindsightConfig contains Hindsight memory service settings
+type HindsightConfig struct {
+	Enabled  bool          `yaml:"enabled"`
+	BaseURL  string        `yaml:"base_url"`
+	Timeout  time.Duration `yaml:"timeout"`
+	Limit    int           `yaml:"limit"`
+	MinScore float64       `yaml:"min_score"`
 }
 
 // OverseerConfig contains overseer-specific settings
@@ -289,12 +290,6 @@ func DefaultConfig() *Config {
 			Port:    8080,
 		},
 		Intelligence: IntelligenceConfig{
-			CassMemory: CassMemoryConfig{
-				Enabled:     true,
-				QueryLimit:  10,
-				HistoryDays: 30,
-				Timeout:     5 * time.Second,
-			},
 			TLDR: TLDRConfig{
 				Enabled:   true,
 				BaseURL:   "http://127.0.0.1:8787",
@@ -312,6 +307,13 @@ func DefaultConfig() *Config {
 			GPTCache: GPTCacheConfig{
 				Enabled:   true,
 				ServerURL: "http://127.0.0.1:8788",
+			},
+			Hindsight: HindsightConfig{
+				Enabled:  true,
+				BaseURL:  "http://127.0.0.1:8000",
+				Timeout:  10 * time.Second,
+				Limit:    5,
+				MinScore: 0.7,
 			},
 			SettledState: DefaultSettledStateConfig(),
 			Patterns: PatternConfig{
