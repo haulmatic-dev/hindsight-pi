@@ -315,20 +315,22 @@ func main() {
 		}
 	}
 
-	// STEP 4: Send execution results to overseer for batch retention
-	// The overseer's batch retention service will handle Hindsight storage efficiently
-	log.Printf("📝 Sending execution results to overseer for batch retention...")
-	streamLog(mcpClient, "info", fmt.Sprintf("Sending results to overseer (status: %s)", status))
+	// STEP 4: Record execution results to Hindsight (file-based, post-execution)
+	// After Pi agent exits, we write output to temp file and then do retention
+	// This is more reliable than real-time streaming and survives crashes
+	log.Printf("📝 Recording execution results to Hindsight...")
 
-	// Send full execution result to overseer via MCP
-	notifyTaskCompleteWithResult(mcpClient, bead, result, status, duration, exitCode, agentID)
-
-	// Optional: Also try direct retention as fallback (best-effort, non-blocking)
-	// This provides redundancy in case overseer batching fails
+	// The executeWithPi function already wrote output to temp file
+	// Now we do retention with the complete execution data
 	if config.HindsightClient.Enabled {
-		go func() {
-			recordExecutionResult(bead, result, mcpClient, config)
-		}()
+		log.Printf("🧠 Retaining execution memory in Hindsight...")
+		retainErr := recordExecutionResultSync(bead, result, config)
+		if retainErr != nil {
+			log.Printf("[WARN] Failed to retain execution memory: %v", retainErr)
+			// Non-fatal: bead completion is more important than retention
+		} else {
+			log.Printf("✅ Execution memory retained in Hindsight")
+		}
 	}
 
 	// STEP 5: Close the bead using beads CLI (best-effort)
@@ -1274,7 +1276,108 @@ monitorLoop:
 		}
 	}
 
+	// Write output to temp file for durability and post-processing
+	tempFile, err := writeExecutionOutputToFile(bead.ID.String(), result)
+	if err != nil {
+		log.Printf("[WARN] Failed to write execution output to file: %v", err)
+	} else {
+		log.Printf("📝 Execution output written to: %s", tempFile)
+
+		// Schedule file cleanup after retention (optional - can keep for debugging)
+		defer func() {
+			// Keep file for 1 hour then clean up
+			time.AfterFunc(1*time.Hour, func() {
+				if err := os.Remove(tempFile); err == nil {
+					log.Printf("🗑️  Cleaned up temp file: %s", tempFile)
+				}
+			})
+		}()
+	}
+
 	return result, cmdErr
+}
+
+// writeExecutionOutputToFile writes the execution result to a temp file for durability
+// and post-processing. Returns the file path or empty string on error.
+func writeExecutionOutputToFile(beadID string, result *ExecutionResult) (string, error) {
+	// Create temp directory if it doesn't exist
+	tempDir := filepath.Join(os.TempDir(), "hydra-executions")
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create temp directory: %w", err)
+	}
+
+	// Create temp file with timestamp and bead ID
+	timestamp := time.Now().Format("20060102-150405")
+	filename := fmt.Sprintf("%s-%s.json", beadID, timestamp)
+	filepath := filepath.Join(tempDir, filename)
+
+	// Build execution record
+	record := map[string]interface{}{
+		"bead_id":    beadID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"success":    result.Success,
+		"exit_code":  result.ExitCode,
+		"duration":   result.Duration.Seconds(),
+		"attempts":   result.Attempts,
+		"agent_type": result.AgentType,
+		"output":     result.Output,
+		"error":      result.Error,
+	}
+
+	// Marshal to JSON
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal execution record: %w", err)
+	}
+
+	// Write to file atomically (write to temp, then rename)
+	tempFile := filepath + ".tmp"
+	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+		return "", fmt.Errorf("failed to write temp file: %w", err)
+	}
+
+	if err := os.Rename(tempFile, filepath); err != nil {
+		os.Remove(tempFile) // Clean up on error
+		return "", fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	return filepath, nil
+}
+
+// readExecutionOutputFromFile reads an execution result from a temp file
+func readExecutionOutputFromFile(filepath string) (*ExecutionResult, error) {
+	data, err := os.ReadFile(filepath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	var record map[string]interface{}
+	if err := json.Unmarshal(data, &record); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal record: %w", err)
+	}
+
+	result := &ExecutionResult{}
+
+	if success, ok := record["success"].(bool); ok {
+		result.Success = success
+	}
+	if exitCode, ok := record["exit_code"].(float64); ok {
+		result.ExitCode = int(exitCode)
+	}
+	if agentType, ok := record["agent_type"].(string); ok {
+		result.AgentType = agentType
+	}
+	if output, ok := record["output"].(string); ok {
+		result.Output = output
+	}
+	if errStr, ok := record["error"].(string); ok {
+		result.Error = errStr
+	}
+	if attempts, ok := record["attempts"].(float64); ok {
+		result.Attempts = int(attempts)
+	}
+
+	return result, nil
 }
 
 // buildPiCommand builds the Pi agent CLI command
@@ -1523,6 +1626,64 @@ func recordExecutionResult(
 		log.Printf("✅ Retained execution memory in Hindsight (memory_id: %s)", retainResult.MemoryID)
 		streamLog(mcpClient, "info", fmt.Sprintf("Retained execution memory in Hindsight"))
 	}
+}
+
+// recordExecutionResultSync is a synchronous version that doesn't require MCP
+// It blocks until retention completes or fails
+func recordExecutionResultSync(
+	bead types.Bead,
+	result *ExecutionResult,
+	config WorkerConfig,
+) error {
+	if result == nil {
+		return fmt.Errorf("cannot record nil result")
+	}
+
+	if !config.HindsightClient.Enabled {
+		log.Println("ℹ️ Hindsight not enabled, skipping result recording")
+		return nil
+	}
+
+	// Initialize hindsight client with config from environment
+	hindsightClient := hindsight.NewClient(
+		hindsight.WithBaseURL(config.HindsightClient.BaseURL),
+		hindsight.WithTimeout(config.HindsightClient.Timeout),
+		hindsight.WithDefaultLimit(config.HindsightClient.Limit),
+		hindsight.WithMinScore(config.HindsightClient.MinScore),
+		hindsight.WithEnabled(true),
+	)
+	log.Printf("[Hindsight] Client initialized for sync retention (baseURL: %s)", config.HindsightClient.BaseURL)
+
+	// Create execution memory with structured data
+	memory := hindsight.NewExecutionMemory(bead, agentID).
+		WithAgentType(result.AgentType).
+		WithOutcome(
+			result.Success,
+			result.ExitCode,
+			result.Output,
+			result.Error,
+			result.Duration,
+			result.Attempts,
+		)
+
+	// Add target files from bead metadata
+	targetFiles := extractTargetFiles(bead)
+	if len(targetFiles) > 0 {
+		memory.Files.TargetFiles = targetFiles
+	}
+
+	// Retain the execution memory in hindsight
+	retainResult, err := hindsightClient.Retain(memory)
+	if err != nil {
+		return fmt.Errorf("failed to retain execution memory: %w", err)
+	}
+
+	if !retainResult.Success {
+		return fmt.Errorf("hindsight retention failed: %s", retainResult.Error)
+	}
+
+	log.Printf("✅ Retained execution memory in Hindsight (memory_id: %s)", retainResult.MemoryID)
+	return nil
 }
 
 // buildSuccessPattern builds a success pattern string from the execution result
