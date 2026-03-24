@@ -163,26 +163,6 @@ func ToGraphQLConfig(config *core.Config) *model.Config {
 	}
 }
 
-// ToGraphQLPattern converts cass_memory bullet to GraphQL model
-func ToGraphQLPattern(bullet intelligence.Bullet) *model.Pattern {
-	score := bullet.Score
-	return &model.Pattern{
-		ID:       bullet.ID,
-		Content:  bullet.Content,
-		Category: bullet.Category,
-		Score:    &score,
-	}
-}
-
-// ToGraphQLPatterns converts a slice of cass_memory bullets to GraphQL models
-func ToGraphQLPatterns(bullets []intelligence.Bullet) []*model.Pattern {
-	patterns := make([]*model.Pattern, len(bullets))
-	for i, bullet := range bullets {
-		patterns[i] = ToGraphQLPattern(bullet)
-	}
-	return patterns
-}
-
 // ToGraphQLImpactAnalysis converts TLDR impact to GraphQL model
 func ToGraphQLImpactAnalysis(impact *intelligence.TLDRImpactResponse) *model.ImpactAnalysis {
 	if impact == nil {

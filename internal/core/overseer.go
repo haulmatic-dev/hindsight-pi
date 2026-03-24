@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,9 +19,12 @@ import (
 	"github.com/haulmatic-dev/hydra/internal/agents"
 	"github.com/haulmatic-dev/hydra/internal/beads"
 	"github.com/haulmatic-dev/hydra/internal/bv"
+	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/internal/intelligence"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/internal/pi"
+	"github.com/haulmatic-dev/hydra/internal/services"
+	"github.com/haulmatic-dev/hydra/internal/validation"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -34,7 +38,7 @@ type IntelligenceBundle struct {
 	GatheredAt      time.Time       `json:"gathered_at"`
 }
 
-// Pattern represents a learned pattern from cass_memory
+// Pattern represents a learned pattern from Hindsight
 type Pattern struct {
 	ID          string    `json:"id"`
 	Type        string    `json:"type"`
@@ -82,93 +86,6 @@ type CallNode struct {
 type CallEdge struct {
 	From string `json:"from"`
 	To   string `json:"to"`
-}
-
-// CassMemoryClient provides access to cass_memory service
-// CASSSearchResult represents a search result from CASS memory
-type CASSSearchResult struct {
-	Count        int          `json:"count"`
-	TotalMatches int          `json:"total_matches"`
-	Hits         []SessionHit `json:"hits"`
-}
-
-// SessionHit represents a single search result from CASS memory
-type SessionHit struct {
-	Agent      string  `json:"agent"`
-	Title      string  `json:"title"`
-	Content    string  `json:"content"`
-	Score      float64 `json:"score"`
-	SourcePath string  `json:"source_path"`
-	LineNumber int     `json:"line_number"`
-	CreatedAt  int64   `json:"created_at"`
-}
-
-type CassMemoryClient struct {
-	baseURL      string
-	httpClient   *http.Client
-	queryLimit   int
-	searchClient interface {
-		SearchSessions(query string, limit int, timeout time.Duration) (*CASSSearchResult, error)
-		IsEnabled() bool
-	}
-}
-
-// NewCassMemoryClient creates a new cass_memory client
-func NewCassMemoryClient(baseURL string, timeout time.Duration, queryLimit int) *CassMemoryClient {
-	return &CassMemoryClient{
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
-		queryLimit: queryLimit,
-	}
-}
-
-// QueryContext queries cass_memory for relevant context
-func (c *CassMemoryClient) QueryContext(beadType string, files []string, days int) ([]ContextEntry, error) {
-	if c.baseURL == "" {
-		return nil, fmt.Errorf("cass_memory base URL not configured")
-	}
-
-	reqBody := map[string]interface{}{
-		"bead_type": beadType,
-		"files":     files,
-		"days":      days,
-		"limit":     c.queryLimit,
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	url := fmt.Sprintf("%s/api/v1/context/query", c.baseURL)
-	req, err := http.NewRequest("POST", url, strings.NewReader(string(jsonBody)))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("cass_memory request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("cass_memory returned status %d", resp.StatusCode)
-	}
-
-	var result struct {
-		Entries []ContextEntry `json:"entries"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode cass_memory response: %w", err)
-	}
-
-	return result.Entries, nil
 }
 
 // GPTCacheClient provides access to GPTCache service
@@ -336,17 +253,19 @@ type Overseer struct {
 	spawner               WorkerSpawner // Interface for spawning workers (allows mocking in tests)
 	dag                   *DAG
 	dagMu                 sync.RWMutex
-	completed             map[string]bool           // Track completed beads for this session
-	retries               map[string]*beadRetryInfo // Track retry state for failed beads
-	retriesMu             sync.RWMutex              // Mutex for retries map
-	baseDelay             time.Duration             // Base delay for exponential backoff
-	maxDelay              time.Duration             // Maximum delay for exponential backoff
-	cassClient            *CassMemoryClient         // cass_memory client for context retrieval
-	tldrClient            *intelligence.TLDRClient  // TLDR client for impact analysis
-	gptCache              *GPTCacheClient           // GPTCache client for caching
-	bvClient              *bv.Client                // BV client for graph analytics
-	intelMutex            sync.RWMutex              // Mutex for intelligence clients
-	settledStateSvc       *SettledStateService      // Settled-state detection service
+	completed             map[string]bool                 // Track completed beads for this session
+	retries               map[string]*beadRetryInfo       // Track retry state for failed beads
+	retriesMu             sync.RWMutex                    // Mutex for retries map
+	baseDelay             time.Duration                   // Base delay for exponential backoff
+	maxDelay              time.Duration                   // Maximum delay for exponential backoff
+	tldrClient            *intelligence.TLDRClient        // TLDR client for impact analysis
+	gptCache              *GPTCacheClient                 // GPTCache client for caching
+	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
+	batchRetentionSvc     *services.BatchRetentionService // Batch retention service for efficient memory storage
+	hindsightLifecycle    *services.HindsightLifecycle    // Hindsight lifecycle manager for memory management
+	bvClient              *bv.Client                      // BV client for graph analytics
+	intelMutex            sync.RWMutex                    // Mutex for intelligence clients
+	settledStateSvc       *SettledStateService            // Settled-state detection service
 
 	// MCP (Model Context Protocol) fields
 	mcpClient          *mcp.HTTPClient             // MCP HTTP client (Streamable HTTP)
@@ -359,8 +278,8 @@ type Overseer struct {
 	// Resource monitoring for adaptive scaling
 	resourceMonitor *ResourceMonitor // Monitors CPU/Memory usage
 
-	// Orphan process janitor for cleaning up orphaned opencode processes
-	orphanJanitor *Charon // Cleans up orphaned opencode processes
+	// Orphan process janitor for cleaning up orphaned worker processes
+	orphanJanitor *Charon // Cleans up orphaned worker processes
 
 	// Chain completion detector for end-of-chain pattern extraction
 	chainCompletionDetector *ChainCompletionDetector // Detects chain completion and triggers pattern extraction
@@ -387,6 +306,12 @@ type Overseer struct {
 
 	// TLDR indexer for deterministic code indexing
 	tldrIndexer *TLDRIndexer // Indexes repositories after code changes
+
+	// Epic scanner for periodic epic auto-close
+	epicScanner *EpicScanner // Scans and closes epics when all tasks complete
+
+	// Validation support for end-of-chain verification
+	validator *validation.Validator // Validates bead implementations before closure
 }
 
 // NewOverseer creates a new overseer instance
@@ -468,6 +393,10 @@ func NewOverseer(config *Config) *Overseer {
 		o.initializeSettledStateService()
 	}
 
+	// Initialize validation service
+	o.validator = validation.NewValidator(validation.DefaultValidationConfig())
+	log.Printf("[Validation] Initialized bead validation service")
+
 	// Initialize chain completion detector if enabled
 	if config.Overseer.ChainDetection.Enabled {
 		o.initializeChainCompletionDetector()
@@ -488,6 +417,10 @@ func NewOverseer(config *Config) *Overseer {
 			o.maxDelay = defaultMaxDelay
 		}
 	}
+
+	// Initialize epic scanner (5 minute interval)
+	o.epicScanner = NewEpicScanner(5*time.Minute, o.beadsClient)
+	log.Printf("[EpicScanner] Initialized with 5 minute scan interval")
 
 	return o
 }
@@ -521,17 +454,6 @@ func (o *Overseer) initializeIntelligenceClients() {
 	defer o.intelMutex.Unlock()
 
 	intellConfig := o.config.Intelligence
-
-	// Initialize cass_memory client if enabled
-	if intellConfig.CassMemory.Enabled {
-		o.cassClient = NewCassMemoryClient(
-			"http://127.0.0.1:5000", // Default cass_memory port
-			intellConfig.CassMemory.Timeout,
-			intellConfig.CassMemory.QueryLimit,
-		)
-		log.Printf("[Intelligence] cass_memory client initialized (limit: %d, timeout: %v)",
-			intellConfig.CassMemory.QueryLimit, intellConfig.CassMemory.Timeout)
-	}
 
 	// Initialize TLDR client if enabled (CLI mode)
 	if intellConfig.TLDR.Enabled {
@@ -567,6 +489,46 @@ func (o *Overseer) initializeIntelligenceClients() {
 		log.Printf("[Intelligence] GPTCache client initialized (server: %s)",
 			intellConfig.GPTCache.ServerURL)
 	}
+
+	// Initialize Hindsight client if enabled
+	if intellConfig.Hindsight.Enabled {
+		o.hindsightClient = hindsight.NewClient(
+			hindsight.WithBaseURL(intellConfig.Hindsight.BaseURL),
+			hindsight.WithTimeout(intellConfig.Hindsight.Timeout),
+			hindsight.WithDefaultLimit(intellConfig.Hindsight.Limit),
+			hindsight.WithMinScore(intellConfig.Hindsight.MinScore),
+			hindsight.WithEnabled(true),
+		)
+		log.Printf("[Intelligence] Hindsight client initialized (baseURL: %s, limit: %d, minScore: %.2f)",
+			intellConfig.Hindsight.BaseURL, intellConfig.Hindsight.Limit, intellConfig.Hindsight.MinScore)
+
+		// Set environment variables so they're inherited by Pi connector and workers
+		os.Setenv("HYDRA_HISTORIESIGHT_ENABLED", "true")
+		os.Setenv("HYDRA_HISTORIESIGHT_BASE_URL", intellConfig.Hindsight.BaseURL)
+		os.Setenv("HYDRA_HISTORIESIGHT_TIMEOUT", intellConfig.Hindsight.Timeout.String())
+		os.Setenv("HYDRA_HISTORIESIGHT_LIMIT", fmt.Sprintf("%d", intellConfig.Hindsight.Limit))
+		os.Setenv("HYDRA_HISTORIESIGHT_MIN_SCORE", fmt.Sprintf("%.2f", intellConfig.Hindsight.MinScore))
+		log.Printf("[Intelligence] Hindsight environment variables set for child processes")
+
+		// Initialize batch retention service for efficient memory storage
+		o.batchRetentionSvc = services.NewBatchRetentionService(o.hindsightClient)
+		log.Printf("[Intelligence] Batch retention service initialized (batchSize: %d, flushInterval: %v)",
+			services.MemoryBatchSize, services.BatchFlushInterval)
+
+		// Initialize Hindsight lifecycle manager for memory management
+		o.hindsightLifecycle = services.NewHindsightLifecycle(services.HindsightLifecycleConfig{
+			Port:          9418,
+			IdleTimeout:   10 * time.Minute, // Restart after 10 minutes idle
+			MaxMemoryMB:   8192,             // Restart if > 8GB RAM (GPU memory not counted)
+			CheckInterval: 60 * time.Second, // Check every minute
+			APIKey:        os.Getenv("KIMI_API_KEY"),
+			Provider:      "openai",
+			Model:         "kimi-k2-5",
+			BaseURL:       "https://api.moonshot.cn/v1",
+		})
+		log.Printf("[Intelligence] Hindsight lifecycle manager initialized (idleTimeout: %v, maxMemory: %d MB)",
+			10*time.Minute, 8192)
+	}
 }
 
 // initializeSettledStateService creates and configures the settled-state detection service
@@ -595,6 +557,12 @@ func (o *Overseer) initializeSettledStateService() {
 			o.settledStateSvc.SetPatternExtractor(extractor)
 			log.Printf("[SettledState] Pattern extractor initialized (storage: %s)", extractorConfig.StoragePath)
 		}
+	}
+
+	// Set up Hindsight reflector for settled-state reflection
+	if o.hindsightClient != nil && o.hindsightClient.IsEnabled() {
+		o.settledStateSvc.SetReflector(o.hindsightClient)
+		log.Printf("[SettledState] Hindsight reflection enabled")
 	}
 
 	// Register callback for when beads become settled
@@ -640,37 +608,6 @@ func (o *Overseer) initializeChainCompletionDetector() {
 
 	log.Printf("[ChainCompletion] Detector initialized (interval: %v, timeout: %v)",
 		config.DetectionInterval, config.Timeout)
-}
-
-// queryCassMemoryContext queries cass_memory for relevant context with error handling
-func (o *Overseer) queryCassMemoryContext(client *CassMemoryClient, bead *types.Bead, files []string) ([]ContextEntry, error) {
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), o.config.Intelligence.CassMemory.Timeout)
-	defer cancel()
-
-	// Run query in goroutine to allow cancellation
-	type result struct {
-		entries []ContextEntry
-		err     error
-	}
-
-	resultChan := make(chan result, 1)
-
-	go func() {
-		entries, err := client.QueryContext(
-			bead.Type,
-			files,
-			o.config.Intelligence.CassMemory.HistoryDays,
-		)
-		resultChan <- result{entries: entries, err: err}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil, fmt.Errorf("cass_memory query timed out: %w", ctx.Err())
-	case res := <-resultChan:
-		return res.entries, res.err
-	}
 }
 
 // analyzeImpactWithTLDR performs impact analysis using TLDR service
@@ -985,8 +922,7 @@ func (o *Overseer) isIntelligenceEnabled() bool {
 	o.intelMutex.RLock()
 	defer o.intelMutex.RUnlock()
 
-	return o.config.Intelligence.CassMemory.Enabled ||
-		o.config.Intelligence.TLDR.Enabled ||
+	return o.config.Intelligence.TLDR.Enabled ||
 		o.config.Intelligence.GPTCache.Enabled
 }
 
@@ -1037,6 +973,12 @@ func (o *Overseer) Start(ctx context.Context) error {
 		o.queueInitialIndexing()
 	}
 
+	// Start epic scanner
+	if o.epicScanner != nil {
+		o.epicScanner.Start()
+		log.Println("🏛️  Epic scanner started")
+	}
+
 	o.running = true
 	ticker := time.NewTicker(o.beadDiscoveryInterval)
 	defer ticker.Stop()
@@ -1066,6 +1008,11 @@ func (o *Overseer) Start(ctx context.Context) error {
 			if o.tldrIndexer != nil {
 				o.tldrIndexer.Stop()
 				log.Println("📇 TLDR indexer stopped")
+			}
+			// Stop epic scanner
+			if o.epicScanner != nil {
+				o.epicScanner.Stop()
+				log.Println("🏛️  Epic scanner stopped")
 			}
 			return nil
 		case <-ticker.C:
@@ -1873,39 +1820,60 @@ func (o *Overseer) getReadyBeadsFromBR() ([]types.Bead, error) {
 	// Filter out beads that are already running or completed
 	o.workerMutex.RLock()
 	var readyBeads []types.Bead
+	filteredCounts := map[string]int{
+		"activeWorkers":      0,
+		"completed":          0,
+		"approvalGate":       0,
+		"approvalInProgress": 0,
+	}
 	for _, bead := range allReadyBeads {
 		beadIDStr := string(bead.ID)
 
 		// Filter: not already running
 		if _, isRunning := o.activeWorkers[beadIDStr]; isRunning {
+			log.Printf("[FilterDebug] Filtering out %s: already in activeWorkers", beadIDStr)
+			filteredCounts["activeWorkers"]++
 			continue
 		}
 
 		// Filter: not already completed in this session
 		if o.completed[beadIDStr] {
+			log.Printf("[FilterDebug] Filtering out %s: already completed in this session", beadIDStr)
+			filteredCounts["completed"]++
 			continue
 		}
 
 		// Skip approval gates
 		if bead.Type == "approval-gate" {
+			log.Printf("[FilterDebug] Filtering out %s: approval-gate type", beadIDStr)
+			filteredCounts["approvalGate"]++
 			continue
 		}
 
 		// Skip approval beads that are in progress (waiting for user approval)
 		if bead.Type == "approval" && bead.Status == types.StatusInProgress {
+			log.Printf("[FilterDebug] Filtering out %s: approval in progress", beadIDStr)
+			filteredCounts["approvalInProgress"]++
 			continue
 		}
 
-		// CRITICAL: Skip beads with unresolved dependencies
-		// br ready may return beads that have dependencies not yet satisfied
-		if len(bead.Dependencies) > 0 {
-			log.Printf("⏸️  [BR] Skipping bead with unresolved dependencies: %s (depends on: %v)", beadIDStr, bead.Dependencies)
-			continue
-		}
+		// Note: br ready already returns beads with satisfied dependencies
+		// The bead.Dependencies field shows all dependencies, but br ready ensures
+		// they are resolved. We don't need to filter here - br ready did it already.
 
 		readyBeads = append(readyBeads, bead)
 	}
 	o.workerMutex.RUnlock()
+
+	// Log filter statistics
+	if len(allReadyBeads) > 0 && len(readyBeads) < len(allReadyBeads) {
+		log.Printf("[FilterDebug] Filtered out %d beads: activeWorkers=%d, completed=%d, approvalGate=%d, approvalInProgress=%d",
+			len(allReadyBeads)-len(readyBeads),
+			filteredCounts["activeWorkers"],
+			filteredCounts["completed"],
+			filteredCounts["approvalGate"],
+			filteredCounts["approvalInProgress"])
+	}
 
 	// Sort by priority (high to low)
 	sort.Slice(readyBeads, func(i, j int) bool {
@@ -2206,8 +2174,9 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		}
 	}
 
-	// Create the worker using the agent connector
-	worker, err := o.spawnWorkerViaAgent(bead)
+	// Create the worker using the worker binary with Pi agent support
+	// This ensures Hindsight memory retention happens after execution
+	worker, err := o.spawnWorkerInternal(bead)
 	if err != nil {
 		// Remove placeholder on spawn failure
 		o.workerMutex.Lock()
@@ -2225,6 +2194,14 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 	o.clearSpawnFailures()
 
 	return nil
+}
+
+// HindsightClient defines the interface for Hindsight memory operations
+type HindsightClient interface {
+	SearchByBead(title, beadType string) (*hindsight.SearchResponse, error)
+	Reflect(beadID types.BeadID, context map[string]interface{}) ([]hindsight.ReflectionInsight, error)
+	Retain(memory *hindsight.ExecutionMemory) (*hindsight.RetentionResult, error)
+	IsEnabled() bool
 }
 
 // spawnWorkerInternal creates and starts a real worker process for a bead
@@ -2290,6 +2267,14 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
 	)
 
+	// Add full bead JSON for enhanced worker context
+	beadJSON, err := json.Marshal(bead)
+	if err == nil {
+		env = append(env, fmt.Sprintf("HYDRA_BEAD_JSON=%s", string(beadJSON)))
+	} else {
+		log.Printf("[WARN] Failed to marshal bead to JSON: %v", err)
+	}
+
 	// Pass API key to worker if configured
 	if o.config != nil && o.config.Agents.Pi.ApiKeyName != "" {
 		if apiKey := os.Getenv(o.config.Agents.Pi.ApiKeyName); apiKey != "" {
@@ -2297,7 +2282,41 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		}
 	}
 
+	// Add Hindsight configuration for memory-based context retrieval
+	if o.config != nil && o.config.Intelligence.Hindsight.Enabled {
+		h := o.config.Intelligence.Hindsight
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_ENABLED=true"))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_BASE_URL=%s", h.BaseURL))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_TIMEOUT=%s", h.Timeout))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_LIMIT=%d", h.Limit))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_MIN_SCORE=%.2f", h.MinScore))
+		log.Printf("[Worker] Hindsight config passed to worker (baseURL: %s)", h.BaseURL)
+	}
+
+	// Add Pi configuration for Pi agent execution
+	if o.config != nil && o.config.Agents.Pi.Enabled {
+		p := o.config.Agents.Pi
+		env = append(env, fmt.Sprintf("HYDRA_PI_ENABLED=true"))
+		env = append(env, fmt.Sprintf("HYDRA_PI_PROVIDER=%s", p.Provider))
+		env = append(env, fmt.Sprintf("HYDRA_PI_MODEL=%s", p.Model))
+		env = append(env, fmt.Sprintf("HYDRA_PI_THINKING_LEVEL=%s", p.ThinkingLevel))
+		env = append(env, fmt.Sprintf("HYDRA_PI_TIMEOUT=%s", p.Timeout))
+		env = append(env, fmt.Sprintf("HYDRA_PI_API_KEY_NAME=%s", p.ApiKeyName))
+		env = append(env, fmt.Sprintf("HYDRA_PI_CONFIG_DIR=%s", o.config.Pi.ConfigDir))
+		log.Printf("[Worker] Pi config passed to worker (provider: %s, model: %s)", p.Provider, p.Model)
+	}
+
 	cmd.Env = env
+
+	// Capture stdout and stderr from worker
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
 
 	// Start process
 	if err := cmd.Start(); err != nil {
@@ -2319,6 +2338,20 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 	}
 
 	log.Printf("[Worker] Process started with PID %d for bead %s (workerTracker nil: %v)", cmd.Process.Pid, beadIDStr, o.workerTracker == nil)
+
+	// Stream worker stdout/stderr to logs
+	go func() {
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			log.Printf("[Worker:%s] %s", beadIDStr, scanner.Text())
+		}
+	}()
+	go func() {
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			log.Printf("[Worker:%s] [stderr] %s", beadIDStr, scanner.Text())
+		}
+	}()
 
 	// Create worker record
 	worker := &types.Worker{
@@ -2462,7 +2495,8 @@ func (o *Overseer) handleWorkerSuccess(worker *types.Worker, duration time.Durat
 		log.Printf("[DAG] %d dependents now ready after %s completion", len(newlyReady), worker.ID)
 	}
 
-	o.completed[worker.ID] = true
+	// Note: Don't mark as completed here - wait for closeBead to succeed
+	// o.completed[worker.ID] = true
 
 	// Track bead for settled-state detection
 	log.Printf("[DEBUG] handleWorkerSuccess: settledStateSvc=%v, BeadID=%s", o.settledStateSvc != nil, worker.BeadID)
@@ -2535,6 +2569,10 @@ func (o *Overseer) handleWorkerCompletion(comp workerCompletion) {
 			success = false
 			exitCode = 1
 		}
+	} else if success {
+		// Only mark as completed if close succeeded and worker succeeded
+		o.completed[comp.worker.ID] = true
+		log.Printf("[Worker] Bead %s marked as completed in session", comp.worker.ID)
 	}
 
 	o.scheduleAfterCompletion(comp.worker, success, comp.newlyReady)
@@ -2780,6 +2818,12 @@ func (o *Overseer) shouldSpawnWorker(node *Node) bool {
 		return false
 	}
 
+	// Skip epics (organizational containers, not actionable)
+	if node.Bead.Type == "epic" {
+		log.Printf("⏸️  Skipping epic (organizational): %s", beadID)
+		return false
+	}
+
 	return true
 }
 
@@ -2972,7 +3016,21 @@ func (o *Overseer) GetRetryDelay() time.Duration {
 }
 
 // CloseBead closes a bead using the beads client
+// If validation is enabled, it validates end-of-chain beads before closure
 func (o *Overseer) CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error {
+	// Check if validation is enabled
+	if o.validator != nil {
+		return validation.CloseBeadWithValidation(
+			o.beadsClient,
+			o.validator,
+			projectPath,
+			repoName,
+			beadID,
+			reason,
+		)
+	}
+
+	// Validation disabled, close directly
 	return o.beadsClient.CloseBead(projectPath, repoName, beadID, reason)
 }
 
@@ -2987,46 +3045,12 @@ func (o *Overseer) RefreshToolClients(changes []ToolConfigChange) {
 // applyToolConfigChange applies a single tool configuration change
 func (o *Overseer) applyToolConfigChange(change ToolConfigChange) {
 	switch change.Tool {
-	case ToolCassMemory:
-		o.refreshCassMemoryClient(change)
 	case ToolTLDR:
 		o.refreshTLDRClient(change)
 	case ToolGPTCache:
 		o.refreshGPTCacheClient(change)
 	case ToolMCP:
 		o.refreshMCPClient(change)
-	}
-}
-
-// refreshCassMemoryClient reinitializes the cass_memory client
-func (o *Overseer) refreshCassMemoryClient(change ToolConfigChange) {
-	o.intelMutex.Lock()
-	defer o.intelMutex.Unlock()
-
-	config := o.config.Intelligence.CassMemory
-
-	if !config.Enabled {
-		// Disable the client
-		if o.cassClient != nil {
-			o.cassClient = nil
-			log.Printf("[Intelligence] cass_memory client disabled")
-		}
-		return
-	}
-
-	// Reinitialize the client with new settings
-	o.cassClient = NewCassMemoryClient(
-		"http://127.0.0.1:5000",
-		config.Timeout,
-		config.QueryLimit,
-	)
-
-	if change.EnabledBefore && change.EnabledAfter {
-		log.Printf("[Intelligence] cass_memory client reinitialized (timeout: %v, limit: %d)",
-			config.Timeout, config.QueryLimit)
-	} else {
-		log.Printf("[Intelligence] cass_memory client initialized (timeout: %v, limit: %d)",
-			config.Timeout, config.QueryLimit)
 	}
 }
 
@@ -3375,8 +3399,86 @@ func (o *Overseer) handleTaskCompleteMessage(msg *mcp.Message) {
 
 	log.Printf("[MCP] Task complete: bead=%s, status=%s, exit_code=%d", beadID, status, exitCode)
 
+	// Submit execution result to batch retention service for Hindsight storage
+	if o.batchRetentionSvc != nil {
+		o.submitExecutionResultToBatchRetention(msg)
+	} else {
+		log.Printf("[MCP] Warning: batch retention service not available, skipping Hindsight retention")
+	}
+
 	// Trigger scheduling cycle for next tasks
 	go o.triggerImmediateSchedule()
+}
+
+// submitExecutionResultToBatchRetention extracts execution result from MCP message
+// and submits it to the batch retention service for Hindsight storage
+func (o *Overseer) submitExecutionResultToBatchRetention(msg *mcp.Message) {
+	beadIDStr, ok := msg.Payload["bead_id"].(string)
+	if !ok || beadIDStr == "" {
+		return
+	}
+
+	// Parse bead ID
+	beadID := types.BeadID(beadIDStr)
+
+	// Extract execution result data
+	status, _ := msg.Payload["status"].(string)
+	success := status == "success"
+
+	exitCode := 0
+	if code, ok := msg.Payload["exit_code"].(float64); ok {
+		exitCode = int(code)
+	}
+
+	duration := 0 * time.Second
+	if dur, ok := msg.Payload["duration"].(float64); ok {
+		duration = time.Duration(dur * float64(time.Second))
+	}
+
+	attempts := 1
+	if att, ok := msg.Payload["attempts"].(float64); ok {
+		attempts = int(att)
+	}
+
+	agentType, _ := msg.Payload["agent_type"].(string)
+	output, _ := msg.Payload["output"].(string)
+	errorStr, _ := msg.Payload["error"].(string)
+	workerID, _ := msg.Payload["agent_id"].(string)
+
+	// Build bead struct with available info
+	bead := types.Bead{
+		ID:    beadID,
+		Title: getStringFromPayload(msg.Payload, "bead_title"),
+		Type:  getStringFromPayload(msg.Payload, "bead_type"),
+	}
+
+	// Build execution result
+	execResult := services.ExecutionResult{
+		BeadID:    beadID,
+		Success:   success,
+		ExitCode:  exitCode,
+		Output:    output,
+		Error:     errorStr,
+		Duration:  duration,
+		Attempts:  attempts,
+		AgentType: agentType,
+		Timestamp: time.Now(),
+	}
+
+	// Submit to batch retention service
+	if err := o.batchRetentionSvc.SubmitExecutionResult(bead, execResult, workerID); err != nil {
+		log.Printf("[MCP] Failed to submit execution result to batch retention: %v", err)
+	} else {
+		log.Printf("[MCP] Submitted execution result to batch retention for bead %s", beadIDStr)
+	}
+}
+
+// getStringFromPayload safely extracts a string value from a map
+func getStringFromPayload(payload map[string]interface{}, key string) string {
+	if val, ok := payload[key].(string); ok {
+		return val
+	}
+	return ""
 }
 
 // handleTaskStartMessage processes task start messages
@@ -3545,48 +3647,16 @@ func (o *Overseer) sendMCPWorkerCompletion(worker *types.Worker, success bool, e
 	}
 }
 
-// spawnWorkerWithContextEnrichment spawns a worker with CASS context enrichment
-// It searches CASS for relevant sessions based on bead title and includes them in environment
+// spawnWorkerWithContextEnrichment spawns a worker with context enrichment
+// (Legacy function - CASS memory integration removed, now just calls spawnWorkerInternal)
 func (o *Overseer) spawnWorkerWithContextEnrichment(bead types.Bead) (*types.Worker, error) {
-	// Check if CASS client has search capability (for testing)
-	if o.cassClient != nil && o.cassClient.searchClient != nil {
-		// Search CASS for relevant sessions
-		if o.cassClient.searchClient != nil && o.cassClient.searchClient.IsEnabled() {
-			// Search with 2 second timeout and limit of 3
-			result, err := o.cassClient.searchClient.SearchSessions(bead.Title, 3, 2*time.Second)
-			if err == nil && result != nil && len(result.Hits) > 0 {
-				// Format sessions as context
-				sessions := make([]map[string]interface{}, 0, len(result.Hits))
-				for _, hit := range result.Hits {
-					sessions = append(sessions, map[string]interface{}{
-						"agent":       hit.Agent,
-						"title":       hit.Title,
-						"content":     hit.Content,
-						"score":       hit.Score,
-						"source_path": hit.SourcePath,
-						"line_number": hit.LineNumber,
-						"created_at":  hit.CreatedAt,
-					})
-				}
-
-				// Marshal to JSON and store in metadata
-				if contextJSON, err := json.Marshal(sessions); err == nil {
-					if bead.Metadata == nil {
-						bead.Metadata = make(map[string]string)
-					}
-					bead.Metadata["HYDRA_CASS_CONTEXT"] = string(contextJSON)
-				}
-			}
-		}
-	}
-
 	// Call spawnWorkerInternal to create the worker
 	return o.spawnWorkerInternal(bead)
 }
 
-// buildWorkerEnvironmentWithContext builds worker environment with CASS context enrichment
-// It searches CASS for sessions related to the bead and includes top results
-func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead, cassClient interface{}) []string {
+// buildWorkerEnvironmentWithContext builds worker environment with context enrichment
+// Includes Hindsight configuration for memory-based context retrieval
+func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead) []string {
 	// Start with basic environment
 	env := []string{
 		fmt.Sprintf("HYDRA_BEAD_ID=%s", bead.ID),
@@ -3596,21 +3666,26 @@ func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead, cassClient
 		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
 	}
 
-	// If CASS client is provided and enabled, search for relevant sessions
-	if cassClient != nil {
-		if searcher, ok := cassClient.(interface {
-			SearchSessions(query string, limit int, timeout time.Duration) (*CASSSearchResult, error)
-			IsEnabled() bool
-		}); ok && searcher.IsEnabled() {
-			// Search with 2 second timeout as per requirements
-			result, err := searcher.SearchSessions(bead.Title, 3, 2*time.Second)
-			if err == nil && result != nil && len(result.Hits) > 0 {
-				// Marshal the entire result (including Count and TotalMatches) to JSON and add to environment
-				if contextJSON, err := json.Marshal(result); err == nil {
-					env = append(env, fmt.Sprintf("HYDRA_CASS_CONTEXT=%s", string(contextJSON)))
-				}
-			}
-		}
+	// Add Hindsight configuration if enabled
+	if o.config.Intelligence.Hindsight.Enabled {
+		h := o.config.Intelligence.Hindsight
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_ENABLED=true"))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_BASE_URL=%s", h.BaseURL))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_TIMEOUT=%s", h.Timeout))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_LIMIT=%d", h.Limit))
+		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_MIN_SCORE=%.2f", h.MinScore))
+	}
+
+	// Add Pi configuration if enabled
+	if o.config.Agents.Pi.Enabled {
+		p := o.config.Agents.Pi
+		env = append(env, fmt.Sprintf("HYDRA_PI_ENABLED=true"))
+		env = append(env, fmt.Sprintf("HYDRA_PI_PROVIDER=%s", p.Provider))
+		env = append(env, fmt.Sprintf("HYDRA_PI_MODEL=%s", p.Model))
+		env = append(env, fmt.Sprintf("HYDRA_PI_THINKING_LEVEL=%s", p.ThinkingLevel))
+		env = append(env, fmt.Sprintf("HYDRA_PI_TIMEOUT=%s", p.Timeout))
+		env = append(env, fmt.Sprintf("HYDRA_PI_API_KEY_NAME=%s", p.ApiKeyName))
+		env = append(env, fmt.Sprintf("HYDRA_PI_CONFIG_DIR=%s", o.config.Pi.ConfigDir))
 	}
 
 	return env

@@ -30,9 +30,6 @@ func createTestOverseer() *core.Overseer {
 			Port:    8080,
 		},
 		Intelligence: core.IntelligenceConfig{
-			CassMemory: core.CassMemoryConfig{
-				Enabled: false,
-			},
 			TLDR: core.TLDRConfig{
 				Enabled: false,
 			},

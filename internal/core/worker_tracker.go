@@ -13,6 +13,7 @@ import (
 // WorkerRecord represents a tracked worker process
 type WorkerRecord struct {
 	PID         int       `json:"pid"`
+	PGID        int       `json:"pgid"` // Process Group ID for cleanup
 	BeadID      string    `json:"bead_id"`
 	ProjectPath string    `json:"project_path"`
 	StartedAt   time.Time `json:"started_at"`
@@ -91,11 +92,17 @@ func (wt *WorkerTracker) save() error {
 
 // TrackWorker records a new worker process
 func (wt *WorkerTracker) TrackWorker(pid int, beadID string, projectPath string) error {
+	return wt.TrackWorkerWithPGID(pid, pid, beadID, projectPath) // Default PGID = PID
+}
+
+// TrackWorkerWithPGID records a new worker process with explicit PGID
+func (wt *WorkerTracker) TrackWorkerWithPGID(pid int, pgid int, beadID string, projectPath string) error {
 	wt.mu.Lock()
 	defer wt.mu.Unlock()
 
 	wt.workers[pid] = &WorkerRecord{
 		PID:         pid,
+		PGID:        pgid,
 		BeadID:      beadID,
 		ProjectPath: projectPath,
 		StartedAt:   time.Now(),
@@ -106,13 +113,18 @@ func (wt *WorkerTracker) TrackWorker(pid int, beadID string, projectPath string)
 		return fmt.Errorf("failed to track worker %d: %w", pid, err)
 	}
 
-	log.Printf("[WorkerTracker] Tracked worker PID %d for bead %s", pid, beadID)
+	log.Printf("[WorkerTracker] Tracked worker PID %d (PGID %d) for bead %s", pid, pgid, beadID)
 	return nil
 }
 
 // UpdateWorkerPID updates a worker's PID from placeholder (0) to actual PID
 // This is used when a worker is initially tracked with PID 0 and later gets a real PID
 func (wt *WorkerTracker) UpdateWorkerPID(oldPID int, newPID int, beadID string) error {
+	return wt.UpdateWorkerPIDWithPGID(oldPID, newPID, newPID, beadID) // Default PGID = newPID
+}
+
+// UpdateWorkerPIDWithPGID updates a worker's PID and PGID
+func (wt *WorkerTracker) UpdateWorkerPIDWithPGID(oldPID int, newPID int, pgid int, beadID string) error {
 	wt.mu.Lock()
 	defer wt.mu.Unlock()
 
@@ -127,10 +139,11 @@ func (wt *WorkerTracker) UpdateWorkerPID(oldPID int, newPID int, beadID string) 
 		return fmt.Errorf("bead ID mismatch: expected %s, got %s", record.BeadID, beadID)
 	}
 
-	// Remove old entry and create new one with correct PID
+	// Remove old entry and create new one with correct PID and PGID
 	delete(wt.workers, oldPID)
 	wt.workers[newPID] = &WorkerRecord{
 		PID:         newPID,
+		PGID:        pgid,
 		BeadID:      record.BeadID,
 		ProjectPath: record.ProjectPath,
 		StartedAt:   record.StartedAt,
@@ -141,7 +154,7 @@ func (wt *WorkerTracker) UpdateWorkerPID(oldPID int, newPID int, beadID string) 
 		return fmt.Errorf("failed to update worker PID from %d to %d: %w", oldPID, newPID, err)
 	}
 
-	log.Printf("[WorkerTracker] Updated worker PID from %d to %d for bead %s", oldPID, newPID, record.BeadID)
+	log.Printf("[WorkerTracker] Updated worker PID from %d to %d (PGID %d) for bead %s", oldPID, newPID, pgid, record.BeadID)
 	return nil
 }
 
@@ -191,6 +204,7 @@ func (wt *WorkerTracker) GetRunningWorkerRecords() map[int]*WorkerRecord {
 			// Return a copy to avoid race conditions
 			workers[pid] = &WorkerRecord{
 				PID:         r.PID,
+				PGID:        r.PGID,
 				BeadID:      r.BeadID,
 				ProjectPath: r.ProjectPath,
 				StartedAt:   r.StartedAt,
@@ -262,6 +276,31 @@ func (wt *WorkerTracker) GetWorkerByBead(beadID string) (*WorkerRecord, bool) {
 			// Return a copy
 			return &WorkerRecord{
 				PID:         r.PID,
+				PGID:        r.PGID,
+				BeadID:      r.BeadID,
+				ProjectPath: r.ProjectPath,
+				StartedAt:   r.StartedAt,
+				Status:      r.Status,
+				ExitCode:    r.ExitCode,
+				CompletedAt: r.CompletedAt,
+			}, true
+		}
+	}
+
+	return nil, false
+}
+
+// GetWorkerByPGID finds a worker record by process group ID (PGID)
+func (wt *WorkerTracker) GetWorkerByPGID(pgid int) (*WorkerRecord, bool) {
+	wt.mu.RLock()
+	defer wt.mu.RUnlock()
+
+	for _, r := range wt.workers {
+		if r.PGID == pgid && r.Status == "running" {
+			// Return a copy
+			return &WorkerRecord{
+				PID:         r.PID,
+				PGID:        r.PGID,
 				BeadID:      r.BeadID,
 				ProjectPath: r.ProjectPath,
 				StartedAt:   r.StartedAt,

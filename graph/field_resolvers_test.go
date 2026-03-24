@@ -120,62 +120,6 @@ func (m *fieldMockOverseer) addWorker(worker types.Worker) {
 	m.workers = append(m.workers, worker)
 }
 
-// fieldMockCassMemory is a mock implementation of the CassMemoryClient for testing
-type fieldMockCassMemory struct {
-	enabled     bool
-	returnError bool
-	response    *intelligence.CassContextResponse
-}
-
-func newFieldMockCassMemory() *fieldMockCassMemory {
-	return &fieldMockCassMemory{
-		enabled:  true,
-		response: &intelligence.CassContextResponse{},
-	}
-}
-
-func (m *fieldMockCassMemory) IsEnabled() bool {
-	return m.enabled
-}
-
-func (m *fieldMockCassMemory) Context(task string) (*intelligence.CassContextResponse, error) {
-	if !m.enabled {
-		return &intelligence.CassContextResponse{
-			Success: true,
-			Data: struct {
-				RelevantBullets []intelligence.Bullet  `json:"relevant_bullets"`
-				AntiPatterns    []intelligence.Bullet  `json:"anti_patterns"`
-				HistorySnippets []intelligence.Snippet `json:"history_snippets"`
-			}{
-				RelevantBullets: []intelligence.Bullet{},
-				AntiPatterns:    []intelligence.Bullet{},
-				HistorySnippets: []intelligence.Snippet{},
-			},
-		}, nil
-	}
-
-	if m.returnError {
-		return nil, fmt.Errorf("mock cass_memory error")
-	}
-
-	if m.response != nil {
-		return m.response, nil
-	}
-
-	return &intelligence.CassContextResponse{
-		Success: true,
-		Data: struct {
-			RelevantBullets []intelligence.Bullet  `json:"relevant_bullets"`
-			AntiPatterns    []intelligence.Bullet  `json:"anti_patterns"`
-			HistorySnippets []intelligence.Snippet `json:"history_snippets"`
-		}{
-			RelevantBullets: []intelligence.Bullet{},
-			AntiPatterns:    []intelligence.Bullet{},
-			HistorySnippets: []intelligence.Snippet{},
-		},
-	}, nil
-}
-
 // fieldMockTLDR is a mock implementation of the TLDRClient for testing
 type fieldMockTLDR struct {
 	returnError bool
@@ -209,20 +153,14 @@ type fieldOverseerInterface interface {
 	GetActiveWorkers() []types.Worker
 }
 
-type fieldCassMemoryInterface interface {
-	IsEnabled() bool
-	Context(task string) (*intelligence.CassContextResponse, error)
-}
-
 type fieldTLDRInterface interface {
 	ImpactAnalysis(file string, depth int) (*intelligence.TLDRImpactResponse, error)
 }
 
 // fieldTestBeadResolver wraps beadResolver with test-specific dependencies
 type fieldTestBeadResolver struct {
-	overseer   fieldOverseerInterface
-	cassMemory fieldCassMemoryInterface
-	tldr       fieldTLDRInterface
+	overseer fieldOverseerInterface
+	tldr     fieldTLDRInterface
 }
 
 func (r *fieldTestBeadResolver) Dependencies(ctx context.Context, obj *model.Bead) ([]*model.Bead, error) {
@@ -288,32 +226,8 @@ func (r *fieldTestBeadResolver) Worker(ctx context.Context, obj *model.Bead) (*m
 }
 
 func (r *fieldTestBeadResolver) Patterns(ctx context.Context, obj *model.Bead) ([]*model.Pattern, error) {
-	if r.cassMemory == nil || !r.cassMemory.IsEnabled() {
-		return []*model.Pattern{}, nil
-	}
-
-	query := fmt.Sprintf("%s %s", obj.Type, obj.Title)
-	if obj.Description != nil && *obj.Description != "" {
-		query = fmt.Sprintf("%s %s", query, *obj.Description)
-	}
-
-	response, err := r.cassMemory.Context(query)
-	if err != nil {
-		return []*model.Pattern{}, nil
-	}
-
-	patterns := make([]*model.Pattern, 0, len(response.Data.RelevantBullets))
-	for _, bullet := range response.Data.RelevantBullets {
-		score := bullet.Score
-		patterns = append(patterns, &model.Pattern{
-			ID:       bullet.ID,
-			Content:  bullet.Content,
-			Category: bullet.Category,
-			Score:    &score,
-		})
-	}
-
-	return patterns, nil
+	// Patterns not implemented in test resolver - return empty
+	return []*model.Pattern{}, nil
 }
 
 func (r *fieldTestBeadResolver) Impact(ctx context.Context, obj *model.Bead) (*model.ImpactAnalysis, error) {
@@ -819,157 +733,30 @@ func TestBeadWorker(t *testing.T) {
 }
 
 func TestBeadPatterns(t *testing.T) {
-	tests := []struct {
-		name          string
-		setupMocks    func(*fieldMockCassMemory)
-		bead          *model.Bead
-		expectedCount int
-		expectedIDs   []string
-	}{
-		{
-			name: "queries cass_memory and returns patterns",
-			setupMocks: func(m *fieldMockCassMemory) {
-				m.enabled = true
-				m.response = &intelligence.CassContextResponse{
-					Success: true,
-					Data: struct {
-						RelevantBullets []intelligence.Bullet  `json:"relevant_bullets"`
-						AntiPatterns    []intelligence.Bullet  `json:"anti_patterns"`
-						HistorySnippets []intelligence.Snippet `json:"history_snippets"`
-					}{
-						RelevantBullets: []intelligence.Bullet{
-							{ID: "bullet-1", Content: "Pattern 1", Category: "testing", Score: 0.95},
-							{ID: "bullet-2", Content: "Pattern 2", Category: "testing", Score: 0.85},
-						},
-					},
-				}
-			},
-			bead: &model.Bead{
-				ID:      "test-project-A",
-				Title:   "Test Bead",
-				Type:    "test",
-				Project: "test-project",
-			},
-			expectedCount: 2,
-			expectedIDs:   []string{"bullet-1", "bullet-2"},
-		},
-		{
-			name: "returns empty when cass_memory unavailable",
-			setupMocks: func(m *fieldMockCassMemory) {
-				m.enabled = false
-			},
-			bead: &model.Bead{
-				ID:      "test-project-A",
-				Title:   "Test Bead",
-				Type:    "test",
-				Project: "test-project",
-			},
-			expectedCount: 0,
-		},
-		{
-			name: "returns empty when cass_memory returns error",
-			setupMocks: func(m *fieldMockCassMemory) {
-				m.enabled = true
-				m.returnError = true
-			},
-			bead: &model.Bead{
-				ID:      "test-project-A",
-				Title:   "Test Bead",
-				Type:    "test",
-				Project: "test-project",
-			},
-			expectedCount: 0,
-		},
-		{
-			name: "returns patterns with scores",
-			setupMocks: func(m *fieldMockCassMemory) {
-				m.enabled = true
-				m.response = &intelligence.CassContextResponse{
-					Success: true,
-					Data: struct {
-						RelevantBullets []intelligence.Bullet  `json:"relevant_bullets"`
-						AntiPatterns    []intelligence.Bullet  `json:"anti_patterns"`
-						HistorySnippets []intelligence.Snippet `json:"history_snippets"`
-					}{
-						RelevantBullets: []intelligence.Bullet{
-							{ID: "bullet-1", Content: "High relevance", Category: "review", Score: 0.99},
-							{ID: "bullet-2", Content: "Medium relevance", Category: "review", Score: 0.75},
-							{ID: "bullet-3", Content: "Low relevance", Category: "review", Score: 0.50},
-						},
-					},
-				}
-			},
-			bead: &model.Bead{
-				ID:      "test-project-A",
-				Title:   "Review Bead",
-				Type:    "review",
-				Project: "test-project",
-			},
-			expectedCount: 3,
-			expectedIDs:   []string{"bullet-1", "bullet-2", "bullet-3"},
-		},
-		{
-			name: "includes description in query",
-			setupMocks: func(m *fieldMockCassMemory) {
-				m.enabled = true
-				m.response = &intelligence.CassContextResponse{
-					Success: true,
-					Data: struct {
-						RelevantBullets []intelligence.Bullet  `json:"relevant_bullets"`
-						AntiPatterns    []intelligence.Bullet  `json:"anti_patterns"`
-						HistorySnippets []intelligence.Snippet `json:"history_snippets"`
-					}{
-						RelevantBullets: []intelligence.Bullet{
-							{ID: "bullet-1", Content: "Pattern for database queries", Category: "database", Score: 0.90},
-						},
-					},
-				}
-			},
-			bead: &model.Bead{
-				ID:          "test-project-A",
-				Title:       "Database Migration",
-				Type:        "database",
-				Project:     "test-project",
-				Description: fieldStrPtr("Create users table with indexes"),
-			},
-			expectedCount: 1,
-			expectedIDs:   []string{"bullet-1"},
-		},
+	// Test that Patterns() returns empty slice (Hindsight integration removed cass_memory)
+	resolver := &fieldTestBeadResolver{}
+
+	bead := &model.Bead{
+		ID:          "test-project-A",
+		Title:       "Test Bead",
+		Type:        "test",
+		Project:     "test-project",
+		Description: fieldStrPtr("Test description"),
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mockCassMemory := newFieldMockCassMemory()
-			tt.setupMocks(mockCassMemory)
+	ctx := context.Background()
+	patterns, err := resolver.Patterns(ctx, bead)
 
-			resolver := &fieldTestBeadResolver{
-				cassMemory: fieldCassMemoryInterface(mockCassMemory),
-			}
+	if err != nil {
+		t.Fatalf("Patterns() unexpected error: %v", err)
+	}
 
-			ctx := context.Background()
-			patterns, err := resolver.Patterns(ctx, tt.bead)
+	if patterns == nil {
+		t.Error("Patterns() returned nil, expected empty slice")
+	}
 
-			if err != nil {
-				t.Fatalf("Patterns() unexpected error: %v", err)
-			}
-
-			if len(patterns) != tt.expectedCount {
-				t.Errorf("Patterns() returned %d patterns, expected %d", len(patterns), tt.expectedCount)
-			}
-
-			for i, expectedID := range tt.expectedIDs {
-				if i < len(patterns) && patterns[i].ID != expectedID {
-					t.Errorf("Patterns()[%d].ID = %s, expected %s", i, patterns[i].ID, expectedID)
-				}
-			}
-
-			// Verify scores are present
-			for i, pattern := range patterns {
-				if pattern.Score == nil {
-					t.Errorf("Patterns()[%d].Score is nil, expected a value", i)
-				}
-			}
-		})
+	if len(patterns) != 0 {
+		t.Errorf("Patterns() returned %d patterns, expected 0 (Hindsight integration removed cass_memory)", len(patterns))
 	}
 }
 
@@ -1417,33 +1204,6 @@ func TestBeadDependenciesWithOverseerNil(t *testing.T) {
 
 	if dependencies == nil || len(dependencies) != 0 {
 		t.Errorf("Expected empty slice when overseer is nil, got %v", dependencies)
-	}
-}
-
-// TestBeadPatternsWithCassMemoryNil tests the actual production behavior
-func TestBeadPatternsWithCassMemoryNil(t *testing.T) {
-	resolver := &beadResolver{
-		Resolver: &Resolver{
-			CassMemory: nil,
-		},
-	}
-
-	bead := &model.Bead{
-		ID:      "test-project-A",
-		Title:   "Test Bead",
-		Type:    "implement",
-		Project: "test-project",
-	}
-
-	ctx := context.Background()
-	patterns, err := resolver.Patterns(ctx, bead)
-
-	if err != nil {
-		t.Fatalf("Patterns() unexpected error: %v", err)
-	}
-
-	if patterns == nil || len(patterns) != 0 {
-		t.Errorf("Expected empty slice when cass_memory is nil, got %v", patterns)
 	}
 }
 

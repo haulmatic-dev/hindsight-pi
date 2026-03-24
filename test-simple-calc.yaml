@@ -1,0 +1,52 @@
+# Hydra configuration for simple-calc test
+overseer:
+  bead_discovery_interval: 10s
+  max_workers: 3
+  max_retries: 2
+  retry_delay: 30s
+  worker_timeout: 2m
+
+projects:
+  auto_discover: false
+  list:
+    - name: simple-calc
+      path: /Users/buddhi/source-code/personal/simple-calc
+      type: single
+
+intelligence:
+  tldr:
+    enabled: true
+    timeout: 30s
+    max_files: 10
+  hindsight:
+    enabled: true
+    base_url: "http://127.0.0.1:9418"
+    timeout: 10s
+    limit: 5
+    min_score: 0.7
+  settled_state:
+    enabled: true
+    check_interval: 30s
+    settlement_delay: 2m
+    stability_threshold: 0.8
+    max_concurrent_checks: 5
+    extract_patterns_on_settle: true
+    pattern_extraction_timeout: 30s
+    retain_unsettled_beads: 100
+    min_settlement_checks: 3
+  patterns:
+    enabled: true
+    min_confidence: 0.7
+    max_patterns_per_bead: 5
+    extract_code_snippets: true
+
+agents:
+  enabled: true
+  default_agent: pi
+  pi:
+    enabled: true
+    provider: kimi-coding
+    model: k2.5
+    timeout: 10m
+    api_key_name: KIMI_API_KEY
+    config_dir: /Users/buddhi/source-code/personal/hydra/pi-config

@@ -38,6 +38,7 @@ logs/
 # Database
 *.db
 *.sqlite
+storage.sqlite3*
 
 # Temporary files
 tmp/
@@ -61,7 +62,18 @@ coverage.html
 # Cass (cache directory)
 .cass/
 
+# Pi agent runtime directories
+internal/pi/.agents/
+internal/pi/.claude/
+internal/pi/.factory/
+internal/pi/.goose/
+internal/pi/.pi/
+internal/pi/skills-lock.json
+
 # Beads
 .beads/
 .hydra/
 hydra.pid
+
+# Integration test runtime data
+internal/integration/.hydra/

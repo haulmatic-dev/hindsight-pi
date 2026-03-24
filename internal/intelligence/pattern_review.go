@@ -468,29 +468,57 @@ func (s *PatternReviewService) IsEnabled() bool {
 
 // Internal helper functions
 
+// Quality scoring constants
+const (
+	qualityScoreMax          = 1.0
+	qualityConfidenceBoost   = 0.1
+	qualityTagBoost          = 0.05
+	qualityConfidenceThreshold = 0.9
+	qualityTagThreshold      = 3
+)
+
+// calculateQualityScore computes a quality score for a pattern based on
+// its validation score, confidence level, and metadata quality.
+// The score is capped at 1.0 and boosts are applied for:
+// - High confidence patterns (>= 0.9): +0.1
+// - Well-tagged patterns (>= 3 tags): +0.05
 func (s *PatternReviewService) calculateQualityScore(pattern *ExtractedPattern) float64 {
-	// Use ValidationScore as the primary quality metric
-	// This is calculated during extraction and includes multiple factors
-	baseScore := pattern.ValidationScore
-
-	// Boost score for high-confidence patterns
-	if pattern.Confidence >= 0.9 {
-		baseScore += 0.1
+	if pattern == nil {
+		return 0.0
 	}
 
-	// Boost for well-tagged patterns
-	if len(pattern.Tags) >= 3 {
-		baseScore += 0.05
-	}
+	score := pattern.ValidationScore
+	score += s.calculateConfidenceBoost(pattern.Confidence)
+	score += s.calculateTagBoost(pattern.Tags)
 
-	// Cap at 1.0
-	if baseScore > 1.0 {
-		baseScore = 1.0
-	}
-
-	return baseScore
+	return minFloat64(score, qualityScoreMax)
 }
 
+// calculateConfidenceBoost returns the boost amount based on pattern confidence
+func (s *PatternReviewService) calculateConfidenceBoost(confidence float64) float64 {
+	if confidence >= qualityConfidenceThreshold {
+		return qualityConfidenceBoost
+	}
+	return 0.0
+}
+
+// calculateTagBoost returns the boost amount based on tag count
+func (s *PatternReviewService) calculateTagBoost(tags []string) float64 {
+	if len(tags) >= qualityTagThreshold {
+		return qualityTagBoost
+	}
+	return 0.0
+}
+
+// minFloat64 returns the smaller of two float64 values
+func minFloat64(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// boolToScore converts a boolean to a score (1.0 for true, 0.0 for false)
 func (s *PatternReviewService) boolToScore(b bool) float64 {
 	if b {
 		return 1.0

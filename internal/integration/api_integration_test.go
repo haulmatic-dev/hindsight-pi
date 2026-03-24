@@ -38,10 +38,10 @@ func setupTestServer(t *testing.T) (*httptest.Server, *core.Overseer, func()) {
 			Port:    0, // Random port
 		},
 		Overseer: core.OverseerConfig{
-			MaxWorkers:     5,
-			BeadDiscoveryInterval:   10 * time.Second,
-			DefaultRetries: 3,
-			WorkerTimeout:  30 * time.Minute,
+			MaxWorkers:            5,
+			BeadDiscoveryInterval: 10 * time.Second,
+			DefaultRetries:        3,
+			WorkerTimeout:         30 * time.Minute,
 		},
 		MCP: core.MCPConfig{
 			Enabled: false, // Disable MCP for tests
@@ -358,10 +358,10 @@ func setupGraphQLServer(t *testing.T) (*httptest.Server, *graph.Resolver, func()
 	// Create test configuration
 	config := &core.Config{
 		Overseer: core.OverseerConfig{
-			MaxWorkers:     5,
-			BeadDiscoveryInterval:   10 * time.Second,
-			DefaultRetries: 3,
-			WorkerTimeout:  30 * time.Minute,
+			MaxWorkers:            5,
+			BeadDiscoveryInterval: 10 * time.Second,
+			DefaultRetries:        3,
+			WorkerTimeout:         30 * time.Minute,
 		},
 	}
 
@@ -710,10 +710,10 @@ func TestGraphQLSubscriptions(t *testing.T) {
 	// Create test configuration
 	config := &core.Config{
 		Overseer: core.OverseerConfig{
-			MaxWorkers:     5,
-			BeadDiscoveryInterval:   10 * time.Second,
-			DefaultRetries: 3,
-			WorkerTimeout:  30 * time.Minute,
+			MaxWorkers:            5,
+			BeadDiscoveryInterval: 10 * time.Second,
+			DefaultRetries:        3,
+			WorkerTimeout:         30 * time.Minute,
 		},
 	}
 
@@ -721,7 +721,7 @@ func TestGraphQLSubscriptions(t *testing.T) {
 	overseer := core.NewOverseer(config)
 
 	// Create resolver with event broadcasting
-	resolver := graph.NewResolver(overseer, nil, nil)
+	resolver := graph.NewResolver(overseer, nil)
 	defer resolver.Stop()
 
 	// Create GraphQL server

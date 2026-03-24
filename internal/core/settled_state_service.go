@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -44,6 +46,15 @@ type PatternExtractor interface {
 	IsEnabled() bool
 }
 
+// HindsightReflector defines the interface for generating insights from settled beads
+type HindsightReflector interface {
+	Reflect(beadID types.BeadID, context map[string]interface{}) ([]hindsight.ReflectionInsight, error)
+	IsEnabled() bool
+}
+
+// ReflectionInsight is an alias for hindsight.ReflectionInsight for backward compatibility
+type ReflectionInsight = hindsight.ReflectionInsight
+
 // BeadChecker defines the interface for checking bead state
 type BeadChecker interface {
 	GetBead(projectPath, repoName string, beadID types.BeadID) (*types.Bead, error)
@@ -55,6 +66,7 @@ type SettledStateService struct {
 	config           SettledStateConfig
 	beadsClient      BeadChecker
 	extractor        PatternExtractor
+	reflector        HindsightReflector
 	overseer         *Overseer
 	trackedBeads     map[string]*types.SettledBeadInfo
 	trackedMutex     sync.RWMutex
@@ -82,6 +94,11 @@ func NewSettledStateService(config SettledStateConfig, beadsClient BeadChecker, 
 // SetPatternExtractor sets the pattern extractor to use when beads settle
 func (s *SettledStateService) SetPatternExtractor(extractor PatternExtractor) {
 	s.extractor = extractor
+}
+
+// SetReflector sets the hindsight reflector to use when beads settle
+func (s *SettledStateService) SetReflector(reflector HindsightReflector) {
+	s.reflector = reflector
 }
 
 // OnSettled registers a callback to be called when a bead becomes settled
@@ -389,9 +406,21 @@ func (s *SettledStateService) findProjectPath(beadID types.BeadID) string {
 		return ""
 	}
 
+	beadProject := beadID.Project()
+
 	// Try to find the project from overseer's projects
 	for _, project := range s.overseer.GetProjects() {
-		if project.Name == beadID.Project() {
+		// Exact match
+		if project.Name == beadProject {
+			if beadID.Repo() != "" && project.Type == types.RepoTypeMulti {
+				return project.Path + "/" + beadID.Repo()
+			}
+			return project.Path
+		}
+
+		// Prefix match: bead project starts with config project name
+		// e.g., bead "simple-calc-prd-new-XXX" -> project "simple-calc"
+		if strings.HasPrefix(beadProject, project.Name) {
 			if beadID.Repo() != "" && project.Type == types.RepoTypeMulti {
 				return project.Path + "/" + beadID.Repo()
 			}
@@ -520,30 +549,44 @@ func (s *SettledStateService) canSettle(beadID types.BeadID, bead *types.Bead, s
 	return true
 }
 
-// settleBead marks a bead as settled and triggers callbacks
+// settleBead marks a bead as settled and triggers callbacks, pattern extraction, and reflection
 func (s *SettledStateService) settleBead(beadID types.BeadID, bead *types.Bead) error {
-	s.trackedMutex.Lock()
-	info, exists := s.trackedBeads[string(beadID)]
-	if !exists {
-		s.trackedMutex.Unlock()
+	info := s.markBeadSettled(beadID, bead)
+	if info == nil {
 		return fmt.Errorf("bead %s not tracked", beadID)
 	}
-
-	// Update state
-	now := time.Now()
-	info.State = types.SettledStateSettled
-	info.SettledAt = &now
-	info.StabilityScore = 1.0
-
-	// Generate immutability hash from bead state
-	info.ImmutabilityHash = s.generateImmutabilityHash(bead)
-
-	s.trackedMutex.Unlock()
 
 	log.Printf("[SettledState] Bead settled: %s (checks: %d, stability: %.2f)",
 		beadID, info.CheckCount, info.StabilityScore)
 
-	// Trigger callbacks
+	s.triggerSettledCallbacks(beadID, info)
+	s.triggerPatternExtraction(beadID, info)
+	s.triggerReflection(beadID, bead, info)
+
+	return nil
+}
+
+// markBeadSettled updates the bead state to settled and returns the info
+func (s *SettledStateService) markBeadSettled(beadID types.BeadID, bead *types.Bead) *types.SettledBeadInfo {
+	s.trackedMutex.Lock()
+	defer s.trackedMutex.Unlock()
+
+	info, exists := s.trackedBeads[string(beadID)]
+	if !exists {
+		return nil
+	}
+
+	now := time.Now()
+	info.State = types.SettledStateSettled
+	info.SettledAt = &now
+	info.StabilityScore = 1.0
+	info.ImmutabilityHash = s.generateImmutabilityHash(bead)
+
+	return info
+}
+
+// triggerSettledCallbacks invokes all registered settled callbacks concurrently
+func (s *SettledStateService) triggerSettledCallbacks(beadID types.BeadID, info *types.SettledBeadInfo) {
 	s.callbackMutex.RLock()
 	callbacks := make([]func(types.BeadID, *types.SettledBeadInfo), len(s.settledCallbacks))
 	copy(callbacks, s.settledCallbacks)
@@ -552,13 +595,101 @@ func (s *SettledStateService) settleBead(beadID types.BeadID, bead *types.Bead) 
 	for _, callback := range callbacks {
 		go callback(beadID, info)
 	}
+}
 
-	// Trigger pattern extraction if enabled
-	if s.config.ExtractPatternsOnSettle && s.extractor != nil && s.extractor.IsEnabled() {
-		go s.extractPatterns(beadID, info)
+// triggerPatternExtraction starts pattern extraction if enabled
+func (s *SettledStateService) triggerPatternExtraction(beadID types.BeadID, info *types.SettledBeadInfo) {
+	if !s.config.ExtractPatternsOnSettle || s.extractor == nil || !s.extractor.IsEnabled() {
+		return
 	}
 
-	return nil
+	go s.extractPatterns(beadID, info)
+}
+
+// triggerReflection generates insights and stores them in bead metadata
+func (s *SettledStateService) triggerReflection(beadID types.BeadID, bead *types.Bead, info *types.SettledBeadInfo) {
+	if s.reflector == nil || !s.reflector.IsEnabled() {
+		return
+	}
+
+	go s.reflectOnBead(beadID, bead, info)
+}
+
+// reflectOnBead performs hindsight reflection and stores insights in metadata
+func (s *SettledStateService) reflectOnBead(beadID types.BeadID, bead *types.Bead, info *types.SettledBeadInfo) {
+	context := s.buildReflectionContext(beadID, bead, info)
+
+	insights, err := s.reflector.Reflect(beadID, context)
+	if err != nil {
+		log.Printf("[SettledState] Reflection failed for bead %s: %v", beadID, err)
+		return
+	}
+
+	s.storeReflectionInsights(beadID, insights)
+	log.Printf("[SettledState] Reflection complete for bead %s: %d insights", beadID, len(insights))
+}
+
+// buildReflectionContext creates the context map for reflection
+func (s *SettledStateService) buildReflectionContext(
+	beadID types.BeadID,
+	bead *types.Bead,
+	info *types.SettledBeadInfo,
+) map[string]interface{} {
+	return map[string]interface{}{
+		"bead_id":           beadID,
+		"bead_type":         bead.Type,
+		"bead_status":       bead.Status,
+		"bead_title":        bead.Title,
+		"bead_description":  bead.Description,
+		"project":           bead.Project,
+		"repo":              bead.Repo,
+		"priority":          bead.Priority,
+		"labels":            bead.Labels,
+		"completed_at":      bead.CompletedAt,
+		"settled_at":        info.SettledAt,
+		"check_count":       info.CheckCount,
+		"stability_score":   info.StabilityScore,
+		"immutability_hash": info.ImmutabilityHash,
+		"dependencies":      bead.Dependencies,
+	}
+}
+
+// storeReflectionInsights stores reflection insights in bead metadata
+func (s *SettledStateService) storeReflectionInsights(beadID types.BeadID, insights []ReflectionInsight) {
+	s.trackedMutex.Lock()
+	defer s.trackedMutex.Unlock()
+
+	info, exists := s.trackedBeads[string(beadID)]
+	if !exists {
+		return
+	}
+
+	if info.Metadata == nil {
+		info.Metadata = make(map[string]string)
+	}
+
+	info.Metadata["reflection_insight_count"] = fmt.Sprintf("%d", len(insights))
+
+	for i, insight := range insights {
+		prefix := fmt.Sprintf("reflection_insight_%d", i)
+		info.Metadata[prefix+"_content"] = insight.Content
+		info.Metadata[prefix+"_type"] = insight.Type
+		if len(insight.Tags) > 0 {
+			info.Metadata[prefix+"_tags"] = s.joinTags(insight.Tags)
+		}
+	}
+}
+
+// joinTags joins tags with a separator for storage
+func (s *SettledStateService) joinTags(tags []string) string {
+	result := ""
+	for i, tag := range tags {
+		if i > 0 {
+			result += ","
+		}
+		result += tag
+	}
+	return result
 }
 
 // generateImmutabilityHash creates a hash representing the bead's immutable state

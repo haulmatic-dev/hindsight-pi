@@ -22,24 +22,18 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 			expected: 0,
 		},
 		{
-			name:     "detect CassMemory timeout change",
 			oldCfg:   createTestConfig(),
-			newCfg:   modifyConfig(createTestConfig(), func(c *Config) { c.Intelligence.CassMemory.Timeout = 10 * time.Second }),
 			expected: 1,
 			check: func(changes []ToolConfigChange) bool {
 				return len(changes) == 1 &&
-					changes[0].Tool == ToolCassMemory &&
 					changes[0].HasChanged
 			},
 		},
 		{
-			name:     "detect CassMemory enabled change",
 			oldCfg:   createTestConfig(),
-			newCfg:   modifyConfig(createTestConfig(), func(c *Config) { c.Intelligence.CassMemory.Enabled = false }),
 			expected: 1,
 			check: func(changes []ToolConfigChange) bool {
 				return len(changes) == 1 &&
-					changes[0].Tool == ToolCassMemory &&
 					changes[0].EnabledBefore == true &&
 					changes[0].EnabledAfter == false
 			},
@@ -101,7 +95,6 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 			name:   "detect multiple changes",
 			oldCfg: createTestConfig(),
 			newCfg: modifyConfig(createTestConfig(), func(c *Config) {
-				c.Intelligence.CassMemory.Timeout = 15 * time.Second
 				c.Intelligence.TLDR.Enabled = false
 			}),
 			expected: 2,
@@ -109,24 +102,19 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 				if len(changes) != 2 {
 					return false
 				}
-				foundCass := false
 				foundTLDR := false
 				for _, c := range changes {
-					if c.Tool == ToolCassMemory {
-						foundCass = true
-					}
 					if c.Tool == ToolTLDR {
 						foundTLDR = true
 					}
 				}
-				return foundCass && foundTLDR
+				return foundTLDR
 			},
 		},
 		{
-			name:     "nil old config returns all as changes",
-			oldCfg:   nil,
-			newCfg:   createTestConfig(),
-			expected: 4, // CassMemory, TLDR, GPTCache, MCP
+			name:   "nil old config returns all as changes",
+			oldCfg: nil,
+			newCfg: createTestConfig(),
 		},
 		{
 			name:     "nil new config returns no changes",
@@ -146,57 +134,6 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 
 			if tt.check != nil && !tt.check(changes) {
 				t.Errorf("changes validation failed: %+v", changes)
-			}
-		})
-	}
-}
-
-func TestConfigChangeDetector_cassMemoryChanged(t *testing.T) {
-	detector := NewConfigChangeDetector()
-
-	tests := []struct {
-		name     string
-		old      CassMemoryConfig
-		new      CassMemoryConfig
-		expected bool
-	}{
-		{
-			name:     "no change",
-			old:      CassMemoryConfig{Enabled: true, Timeout: 5 * time.Second},
-			new:      CassMemoryConfig{Enabled: true, Timeout: 5 * time.Second},
-			expected: false,
-		},
-		{
-			name:     "timeout changed",
-			old:      CassMemoryConfig{Enabled: true, Timeout: 5 * time.Second},
-			new:      CassMemoryConfig{Enabled: true, Timeout: 10 * time.Second},
-			expected: true,
-		},
-		{
-			name:     "enabled changed",
-			old:      CassMemoryConfig{Enabled: true},
-			new:      CassMemoryConfig{Enabled: false},
-			expected: true,
-		},
-		{
-			name:     "query limit changed",
-			old:      CassMemoryConfig{QueryLimit: 10},
-			new:      CassMemoryConfig{QueryLimit: 20},
-			expected: true,
-		},
-		{
-			name:     "history days changed",
-			old:      CassMemoryConfig{HistoryDays: 30},
-			new:      CassMemoryConfig{HistoryDays: 60},
-			expected: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := detector.cassMemoryChanged(tt.old, tt.new)
-			if result != tt.expected {
-				t.Errorf("expected %v, got %v", tt.expected, result)
 			}
 		})
 	}
@@ -354,12 +291,6 @@ func TestConfigChangeDetector_mcpChanged(t *testing.T) {
 func createTestConfig() *Config {
 	return &Config{
 		Intelligence: IntelligenceConfig{
-			CassMemory: CassMemoryConfig{
-				Enabled:     true,
-				Timeout:     5 * time.Second,
-				QueryLimit:  10,
-				HistoryDays: 30,
-			},
 			TLDR: TLDRConfig{
 				Enabled:   true,
 				BaseURL:   "http://localhost:8787",

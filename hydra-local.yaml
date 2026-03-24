@@ -18,11 +18,11 @@ api:
 projects:
   auto_discover: false
   list:
-    - name: opencode-simple-test
-      path: /Users/buddhi/source-code/personal/opencode-simple-test
+    - name: simple-calc
+      path: /Users/buddhi/source-code/personal/simple-calc
       type: single
-    - name: hydra-testing-folder
-      path: /Users/buddhi/source-code/personal/hydra-testing-folder
+    - name: hydra
+      path: /Users/buddhi/source-code/personal/hydra
       type: single
 
 intelligence:

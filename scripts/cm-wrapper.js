@@ -3,14 +3,14 @@
 /**
  * cass_memory wrapper script with logging
  * Logs all cass_memory (cm) commands and their responses
- * 
+ *
  * Usage: Same as cm command
  * Example: cm context "authentication" --json
  */
 
-const { spawn } = require('child_process');
-const path = require('path');
-const fs = require('fs');
+const { spawn } = require('node:child_process');
+const path = require('node:path');
+const fs = require('node:fs');
 
 const CM_BINARY = 'cm'; // Will find real cm in PATH (after this wrapper)
 const LOG_DIR = '/tmp/hydra-logs';
@@ -33,20 +33,20 @@ function rotateLogIfNeeded() {
         console.error(`[cass-memory-wrapper] Rotated log to ${rotatedFile}`);
       }
     }
-  } catch (err) {
+  } catch (_err) {
     // Non-fatal, continue without rotation
   }
 }
 
 // Log entry format
 function createLogEntry(type, data) {
-  return JSON.stringify({
+  return `${JSON.stringify({
     timestamp: new Date().toISOString(),
     type,
     data,
     pid: process.pid,
-    cwd: process.cwd()
-  }) + '\n';
+    cwd: process.cwd(),
+  })}\n`;
 }
 
 // Main execution
@@ -63,21 +63,23 @@ async function main() {
     env: {
       HYDRA_BEAD_ID: process.env.HYDRA_BEAD_ID,
       HYDRA_PROJECT: process.env.HYDRA_PROJECT,
-      HYDRA_AGENT_TYPE: process.env.HYDRA_AGENT_TYPE
-    }
+      HYDRA_AGENT_TYPE: process.env.HYDRA_AGENT_TYPE,
+    },
   });
 
   try {
     fs.appendFileSync(LOG_FILE, logEntry);
   } catch (err) {
-    console.error(`[cass-memory-wrapper] Failed to log request: ${err.message}`);
+    console.error(
+      `[cass-memory-wrapper] Failed to log request: ${err.message}`,
+    );
   }
 
   // Execute the real cm command
   const child = spawn(CM_BINARY, args, {
     stdio: ['inherit', 'pipe', 'pipe'],
     cwd: process.cwd(),
-    env: process.env
+    env: process.env,
   });
 
   let stdout = '';
@@ -105,13 +107,15 @@ async function main() {
       stdoutLength: stdout.length,
       stderrLength: stderr.length,
       stdout: stdout.substring(0, 10000), // Limit logged stdout
-      stderr: stderr.substring(0, 1000)   // Limit logged stderr
+      stderr: stderr.substring(0, 1000), // Limit logged stderr
     });
 
     try {
       fs.appendFileSync(LOG_FILE, responseEntry);
     } catch (err) {
-      console.error(`[cass-memory-wrapper] Failed to log response: ${err.message}`);
+      console.error(
+        `[cass-memory-wrapper] Failed to log response: ${err.message}`,
+      );
     }
 
     process.exit(code);
@@ -122,13 +126,15 @@ async function main() {
       command: 'cm',
       args,
       error: err.message,
-      duration: Date.now() - startTime
+      duration: Date.now() - startTime,
     });
 
     try {
       fs.appendFileSync(LOG_FILE, errorEntry);
     } catch (logErr) {
-      console.error(`[cass-memory-wrapper] Failed to log error: ${logErr.message}`);
+      console.error(
+        `[cass-memory-wrapper] Failed to log error: ${logErr.message}`,
+      );
     }
 
     console.error(`[cass-memory-wrapper] Failed to execute cm: ${err.message}`);

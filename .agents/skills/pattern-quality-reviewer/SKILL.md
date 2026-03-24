@@ -1,17 +1,17 @@
 ---
 name: pattern-quality-reviewer
-description: Review patterns before saving to institutional knowledge (cass_memory). Assess pattern quality, novelty, and generalizability to ensure only valuable learnings are preserved.
+description: Review patterns before saving to institutional knowledge (Hindsight). Assess pattern quality, novelty, and generalizability to ensure only valuable learnings are preserved.
 ---
 
 # Pattern Quality Reviewer
 
 ## Overview
 
-**Purpose:** Review extracted patterns before adding them to cass_memory to ensure quality and value.
+**Purpose:** Review extracted patterns before adding them to Hindsight to ensure quality and value.
 
 **When to use:**
 - After completing a bead or chain
-- Before calling `cm add` to save a pattern
+- Before calling `hindsight retain` to save a pattern
 - When you want to verify a pattern is worth preserving
 
 **Key principle:** Not all solutions should be saved. Only generalizable, high-quality patterns deserve a place in institutional memory.
@@ -66,7 +66,7 @@ Before saving, assess the pattern against quality criteria.
 ```bash
 # Interactive quality assessment (self-reflection)
 # Ask yourself:
-# 1. Is this novel? (Not already in cass_memory)
+# 1. Is this novel? (Not already in Hindsight)
 # 2. Is it generalizable? (Useful for similar tasks)
 # 3. Is it well-documented? (Clear what problem it solves)
 # 4. Is it proven? (Tested and working)
@@ -82,8 +82,8 @@ Before saving, assess the pattern against quality criteria.
 Before saving, verify the pattern doesn't already exist.
 
 ```bash
-# Search cass_memory for similar patterns
-cm search "your pattern keywords" --json --limit 5
+# Search Hindsight for similar patterns
+hindsight search "your pattern keywords" --limit 5
 
 # Check for exact matches
 grep -i "your pattern" ~/.pi/skills/*/SKILL.md 2>/dev/null || true
@@ -119,7 +119,7 @@ Score < 60:   Don't save
 # Ask: Is this novel? Generalizable? Documented? Proven? Non-obvious?
 
 # Step 3: Check for duplicates
-cm search "your insight" --json
+hindsight search "your insight" --limit 5
 
 # Step 4: Calculate quality score
 # Novel (20) + Generalizable (20) + Documented (20) + Proven (20) + Non-obvious (20) = 100
@@ -130,7 +130,7 @@ cm search "your insight" --json
 # Score < 60 → Don't save (but keep mental note)
 
 # Step 6: If saving, use descriptive title and comprehensive description
-cm add "Quality pattern: [title] - [description with context, trade-offs, and examples]" --category [appropriate-category] --json
+hindsight retain "Quality pattern: [title] - [description with context, trade-offs, and examples]" --metadata '{"category": "[appropriate-category]"}'
 ```
 
 ### Pattern Documentation Template
@@ -163,7 +163,7 @@ Category: [testing, security, performance, etc.]
 
 ```bash
 # Save anti-pattern
-cm add "DON'T: [what not to do]. Instead: [what to do]. Reason: [why]" --category anti-pattern --json
+hindsight retain "DON'T: [what not to do]. Instead: [what to do]. Reason: [why]" --metadata '{"category": "anti-pattern"}'
 ```
 
 ## Categories
@@ -191,7 +191,7 @@ Task: Implement retry logic with exponential backoff
 Reflection: "Discovered that exponential backoff with jitter prevents thundering herd"
 
 Quality Check:
-✅ Novel: Not in existing cass_memory
+✅ Novel: Not in existing Hindsight
 ✅ Generalizable: Applies to any external API calls
 ✅ Documented: Clear explanation of jitter importance
 ✅ Proven: Tested with 1000 concurrent requests
@@ -200,7 +200,7 @@ Quality Check:
 Score: 100/100 → SAVE
 
 Save command:
-cm add "Use exponential backoff with jitter for retry logic to prevent thundering herd problems. Base delay: 100ms, multiplier: 2, max delay: 30s, add random jitter 0-100ms. Category: performance" --category performance --json
+hindsight retain "Use exponential backoff with jitter for retry logic to prevent thundering herd problems. Base delay: 100ms, multiplier: 2, max delay: 30s, add random jitter 0-100ms." --metadata '{"category": "performance", "tags": ["retry", "backoff", "resilience"]}'
 ```
 
 ### Example 2: Low-Quality Pattern (Don't Save)
@@ -228,7 +228,7 @@ Task: Debug race condition in user cache
 Reflection: "Race condition occurred because cache wasn't thread-safe"
 
 Anti-Pattern:
-cm add "DON'T: Use plain maps for caches in concurrent code without synchronization. Instead: Use sync.RWMutex or concurrent-safe data structures like sync.Map. Reason: Race conditions cause data corruption and are hard to debug. Category: debugging" --category debugging --json
+hindsight retain "DON'T: Use plain maps for caches in concurrent code without synchronization. Instead: Use sync.RWMutex or concurrent-safe data structures like sync.Map. Reason: Race conditions cause data corruption and are hard to debug." --metadata '{"category": "debugging", "tags": ["concurrency", "cache", "race-condition"]}'
 
 Quality: High value because it prevents future bugs
 ```
@@ -265,7 +265,7 @@ Don't save (mental note only)
 
 ## Related Skills
 
-- **cass-memory-insights**: Query existing patterns before saving
+- **code-search-and-intelligence**: Query existing patterns before saving
 - **tldr-code-intelligence**: Find related code to verify pattern
 - **systematic-debugging**: Document debugging insights worth saving
 
@@ -274,18 +274,18 @@ Don't save (mental note only)
 ```bash
 # Review checklist (run before saving)
 echo "Quality Review Checklist:"
-echo "□ Novel (not in cass_memory)?"
+echo "□ Novel (not in Hindsight)?"
 echo "□ Generalizable (useful beyond this case)?"
 echo "□ Documented (clear problem/solution)?"
 echo "□ Proven (tested and working)?"
 echo "□ Non-obvious (learned wisdom)?"
 
 # Search for duplicates
-cm search "your pattern keywords" --json
+hindsight search "your pattern keywords" --limit 5
 
 # Save quality pattern
-cm add "[Title]: [Problem]. Solution: [How]. Context: [When]. Trade-offs: [Pros/Cons]. Example: [Code]." --category [category] --json
+hindsight retain "[Title]: [Problem]. Solution: [How]. Context: [When]. Trade-offs: [Pros/Cons]. Example: [Code]." --metadata '{"category": "[category]"}'
 
 # Save anti-pattern
-cm add "DON'T: [what not to do]. Instead: [what to do]. Reason: [why]." --category anti-pattern --json
+hindsight retain "DON'T: [what not to do]. Instead: [what to do]. Reason: [why]." --metadata '{"category": "anti-pattern"}'
 ```
