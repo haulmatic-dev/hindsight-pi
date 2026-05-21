@@ -16,8 +16,8 @@ import (
 )
 
 // BankID is the identifier for the shared cross-project memory bank.
-// All Hydra projects use this single "hydra" memory bank for knowledge sharing.
-const BankID = "hydra"
+// All Hydra projects use this single "coding-brain" memory bank for knowledge sharing.
+const BankID = "coding-brain"
 
 // Memory represents a single memory entry from Hindsight.
 // Each memory includes project attribution to enable cross-project knowledge sharing
@@ -37,7 +37,7 @@ type Memory struct {
 	// Project attribution fields for cross-project memory bank
 	Project  string `json:"project"`             // Project this memory belongs to
 	Repo     string `json:"repo,omitempty"`      // Repository within the project
-	BankID   string `json:"bank_id"`             // Memory bank identifier (always "hydra")
+	BankID   string `json:"bank_id"`             // Memory bank identifier (always "coding-brain")
 	WorkerID string `json:"worker_id,omitempty"` // Worker that created this memory
 }
 
@@ -52,7 +52,7 @@ type SearchRequest struct {
 	DaysBack   int      `json:"days_back,omitempty"`
 
 	// Cross-project memory bank fields
-	BankID          string   `json:"bank_id"`                    // Target memory bank (always "hydra")
+	BankID          string   `json:"bank_id"`                    // Target memory bank (always "coding-brain")
 	Projects        []string `json:"projects,omitempty"`         // Filter by specific projects (empty = all)
 	ExcludeProjects []string `json:"exclude_projects,omitempty"` // Projects to exclude from results
 }
@@ -253,7 +253,7 @@ func (c *Client) Search(query, beadType string, limit int) (*SearchResponse, err
 		Limit:    limit,
 		MinScore: c.minScore,
 		DaysBack: 30,     // Search last 30 days by default
-		BankID:   BankID, // Always use the shared "hydra" memory bank
+		BankID:   BankID, // Always use the shared "coding-brain" memory bank
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -306,10 +306,10 @@ func (c *Client) SearchByBead(title, beadType string) (*SearchResponse, error) {
 }
 
 // RetainRequest represents a request to retain an execution memory.
-// Memories are stored in the shared "hydra" memory bank with project attribution.
+// Memories are stored in the shared "coding-brain" memory bank with project attribution.
 type RetainRequest struct {
 	Memory ExecutionMemory `json:"memory"`
-	BankID string          `json:"bank_id"` // Target memory bank (always "hydra")
+	BankID string          `json:"bank_id"` // Target memory bank (always "coding-brain")
 }
 
 // RetainResponse represents the response from the retain endpoint
@@ -469,7 +469,7 @@ func (c *Client) buildRetainRequest(memory *ExecutionMemory) map[string]interfac
 	}
 
 	// Build tags from bead metadata
-	tags := []string{"hydra", "execution", memory.BeadMetadata.Type}
+	tags := []string{"coding-brain", "execution", memory.BeadMetadata.Type}
 	if memory.BeadMetadata.Project != "" {
 		tags = append(tags, memory.BeadMetadata.Project)
 	}
@@ -560,7 +560,7 @@ func (c *Client) Reflect(beadID types.BeadID, reflectionCtx map[string]interface
 		Query:     query,
 		Budget:    "low", // Use low budget for quick insights
 		MaxTokens: 2048,
-		Tags:      []string{"hydra", "execution"},
+		Tags:      []string{"coding-brain", "execution"},
 		TagsMatch: "any",
 	}
 
@@ -675,7 +675,7 @@ func (c *Client) parseReflectionInsights(resp ReflectResponse, beadID types.Bead
 		insights = append(insights, ReflectionInsight{
 			Content: resp.Text,
 			Type:    "reflection",
-			Tags:    []string{"hydra", "insight", string(beadID)},
+			Tags:    []string{"coding-brain", "insight", string(beadID)},
 		})
 	}
 

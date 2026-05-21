@@ -515,19 +515,9 @@ func (o *Overseer) initializeIntelligenceClients() {
 		log.Printf("[Intelligence] Batch retention service initialized (batchSize: %d, flushInterval: %v)",
 			services.MemoryBatchSize, services.BatchFlushInterval)
 
-		// Initialize Hindsight lifecycle manager for memory management
-		o.hindsightLifecycle = services.NewHindsightLifecycle(services.HindsightLifecycleConfig{
-			Port:          9418,
-			IdleTimeout:   10 * time.Minute, // Restart after 10 minutes idle
-			MaxMemoryMB:   8192,             // Restart if > 8GB RAM (GPU memory not counted)
-			CheckInterval: 60 * time.Second, // Check every minute
-			APIKey:        os.Getenv("KIMI_API_KEY"),
-			Provider:      "openai",
-			Model:         "kimi-k2-5",
-			BaseURL:       "https://api.moonshot.cn/v1",
-		})
-		log.Printf("[Intelligence] Hindsight lifecycle manager initialized (idleTimeout: %v, maxMemory: %d MB)",
-			10*time.Minute, 8192)
+		// NOTE: Using external Hindsight server on port 8888.
+		// Lifecycle manager disabled to avoid starting a second embedded server.
+		// o.hindsightLifecycle = services.NewHindsightLifecycle(...)
 	}
 }
 

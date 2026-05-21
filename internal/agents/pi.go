@@ -842,7 +842,7 @@ func (c *PiConnector) enrichPromptWithHindsight(session *AgentSession, prompt st
 	// Get Hindsight config from environment
 	baseURL := os.Getenv("HYDRA_HISTORIESIGHT_BASE_URL")
 	if baseURL == "" {
-		baseURL = "http://127.0.0.1:9418"
+		baseURL = "http://127.0.0.1:8888"
 	}
 
 	timeout := 5 * time.Second

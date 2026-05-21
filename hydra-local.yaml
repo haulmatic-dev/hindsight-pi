@@ -42,6 +42,12 @@ intelligence:
       retry_delay: 5s          # Delay between retries
   gptcache:
     enabled: true
+  hindsight:
+    enabled: true
+    base_url: http://127.0.0.1:8888
+    timeout: 10s
+    limit: 5
+    min_score: 0.7
   patterns:
     enabled: true
     min_confidence: 0.7

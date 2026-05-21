@@ -50,7 +50,7 @@ func NewHindsightLifecycle(config HindsightLifecycleConfig) *HindsightLifecycle 
 
 	// Set defaults
 	if config.Port == 0 {
-		config.Port = 9418
+		config.Port = 8888
 	}
 	if config.IdleTimeout == 0 {
 		config.IdleTimeout = 5 * time.Minute
