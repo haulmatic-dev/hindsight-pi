@@ -40,10 +40,28 @@ type PiConfig struct {
 
 // PiRootConfig contains Pi-specific configuration settings
 type PiRootConfig struct {
-	ConfigDir   string         `yaml:"config_dir"`
-	PiConfigDir string         `yaml:"pi_config_dir"`
-	Skills      PiSkillsConfig `yaml:"skills"`
-	LSP         LSPConfig      `yaml:"lsp"`
+	ConfigDir       string         `yaml:"config_dir"`
+	PiConfigDir     string         `yaml:"pi_config_dir"`
+	Skills          PiSkillsConfig `yaml:"skills"`
+	LSP             LSPConfig      `yaml:"lsp"`
+	StandardAgent   PiAgentConfig  `yaml:"standard-agent"`
+	ValidationAgent PiAgentConfig  `yaml:"validation-agent"`
+}
+
+// PiAgentConfig contains a Pi agent sub-configuration (standard-agent, validation-agent)
+type PiAgentConfig struct {
+	Enabled bool      `yaml:"enabled"`
+	LLM     LLMConfig `yaml:"llm"`
+	Skills  PiSkillsConfig `yaml:"skills"`
+}
+
+// LLMConfig contains LLM provider settings
+type LLMConfig struct {
+	Provider      string `yaml:"provider"`
+	Model         string `yaml:"model"`
+	ThinkingLevel string `yaml:"thinking_level"`
+	Timeout       string `yaml:"timeout"`
+	ApiKeyName    string `yaml:"api_key_name"`
 }
 
 // LSPConfig contains LSP (Language Server Protocol) settings
@@ -87,10 +105,12 @@ type rawConfig struct {
 
 // rawPiConfig is used for YAML parsing of Pi configuration
 type rawPiConfig struct {
-	ConfigDir   string         `yaml:"config_dir"`
-	PiConfigDir string         `yaml:"pi_config_dir"`
-	Skills      PiSkillsConfig `yaml:"skills"`
-	LSP         LSPConfig      `yaml:"lsp"`
+	ConfigDir       string         `yaml:"config_dir"`
+	PiConfigDir     string         `yaml:"pi_config_dir"`
+	Skills          PiSkillsConfig `yaml:"skills"`
+	LSP             LSPConfig      `yaml:"lsp"`
+	StandardAgent   PiAgentConfig  `yaml:"standard-agent"`
+	ValidationAgent PiAgentConfig  `yaml:"validation-agent"`
 }
 
 // projectsListConfig handles the case where projects is an object with 'list' field
@@ -363,11 +383,10 @@ func DefaultConfig() *Config {
 			Enabled:      true,
 			DefaultAgent: "pi",
 			Pi: PiConfig{
-				Enabled:       true,
-				Provider:      "kimi",
-				Model:         "kimi-for-coding",
-				ThinkingLevel: "medium",
-				Timeout:       "10m",
+				Enabled: true,
+				// Provider/Model/ThinkingLevel/Timeout left empty so that
+				// pi.standard-agent.llm in the YAML can override, or the
+				// overseer fills in safe defaults.
 			},
 		},
 		Pi: PiRootConfig{
@@ -488,12 +507,13 @@ func LoadConfig(path string) (*Config, error) {
 	config.Intelligence = raw.Intelligence
 	config.Agents = raw.Agents
 	config.Pi = PiRootConfig{
-		ConfigDir:   raw.Pi.ConfigDir,
-		PiConfigDir: raw.Pi.PiConfigDir,
-		Skills:      raw.Pi.Skills,
-		LSP:         raw.Pi.LSP,
+		ConfigDir:       raw.Pi.ConfigDir,
+		PiConfigDir:     raw.Pi.PiConfigDir,
+		Skills:          raw.Pi.Skills,
+		LSP:             raw.Pi.LSP,
+		StandardAgent:   raw.Pi.StandardAgent,
+		ValidationAgent: raw.Pi.ValidationAgent,
 	}
-
 	// Handle projects field - can be:
 	// 1. An array of ProjectConfig (direct list)
 	// 2. An object with 'auto_discover' and 'list' fields
@@ -548,12 +568,13 @@ func LoadConfigUncached(path string) (*Config, error) {
 	config.Intelligence = raw.Intelligence
 	config.Agents = raw.Agents
 	config.Pi = PiRootConfig{
-		ConfigDir:   raw.Pi.ConfigDir,
-		PiConfigDir: raw.Pi.PiConfigDir,
-		Skills:      raw.Pi.Skills,
-		LSP:         raw.Pi.LSP,
+		ConfigDir:       raw.Pi.ConfigDir,
+		PiConfigDir:     raw.Pi.PiConfigDir,
+		Skills:          raw.Pi.Skills,
+		LSP:             raw.Pi.LSP,
+		StandardAgent:   raw.Pi.StandardAgent,
+		ValidationAgent: raw.Pi.ValidationAgent,
 	}
-
 	// Handle projects field
 	if !isZeroNode(raw.Projects) {
 		if raw.Projects.Kind == yaml.SequenceNode {

@@ -2395,6 +2395,23 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 
 	// Add Pi configuration for Pi agent execution (always enabled)
 	p := o.config.Agents.Pi
+	// Fallback to pi.standard-agent.llm if agents.pi is not set
+	std := o.config.Pi.StandardAgent.LLM
+	if p.Provider == "" && std.Provider != "" {
+		p.Provider = std.Provider
+	}
+	if p.Model == "" && std.Model != "" {
+		p.Model = std.Model
+	}
+	if p.ThinkingLevel == "" && std.ThinkingLevel != "" {
+		p.ThinkingLevel = std.ThinkingLevel
+	}
+	if p.Timeout == "" && std.Timeout != "" {
+		p.Timeout = std.Timeout
+	}
+	if p.ApiKeyName == "" && std.ApiKeyName != "" {
+		p.ApiKeyName = std.ApiKeyName
+	}
 	if p.Provider == "" {
 		p.Provider = "kimi-coding"
 	}
@@ -3798,6 +3815,23 @@ func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead) []string {
 
 	// Add Pi configuration (always enabled)
 	p := o.config.Agents.Pi
+	// Fallback to pi.standard-agent.llm if agents.pi is not set
+	std := o.config.Pi.StandardAgent.LLM
+	if p.Provider == "" && std.Provider != "" {
+		p.Provider = std.Provider
+	}
+	if p.Model == "" && std.Model != "" {
+		p.Model = std.Model
+	}
+	if p.ThinkingLevel == "" && std.ThinkingLevel != "" {
+		p.ThinkingLevel = std.ThinkingLevel
+	}
+	if p.Timeout == "" && std.Timeout != "" {
+		p.Timeout = std.Timeout
+	}
+	if p.ApiKeyName == "" && std.ApiKeyName != "" {
+		p.ApiKeyName = std.ApiKeyName
+	}
 	if p.Provider == "" {
 		p.Provider = "kimi-coding"
 	}
