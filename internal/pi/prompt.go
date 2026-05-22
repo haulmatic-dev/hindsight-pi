@@ -30,20 +30,18 @@ type SkillInfo struct {
 
 // Loader handles loading and rendering prompt templates
 type Loader struct {
-	baseDir          string
-	piTemplate       string
-	opencodeTemplate string
-	defaultTemplate  string
+	baseDir         string
+	piTemplate      string
+	defaultTemplate string
 }
 
 // NewPromptLoader creates a new prompt loader with the specified base directory
 func NewPromptLoader(baseDir string) *Loader {
 	promptDir := filepath.Join(baseDir, "prompts")
 	return &Loader{
-		baseDir:          baseDir,
-		piTemplate:       filepath.Join(promptDir, "pi-agent.md"),
-		opencodeTemplate: filepath.Join(promptDir, "opencode-agent.md"),
-		defaultTemplate:  filepath.Join(promptDir, "default.md"),
+		baseDir:         baseDir,
+		piTemplate:      filepath.Join(promptDir, "pi-agent.md"),
+		defaultTemplate: filepath.Join(promptDir, "default.md"),
 	}
 }
 
@@ -90,11 +88,6 @@ func (l *Loader) GetPiAgentPrompt(data TemplateData) (string, error) {
 	return l.RenderPrompt(l.piTemplate, data)
 }
 
-// GetOpencodeAgentPrompt renders the Opencode agent prompt template
-func (l *Loader) GetOpencodeAgentPrompt(data TemplateData) (string, error) {
-	return l.RenderPrompt(l.opencodeTemplate, data)
-}
-
 // DefaultPiPrompt returns the hardcoded default Pi agent prompt (fallback)
 func DefaultPiPrompt(data TemplateData) string {
 	return fmt.Sprintf(`# Task: %s
@@ -115,11 +108,4 @@ You have access to the code-search-and-intelligence skill to help with implement
 **Use this skill as needed based on your judgment.**`, data.Title, data.Description)
 }
 
-// DefaultOpencodePrompt returns the hardcoded default Opencode agent prompt (fallback)
-func DefaultOpencodePrompt(data TemplateData) string {
-	prompt := fmt.Sprintf("%s: %s\n\n%s", data.Type, data.Title, data.Description)
-	if len(data.Files) > 0 {
-		prompt += fmt.Sprintf("\n\nFiles to modify: %v", data.Files)
-	}
-	return prompt
-}
+

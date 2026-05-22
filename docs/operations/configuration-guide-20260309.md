@@ -379,7 +379,6 @@ agents:
 
 **Supported Agents**:
 - `pi` - Pi coding agent via RPC mode (default)
-- `opencode` - Opencode via HTTP server mode
 - `claude` - Claude API (future)
 - `github_copilot` - GitHub Copilot (future)
 

@@ -46,7 +46,7 @@ curl http://localhost:8080/health
 - **Go:** 1.23 or later
 - **Git:** 2.30+
 - **Beads CLI:** `pip install beads-cli`
-- **Opencode:** Latest version
+- **Pi Agent:** Latest version
 
 ### Optional Services
 
@@ -485,8 +485,8 @@ du -sh /var/lib/hydra/
 
 2. **Verify dependencies:**
    ```bash
-   which opencode
-   opencode --version
+   which pi
+   pi --version
    
    which br
    br --version

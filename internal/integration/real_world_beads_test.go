@@ -92,7 +92,7 @@ func convertToTypesBead(bead *Bead) *types.Bead {
 		Description: bead.Description,
 		Status:      status,
 		Type:        bead.Type,
-		Project:     "opencode-simple-test",
+		Project:     "hydra-test-project",
 		Repo:        ".",
 		CreatedAt:   bead.CreatedAt,
 		UpdatedAt:   bead.UpdatedAt,
@@ -330,7 +330,7 @@ func (s *RealWorldTestSuite) createPatternFromBead(bead *Bead) *intelligence.Ext
 		ValidationScore: quality,
 		Tags:            s.extractTags(bead),
 		Metadata: map[string]interface{}{
-			"source_project":       "opencode-simple-test",
+			"source_project":       "hydra-test-project",
 			"success_rate":         0.9,
 			"usage_count":          10,
 			"extracted_at":         time.Now(),
@@ -516,7 +516,7 @@ func (s *RealWorldTestSuite) PrintSummary() {
 	fmt.Println(strings.Repeat("=", 60))
 
 	fmt.Printf("\n📁 Data Source:\n")
-	fmt.Printf("   Project: opencode-simple-test\n")
+	fmt.Printf("   Project: hydra-test-project\n")
 	fmt.Printf("   Total Beads: %d\n", len(s.beads))
 
 	// Count patterns

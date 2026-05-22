@@ -46,7 +46,7 @@ Based on testing, the optimal configuration for processing beads:
 overseer:
   poll_interval: 5s        # Check for ready beads every 5 seconds
   max_workers: 5           # Process up to 5 beads concurrently
-  worker_timeout: 3m       # 3 minutes per worker (opencode takes ~1-2m)
+  worker_timeout: 3m       # 3 minutes per worker (agent takes ~1-2m)
   max_retries: 2           # Retry failed beads up to 2 times
   retry_delay: 5s          # Wait 5 seconds between retries
 ```
@@ -81,9 +81,9 @@ If workers fail consistently:
    grep "Worker.*failed\|exit.*error" /tmp/hydra.log
    ```
 
-2. Verify opencode is working:
+2. Verify pi agent is working:
    ```bash
-   echo "test" | opencode run --format json --dir <project-path>
+   pi --version
    ```
 
 3. Check project path configuration in hydra.yaml
@@ -92,7 +92,7 @@ If workers fail consistently:
 
 Recommended alerts to set up:
 
-1. **Worker failure rate > 20%**: May indicate opencode issues
+1. **Worker failure rate > 20%**: May indicate agent or environment issues
 2. **No beads processed for 10 minutes**: May indicate configuration issues
 3. **Zero beads closed after 30 minutes**: May indicate dependency blocking
 

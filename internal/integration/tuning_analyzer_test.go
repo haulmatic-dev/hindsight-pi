@@ -261,7 +261,7 @@ func (a *TuningAnalyzer) createPatternFromBead(bead *Bead) *intelligence.Extract
 		ValidationScore: quality,
 		Tags:            a.extractTags(bead),
 		Metadata: map[string]interface{}{
-			"source_project":       "opencode-simple-test",
+			"source_project":       "hydra-test-project",
 			"success_rate":         0.9,
 			"usage_count":          10,
 			"extracted_at":         time.Now(),

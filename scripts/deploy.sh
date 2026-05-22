@@ -263,12 +263,6 @@ check_dependencies() {
         print_status "beads CLI installed"
     fi
     
-    # Check opencode
-    if ! command -v opencode &> /dev/null; then
-        print_warning "opencode not found. Please install opencode"
-    else
-        print_status "opencode installed"
-    fi
 }
 
 # Start service

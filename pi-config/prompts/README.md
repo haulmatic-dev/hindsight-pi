@@ -7,7 +7,6 @@ This directory contains customizable prompt templates for Hydra's AI agents.
 | File | Agent Type | Description |
 |------|-----------|-------------|
 | `pi-agent.md` | Pi Agent | Full-featured template with dynamic skills listing |
-| `opencode-agent.md` | Opencode | Minimal, direct prompt format |
 | `default.md` | Fallback | Used when agent-specific template not found |
 
 ## Template Variables

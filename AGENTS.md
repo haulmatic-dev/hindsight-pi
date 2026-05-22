@@ -59,7 +59,7 @@ This document contains important information for agents working on the Hydra pro
 **Solution**: 
 - Added `HYDRA_BEAD_TITLE` and `HYDRA_BEAD_DESCRIPTION` environment variables
 - Updated WorkerConfig struct to include these fields
-- Worker now populates bead object with complete information for opencode prompts
+- Worker now populates bead object with complete information for agent prompts
 
 ### 4. Project Path Resolution (March 2026)
 
@@ -141,7 +141,7 @@ overseer:
 
 **Check**:
 1. Worker logs: `grep "Worker.*failed" /tmp/hydra.log`
-2. Opencode works: `echo "test" | opencode run --format json --dir <path>`
+2. Pi agent works: verify `pi` binary is in PATH and `HYDRA_PI_ENABLED=true` is set
 3. Project path in hydra.yaml
 
 ### Config Not Loading
@@ -174,7 +174,7 @@ tail -f /tmp/hydra.log | grep -E "(Worker|Completed|Closed)"
 
 ## Dependencies
 
-- **opencode**: Must be installed and in PATH
+- **pi**: Pi coding agent must be installed and in PATH
 - **br**: Beads CLI must be installed
 - **bv**: Beads viewer for triage
 - **Go 1.23+**: For building

@@ -13,8 +13,8 @@ api:
   port: 8081
 
 projects:
-  - name: opencode-simple-test
-    path: /Users/buddhi/source-code/personal/opencode-simple-test
+  - name: hydra-test-project
+    path: /Users/buddhi/source-code/personal/hydra-test-project
     type: single
 
 intelligence:

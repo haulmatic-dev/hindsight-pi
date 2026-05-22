@@ -155,20 +155,4 @@ func TestDefaultPiPrompt(t *testing.T) {
 	}
 }
 
-func TestDefaultOpencodePrompt(t *testing.T) {
-	data := TemplateData{
-		Title:       "Test Task",
-		Description: "Test Description",
-		Type:        "implementation",
-		Files:       []string{"file1.go", "file2.go"},
-	}
 
-	result := DefaultOpencodePrompt(data)
-
-	if !strings.Contains(result, "implementation: Test Task") {
-		t.Error("Default prompt should contain type and title")
-	}
-	if !strings.Contains(result, "file1.go") {
-		t.Error("Default prompt should contain files when provided")
-	}
-}

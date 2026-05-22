@@ -9,7 +9,7 @@ import (
 )
 
 // AgentConnector defines the interface for agent operations
-// This abstraction allows Hydra to work with different agents (opencode, claude-code, etc.)
+// This abstraction allows Hydra to work with different agents (Pi, Claude, etc.)
 type AgentConnector interface {
 	// Start initializes the agent connection/session
 	Start(ctx context.Context, bead types.Bead, opts AgentOptions) (*AgentSession, error)

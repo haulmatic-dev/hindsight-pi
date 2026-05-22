@@ -17,7 +17,7 @@ When one agent finishes its task, another immediately spawns to take the next on
 Hydra is built on three core beliefs:
 
 1. **Ephemeral by Design**: Spawn, execute, terminate. No context baggage, but tap into context when necessary
-2. **Agnostic Intelligence**: Whether your agent prefers opencode, claudecode, pi, or speaks in binary, Hydra doesn't judge. Tools are tools.
+2. **Agnostic Intelligence**: Whether your agent prefers claudecode, pi, or speaks in binary, Hydra doesn't judge. Tools are tools.
 3. **Autonomous Flow**: From PRD to production, let the machines handle the repetitive so humans can focus on the creative.
 
 ## Vision
@@ -56,9 +56,9 @@ Welcome to the swarm.
 
 ## What is Hydra?
 
-- **Hydra is an agent swarm orchestrator** — It spawns agents that work with any coding tool (opencode, claudecode, pi) via the **Agent Connector Architecture**. This modular system uses HTTP APIs for better session control, allowing seamless integration of multiple AI agents. Cut off one agent's task, and another one immediately spawns to take its place. No heads were harmed in the making of this software.
+- **Hydra is an agent swarm orchestrator** — It spawns agents that work with any coding tool (claudecode, pi) via the **Agent Connector Architecture**. This modular system uses HTTP APIs for better session control, allowing seamless integration of multiple AI agents. Cut off one agent's task, and another one immediately spawns to take its place. No heads were harmed in the making of this software.
 
-- **PRDs and beads go in, working software comes out** — Developers create PRDs and beads using opencode (currently). Once the approval gate is released (after review), Hydra goes to town on them. Think of it as releasing the hounds, except the hounds are AI agents and the fox is technical debt.
+- **PRDs and beads go in, working software comes out** — Developers create PRDs and beads using their preferred tools. Once the approval gate is released (after review), Hydra goes to town on them. Think of it as releasing the hounds, except the hounds are AI agents and the fox is technical debt.
 
 - **Multi-repo orchestration with cross-service awareness** — Projects contain multiple repos (microservices, web apps, mobile apps) that share interconnection info. Service A knows it needs Service B's data, and at commit time, Service B exposes documents (Swagger, JSON schemas, and other docs in `docs/for-agents-only/`) so Service A's agents can access them across the project. Eventually, this will integrate with QMD, LLM-TLDR, or similar tools for semantic search across service boundaries.
 
@@ -119,33 +119,32 @@ flowchart TB
     
     subgraph Agents["Agent Connector Layer"]
         AgentRegistry["Agent Registry"]
-        OpencodeConn["Opencode Connector<br/>HTTP API"]
+        PiConn["Pi Connector<br/>RPC Mode"]
         ClaudeConn["Claude Connector<br/>(Future)"]
     end
-    
+
     subgraph Intelligence["Intelligence Layer"]
         CassMemory["cass_memory"]
         TLDR["TLDR"]
         GPTCache["GPTCache"]
         PatternMatcher["Pattern Matcher"]
     end
-    
+
     subgraph External["External Services"]
         MCP["MCP Agent Mail<br/>Port 8765"]
-        OpencodeServer["Opencode Server<br/>Port 4096"]
     end
-    
+
     subgraph Workers["Ephemeral Workers"]
         W1["Worker 1"]
         W2["Worker 2"]
         W3["Worker N"]
     end
-    
+
     subgraph Storage["Storage"]
         BeadsDB[("Beads DB<br/>.beads/")]
         PatternStore[("Pattern Store")]
     end
-    
+
     API --> Overseer
     Overseer --> Scheduler
     Overseer --> ResourceMonitor
@@ -153,13 +152,11 @@ flowchart TB
     Overseer --> Intelligence
     Overseer --> MCP
     Overseer --> Agents
-    
-    AgentRegistry --> OpencodeConn
+
+    AgentRegistry --> PiConn
     AgentRegistry --> ClaudeConn
-    OpencodeConn --> OpencodeServer
-    
+
     Scheduler --> Workers
-    Workers --> OpencodeServer
     Workers --> BeadsDB
     
     PatternMatcher --> PatternStore
@@ -174,7 +171,7 @@ flowchart TB
 
 ## ✨ Key Features
 
-- **🤖 Agent Connector Architecture**: Modular system supporting multiple AI agents (opencode, claude, etc.) via HTTP APIs
+- **🤖 Agent Connector Architecture**: Modular system supporting multiple AI agents (pi, claude, etc.) via HTTP APIs
 - **🔄 Activity-Based Timeout**: Workers only timeout after 5 minutes of inactivity, not fixed duration
 - **📊 Resource-Based Scaling**: Automatically limits workers when CPU/Memory > 70%
 - **🔗 MCP Integration**: HTTP-based protocol for agent coordination and file reservations
