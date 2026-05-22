@@ -526,9 +526,8 @@ func parseHindsightClientConfig() HindsightClientConfig {
 func parsePiConfig() PiConfig {
 	var cfg PiConfig
 
-	// Check if Pi is enabled
-	enabledStr := os.Getenv("HYDRA_PI_ENABLED")
-	cfg.Enabled = enabledStr == "true" || enabledStr == "1"
+	// Pi is always enabled (sole supported agent)
+	cfg.Enabled = true
 
 	// Parse provider
 	cfg.Provider = os.Getenv("HYDRA_PI_PROVIDER")
@@ -789,12 +788,8 @@ func executeWithRetry(
 			hindsightContext = queryHindsightForContext(bead, config, mcpClient)
 		}
 
-		// Choose execution method based on configuration
-		if config.Pi.Enabled {
-			result, lastErr = executeWithPi(bead, config.Pi, mcpClient, projectPath, hindsightContext)
-		} else {
-			lastErr = fmt.Errorf("no agent configured: HYDRA_PI_ENABLED must be set to true")
-		}
+		// Execute with Pi agent (sole supported agent)
+		result, lastErr = executeWithPi(bead, config.Pi, mcpClient, projectPath, hindsightContext)
 		result.Attempts = attempt + 1
 
 		if lastErr == nil && result.Success {

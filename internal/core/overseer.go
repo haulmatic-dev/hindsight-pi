@@ -2283,18 +2283,31 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		log.Printf("[Worker] Hindsight config passed to worker (baseURL: %s)", h.BaseURL)
 	}
 
-	// Add Pi configuration for Pi agent execution
-	if o.config != nil && o.config.Agents.Pi.Enabled {
-		p := o.config.Agents.Pi
-		env = append(env, fmt.Sprintf("HYDRA_PI_ENABLED=true"))
-		env = append(env, fmt.Sprintf("HYDRA_PI_PROVIDER=%s", p.Provider))
-		env = append(env, fmt.Sprintf("HYDRA_PI_MODEL=%s", p.Model))
-		env = append(env, fmt.Sprintf("HYDRA_PI_THINKING_LEVEL=%s", p.ThinkingLevel))
-		env = append(env, fmt.Sprintf("HYDRA_PI_TIMEOUT=%s", p.Timeout))
-		env = append(env, fmt.Sprintf("HYDRA_PI_API_KEY_NAME=%s", p.ApiKeyName))
-		env = append(env, fmt.Sprintf("HYDRA_PI_CONFIG_DIR=%s", o.config.Pi.ConfigDir))
-		log.Printf("[Worker] Pi config passed to worker (provider: %s, model: %s)", p.Provider, p.Model)
+	// Add Pi configuration for Pi agent execution (always enabled)
+	p := o.config.Agents.Pi
+	if p.Provider == "" {
+		p.Provider = "kimi-coding"
 	}
+	if p.Model == "" {
+		p.Model = "k2.5"
+	}
+	if p.ThinkingLevel == "" {
+		p.ThinkingLevel = "on"
+	}
+	if p.Timeout == "" {
+		p.Timeout = "10m"
+	}
+	if p.ApiKeyName == "" {
+		p.ApiKeyName = "KIMI_API_KEY"
+	}
+	env = append(env, fmt.Sprintf("HYDRA_PI_ENABLED=true"))
+	env = append(env, fmt.Sprintf("HYDRA_PI_PROVIDER=%s", p.Provider))
+	env = append(env, fmt.Sprintf("HYDRA_PI_MODEL=%s", p.Model))
+	env = append(env, fmt.Sprintf("HYDRA_PI_THINKING_LEVEL=%s", p.ThinkingLevel))
+	env = append(env, fmt.Sprintf("HYDRA_PI_TIMEOUT=%s", p.Timeout))
+	env = append(env, fmt.Sprintf("HYDRA_PI_API_KEY_NAME=%s", p.ApiKeyName))
+	env = append(env, fmt.Sprintf("HYDRA_PI_CONFIG_DIR=%s", o.config.Pi.ConfigDir))
+	log.Printf("[Worker] Pi config passed to worker (provider: %s, model: %s)", p.Provider, p.Model)
 
 	cmd.Env = env
 
@@ -3666,17 +3679,30 @@ func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead) []string {
 		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_MIN_SCORE=%.2f", h.MinScore))
 	}
 
-	// Add Pi configuration if enabled
-	if o.config.Agents.Pi.Enabled {
-		p := o.config.Agents.Pi
-		env = append(env, fmt.Sprintf("HYDRA_PI_ENABLED=true"))
-		env = append(env, fmt.Sprintf("HYDRA_PI_PROVIDER=%s", p.Provider))
-		env = append(env, fmt.Sprintf("HYDRA_PI_MODEL=%s", p.Model))
-		env = append(env, fmt.Sprintf("HYDRA_PI_THINKING_LEVEL=%s", p.ThinkingLevel))
-		env = append(env, fmt.Sprintf("HYDRA_PI_TIMEOUT=%s", p.Timeout))
-		env = append(env, fmt.Sprintf("HYDRA_PI_API_KEY_NAME=%s", p.ApiKeyName))
-		env = append(env, fmt.Sprintf("HYDRA_PI_CONFIG_DIR=%s", o.config.Pi.ConfigDir))
+	// Add Pi configuration (always enabled)
+	p := o.config.Agents.Pi
+	if p.Provider == "" {
+		p.Provider = "kimi-coding"
 	}
+	if p.Model == "" {
+		p.Model = "k2.5"
+	}
+	if p.ThinkingLevel == "" {
+		p.ThinkingLevel = "on"
+	}
+	if p.Timeout == "" {
+		p.Timeout = "10m"
+	}
+	if p.ApiKeyName == "" {
+		p.ApiKeyName = "KIMI_API_KEY"
+	}
+	env = append(env, fmt.Sprintf("HYDRA_PI_ENABLED=true"))
+	env = append(env, fmt.Sprintf("HYDRA_PI_PROVIDER=%s", p.Provider))
+	env = append(env, fmt.Sprintf("HYDRA_PI_MODEL=%s", p.Model))
+	env = append(env, fmt.Sprintf("HYDRA_PI_THINKING_LEVEL=%s", p.ThinkingLevel))
+	env = append(env, fmt.Sprintf("HYDRA_PI_TIMEOUT=%s", p.Timeout))
+	env = append(env, fmt.Sprintf("HYDRA_PI_API_KEY_NAME=%s", p.ApiKeyName))
+	env = append(env, fmt.Sprintf("HYDRA_PI_CONFIG_DIR=%s", o.config.Pi.ConfigDir))
 
 	return env
 }
