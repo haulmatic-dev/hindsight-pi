@@ -302,12 +302,14 @@ func main() {
 
 	// Calculate duration
 	duration := time.Since(startTime)
-	result.Duration = duration
+	if result != nil {
+		result.Duration = duration
+	}
 
 	// Determine status
 	status := "success"
 	exitCode := 0
-	if err != nil || !result.Success {
+	if err != nil || result == nil || !result.Success {
 		status = "failure"
 		exitCode = 1
 		if result != nil {
@@ -335,7 +337,7 @@ func main() {
 
 	// STEP 5: Close the bead using beads CLI (best-effort)
 	// Only close beads that succeeded - failed beads remain open for retry/investigation
-	if exitCode == 0 && result.Success {
+	if exitCode == 0 && result != nil && result.Success {
 		if err := closeBeadFromWorker(bead, projectPath, config.Repo, "completed"); err != nil {
 			log.Printf("[WARN] Failed to close bead from worker (non-fatal): %v", err)
 			// Don't fail the worker just because we couldn't close the bead
@@ -344,8 +346,12 @@ func main() {
 			log.Printf("✅ Successfully closed bead %s with status: completed", beadID)
 		}
 	} else {
+		successStr := "false"
+		if result != nil {
+			successStr = fmt.Sprintf("%v", result.Success)
+		}
 		log.Printf("⚠️  Bead %s NOT closed - worker failed (exit: %d, success: %v). Will remain open for retry.",
-			beadID, exitCode, result.Success)
+			beadID, exitCode, successStr)
 	}
 
 	streamLog(mcpClient, "info", fmt.Sprintf("Worker completed for bead %s with status %s", beadID, status))
@@ -358,8 +364,12 @@ func main() {
 		log.Printf("❌ Execution error:\n%s", result.Error)
 	}
 
+	attempts := 0
+	if result != nil {
+		attempts = result.Attempts
+	}
 	log.Printf("✅ Worker completed for bead: %s (status: %s, duration: %v, attempts: %d)",
-		beadID, status, duration, result.Attempts)
+		beadID, status, duration, attempts)
 
 	// Exit with appropriate code
 	os.Exit(exitCode)
@@ -914,12 +924,11 @@ func executeWithPi(
 	}
 	defer stderrPipe.Close()
 
-	// Create stdin pipe for JSONL protocol
+	// Create stdin pipe for Pi text mode (plain text prompt via stdin)
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return result, fmt.Errorf("failed to create stdin pipe: %w", err)
 	}
-	defer stdinPipe.Close()
 
 	// Start the command
 	if err := cmd.Start(); err != nil {
@@ -929,20 +938,11 @@ func executeWithPi(
 	// Build the prompt message
 	prompt := buildPiPrompt(bead, hindsightContext)
 
-	// Send prompt as JSONL
-	request := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"method":  "pi/execute",
-		"params": map[string]interface{}{
-			"prompt": prompt,
-		},
-		"id": 1,
-	}
-
-	encoder := json.NewEncoder(stdinPipe)
-	if err := encoder.Encode(request); err != nil {
+	// Send prompt as plain text via stdin
+	if _, err := stdinPipe.Write([]byte(prompt + "\n")); err != nil {
 		return result, fmt.Errorf("failed to send prompt to pi: %w", err)
 	}
+	// Close stdin to signal EOF — Pi starts processing when stdin closes
 	stdinPipe.Close()
 
 	// Capture output with activity monitoring
@@ -1163,9 +1163,8 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 		path = bead.Project
 	}
 
-	// Build base args
+	// Build base args — default text mode reads prompt from stdin
 	args := []string{
-		"--mode", "rpc",
 		"--no-session",
 	}
 
