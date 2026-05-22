@@ -175,8 +175,8 @@ func (rm *ResourceMonitor) getProcessCount() (int, error) {
 
 // getProcessLimit returns the maximum number of processes allowed (ulimit -u)
 func (rm *ResourceMonitor) getProcessLimit() (int, error) {
-	// Get ulimit -u for current user
-	cmd := exec.Command("ulimit", "-u")
+	// ulimit is a shell builtin — must invoke via bash (sh/dash may not support -u)
+	cmd := exec.Command("bash", "-c", "ulimit -u")
 	output, err := cmd.Output()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get process limit: %w", err)

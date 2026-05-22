@@ -1,0 +1,122 @@
+overseer:
+  bead_discovery_interval: 10s
+  max_workers: 10
+  default_retries: 5
+  max_retries: 5
+  retry_delay: 30s
+  worker_timeout: 10m
+  handoff_timeout: 6m
+  resource_monitoring:
+    enabled: true
+    max_cpu_percent: 50
+    max_memory_percent: 50
+    mode: hydra
+  chain_detection:
+    enabled: true
+    interval: 10s
+    timeout: 10m
+
+api:
+  enabled: true
+  port: 8089
+
+projects:
+  auto_discover: false
+  list:
+    - name: hydra
+      path: /opt/dev-tools/components/hydra
+      type: single
+    - name: outreach
+      path: /opt/outreach-workflow
+      type: single
+
+intelligence:
+  tldr:
+    enabled: true
+    base_url: http://127.0.0.1:8787
+    timeout: 30s
+    max_files: 20
+    max_tokens: 100000
+    indexing:
+      enabled: true
+      max_concurrent: 2
+      queue_size: 100
+      retry_attempts: 3
+      retry_delay: 5s
+  hindsight:
+    enabled: true
+    base_url: http://127.0.0.1:8888
+    timeout: 10s
+    limit: 5
+    min_score: 0.7
+  patterns:
+    enabled: true
+    min_confidence: 0.7
+    max_patterns_per_bead: 5
+    extract_code_snippets: true
+    storage_path: /opt/dev-tools/components/hydra/.hydra/patterns
+  settled_state:
+    enabled: true
+    check_interval: 30s
+    settlement_delay: 2m
+    stability_threshold: 0.95
+    max_concurrent_checks: 10
+    extract_patterns_on_settle: true
+    pattern_extraction_timeout: 5m
+    retain_unsettled_beads: 1000
+    min_settlement_checks: 3
+
+mcp:
+  enabled: true
+  url: http://127.0.0.1:8765
+  port: 8765
+  base_url: http://127.0.0.1:8765
+  reconnect_interval: 5s
+  max_reconnect_attempts: 10
+  heartbeat_interval: 30s
+  file_reservation_ttl: 30m
+
+dryad:
+  base_path: /opt/dev-tools/components/hydra/.hydra/dryad
+  max_worktrees: 10
+  lease_timeout: 2h
+  setup:
+    pi_provider: minimax
+    pi_model: MiniMax-M2.7
+    timeout: 5m
+    skills_path: /opt/dev-tools/config/pi/skills
+    nodejs:
+      preferred_manager: npm
+      global_virtual_store: false
+
+pi:
+  config_dir: /opt/dev-tools/components/hydra/pi-config
+
+  standard-agent:
+    enabled: true
+    llm:
+      provider: minimax
+      model: MiniMax-M2.7
+      thinking_level: medium
+      timeout: 10m
+      api_key_name: MINIMAX_API_KEY
+    skills:
+      update_interval: 24h
+      auto_update: false
+      global: false
+      list: []
+
+  validation-agent:
+    enabled: true
+    agent_verification_enabled: true
+    timeout: 10m
+    max_retries: 3
+    llm:
+      provider: minimax
+      model: MiniMax-M2.7
+      api_key_name: MINIMAX_API_KEY
+    skills:
+      update_interval: 24h
+      auto_update: false
+      global: false
+      list: []

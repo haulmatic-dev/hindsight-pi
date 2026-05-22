@@ -2325,8 +2325,8 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 	if o.beadsClient != nil && projectPath != "" {
 		log.Printf("[Overseer] Marking bead %s as in_progress", beadIDStr)
 		if err := o.beadsClient.UpdateBeadStatus(projectPath, bead.ID, types.StatusInProgress); err != nil {
-			log.Printf("[Overseer] Warning: failed to mark bead %s as in_progress: %v", beadIDStr, err)
-			// Continue anyway - this is not fatal
+			// Non-fatal: bead may already be in_progress or locked by concurrent process
+			log.Printf("[Overseer] Debug: could not mark bead %s as in_progress: %v", beadIDStr, err)
 		}
 	}
 
@@ -2357,11 +2357,22 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 	)
 
 	// Add full bead JSON for enhanced worker context
-	beadJSON, err := json.Marshal(bead)
-	if err == nil {
-		env = append(env, fmt.Sprintf("HYDRA_BEAD_JSON=%s", string(beadJSON)))
-	} else {
-		log.Printf("[WARN] Failed to marshal bead to JSON: %v", err)
+	if bead.ID != "" {
+		// Filter empty dependency entries that break BeadID unmarshaling
+		cleanBead := bead
+		cleanDeps := make([]types.BeadID, 0, len(bead.Dependencies))
+		for _, dep := range bead.Dependencies {
+			if dep != "" {
+				cleanDeps = append(cleanDeps, dep)
+			}
+		}
+		cleanBead.Dependencies = cleanDeps
+		beadJSON, err := json.Marshal(cleanBead)
+		if err == nil {
+			env = append(env, fmt.Sprintf("HYDRA_BEAD_JSON=%s", string(beadJSON)))
+		} else {
+			log.Printf("[WARN] Failed to marshal bead to JSON: %v", err)
+		}
 	}
 
 	// Pass API key to worker if configured
@@ -2730,6 +2741,13 @@ func (o *Overseer) closeBead(worker *types.Worker, success bool) error {
 		if repoPath != "" {
 			o.queueRepoIndexing(projectName, repoPath)
 		}
+	}
+
+	// Verify bead is not already closed (worker may have closed it)
+	bead, err := o.beadsClient.GetBead(projectPath, repoName, worker.BeadID)
+	if err == nil && bead.Status.IsTerminal() {
+		log.Printf("[closeBead] Bead %s already closed (status: %s), skipping", worker.BeadID.String(), bead.Status)
+		return nil
 	}
 
 	return o.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason)
@@ -3419,7 +3437,7 @@ func (o *Overseer) StartMCPListener() error {
 	}
 
 	if err := o.mcpClient.Register(metadata); err != nil {
-		log.Printf("[MCP] Failed to register: %v", err)
+		log.Printf("[MCP] Debug: registration failed: %v", err)
 		// Continue even if registration fails
 	} else {
 		log.Printf("[MCP] Successfully registered with MCP server")
@@ -3743,7 +3761,7 @@ func (o *Overseer) sendMCPWorkerCompletion(worker *types.Worker, success bool, e
 	}
 
 	if err := client.Broadcast(mcp.MsgTypeTaskComplete, payload); err != nil {
-		log.Printf("[MCP] Failed to send task completion: %v", err)
+		log.Printf("[MCP] Debug: task completion broadcast failed: %v", err)
 	} else {
 		log.Printf("[MCP] Task completion broadcast: bead=%s, status=%s", worker.ID, status)
 	}

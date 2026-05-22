@@ -193,12 +193,23 @@ func (c *Client) UpdateBeadStatus(projectPath string, beadID types.BeadID, statu
 // CloseBead marks a bead as completed and verifies the closure
 func (c *Client) CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error {
 	output, err := c.execInDir(projectPath, "br", "close", beadID.String(), "-r", reason)
+	outputStr := string(output)
+
+	// Exit 3 means "already closed" or "skipped" — treat as idempotent success
 	if err != nil {
+		if cliErr, ok := err.(*CLIError); ok {
+			if strings.Contains(outputStr, "already closed") || strings.Contains(outputStr, "skipped") {
+				return nil
+			}
+			// Check if exit code indicates already-closed state
+			if exitErr, ok := cliErr.Err.(*exec.ExitError); ok && exitErr.ExitCode() == 3 {
+				return nil
+			}
+		}
 		return fmt.Errorf("close failed for bead %s: %w", beadID.String(), err)
 	}
 
 	// Check if close was skipped due to dependencies
-	outputStr := string(output)
 	if strings.Contains(outputStr, "Warning: Skipped") || strings.Contains(outputStr, "blocked by") {
 		return fmt.Errorf("bead %s skipped due to dependencies: %s", beadID.String(), outputStr)
 	}

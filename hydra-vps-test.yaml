@@ -1,0 +1,35 @@
+# Minimal test config for Hydra on VPS
+
+projects:
+  - name: hydra
+    path: /opt/dev-tools/components/hydra
+    type: single
+
+overseer:
+  bead_discovery_interval: 10s
+  max_workers: 3
+  default_retries: 2
+  max_retries: 2
+  retry_delay: 10s
+  worker_timeout: 15m
+
+intelligence:
+  enabled: false
+  tldr:
+    enabled: false
+  hindsight:
+    enabled: false
+
+mcp:
+  enabled: false
+
+pi:
+  standard-agent:
+    enabled: true
+    llm:
+      provider: minimax
+      model: MiniMax-M2.7
+    skills:
+      auto_update: false
+
+worker_binary: /opt/dev-tools/components/hydra/bin/hydra-worker
