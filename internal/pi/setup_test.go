@@ -423,7 +423,7 @@ func TestSetupManager_NewSetupManager_DefaultValues(t *testing.T) {
 
 	// Verify defaults were applied
 	assert.NotEmpty(t, sm.configDir, "ConfigDir should have default value")
-	assert.Equal(t, "pi-config", sm.piConfigDir, "PiConfigDir should default to 'pi-config'")
+	assert.Equal(t, ".pi/hydra-config", sm.piConfigDir, "PiConfigDir should default to '.pi/hydra-config'")
 	assert.NotNil(t, sm.configManager, "ConfigManager should be initialized")
 	assert.NotEmpty(t, sm.trackingFile, "TrackingFile should be set")
 }

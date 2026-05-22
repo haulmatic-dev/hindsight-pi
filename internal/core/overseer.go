@@ -3692,7 +3692,7 @@ func (o *Overseer) runPiSetup() error {
 		configDir = ""
 	}
 	if piConfigDir == "" {
-		piConfigDir = "pi-config"
+		piConfigDir = ".pi/hydra-config"
 	}
 	setupManager := pi.NewSetupManager(configDir, piConfigDir)
 

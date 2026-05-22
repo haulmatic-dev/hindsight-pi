@@ -886,7 +886,7 @@ func TestUS001_Integration(t *testing.T) {
 			configDir = ""
 		}
 		if piConfigDir == "" {
-			piConfigDir = "pi-config"
+			piConfigDir = ".pi/hydra-config"
 		}
 
 		setupManager := NewSetupManager(configDir, piConfigDir)
@@ -933,7 +933,7 @@ func TestUS001_EdgeCases(t *testing.T) {
 
 		// Should use default values
 		assert.NotEmpty(t, sm.configDir, "ConfigDir should have default value")
-		assert.Equal(t, "pi-config", sm.piConfigDir, "PiConfigDir should default to 'pi-config'")
+		assert.Equal(t, ".pi/hydra-config", sm.piConfigDir, "PiConfigDir should default to '.pi/hydra-config'")
 	})
 
 	t.Run("LSP_InvalidCacheTTL_HandledGracefully", func(t *testing.T) {

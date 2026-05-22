@@ -52,7 +52,7 @@ func NewSetupManager(configDir string, piConfigDir string) *SetupManager {
 	}
 
 	if piConfigDir == "" {
-		piConfigDir = "pi-config"
+		piConfigDir = ".pi/hydra-config"
 	}
 
 	sm := &SetupManager{
