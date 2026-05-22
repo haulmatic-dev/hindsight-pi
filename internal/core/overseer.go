@@ -2399,7 +2399,7 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		p.Provider = "kimi-coding"
 	}
 	if p.Model == "" {
-		p.Model = "k2.5"
+		p.Model = "kimi-for-coding"
 	}
 	if p.ThinkingLevel == "" {
 		p.ThinkingLevel = "on"
@@ -3802,7 +3802,7 @@ func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead) []string {
 		p.Provider = "kimi-coding"
 	}
 	if p.Model == "" {
-		p.Model = "k2.5"
+		p.Model = "kimi-for-coding"
 	}
 	if p.ThinkingLevel == "" {
 		p.ThinkingLevel = "on"

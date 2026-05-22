@@ -32,7 +32,7 @@ type LLMConfig struct {
 	// Provider is the LLM provider name (e.g., "openai", "anthropic", "kimi")
 	Provider string `yaml:"provider"`
 
-	// Model is the specific model to use (e.g., "gpt-4", "claude-3", "k2.5")
+	// Model is the specific model to use (e.g., "gpt-4", "claude-3", "kimi-for-coding")
 	Model string `yaml:"model"`
 
 	// BaseURL is the base URL for the LLM API (optional, uses provider default if empty)

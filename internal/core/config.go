@@ -365,7 +365,7 @@ func DefaultConfig() *Config {
 			Pi: PiConfig{
 				Enabled:       true,
 				Provider:      "kimi",
-				Model:         "k2.5",
+				Model:         "kimi-for-coding",
 				ThinkingLevel: "medium",
 				Timeout:       "10m",
 			},

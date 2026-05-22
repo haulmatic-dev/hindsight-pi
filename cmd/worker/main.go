@@ -538,7 +538,7 @@ func parsePiConfig() PiConfig {
 	// Parse model
 	cfg.Model = os.Getenv("HYDRA_PI_MODEL")
 	if cfg.Model == "" {
-		cfg.Model = "k2.5" // Default model
+		cfg.Model = "kimi-for-coding" // Default model
 	}
 
 	// Parse thinking level

@@ -44,5 +44,5 @@ agents:
   pi:
     enabled: true
     provider: kimi-coding
-    model: k2.5
+    model: kimi-for-coding
     timeout: 10m
