@@ -225,9 +225,14 @@ func (c *Client) GetTriage(projectPath string) (*TriageResponse, error) {
 	return &wrapper.Triage, nil
 }
 
-// GetPlan retrieves dependency-respecting execution plan
-func (c *Client) GetPlan(projectPath string) (*PlanResponse, error) {
-	return executeRobotCommand[PlanResponse](c, projectPath, "--robot-plan", nil)
+// GetPlan retrieves dependency-respecting execution plan.
+// Returns the inner PlanData (tracks, actionable counts, summary).
+func (c *Client) GetPlan(projectPath string) (*PlanData, error) {
+	wrapper, err := executeRobotCommand[PlanWrapper](c, projectPath, "--robot-plan", nil)
+	if err != nil {
+		return nil, err
+	}
+	return &wrapper.Plan, nil
 }
 
 // GetAlerts retrieves alerts (drift + proactive)

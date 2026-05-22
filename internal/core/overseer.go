@@ -1749,24 +1749,35 @@ func (o *Overseer) getAllDescendants(nodeID string) []string {
 	return descendants
 }
 
-// getReadyBeads retrieves beads that are ready to execute
-// Primary: uses br ready for maximum parallelism (returns all unblocked beads)
-// Falls back to bv --robot-triage for intelligent prioritization if br returns insufficient beads
+// getReadyBeads retrieves beads that are ready to execute.
+// Priority:
+//   1. bv --robot-plan (dependency-respecting tracks with impact scoring)
+//   2. br ready (all unblocked beads, maximum parallelism)
+//   3. bv --robot-triage (intelligent prioritization fallback)
 func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
-	// Try br ready first for maximum parallelism (returns all 20+ unblocked beads)
-	// This is more reliable than BV triage which filters to only 1-2 beads
+	// 1. Try bv --robot-plan first for dependency-respecting scheduling
+	if o.bvClient != nil {
+		planBeads, planErr := o.getReadyBeadsFromBVPlan()
+		if planErr != nil {
+			log.Printf("⚠️  [BV-Plan] failed: %v", planErr)
+		}
+		if planErr == nil && len(planBeads) > 0 {
+			log.Printf("✅ Using bv robot-plan: found %d actionable beads", len(planBeads))
+			return planBeads, nil
+		}
+	}
+
+	// 2. Fallback to br ready for maximum parallelism
 	brBeads, brErr := o.getReadyBeadsFromBR()
 	if brErr != nil {
 		log.Printf("⚠️  br ready failed: %v", brErr)
 	}
-
-	// If br ready worked and returned beads, use them
 	if brErr == nil && len(brBeads) > 0 {
 		log.Printf("✅ Using br ready: found %d unblocked beads", len(brBeads))
 		return brBeads, nil
 	}
 
-	// Fallback to bv triage if br ready failed or returned no beads
+	// 3. Fallback to bv --robot-triage for intelligent prioritization
 	if o.bvClient != nil {
 		log.Printf("⚠️  br ready failed or returned 0 beads, falling back to bv triage")
 		beads, err := o.getReadyBeadsFromBV()
@@ -1776,11 +1787,9 @@ func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
 		return beads, nil
 	}
 
-	// If both fail, return error
 	if brErr != nil {
-		return nil, fmt.Errorf("both br ready and bv triage failed: br: %w, bv: nil", brErr)
+		return nil, fmt.Errorf("all bead discovery methods failed: br: %w", brErr)
 	}
-
 	return nil, fmt.Errorf("no beads found")
 }
 
@@ -2071,6 +2080,96 @@ func (o *Overseer) getReadyBeadsFromBV() ([]types.Bead, error) {
 
 	log.Printf("📋 [BV] Found %d ready beads from triage (after filtering)", len(allReadyBeads))
 
+	return allReadyBeads, nil
+}
+
+// getReadyBeadsFromBVPlan retrieves beads using bv --robot-plan.
+// It returns parallel execution tracks with dependency-respecting ordering,
+// critical-path awareness, and impact scoring (unblocks count).
+func (o *Overseer) getReadyBeadsFromBVPlan() ([]types.Bead, error) {
+	if o.bvClient == nil {
+		return nil, fmt.Errorf("bv client not initialized")
+	}
+
+	var allReadyBeads []types.Bead
+
+	for _, project := range o.projects {
+		plan, err := o.bvClient.GetPlan(project.Path)
+		if err != nil {
+			log.Printf("⚠️  [BV-Plan] GetPlan failed for %s: %v", project.Name, err)
+			continue
+		}
+
+		log.Printf("[BV-Plan] %s: %d tracks, %d actionable, %d blocked, highest_impact=%s",
+			project.Name, len(plan.Tracks), plan.TotalActionable, plan.TotalBlocked, plan.Summary.HighestImpact)
+
+		for _, track := range plan.Tracks {
+			for _, item := range track.Items {
+				beadID := types.BeadID(item.ID)
+				beadIDStr := string(beadID)
+
+				// Filter: not already running
+				o.workerMutex.RLock()
+				if _, isRunning := o.activeWorkers[beadIDStr]; isRunning {
+					o.workerMutex.RUnlock()
+					continue
+				}
+				o.workerMutex.RUnlock()
+
+				// Filter: not already completed in this session
+				if o.completed[beadIDStr] {
+					continue
+				}
+
+				// Fetch full bead details
+				var repoName string
+				if project.Type != types.RepoTypeSingle && len(project.Repos) > 0 {
+					repoName = project.Repos[0].Name
+				}
+
+				bead, err := o.beadsClient.GetBead(project.Path, repoName, beadID)
+				if err != nil {
+					log.Printf("⚠️  [BV-Plan] Could not get bead details for %s: %v", beadID, err)
+					// Fallback: create minimal bead from plan data
+					bead = &types.Bead{
+						ID:       beadID,
+						Title:    item.Title,
+						Priority: item.Priority,
+						Project:  project.Name,
+						Repo:     repoName,
+						Status:   types.StatusOpen,
+						Metadata: map[string]string{
+							"bv_track":    track.TrackID,
+							"bv_source":   "robot-plan",
+						},
+					}
+				}
+
+				// Skip approval gates
+				if bead.Type == "approval-gate" {
+					continue
+				}
+
+				// Skip approval beads in progress
+				if bead.Type == "approval" && bead.Status == types.StatusInProgress {
+					continue
+				}
+
+				if bead.Metadata == nil {
+					bead.Metadata = make(map[string]string)
+				}
+				bead.Metadata["bv_track"] = track.TrackID
+				bead.Metadata["bv_source"] = "robot-plan"
+				if len(item.Unblocks) > 0 {
+					bead.Metadata["bv_unblocks"] = strings.Join(item.Unblocks, ",")
+				}
+
+				allReadyBeads = append(allReadyBeads, *bead)
+			}
+		}
+	}
+
+	log.Printf("📋 [BV-Plan] Found %d ready beads from plan (after filtering)", len(allReadyBeads))
 	return allReadyBeads, nil
 }
 

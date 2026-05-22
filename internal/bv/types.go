@@ -105,6 +105,45 @@ type AttentionItem struct {
 	Message  string `json:"message"`
 }
 
+// PlanWrapper wraps the raw bv --robot-plan JSON response.
+type PlanWrapper struct {
+	GeneratedAt    string   `json:"generated_at"`
+	DataHash       string   `json:"data_hash"`
+	Plan           PlanData `json:"plan"`
+}
+
+// PlanData holds the actionable execution plan from bv.
+type PlanData struct {
+	Tracks          []PlanTrack `json:"tracks"`
+	TotalActionable int         `json:"total_actionable"`
+	TotalBlocked    int         `json:"total_blocked"`
+	Summary         PlanSummary `json:"summary"`
+}
+
+// PlanTrack is a parallel work stream of beads that can execute independently.
+type PlanTrack struct {
+	TrackID string    `json:"track_id"`
+	Items   []PlanItem `json:"items"`
+}
+
+// PlanItem is a single bead inside a plan track.
+type PlanItem struct {
+	ID       string   `json:"id"`
+	Title    string   `json:"title"`
+	Priority int      `json:"priority"`
+	Status   string   `json:"status"`
+	Unblocks []string `json:"unblocks"`
+}
+
+// PlanSummary provides high-level plan metadata.
+type PlanSummary struct {
+	HighestImpact  string `json:"highest_impact"`
+	ImpactReason   string `json:"impact_reason"`
+	UnblocksCount  int    `json:"unblocks_count"`
+}
+
+// --- Legacy types kept for backward compatibility ---
+
 // PlanResponse represents dependency-respecting execution plan from bv --robot-plan
 type PlanResponse struct {
 	Phases         []PlanPhase `json:"phases"`

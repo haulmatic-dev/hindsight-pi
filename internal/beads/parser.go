@@ -310,15 +310,30 @@ func (p *Parser) ParseBeadDetail(output []byte, ctx BeadContext) (*types.Bead, e
 	return &bead, nil
 }
 
+// ListPage represents the paginated response from 'br list --json'
+type ListPage struct {
+	Issues   []BeadSummary `json:"issues"`
+	Total    int           `json:"total"`
+	Limit    int           `json:"limit"`
+	Offset   int           `json:"offset"`
+	HasMore  bool          `json:"has_more"`
+}
+
 // ParseBeadList parses JSON output from 'br list --json' command
 func (p *Parser) ParseBeadList(output []byte, ctx BeadContext) ([]types.Bead, error) {
-	responses, err := parseJSON[[]BeadSummary](output, "bead list")
-	if err != nil {
-		return nil, err
+	// beads_rust returns a paginated object: {"issues":[...], "total":N, ...}
+	var page ListPage
+	if err := json.Unmarshal(output, &page); err != nil {
+		// Fallback: try old flat array format for backward compatibility
+		var responses []BeadSummary
+		if err2 := json.Unmarshal(output, &responses); err2 != nil {
+			return nil, fmt.Errorf("failed to parse bead list JSON (tried object and array): %w", err)
+		}
+		page.Issues = responses
 	}
 
-	beads := make([]types.Bead, len(responses))
-	for i, resp := range responses {
+	beads := make([]types.Bead, len(page.Issues))
+	for i, resp := range page.Issues {
 		bead := createBaseBead(resp.BeadCore, ctx)
 		bead.Metadata["dependency_count"] = fmt.Sprintf("%d", resp.DependencyCount)
 		bead.Metadata["dependent_count"] = fmt.Sprintf("%d", resp.DependentCount)
