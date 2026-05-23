@@ -23,7 +23,6 @@ import (
 	"github.com/haulmatic-dev/hydra/internal/intelligence"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/internal/pi"
-	"github.com/haulmatic-dev/hydra/internal/project"
 	"github.com/haulmatic-dev/hydra/internal/services"
 	"github.com/haulmatic-dev/hydra/internal/validation"
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -3812,27 +3811,6 @@ func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead) []string {
 		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_TIMEOUT=%s", h.Timeout))
 		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_LIMIT=%d", h.Limit))
 		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_MIN_SCORE=%.2f", h.MinScore))
-	}
-
-	// Detect project profile from project path
-	projectPath := ""
-	for _, proj := range o.projects {
-		if proj.Name == bead.Project {
-			projectPath = proj.Path
-			break
-		}
-	}
-	if projectPath == "" {
-		projectPath = bead.Project
-	}
-	profile := project.DetectProfile(projectPath)
-	if !profile.IsZero() {
-		env = append(env, fmt.Sprintf("HYDRA_PROJECT_LANG=%s", profile.Primary))
-		env = append(env, fmt.Sprintf("HYDRA_PROJECT_MANIFEST=%s", profile.Manifest))
-		env = append(env, fmt.Sprintf("HYDRA_PROJECT_BUILD=%s", profile.BuildCmd))
-		env = append(env, fmt.Sprintf("HYDRA_PROJECT_TEST=%s", profile.TestCmd))
-		env = append(env, fmt.Sprintf("HYDRA_PROJECT_EXT=%s", profile.Extension))
-		log.Printf("[Worker] Project profile: %s (%s)", profile.Primary, profile.Manifest)
 	}
 
 	// Add Pi configuration (always enabled)

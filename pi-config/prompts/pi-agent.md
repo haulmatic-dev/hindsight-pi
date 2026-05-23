@@ -5,6 +5,7 @@
 
 ## Instructions
 Please complete this task based on the description above.
+Do not infer technology stack, file structure, or implementation details from the task title alone.
 When finished, ensure all files are saved and the solution is complete.
 
 ## Available Skills

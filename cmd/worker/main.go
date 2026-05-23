@@ -581,19 +581,6 @@ func parsePiConfig() PiConfig {
 	return cfg
 }
 
-// parseProjectProfile reads the detected project profile from environment variables
-// set by the overseer. Returns a zero-value profile if none were set.
-func parseProjectProfile() types.ProjectProfile {
-	p := types.ProjectProfile{
-		Primary:   os.Getenv("HYDRA_PROJECT_LANG"),
-		Manifest:  os.Getenv("HYDRA_PROJECT_MANIFEST"),
-		BuildCmd:  os.Getenv("HYDRA_PROJECT_BUILD"),
-		TestCmd:   os.Getenv("HYDRA_PROJECT_TEST"),
-		Extension: os.Getenv("HYDRA_PROJECT_EXT"),
-	}
-	return p
-}
-
 // logHindsightContext logs the hindsight context information
 func logHindsightContext(ctx *HindsightContext) {
 	if ctx == nil {
@@ -916,11 +903,8 @@ func executeWithPi(
 	activityTimeout := 5 * time.Minute
 	activityMonitor := NewActivityMonitor(activityTimeout)
 
-	// Read project profile for skill filtering and prompt context
-	profile := parseProjectProfile()
-
 	// Build pi command
-	cmd := buildPiCommand(bead, piConfig, projectPath, hindsightContext, profile)
+	cmd := buildPiCommand(bead, piConfig, projectPath, hindsightContext)
 
 	log.Printf("🔧 Executing Pi: %s %s", cmd.Path, strings.Join(cmd.Args[1:], " "))
 	log.Printf("📁 Working directory: %s", cmd.Dir)
@@ -952,7 +936,7 @@ func executeWithPi(
 	}
 
 	// Build the prompt message
-	prompt := buildPiPrompt(bead, hindsightContext, profile)
+	prompt := buildPiPrompt(bead, hindsightContext)
 
 	// Send prompt as plain text via stdin
 	if _, err := stdinPipe.Write([]byte(prompt + "\n")); err != nil {
@@ -1166,7 +1150,7 @@ func readExecutionOutputFromFile(filepath string) (*ExecutionResult, error) {
 }
 
 // buildPiCommand builds the Pi agent CLI command
-func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hindsightContext *agents.ContextEnrichment, profile types.ProjectProfile) *exec.Cmd {
+func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hindsightContext *agents.ContextEnrichment) *exec.Cmd {
 	// Find pi binary
 	piPath := os.Getenv("HYDRA_PI_PATH")
 	if piPath == "" {
@@ -1196,13 +1180,7 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 
 	// Build skill flags if configDir is set
 	if piConfig.ConfigDir != "" {
-		var skillResult *pi.SkillFlagsResult
-		var err error
-		if !profile.IsZero() {
-			skillResult, err = pi.BuildSkillFlagsWithProfile(piConfig.ConfigDir, profile)
-		} else {
-			skillResult, err = pi.BuildSkillFlags(piConfig.ConfigDir)
-		}
+		skillResult, err := pi.BuildSkillFlags(piConfig.ConfigDir)
 		if err != nil {
 			log.Printf("[Worker] Warning: failed to build skill flags: %v", err)
 		} else {
@@ -1258,7 +1236,7 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 }
 
 // buildPiPrompt builds the prompt message for Pi agent
-func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, profile types.ProjectProfile) string {
+func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment) string {
 	var promptParts []string
 
 	// Add bead type and title
@@ -1271,14 +1249,6 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 	// Add description
 	if bead.Description != "" {
 		promptParts = append(promptParts, bead.Description)
-	}
-
-	// Add project profile context (language, build, test commands)
-	if !profile.IsZero() {
-		promptParts = append(promptParts, fmt.Sprintf(
-			"PROJECT CONTEXT:\nLanguage: %s\nBuild: %s\nTest: %s\nExtension: %s",
-			profile.Primary, profile.BuildCmd, profile.TestCmd, profile.Extension,
-		))
 	}
 
 	// Add target files if available

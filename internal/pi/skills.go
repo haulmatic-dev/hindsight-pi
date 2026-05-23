@@ -8,53 +8,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
-
-	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // Skill represents a Pi skill to install
 type Skill struct {
-	Name        string   `json:"name"`
-	Repo        string   `json:"repo"`
-	Description string   `json:"description,omitempty"`
-	Tags        []string `json:"tags,omitempty"` // Language/framework tags, e.g. ["go"], ["typescript"]
-}
-
-func init() {
-	// Auto-populate Tags for DefaultSkills from skill naming conventions.
-	for i := range DefaultSkills {
-		DefaultSkills[i].Tags = skillTagsFromName(DefaultSkills[i].Name)
-	}
-}
-
-// skillTagsFromName extracts language tags from a skill name.
-func skillTagsFromName(name string) []string {
-	lower := strings.ToLower(name)
-	switch {
-	case strings.HasPrefix(lower, "golang-"):
-		return []string{"go"}
-	case strings.HasPrefix(lower, "angular-"), strings.HasPrefix(lower, "typescript-"):
-		return []string{"typescript"}
-	case strings.HasPrefix(lower, "javascript-"), strings.HasPrefix(lower, "nodejs-"), lower == "vitest":
-		return []string{"typescript", "javascript"}
-	case strings.HasPrefix(lower, "rust-"), strings.HasPrefix(lower, "cargo-"):
-		return []string{"rust"}
-	case strings.HasPrefix(lower, "python-"), strings.HasPrefix(lower, "django-"), strings.HasPrefix(lower, "flask-"):
-		return []string{"python"}
-	case strings.HasPrefix(lower, "ruby-"), strings.HasPrefix(lower, "rails-"):
-		return []string{"ruby"}
-	case strings.HasPrefix(lower, "php-"), strings.HasPrefix(lower, "laravel-"):
-		return []string{"php"}
-	case strings.HasPrefix(lower, "java-"), strings.HasPrefix(lower, "spring-"):
-		return []string{"java"}
-	case strings.HasPrefix(lower, "elixir-"), strings.HasPrefix(lower, "phoenix-"):
-		return []string{"elixir"}
-	default:
-		return nil // generic skill
-	}
+	Name        string `json:"name"`
+	Repo        string `json:"repo"`
+	Description string `json:"description,omitempty"`
 }
 
 // DefaultSkills contains the 16 required skills to install
@@ -516,42 +478,6 @@ func BuildSkillFlags(configDir string) (*SkillFlagsResult, error) {
 // failOnMissing: if true, returns an error if any skill directories are missing
 // Uses caching to avoid repeated filesystem operations
 func BuildSkillFlagsWithOptions(configDir string, failOnMissing bool) (*SkillFlagsResult, error) {
-	return buildSkillFlagsWithBaseSkills(configDir, failOnMissing, DefaultSkills)
-}
-
-// BuildSkillFlagsWithProfile builds skill flags filtered by project profile.
-// Only skills matching the project's primary language are included; generic
-// skills (those with no language tags) are always included.
-func BuildSkillFlagsWithProfile(configDir string, profile types.ProjectProfile) (*SkillFlagsResult, error) {
-	filtered := make([]Skill, 0, len(DefaultSkills))
-	for _, s := range DefaultSkills {
-		if skillMatchesProfile(s, profile) {
-			filtered = append(filtered, s)
-		}
-	}
-	log.Printf("[BuildSkillFlags] Filtered %d skills -> %d for project %s",
-		len(DefaultSkills), len(filtered), profile.Primary)
-	return buildSkillFlagsWithBaseSkills(configDir, false, filtered)
-}
-
-// skillMatchesProfile returns true if a skill is relevant for the given profile.
-func skillMatchesProfile(s Skill, profile types.ProjectProfile) bool {
-	if len(s.Tags) == 0 {
-		return true // generic skill
-	}
-	if profile.IsZero() {
-		return true // unknown project, include everything
-	}
-	for _, tag := range s.Tags {
-		if profile.Supports(tag) {
-			return true
-		}
-	}
-	return false
-}
-
-// buildSkillFlagsWithBaseSkills is the internal implementation that accepts a custom base skill list.
-func buildSkillFlagsWithBaseSkills(configDir string, failOnMissing bool, baseSkills []Skill) (*SkillFlagsResult, error) {
 	// Ensure configDir is absolute for consistent cache keys
 	absConfigDir, err := filepath.Abs(configDir)
 	if err != nil {
@@ -582,7 +508,7 @@ func buildSkillFlagsWithBaseSkills(configDir string, failOnMissing bool, baseSki
 	skillFlagsCacheMiss++
 	skillFlagsCacheMu.Unlock()
 
-	result, err := buildSkillFlagsUncached(absConfigDir, failOnMissing, baseSkills)
+	result, err := buildSkillFlagsUncached(absConfigDir, failOnMissing)
 	// Only cache successful results to avoid caching error states
 	if err == nil {
 		skillFlagsCacheMu.Lock()
@@ -646,7 +572,7 @@ func discoverLocalSkills(hydraDir string) []Skill {
 }
 
 // buildSkillFlagsUncached performs the actual skill flag building without caching
-func buildSkillFlagsUncached(absConfigDir string, failOnMissing bool, baseSkills []Skill) (*SkillFlagsResult, error) {
+func buildSkillFlagsUncached(absConfigDir string, failOnMissing bool) (*SkillFlagsResult, error) {
 	// Discover local skills from .agents/skills/
 	hydraDir := filepath.Dir(absConfigDir) // configDir is <hydra>/config, so parent is <hydra>
 	localSkills := discoverLocalSkills(hydraDir)
@@ -672,10 +598,10 @@ func buildSkillFlagsUncached(absConfigDir string, failOnMissing bool, baseSkills
 		}
 	}
 
-	// Merge baseSkills with local skills
-	allSkills := make([]Skill, len(baseSkills)+len(localSkills))
-	copy(allSkills, baseSkills)
-	copy(allSkills[len(baseSkills):], localSkills)
+	// Merge DefaultSkills with local skills
+	allSkills := make([]Skill, len(DefaultSkills)+len(localSkills))
+	copy(allSkills, DefaultSkills)
+	copy(allSkills[len(DefaultSkills):], localSkills)
 
 	result := &SkillFlagsResult{
 		Flags:         make([]string, 0, len(allSkills)*2),
