@@ -449,8 +449,13 @@ func TestDetectCircularDependencies_ChainedCycles(t *testing.T) {
 		t.Fatalf("Expected at least 1 cycle, got %d", len(cycles))
 	}
 
-	// The main cycle should include A, B, and C
-	foundAll := false
+	// Should find two cycles: A-B and B-C (they share node B but are distinct)
+	if len(cycles) != 2 {
+		t.Errorf("Expected 2 cycles (A-B and B-C), got %d: %v", len(cycles), cycles)
+	}
+
+	foundAB := false
+	foundBC := false
 	for _, cycle := range cycles {
 		hasA, hasB, hasC := false, false, false
 		for _, node := range cycle {
@@ -464,13 +469,18 @@ func TestDetectCircularDependencies_ChainedCycles(t *testing.T) {
 				hasC = true
 			}
 		}
-		if hasA && hasB && hasC {
-			foundAll = true
-			break
+		if hasA && hasB && !hasC {
+			foundAB = true
+		}
+		if !hasA && hasB && hasC {
+			foundBC = true
 		}
 	}
 
-	if !foundAll {
-		t.Error("Expected to find a cycle containing all nodes A, B, and C")
+	if !foundAB {
+		t.Error("Expected to find cycle A-B")
+	}
+	if !foundBC {
+		t.Error("Expected to find cycle B-C")
 	}
 }

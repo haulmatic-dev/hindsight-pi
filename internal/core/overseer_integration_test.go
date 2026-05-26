@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -178,6 +179,29 @@ func (m *mockBeadsClient) UpdateBeadStatus(projectPath string, beadID types.Bead
 		m.beads[string(beadID)] = bead
 	}
 	return nil
+}
+
+func (m *mockBeadsClient) CreateBead(projectPath string, req types.CreateBeadRequest) (types.BeadID, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Generate a simple bead ID
+	projectName := filepath.Base(projectPath)
+	beadID := types.BeadID(fmt.Sprintf("%s-fix-%d", projectName, len(m.beads)+1))
+
+	bead := types.Bead{
+		ID:           beadID,
+		Title:        req.Title,
+		Description:  req.Description,
+		Type:         req.Type,
+		Status:       types.StatusOpen,
+		Priority:     req.Priority,
+		Dependencies: req.Dependencies,
+		Labels:       req.Labels,
+		Project:      projectName,
+	}
+	m.beads[string(beadID)] = bead
+	return beadID, nil
 }
 
 // mockWorkerSpawner tracks worker spawn calls for testing

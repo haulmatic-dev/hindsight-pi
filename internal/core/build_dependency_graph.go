@@ -110,7 +110,13 @@ func (g *DependencyGraph) addDependencyEdges(bead types.Bead) error {
 		depIDStr := string(depID)
 
 		// Skip missing dependencies
-		if _, exists := g.beadsByID[depIDStr]; !exists {
+		depBead, exists := g.beadsByID[depIDStr]
+		if !exists {
+			continue
+		}
+
+		// Skip already-completed dependencies — they're already satisfied
+		if depBead.Status == types.StatusCompleted || depBead.Status == types.StatusClosed {
 			continue
 		}
 

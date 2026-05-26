@@ -19,6 +19,7 @@ type Config struct {
 	Intelligence IntelligenceConfig `yaml:"intelligence"`
 	Agents       AgentsConfig       `yaml:"agents"`
 	Pi           PiRootConfig       `yaml:"pi"`
+	Validation   ValidationConfig   `yaml:"validation"`
 }
 
 // AgentsConfig contains agent connector settings
@@ -101,6 +102,7 @@ type rawConfig struct {
 	Intelligence IntelligenceConfig `yaml:"intelligence"`
 	Agents       AgentsConfig       `yaml:"agents"`
 	Pi           rawPiConfig        `yaml:"pi"`
+	Validation   ValidationConfig   `yaml:"validation"`
 }
 
 // rawPiConfig is used for YAML parsing of Pi configuration
@@ -242,6 +244,15 @@ type ChainDetectionConfig struct {
 	Timeout  time.Duration `yaml:"timeout"`
 }
 
+// ValidationConfig contains self-healing validation loop settings
+type ValidationConfig struct {
+	Enabled                  bool `yaml:"enabled"`
+	TDDValidationEnabled     bool `yaml:"tdd_validation_enabled"`
+	PRDValidationEnabled     bool `yaml:"prd_validation_enabled"`
+	MaxRounds                int  `yaml:"max_rounds"`
+	AgentVerificationEnabled bool `yaml:"agent_verification_enabled"`
+}
+
 // ResourceMonitoringConfig contains resource monitoring settings
 type ResourceMonitoringConfig struct {
 	Enabled          bool    `yaml:"enabled"`
@@ -294,6 +305,13 @@ func DefaultConfig() *Config {
 				Interval: 10 * time.Second,
 				Timeout:  10 * time.Minute,
 			},
+		},
+		Validation: ValidationConfig{
+			Enabled:                  true,
+			TDDValidationEnabled:     true,
+			PRDValidationEnabled:     true,
+			MaxRounds:                3,
+			AgentVerificationEnabled: true,
 		},
 		MCP: MCPConfig{
 			Enabled:              true,
@@ -506,6 +524,7 @@ func LoadConfig(path string) (*Config, error) {
 	config.API = raw.API
 	config.Intelligence = raw.Intelligence
 	config.Agents = raw.Agents
+	config.Validation = raw.Validation
 	config.Pi = PiRootConfig{
 		ConfigDir:       raw.Pi.ConfigDir,
 		PiConfigDir:     raw.Pi.PiConfigDir,

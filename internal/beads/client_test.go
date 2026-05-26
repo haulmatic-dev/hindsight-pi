@@ -58,6 +58,11 @@ func (m *mockExecutor) Execute(name string, arg ...string) ([]byte, error) {
 	return []byte{}, nil
 }
 
+// ExecuteInDir implements directory-aware execution for mocking execInDir calls
+func (m *mockExecutor) ExecuteInDir(dir string, name string, arg ...string) ([]byte, error) {
+	return m.Execute(name, arg...)
+}
+
 // GetCalls returns all calls made to the executor
 func (m *mockExecutor) GetCalls() []struct {
 	Name string
@@ -914,6 +919,116 @@ func TestCloseBead_DifferentReasons(t *testing.T) {
 				t.Errorf("Expected reason '%s', got '%s'", tc.reason, calls[0].Args[3])
 			}
 		})
+	}
+}
+
+func TestCreateBead_Success(t *testing.T) {
+	mockExec := NewMockExecutor()
+	client := NewClientWithExecutor(mockExec)
+
+	createdBead := BeadCore{
+		ID:        "hydra-newbead",
+		Title:     "New test bead",
+		Status:    "open",
+		Priority:  2,
+		IssueType: "implement",
+	}
+	jsonData, _ := json.Marshal(createdBead)
+
+	mockExec.AddResponse("br", []string{"create", "New test bead", "--json", "--description", "Test description", "--type", "implement", "--priority", "2", "--labels", "backend,urgent"}, jsonData, nil)
+
+	req := types.CreateBeadRequest{
+		Title:       "New test bead",
+		Description: "Test description",
+		Type:        "implement",
+		Priority:    2,
+		Labels:      []string{"backend", "urgent"},
+	}
+
+	beadID, err := client.CreateBead("/projects/hydra", req)
+	if err != nil {
+		t.Fatalf("CreateBead failed: %v", err)
+	}
+
+	if beadID != "hydra-newbead" {
+		t.Errorf("Expected bead ID 'hydra-newbead', got '%s'", beadID)
+	}
+
+	calls := mockExec.GetCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Name != "br" {
+		t.Errorf("Expected command 'br', got '%s'", calls[0].Name)
+	}
+}
+
+func TestCreateBead_WithDependencies(t *testing.T) {
+	mockExec := NewMockExecutor()
+	client := NewClientWithExecutor(mockExec)
+
+	createdBead := BeadCore{
+		ID:        "hydra-depbead",
+		Title:     "Dependent bead",
+		Status:    "open",
+		Priority:  1,
+		IssueType: "fix",
+	}
+	jsonData, _ := json.Marshal(createdBead)
+
+	mockExec.AddResponse("br", []string{"create", "Dependent bead", "--json", "--type", "fix", "--deps", "hydra-parent1,hydra-parent2"}, jsonData, nil)
+
+	req := types.CreateBeadRequest{
+		Title:        "Dependent bead",
+		Type:         "fix",
+		Dependencies: []types.BeadID{"hydra-parent1", "hydra-parent2"},
+	}
+
+	beadID, err := client.CreateBead("/projects/hydra", req)
+	if err != nil {
+		t.Fatalf("CreateBead failed: %v", err)
+	}
+
+	if beadID != "hydra-depbead" {
+		t.Errorf("Expected bead ID 'hydra-depbead', got '%s'", beadID)
+	}
+}
+
+func TestCreateBead_CLIError(t *testing.T) {
+	mockExec := NewMockExecutor()
+	client := NewClientWithExecutor(mockExec)
+
+	cliErr := errors.New("exit status 1: database locked")
+	mockExec.AddResponse("br", []string{"create", "Fail bead", "--json"}, []byte{}, cliErr)
+
+	req := types.CreateBeadRequest{Title: "Fail bead"}
+	beadID, err := client.CreateBead("/projects/hydra", req)
+
+	if err == nil {
+		t.Fatal("Expected error, got nil")
+	}
+	if beadID != "" {
+		t.Errorf("Expected empty bead ID on error, got '%s'", beadID)
+	}
+	if !strings.Contains(err.Error(), "create bead failed") {
+		t.Errorf("Expected 'create bead failed' in error, got: %v", err)
+	}
+}
+
+func TestCreateBead_InvalidJSONResponse(t *testing.T) {
+	mockExec := NewMockExecutor()
+	client := NewClientWithExecutor(mockExec)
+
+	mockExec.AddResponse("br", []string{"create", "Bad response", "--json"}, []byte("not json"), nil)
+
+	req := types.CreateBeadRequest{Title: "Bad response"}
+	beadID, err := client.CreateBead("/projects/hydra", req)
+
+	if err == nil {
+		t.Fatal("Expected error for invalid JSON, got nil")
+	}
+	if beadID != "" {
+		t.Errorf("Expected empty bead ID on error, got '%s'", beadID)
 	}
 }
 

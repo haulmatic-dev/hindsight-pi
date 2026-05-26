@@ -379,6 +379,17 @@ type SettledBeadInfo struct {
 	Metadata         map[string]string `json:"metadata,omitempty"`
 }
 
+// CreateBeadRequest contains parameters for creating a new bead.
+type CreateBeadRequest struct {
+	Title        string   `json:"title"`
+	Description  string   `json:"description,omitempty"`
+	Type         string   `json:"type"`
+	Priority     int      `json:"priority,omitempty"`
+	Labels       []string `json:"labels,omitempty"`
+	Dependencies []BeadID `json:"dependencies,omitempty"`
+	Status       string   `json:"status,omitempty"`
+}
+
 // CUFeedbackConfig contains feedback loop settings for Collective Unconscious
 type CUFeedbackConfig struct {
 	TrackOutcomes           bool    `yaml:"track_outcomes"`

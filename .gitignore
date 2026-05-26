@@ -77,3 +77,5 @@ hydra.pid
 
 # Integration test runtime data
 internal/integration/.hydra/
+
+.gograph/

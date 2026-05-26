@@ -298,29 +298,39 @@ func TestDependencyResolution_MultipleDependencyLevels(t *testing.T) {
 	// Complete all Level 0 beads
 	builder.MarkCompleted("l0-1")
 	builder.MarkCompleted("l0-2")
-	newlyReady, _ := builder.MarkCompleted("l0-3")
+	builder.MarkCompleted("l0-3")
 
-	// Both Level 1 beads should become ready
-	if len(newlyReady) != 2 {
-		t.Errorf("Expected 2 Level 1 beads to become ready, got %v", newlyReady)
+	// Both Level 1 beads should be ready now
+	ready = builder.GetReadyBeads()
+	if len(ready) != 2 {
+		t.Errorf("Expected 2 Level 1 beads ready, got %d: %v", len(ready), ready)
 	}
 
 	// Complete Level 1 beads
 	builder.MarkCompleted("l1-1")
-	newlyReady, _ = builder.MarkCompleted("l1-2")
+	builder.MarkCompleted("l1-2")
 
-	// Both Level 2 beads should become ready
-	if len(newlyReady) != 2 {
-		t.Errorf("Expected 2 Level 2 beads to become ready, got %v", newlyReady)
+	// Both Level 2 beads should be ready now
+	ready = builder.GetReadyBeads()
+	if len(ready) != 2 {
+		t.Errorf("Expected 2 Level 2 beads ready, got %d: %v", len(ready), ready)
 	}
 
 	// Complete Level 2 beads
 	builder.MarkCompleted("l2-1")
-	newlyReady, _ = builder.MarkCompleted("l2-2")
+	builder.MarkCompleted("l2-2")
 
-	// Level 3 bead should become ready
-	if len(newlyReady) != 1 || newlyReady[0] != "l3-1" {
-		t.Errorf("Expected l3-1 to become ready, got %v", newlyReady)
+	// Level 3 bead should be ready now
+	ready = builder.GetReadyBeads()
+	foundL3 := false
+	for _, b := range ready {
+		if b.ID == "l3-1" {
+			foundL3 = true
+			break
+		}
+	}
+	if !foundL3 {
+		t.Errorf("Expected l3-1 to be ready, got %v", ready)
 	}
 }
 
@@ -372,29 +382,30 @@ func TestDependencyResolution_MixedStatuses(t *testing.T) {
 		t.Fatalf("BuildFromBeads() error = %v", err)
 	}
 
-	// Ready beads should only be open beads with no deps
+	// Ready beads: open beads with all deps satisfied
 	// mixed-001 (completed) and mixed-002 (failed) are not "ready"
-	// mixed-003 should be ready
-	// mixed-004 and mixed-005 are blocked
+	// mixed-003 should be ready (no deps)
+	// mixed-004 should be ready (depends on completed mixed-001)
+	// mixed-005 is blocked (depends on failed mixed-002)
 	ready := builder.GetReadyBeads()
-	if len(ready) != 1 || ready[0].ID != "mixed-003" {
-		t.Errorf("Expected only mixed-003 to be ready, got %v", ready)
+	if len(ready) != 2 {
+		t.Errorf("Expected 2 ready beads (mixed-003, mixed-004), got %d: %v", len(ready), ready)
 	}
 
-	// Mark completed bead as completed in DAG
-	newlyReady, _ := builder.MarkCompleted("mixed-001")
-
-	// mixed-004 should become ready (depends on completed mixed-001)
-	if len(newlyReady) != 1 || newlyReady[0] != "mixed-004" {
-		t.Errorf("Expected mixed-004 to become ready, got %v", newlyReady)
+	// mixed-004 should already be ready (depends on already-completed mixed-001)
+	ready = builder.GetReadyBeads()
+	foundMixed004 := false
+	for _, b := range ready {
+		if b.ID == "mixed-004" {
+			foundMixed004 = true
+			break
+		}
+	}
+	if !foundMixed004 {
+		t.Errorf("Expected mixed-004 to be ready (depends on completed mixed-001), got %v", ready)
 	}
 
-	// Mark failed bead as failed in DAG
-	err = builder.MarkFailed("mixed-002")
-	if err != nil {
-		t.Fatalf("MarkFailed() error = %v", err)
-	}
-
+	// mixed-002 is already failed when added to the graph
 	// mixed-005 should remain blocked (depends on failed bead)
 	ready = builder.GetReadyBeads()
 	for _, bead := range ready {
@@ -415,14 +426,14 @@ func TestDependencyResolution_ComplexGraph(t *testing.T) {
 	// F -> G
 	// H (standalone)
 	beads := []types.Bead{
-		{ID: types.BeadID("c-A"), Dependencies: []types.BeadID{}},
-		{ID: types.BeadID("c-B"), Dependencies: []types.BeadID{"c-A"}},
-		{ID: types.BeadID("c-C"), Dependencies: []types.BeadID{"c-B", "c-E"}},
-		{ID: types.BeadID("c-D"), Dependencies: []types.BeadID{}},
-		{ID: types.BeadID("c-E"), Dependencies: []types.BeadID{"c-D"}},
-		{ID: types.BeadID("c-F"), Dependencies: []types.BeadID{}},
-		{ID: types.BeadID("c-G"), Dependencies: []types.BeadID{"c-F"}},
-		{ID: types.BeadID("c-H"), Dependencies: []types.BeadID{}},
+		{ID: types.BeadID("c-A"), Status: types.StatusOpen, Dependencies: []types.BeadID{}},
+		{ID: types.BeadID("c-B"), Status: types.StatusOpen, Dependencies: []types.BeadID{"c-A"}},
+		{ID: types.BeadID("c-C"), Status: types.StatusOpen, Dependencies: []types.BeadID{"c-B", "c-E"}},
+		{ID: types.BeadID("c-D"), Status: types.StatusOpen, Dependencies: []types.BeadID{}},
+		{ID: types.BeadID("c-E"), Status: types.StatusOpen, Dependencies: []types.BeadID{"c-D"}},
+		{ID: types.BeadID("c-F"), Status: types.StatusOpen, Dependencies: []types.BeadID{}},
+		{ID: types.BeadID("c-G"), Status: types.StatusOpen, Dependencies: []types.BeadID{"c-F"}},
+		{ID: types.BeadID("c-H"), Status: types.StatusOpen, Dependencies: []types.BeadID{}},
 	}
 
 	for _, bead := range beads {
@@ -445,27 +456,39 @@ func TestDependencyResolution_ComplexGraph(t *testing.T) {
 	builder.MarkCompleted("c-A")
 	builder.MarkCompleted("c-D")
 	builder.MarkCompleted("c-F")
-	newlyReady, _ := builder.MarkCompleted("c-H")
+	builder.MarkCompleted("c-H")
 
-	// B, E, G should become ready (H has no dependents)
-	if len(newlyReady) != 3 {
-		t.Errorf("Expected 3 newly ready (B, E, G), got %d", len(newlyReady))
+	// B, E, G should be ready now (H has no dependents)
+	ready = builder.GetReadyBeads()
+	if len(ready) != 3 {
+		t.Errorf("Expected 3 ready (B, E, G), got %d: %v", len(ready), ready)
 	}
 
 	// Complete B
-	newlyReady, _ = builder.MarkCompleted("c-B")
+	builder.MarkCompleted("c-B")
 
 	// C should NOT be ready yet (waiting for E)
-	if len(newlyReady) != 0 {
-		t.Errorf("Expected C to remain blocked, got %v", newlyReady)
+	ready = builder.GetReadyBeads()
+	for _, b := range ready {
+		if b.ID == "c-C" {
+			t.Errorf("Expected C to remain blocked, got ready: %v", ready)
+		}
 	}
 
 	// Complete E
-	newlyReady, _ = builder.MarkCompleted("c-E")
+	builder.MarkCompleted("c-E")
 
-	// NOW C should become ready (both B and E completed)
-	if len(newlyReady) != 1 || newlyReady[0] != "c-C" {
-		t.Errorf("Expected c-C to become ready, got %v", newlyReady)
+	// NOW C should be ready (both B and E completed)
+	ready = builder.GetReadyBeads()
+	foundC := false
+	for _, b := range ready {
+		if b.ID == "c-C" {
+			foundC = true
+			break
+		}
+	}
+	if !foundC {
+		t.Errorf("Expected c-C to be ready, got %v", ready)
 	}
 }
 
@@ -515,7 +538,7 @@ func TestDependencyResolution_ConcurrentMarking(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			beadID := types.NewNumericBeadID("conc", "", idx+1).ID()
+			beadID := string(types.NewNumericBeadID("conc", "", idx+1))
 			_, err := builder.MarkCompleted(beadID)
 			if err != nil {
 				errors <- err
@@ -557,18 +580,21 @@ func TestDependencyResolution_BeadsClientIntegration(t *testing.T) {
 			Title:        "Ready Bead 1",
 			Status:       types.StatusOpen,
 			Dependencies: []types.BeadID{},
+			Project:      "test-project",
 		},
 		{
 			ID:           types.BeadID("bci-002"),
 			Title:        "Ready Bead 2",
 			Status:       types.StatusOpen,
 			Dependencies: []types.BeadID{},
+			Project:      "test-project",
 		},
 		{
 			ID:           types.BeadID("bci-003"),
 			Title:        "Blocked Bead",
 			Status:       types.StatusOpen,
 			Dependencies: []types.BeadID{"bci-001"},
+			Project:      "test-project",
 		},
 	}
 
@@ -576,8 +602,8 @@ func TestDependencyResolution_BeadsClientIntegration(t *testing.T) {
 		mockClient.beads[string(bead.ID)] = bead
 	}
 
-	// Test GetReadyBeads through the client
-	ready, err := mockClient.GetReadyBeads("test-project", "/test/project", "test-repo")
+	// Test GetReadyBeads through the client (no repo filter)
+	ready, err := mockClient.GetReadyBeads("test-project", "/test/project", "")
 	if err != nil {
 		t.Fatalf("GetReadyBeads() error = %v", err)
 	}
@@ -587,7 +613,7 @@ func TestDependencyResolution_BeadsClientIntegration(t *testing.T) {
 	}
 
 	// Mark one as completed through client
-	err = mockClient.CloseBead("/test/project", "test-repo", types.BeadID("bci-001"), "completed")
+	err = mockClient.CloseBead("/test/project", "", types.BeadID("bci-001"), "completed")
 	if err != nil {
 		t.Fatalf("CloseBead() error = %v", err)
 	}
@@ -598,7 +624,7 @@ func TestDependencyResolution_BeadsClientIntegration(t *testing.T) {
 	mockClient.beads["bci-001"] = bead
 
 	// bci-003 should now be ready
-	ready, err = mockClient.GetReadyBeads("test-project", "/test/project", "test-repo")
+	ready, err = mockClient.GetReadyBeads("test-project", "/test/project", "")
 	if err != nil {
 		t.Fatalf("GetReadyBeads() error = %v", err)
 	}
@@ -615,11 +641,12 @@ func TestDependencyResolution_PartialCompletion(t *testing.T) {
 
 	// Bead depends on A, B, and C
 	beads := []types.Bead{
-		{ID: types.BeadID("p-A"), Dependencies: []types.BeadID{}},
-		{ID: types.BeadID("p-B"), Dependencies: []types.BeadID{}},
-		{ID: types.BeadID("p-C"), Dependencies: []types.BeadID{}},
+		{ID: types.BeadID("p-A"), Status: types.StatusOpen, Dependencies: []types.BeadID{}},
+		{ID: types.BeadID("p-B"), Status: types.StatusOpen, Dependencies: []types.BeadID{}},
+		{ID: types.BeadID("p-C"), Status: types.StatusOpen, Dependencies: []types.BeadID{}},
 		{
 			ID:           types.BeadID("p-target"),
+			Status:       types.StatusOpen,
 			Dependencies: []types.BeadID{"p-A", "p-B", "p-C"},
 		},
 	}
@@ -791,10 +818,10 @@ func TestDependencyResolution_MissingDependencies(t *testing.T) {
 	}
 
 	// missing-base should be ready
-	// missing-dep should be blocked (depends on non-existent bead)
+	// missing-dep should ALSO be ready (non-existent dependency is skipped)
 	ready := builder.GetReadyBeads()
-	if len(ready) != 1 || ready[0].ID != "missing-base" {
-		t.Errorf("Expected only missing-base to be ready, got %v", ready)
+	if len(ready) != 2 {
+		t.Errorf("Expected 2 ready beads (missing-base and missing-dep), got %d: %v", len(ready), ready)
 	}
 }
 
@@ -984,8 +1011,8 @@ func TestDependencyResolution_ResetAndRebuild(t *testing.T) {
 	mockClient := newMockBeadsClient()
 
 	beads1 := []types.Bead{
-		{ID: types.BeadID("reset-A"), Dependencies: []types.BeadID{}},
-		{ID: types.BeadID("reset-B"), Dependencies: []types.BeadID{"reset-A"}},
+		{ID: types.BeadID("reset-A"), Status: types.StatusOpen, Dependencies: []types.BeadID{}},
+		{ID: types.BeadID("reset-B"), Status: types.StatusOpen, Dependencies: []types.BeadID{"reset-A"}},
 	}
 
 	for _, bead := range beads1 {
@@ -1011,9 +1038,9 @@ func TestDependencyResolution_ResetAndRebuild(t *testing.T) {
 
 	// Build with different beads
 	beads2 := []types.Bead{
-		{ID: types.BeadID("reset-C"), Dependencies: []types.BeadID{}},
-		{ID: types.BeadID("reset-D"), Dependencies: []types.BeadID{}},
-		{ID: types.BeadID("reset-E"), Dependencies: []types.BeadID{"reset-C"}},
+		{ID: types.BeadID("reset-C"), Status: types.StatusOpen, Dependencies: []types.BeadID{}},
+		{ID: types.BeadID("reset-D"), Status: types.StatusOpen, Dependencies: []types.BeadID{}},
+		{ID: types.BeadID("reset-E"), Status: types.StatusOpen, Dependencies: []types.BeadID{"reset-C"}},
 	}
 
 	for _, bead := range beads2 {

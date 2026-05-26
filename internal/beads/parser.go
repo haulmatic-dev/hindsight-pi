@@ -341,3 +341,19 @@ func (p *Parser) ParseBeadList(output []byte, ctx BeadContext) ([]types.Bead, er
 	}
 	return beads, nil
 }
+
+// ParseCreatedBead parses JSON output from 'br create --json' command
+func (p *Parser) ParseCreatedBead(output []byte) (types.BeadID, error) {
+	var resp BeadCore
+	if err := json.Unmarshal(output, &resp); err != nil {
+		return "", fmt.Errorf("failed to parse created bead JSON: %w", err)
+	}
+	if resp.ID == "" {
+		return "", fmt.Errorf("created bead response missing id field")
+	}
+	beadID, err := types.ParseBeadID(resp.ID)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse created bead id %q: %w", resp.ID, err)
+	}
+	return beadID, nil
+}

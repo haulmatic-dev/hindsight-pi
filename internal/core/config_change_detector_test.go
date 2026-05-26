@@ -22,7 +22,9 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 			expected: 0,
 		},
 		{
+			name:     "detect TLDR enabled change",
 			oldCfg:   createTestConfig(),
+			newCfg:   modifyConfig(createTestConfig(), func(c *Config) { c.Intelligence.TLDR.Enabled = false }),
 			expected: 1,
 			check: func(changes []ToolConfigChange) bool {
 				return len(changes) == 1 &&
@@ -30,7 +32,9 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 			},
 		},
 		{
+			name:     "detect GPTCache disabled change",
 			oldCfg:   createTestConfig(),
+			newCfg:   modifyConfig(createTestConfig(), func(c *Config) { c.Intelligence.GPTCache.Enabled = false }),
 			expected: 1,
 			check: func(changes []ToolConfigChange) bool {
 				return len(changes) == 1 &&
@@ -96,6 +100,7 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 			oldCfg: createTestConfig(),
 			newCfg: modifyConfig(createTestConfig(), func(c *Config) {
 				c.Intelligence.TLDR.Enabled = false
+				c.MCP.Enabled = false
 			}),
 			expected: 2,
 			check: func(changes []ToolConfigChange) bool {
@@ -112,9 +117,13 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 			},
 		},
 		{
-			name:   "nil old config returns all as changes",
-			oldCfg: nil,
-			newCfg: createTestConfig(),
+			name:     "nil old config returns all as changes",
+			oldCfg:   nil,
+			newCfg:   createTestConfig(),
+			expected: 3,
+			check: func(changes []ToolConfigChange) bool {
+				return len(changes) == 3
+			},
 		},
 		{
 			name:     "nil new config returns no changes",

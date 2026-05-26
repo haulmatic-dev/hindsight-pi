@@ -115,7 +115,22 @@ func (c *Client) exec(cmd string, args ...string) ([]byte, error) {
 
 // execInDir executes a CLI command in a specific directory
 func (c *Client) execInDir(dir string, cmd string, args ...string) ([]byte, error) {
-	// Create a directory-aware executor for the command
+	// If the executor supports directory-aware execution, use it
+	if execWithDir, ok := c.executor.(interface {
+		ExecuteInDir(dir string, name string, arg ...string) ([]byte, error)
+	}); ok {
+		output, err := execWithDir.ExecuteInDir(dir, cmd, args...)
+		if err != nil {
+			return nil, &CLIError{
+				Command: cmd,
+				Args:    args,
+				Err:     err,
+			}
+		}
+		return output, nil
+	}
+
+	// Fall back to creating a directory-aware executor
 	executor := &defaultExecutorWithDir{Dir: dir}
 	output, err := executor.Execute(cmd, args...)
 	if err != nil {
@@ -234,4 +249,46 @@ func (c *Client) ListBeads(projectPath, repoName string) ([]types.Bead, error) {
 		return nil, err
 	}
 	return c.parser.ParseBeadList(output, c.newContext(projectPath, repoName))
+}
+
+// CreateBead creates a new bead using the br CLI.
+func (c *Client) CreateBead(projectPath string, req types.CreateBeadRequest) (types.BeadID, error) {
+	args := []string{"create", req.Title, "--json"}
+	if req.Description != "" {
+		args = append(args, "--description", req.Description)
+	}
+	if req.Type != "" {
+		args = append(args, "--type", req.Type)
+	}
+	if req.Priority > 0 {
+		args = append(args, "--priority", fmt.Sprintf("%d", req.Priority))
+	}
+	if len(req.Labels) > 0 {
+		args = append(args, "--labels", strings.Join(req.Labels, ","))
+	}
+	if len(req.Dependencies) > 0 {
+		depStrs := make([]string, len(req.Dependencies))
+		for i, dep := range req.Dependencies {
+			depStrs[i] = dep.String()
+		}
+		args = append(args, "--deps", strings.Join(depStrs, ","))
+	}
+	if req.Status != "" {
+		args = append(args, "--status", req.Status)
+	}
+
+	output, err := c.execInDir(projectPath, "br", args...)
+	if err != nil {
+		if cliErr, ok := err.(*CLIError); ok {
+			cliErr.Stdout = string(output)
+		}
+		return "", fmt.Errorf("create bead failed: %w", err)
+	}
+
+	beadID, err := c.parser.ParseCreatedBead(output)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse created bead: %w", err)
+	}
+
+	return beadID, nil
 }

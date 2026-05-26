@@ -214,6 +214,7 @@ type BeadsClient interface {
 	CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error
 	GetReadyBeads(projectName, projectPath, repoName string) ([]types.Bead, error)
 	UpdateBeadStatus(projectPath string, beadID types.BeadID, status types.BeadStatus) error
+	CreateBead(projectPath string, req types.CreateBeadRequest) (types.BeadID, error)
 }
 
 // WorkerSpawner defines the interface for spawning workers
@@ -256,6 +257,8 @@ type Overseer struct {
 	completed             map[string]bool                 // Track completed beads for this session
 	retries               map[string]*beadRetryInfo       // Track retry state for failed beads
 	retriesMu             sync.RWMutex                    // Mutex for retries map
+	validationRetries     map[string]int                  // Track validation retry count per bead
+	validationRetriesMu   sync.RWMutex                    // Mutex for validation retries map
 	baseDelay             time.Duration                   // Base delay for exponential backoff
 	maxDelay              time.Duration                   // Maximum delay for exponential backoff
 	tldrClient            *intelligence.TLDRClient        // TLDR client for impact analysis
@@ -332,6 +335,7 @@ func NewOverseer(config *Config) *Overseer {
 		dag:                   NewDAG(),
 		completed:             make(map[string]bool),
 		retries:               make(map[string]*beadRetryInfo),
+		validationRetries:     make(map[string]int),
 		baseDelay:             defaultBaseDelay,
 		maxDelay:              defaultMaxDelay,
 	}
@@ -591,6 +595,15 @@ func (o *Overseer) initializeChainCompletionDetector() {
 
 	o.chainCompletionDetector.SetCallback(func(event ChainCompletedEvent) {
 		log.Printf("[Overseer] Chain completed: root=%s", event.ChainInfo.RootBeadID)
+
+		// Run PRD validation
+		projectPath := o.findProjectPathForBeadID(event.ChainInfo.RootBeadID)
+		if projectPath != "" {
+			if err := o.RunPRDValidation(event.ChainInfo, projectPath); err != nil {
+				log.Printf("[Overseer] PRD validation failed: %v", err)
+			}
+		}
+
 		if err := extractor.ExtractPatterns(event); err != nil {
 			log.Printf("[Overseer] Chain pattern extraction failed: %v", err)
 		}
@@ -822,6 +835,34 @@ func (o *Overseer) getRetryCount(beadID string) int {
 		return info.count
 	}
 	return 0
+}
+
+// getValidationRetryCount returns the current validation retry count for a bead
+func (o *Overseer) getValidationRetryCount(beadID string) int {
+	o.validationRetriesMu.RLock()
+	defer o.validationRetriesMu.RUnlock()
+
+	return o.validationRetries[beadID]
+}
+
+// incrementValidationRetry increments the validation retry count for a bead
+func (o *Overseer) incrementValidationRetry(beadID string) {
+	o.validationRetriesMu.Lock()
+	defer o.validationRetriesMu.Unlock()
+
+	o.validationRetries[beadID]++
+	log.Printf("[Validation] Bead %s validation retry count: %d", beadID, o.validationRetries[beadID])
+}
+
+// clearValidationRetry removes the validation retry count for a bead
+func (o *Overseer) clearValidationRetry(beadID string) {
+	o.validationRetriesMu.Lock()
+	defer o.validationRetriesMu.Unlock()
+
+	if _, exists := o.validationRetries[beadID]; exists {
+		delete(o.validationRetries, beadID)
+		log.Printf("[Validation] Bead %s validation retry state cleared", beadID)
+	}
 }
 
 // recordSpawnFailure records a spawn failure and calculates backoff
@@ -2767,6 +2808,13 @@ func (o *Overseer) closeBead(worker *types.Worker, success bool) error {
 		return nil
 	}
 
+	// Run TDD validation for REFACTOR beads before closing
+	if success && bead != nil && bead.Type == "refactor" {
+		if err := o.RunTDDValidation(*bead, projectPath); err != nil {
+			log.Printf("[closeBead] TDD validation error for %s: %v", worker.BeadID.String(), err)
+		}
+	}
+
 	return o.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason)
 }
 
@@ -3007,6 +3055,12 @@ func (o *Overseer) GetProjectPath(projectName string) string {
 	return ""
 }
 
+// findProjectPathForBeadID finds the project path for a given bead ID
+func (o *Overseer) findProjectPathForBeadID(beadID types.BeadID) string {
+	projectName := beadID.Project()
+	return o.GetProjectPath(projectName)
+}
+
 // IsRunning returns whether the overseer is currently running
 func (o *Overseer) IsRunning() bool {
 	return o.running
@@ -3078,10 +3132,23 @@ func (o *Overseer) GetReadyBeadsFromDAG() []types.Bead {
 	}
 
 	readyNodes := o.dag.GetReadyNodes()
-	beads := make([]types.Bead, len(readyNodes))
-	for i, node := range readyNodes {
-		beads[i] = node.Bead
+	var beads []types.Bead
+	for _, node := range readyNodes {
+		// Skip approval gates
+		if node.Bead.Type == "approval-gate" {
+			continue
+		}
+		// Skip beads already completed in this session
+		if o.completed[string(node.Bead.ID)] {
+			continue
+		}
+		beads = append(beads, node.Bead)
 	}
+
+	// Sort by priority descending (highest first)
+	sort.Slice(beads, func(i, j int) bool {
+		return beads[i].Priority > beads[j].Priority
+	})
 
 	return beads
 }

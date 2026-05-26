@@ -106,6 +106,7 @@ func TestEpicScannerScanWithMockClient(t *testing.T) {
 
 	// Create scanner
 	scanner := NewEpicScanner(5*time.Minute, mockClient)
+	scanner.SetMockBeads(mockClient.beads)
 
 	// Run scan
 	scanner.scanAndCloseEpics()
@@ -143,13 +144,14 @@ func TestEpicScannerClosesEpicWhenAllTasksComplete(t *testing.T) {
 
 	// Create scanner
 	scanner := NewEpicScanner(5*time.Minute, mockClient)
+	scanner.SetMockBeads(mockClient.beads)
 
 	// Run scan
 	scanner.scanAndCloseEpics()
 
 	// Epic SHOULD be closed because all tasks are completed
 	found := false
-	for _, call := range mockClient.closeCalls {
+	for _, call := range scanner.GetCloseCalls() {
 		if call.beadID.String() == "hydra-31h" {
 			found = true
 			if call.reason != "all dependencies resolved" {

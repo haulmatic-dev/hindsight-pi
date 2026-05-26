@@ -12,6 +12,13 @@ overseer:
     interval: 10s
     timeout: 10m
 
+validation:
+  enabled: true
+  tdd_validation_enabled: true
+  prd_validation_enabled: true
+  max_rounds: 3
+  agent_verification_enabled: true
+
 api:
   enabled: false
 

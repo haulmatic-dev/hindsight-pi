@@ -302,20 +302,23 @@ func TestPiConfig_AgentsPiDefaultValues(t *testing.T) {
 		t.Error("Agents.Pi.Enabled should be true by default")
 	}
 
-	if cfg.Agents.Pi.Provider != "kimi" {
-		t.Errorf("Agents.Pi.Provider = %q, want %q", cfg.Agents.Pi.Provider, "kimi")
+	// Provider/Model/ThinkingLevel/Timeout are intentionally left empty
+	// in DefaultConfig so that pi.standard-agent.llm in the YAML can
+	// override, or the overseer fills in safe defaults.
+	if cfg.Agents.Pi.Provider != "" {
+		t.Errorf("Agents.Pi.Provider = %q, want empty string", cfg.Agents.Pi.Provider)
 	}
 
-	if cfg.Agents.Pi.Model != "k2.5" {
-		t.Errorf("Agents.Pi.Model = %q, want %q", cfg.Agents.Pi.Model, "k2.5")
+	if cfg.Agents.Pi.Model != "" {
+		t.Errorf("Agents.Pi.Model = %q, want empty string", cfg.Agents.Pi.Model)
 	}
 
-	if cfg.Agents.Pi.ThinkingLevel != "medium" {
-		t.Errorf("Agents.Pi.ThinkingLevel = %q, want %q", cfg.Agents.Pi.ThinkingLevel, "medium")
+	if cfg.Agents.Pi.ThinkingLevel != "" {
+		t.Errorf("Agents.Pi.ThinkingLevel = %q, want empty string", cfg.Agents.Pi.ThinkingLevel)
 	}
 
-	if cfg.Agents.Pi.Timeout != "10m" {
-		t.Errorf("Agents.Pi.Timeout = %q, want %q", cfg.Agents.Pi.Timeout, "10m")
+	if cfg.Agents.Pi.Timeout != "" {
+		t.Errorf("Agents.Pi.Timeout = %q, want empty string", cfg.Agents.Pi.Timeout)
 	}
 
 	if cfg.Agents.Pi.ApiKeyName != "" {

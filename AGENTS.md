@@ -1,211 +1,118 @@
-# Hydra Agent Configuration
+# Hydra Agent Workflow
 
-This document contains important information for agents working on the Hydra project.
+## Intelligence Protocol (Mandatory)
 
-## Recent Fixes and Improvements
+Every implementation, fix, or refactor MUST follow this 5-step workflow. Skipping steps reproduces bugs that were already fixed.
 
-### 1. Bead Closure and Dependency Handling (March 2026)
-
-**Problem**: Beads were being processed by workers but not properly closed due to dependency issues.
-
-**Root Causes**:
-- `br close` returns exit code 0 even when skipping beads due to dependencies
-- DAG had stale dependency data
-- Status constants didn't include "closed" (only "completed")
-
-**Solutions Implemented**:
-
-#### a) Fixed CloseBead Function (`internal/beads/client.go`)
-- Parse `br close` output for "Warning: Skipped" and "blocked by" messages
-- Verify bead status after close using `GetBead()`
-- Return error if bead not actually closed
-- Updated to use `-r` flag instead of `-m` for reason
-
-```go
-// CloseBead now:
-// 1. Parses output for dependency warnings
-// 2. Verifies bead status after close
-// 3. Returns error if not actually closed
-```
-
-#### b) Added StatusClosed Constant (`pkg/types/bead.go`)
-- Added `StatusClosed = "closed"` constant
-- Updated `IsTerminal()` to include `StatusClosed`
-- Beads CLI uses "closed" status, not "completed"
-
-#### c) Switched from DAG to br ready (`internal/core/overseer.go`)
-- Replaced `getReadyBeadsFromDAG()` with `getReadyBeads()`
-- Uses `beadsClient.GetReadyBeads()` → calls `br ready --json`
-- More reliable as it queries actual bead status
-- Better filtering for running/completed beads
-
-#### d) Updated Overseer Error Handling
-- Detects close failures due to dependencies
-- Marks worker as failed when close fails
-- Triggers retry scheduling
-
-### 2. Config Parsing Fix (March 2026)
-
-**Problem**: `LoadConfig()` just returned `DefaultConfig()` without parsing YAML file.
-
-**Solution**: Implemented proper YAML parsing with support for:
-- `projects: []` array format (old)
-- `projects: {auto_discover: false, list: []}` object format (new)
-
-### 3. Worker Configuration Fix (March 2026)
-
-**Problem**: Workers only received basic info (ID, Project, Repo, Type) via environment variables.
-
-**Solution**: 
-- Added `HYDRA_BEAD_TITLE` and `HYDRA_BEAD_DESCRIPTION` environment variables
-- Updated WorkerConfig struct to include these fields
-- Worker now populates bead object with complete information for agent prompts
-
-### 4. Project Path Resolution (March 2026)
-
-**Problem**: `closeWorkerBead` couldn't find project paths for beads from unconfigured projects.
-
-**Solution**:
-- Added `ProjectPath` field to Worker struct
-- Save projectPath in worker record during spawn
-- Use worker.ProjectPath as primary source in closeWorkerBead
-- Fallback to searching configured projects
-
-## Testing
-
-### Unit Tests Added
-
-1. **Config Tests** (`internal/core/config_test.go`):
-   - `TestLoadConfig_ValidYAML` - Valid YAML parsing
-   - `TestLoadConfig_ArrayFormat` - Array format projects
-   - `TestLoadConfig_ObjectWithListFormat` - Object with list format
-   - `TestLoadConfig_DefaultValues` - Default value preservation
-   - `TestLoadConfig_FileNotFound` - Error handling
-   - `TestLoadConfig_InvalidYAML` - Invalid YAML handling
-
-2. **Beads Client Tests** (`internal/beads/client_test.go`):
-   - `TestCloseBead_Success` - Successful closure
-   - `TestCloseBead_CLIError` - CLI error handling
-   - `TestCloseBead_DetectsSkippedDueToDependencies` - Dependency detection
-   - `TestCloseBead_DetectsBlockedByDependencies` - Blocked detection
-   - `TestCloseBead_DifferentReasons` - Various close reasons
-
-### Running Tests
+### Step 1: Query CASS (Institutional Memory)
 
 ```bash
-# Run all tests
-go test ./...
-
-# Run specific packages
-go test ./internal/beads/... -v
-go test ./internal/core/... -v
-
-# Run specific tests
-go test -run TestCloseBead
-go test -run TestLoadConfig
+cm context "<concise description of what you are about to implement>" --json
 ```
 
-## Performance Optimization
+- Parse JSON output. Look for bullets with `finalScore >= 0.7`.
+- Read `content` field for proven patterns and anti-patterns.
+- **If an anti-pattern matches your current approach, STOP and follow the documented fix.**
 
-Based on testing with 122 beads:
-
-**Optimal Configuration**:
-```yaml
-overseer:
-  poll_interval: 5s
-  max_workers: 5
-  worker_timeout: 3m
-  max_retries: 2
-  retry_delay: 5s
-```
-
-**Results**:
-- 30-minute test: 89 beads closed (73% success rate)
-- Processing rate: ~3 beads per minute
-- Worker duration: 40-120 seconds per bead
-
-## Troubleshooting Guide
-
-### Beads Not Closing
-
-**Symptoms**: Workers complete but beads remain open.
-
-**Check**:
-1. Dependency status: `br show <bead-id>`
-2. Logs for warnings: `grep "blocked by\|dependencies" /tmp/hydra.log`
-3. Ensure root beads processed first
-
-### Workers Failing
-
-**Symptoms**: Workers exit with error code.
-
-**Check**:
-1. Worker logs: `grep "Worker.*failed" /tmp/hydra.log`
-2. Pi agent works: verify `pi` binary is in PATH and `HYDRA_PI_ENABLED=true` is set
-3. Project path in hydra.yaml
-
-### Config Not Loading
-
-**Symptoms**: Hydra uses default config instead of hydra.yaml.
-
-**Check**:
-1. File exists: `ls -la /path/to/hydra.yaml`
-2. Valid YAML: `cat /path/to/hydra.yaml | head -20`
-3. Projects section properly formatted
-
-## Common Commands
+### Step 2: Search Codebase with TLDR
 
 ```bash
-# Build binaries
-go build -o bin/hydra ./cmd/hydra
-go build -o bin/worker ./cmd/worker
-
-# Run hydra
-./bin/hydra -config /path/to/hydra.yaml
-
-# Check bead status
-cd /project/path && br list
-cd /project/path && br ready
-cd /project/path && br show <bead-id>
-
-# View logs
-tail -f /tmp/hydra.log | grep -E "(Worker|Completed|Closed)"
+hydra-llm-tldr search "<what you need to implement>" . --max 10
 ```
 
-## Dependencies
+- Use results to find existing code patterns before writing new code.
+- If semantic search returns 0 results, use `rg "<pattern>"` as fallback.
 
-- **pi**: Pi coding agent must be installed and in PATH
-- **br**: Beads CLI must be installed
-- **bv**: Beads viewer for triage
-- **Go 1.23+**: For building
+### Step 3: Analyze Impact (For Modifications)
 
-## Code Structure
-
-```
-cmd/
-  hydra/        # Main hydra binary
-  worker/       # Worker binary
-
-internal/
-  beads/        # Beads client
-  core/         # Overseer and config
-  intelligence/ # Intelligence services
-
-pkg/
-  types/        # Type definitions
-
-docs/
-  MONITORING.md # Monitoring documentation
+```bash
+hydra-llm-tldr impact <file-path> --depth 2
 ```
 
-## Future Improvements
+- Required when modifying existing files.
+- Shows downstream callers affected by your change.
 
-- [ ] Prometheus metrics endpoint
-- [ ] Grafana dashboard
-- [ ] Better dependency visualization
-- [ ] Worker pool optimization
-- [ ] Retry backoff strategies
+### Step 4: Save New Patterns
+
+After discovering a new anti-pattern, proven fix, or architectural insight:
+
+```bash
+cm add "<concise pattern description>" --category <architecture|testing|performance|git|verification>
+```
+
+**Save within the same session. Do not defer.** Context is lost across sessions.
+
+For project-specific patterns that belong in durable memory:
+
+```bash
+hindsight_retain "<project-specific insight>" --context "<why this matters for hydra>"
+```
+
+### Step 5: Verify and Retain
+
+After implementation:
+- Run tests: `go test ./...`
+- If tests pass and you discovered a pattern, GOTO Step 4.
+- If tests fail, fix, then GOTO Step 4.
 
 ---
 
-*Last updated: March 2026*
+## Category Guide for `cm add`
+
+| Category | Use For |
+|----------|---------|
+| `architecture` | Design decisions, state machine rules, interface contracts |
+| `testing` | Mock gotchas, test setup traps, assertion patterns |
+| `performance` | Bottlenecks, resource limits, concurrency issues |
+| `git` | Commit conventions, merge workflows, branch hygiene |
+| `verification` | Validation logic, config parsing, deployment checks |
+
+---
+
+## Anti-Patterns (DO NOT)
+
+1. **DO NOT** start implementing without querying CASS first.
+2. **DO NOT** write new code without checking TLDR for existing patterns.
+3. **DO NOT** modify files without running `impact` analysis.
+4. **DO NOT** discover a pattern and defer saving it to "later".
+5. **DO NOT** save raw execution output or JSON events — save distilled insights only.
+
+---
+
+## Hydra-Specific Patterns (Quick Reference)
+
+### Bead IDs
+- `NewNumericBeadID(project, repo, number).ID()` returns only the numeric suffix.
+- Use `string(NewNumericBeadID(...))` for the full bead ID.
+
+### Dependency Graph
+- `BuildFromBeads` must skip edges for already-completed dependencies (`StatusCompleted`, `StatusClosed`).
+- Otherwise completed beads continue blocking their dependents.
+
+### Scheduling
+- `GetReadyBeadsFromDAG` must:
+  1. Filter approval-gates
+  2. Exclude session-completed beads (`o.completed`)
+  3. Sort by priority descending
+
+### Interface Changes
+- When `BeadsClient` interface changes, update ALL mock implementations:
+  - `mockBeadsClient` in `overseer_integration_test.go`
+  - `enhancedMockBeadsClient` in `worker_completion_test.go`
+
+### Process Management
+- `ps -g` filters by session ID, NOT process group ID.
+- To list by PGID: `ps -e -o pid,pgid` and filter by PGID column.
+
+---
+
+## Verification Checklist
+
+Before marking any task complete:
+
+- [ ] CASS queried and results reviewed
+- [ ] TLDR searched for existing patterns
+- [ ] Impact analysis run (if modifying files)
+- [ ] Tests pass: `go test ./...`
+- [ ] New patterns saved to CASS (`cm add`)
+- [ ] Project insights saved to Hindsight (`hindsight_retain`)
