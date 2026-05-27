@@ -2651,75 +2651,6 @@ func (o *Overseer) refreshMCPClient(change ToolConfigChange) {
 	o.configManager.refreshMCPClient(change)
 }
 
-// Old implementation placeholder - moved to ConfigManager
-func (o *Overseer) _refreshMCPClient(change ToolConfigChange) {
-	o.mcpMu.Lock()
-	defer o.mcpMu.Unlock()
-
-	config := o.config.MCP
-
-	// Stop existing client if running
-	if o.mcpClient != nil && o.mcpClient.IsConnected() {
-		if err := o.StopMCP(); err != nil {
-			log.Printf("[MCP] Error stopping existing client: %v", err)
-		}
-	}
-
-	if !config.Enabled {
-		o.mcpClient = nil
-		o.mcpReservationMgr = nil
-		o.activeReservations = nil
-		log.Printf("[MCP] MCP client disabled")
-		return
-	}
-
-	// Reinitialize MCP with new config
-	o.mcpConfig = &config
-	o.activeReservations = make(map[string]*mcp.Reservation)
-
-	// Initialize reservation manager with configured TTL
-	ttl := config.FileReservationTTL
-	if ttl <= 0 {
-		ttl = 30 * time.Minute
-	}
-	o.mcpReservationMgr = mcp.NewReservationManager()
-
-	// Initialize HTTP MCP client
-	agentID := fmt.Sprintf("hydra-overseer-%d", time.Now().Unix())
-	httpURL := config.URL
-	if httpURL == "" {
-		httpURL = fmt.Sprintf("http://127.0.0.1:%d", config.Port)
-	}
-	// Convert ws:// to http:// if needed
-	if strings.HasPrefix(httpURL, "ws://") {
-		httpURL = "http://" + strings.TrimPrefix(httpURL, "ws://")
-	}
-	// Remove /ws suffix if present
-	httpURL = strings.TrimSuffix(httpURL, "/ws")
-
-	var err error
-	o.mcpClient, err = mcp.NewHTTPClient(httpURL, agentID)
-	if err != nil {
-		log.Printf("[MCP] Failed to recreate MCP client: %v", err)
-		return
-	}
-
-	// Set up message handler
-	o.mcpClient.SetMessageHandler(o.handleMCPMessage)
-
-	// Start the MCP listener
-	if err := o.StartMCPListener(); err != nil {
-		log.Printf("[MCP] Failed to restart MCP listener: %v", err)
-		return
-	}
-
-	if change.EnabledBefore && change.EnabledAfter {
-		log.Printf("[MCP] MCP client reinitialized (URL: %s)", httpURL)
-	} else {
-		log.Printf("[MCP] MCP client initialized (URL: %s)", httpURL)
-	}
-}
-
 // UpdateConfig updates the overseer's configuration and refreshes affected clients.
 func (o *Overseer) UpdateConfig(newConfig *Config) error {
 	return o.configManager.UpdateConfig(newConfig)
@@ -2732,8 +2663,6 @@ func (o *Overseer) GetBeadsClient() BeadsClient {
 
 // GetBVClient returns the BV client for graph analytics
 func (o *Overseer) GetBVClient() *bv.Client {
-	o.intelMutex.RLock()
-	defer o.intelMutex.RUnlock()
 	return o.bvClient
 }
 
