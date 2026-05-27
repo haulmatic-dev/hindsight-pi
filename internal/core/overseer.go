@@ -230,6 +230,7 @@ type Overseer struct {
 
 	// Chain completion detector for end-of-chain pattern extraction
 	chainCompletionDetector *ChainCompletionDetector // Detects chain completion and triggers pattern extraction
+	chainRegistrar          *ChainRegistrar          // Registers bead chains from issues.jsonl
 	chainsRegistered        bool                     // Track if chains have been registered (only once at startup)
 
 	// Worker tracker for persistent PID tracking
@@ -749,7 +750,7 @@ func (o *Overseer) tick() error {
 	// Register chains only ONCE at startup (not on every discovery cycle)
 	// This is called from the main loop but we track registration state
 	if o.chainCompletionDetector != nil && !o.chainsRegistered {
-		o.registerChainsFromBeadsClient()
+		o.chainRegistrar.RegisterFromProjects(o.projects)
 		o.chainsRegistered = true
 	}
 
@@ -789,7 +790,7 @@ func (o *Overseer) tick() error {
 	// Register chains before spawning workers (to catch beads just before execution)
 	// This ensures we track chains even when beads complete in milliseconds
 	if o.chainCompletionDetector != nil && !o.chainsRegistered && o.dag != nil {
-		o.registerChainsFromBeadsClient()
+		o.chainRegistrar.RegisterFromProjects(o.projects)
 		o.chainsRegistered = true
 		log.Printf("[ChainCompletion] Registered chains before worker spawn")
 	}
@@ -1108,84 +1109,6 @@ func (o *Overseer) buildDAG() error {
 
 // registerChainsFromBeadsClient registers chains by reading beads directly from .beads/issues.jsonl
 // This gets ALL beads regardless of status (open/closed), unlike br list which only returns open
-func (o *Overseer) registerChainsFromBeadsClient() {
-	if o.chainCompletionDetector == nil {
-		return
-	}
-
-	allBeadMap := make(map[string]types.Bead)
-	dependsOnMap := make(map[string][]string) // beadID -> list of beads that depend on it
-
-	for _, project := range o.projects {
-		issuesFile := filepath.Join(project.Path, ".beads", "issues.jsonl")
-		beads, err := o.beadFileReader.ReadFile(issuesFile)
-		if err != nil {
-			log.Printf("[ChainCompletion] Could not read beads from %s: %v", issuesFile, err)
-			continue
-		}
-		log.Printf("[ChainCompletion] Read %d beads from %s", len(beads), project.Name)
-		for _, bead := range beads {
-			allBeadMap[string(bead.ID)] = bead
-			// Build inverse map: what depends on this bead
-			// If bead B has depends_on_id = A, then B depends on A, so A is blocked by B
-			// We want to find: given A, what beads depend on A?
-			for _, dep := range bead.Dependencies {
-				depStr := string(dep)
-				dependsOnMap[depStr] = append(dependsOnMap[depStr], string(bead.ID))
-			}
-		}
-	}
-
-	if len(allBeadMap) == 0 {
-		log.Printf("[ChainCompletion] No beads found, skipping chain registration")
-		return
-	}
-
-	// Find roots (beads with no dependencies - they don't depend on anything)
-	roots := make([]types.Bead, 0)
-	for _, bead := range allBeadMap {
-		if len(bead.Dependencies) == 0 {
-			roots = append(roots, bead)
-		}
-	}
-
-	log.Printf("[ChainCompletion] Found %d root beads", len(roots))
-
-	chainCount := 0
-	visited := make(map[string]bool)
-
-	// For each root, traverse down to find all dependents
-	for _, root := range roots {
-		var chainBeads []types.BeadID
-
-		var dfs func(beadID string)
-		dfs = func(beadID string) {
-			if visited[beadID] {
-				return
-			}
-			visited[beadID] = true
-
-			bid, _ := types.ParseBeadID(beadID)
-			chainBeads = append(chainBeads, bid)
-
-			// Find all beads that depend on this one (inverse lookup)
-			for _, dependent := range dependsOnMap[beadID] {
-				dfs(dependent)
-			}
-		}
-
-		dfs(string(root.ID))
-
-		if len(chainBeads) > 1 {
-			o.chainCompletionDetector.RegisterChain(chainBeads[0], chainBeads)
-			chainCount++
-			log.Printf("[ChainCompletion] Registered chain with %d beads starting from %s", len(chainBeads), root.ID)
-		}
-	}
-
-	log.Printf("[ChainCompletion] Registered %d chains from %d total beads", chainCount, len(allBeadMap))
-}
-
 // GetBeadFromFile reads a single bead from issues.jsonl
 func (o *Overseer) getAllDescendants(nodeID string) []string {
 	var descendants []string
