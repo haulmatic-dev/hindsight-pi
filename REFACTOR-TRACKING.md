@@ -7,7 +7,7 @@
 
 ### P0: Critical
 
-- [x] **1. Decompose Overseer God Object** (partial — 29 methods extracted)
+- [x] **1. Decompose Overseer God Object** (partial — 32 methods extracted)
   - [x] Extract SpawnRateLimiter (5 methods)
   - [x] Extract RetryManager (7 methods)
   - [x] Extract ProjectScanner (2 methods)
@@ -23,8 +23,11 @@
   - [x] Extract ImpactAnalyzer (TLDR-based impact analysis)
   - [x] Extract WorkerEnvBuilder (worker environment variables)
   - [x] Extract BeadDiscovery (ready bead finding from BR/BV)
-  - [ ] Extract WorkerManager (deferred — high coupling)
-  - [ ] Extract Scheduler (deferred — high coupling)
+  - [x] Extract ProjectResolver (path resolution for beads)
+  - [x] Extract WorkerLifecycle (worker process lifecycle)
+  - [x] Extract Scheduler (main scheduling loop)
+  - [x] Extract ServiceStarter (background service lifecycle)
+  - [ ] Extract WorkerSpawner (spawnWorker + spawnWorkerInternal)
   - [ ] Extract ChainOrchestrator
   - [ ] Extract ResourceGovernor
   - [ ] Extract ValidationEngine
@@ -60,7 +63,7 @@
 
 - [ ] **10. Package Reorganization**
 
-## Commits So Far (32)
+## Commits So Far (35)
 
 1. `a317e9c` refactor(cli): add unified CLI runner package
 2. `ece1b1d` refactor(cleanup): remove dead code packages
@@ -87,16 +90,20 @@
 23. `latest` refactor(overseer): move batch retention to IntelligenceHub
 24. `latest` refactor(overseer): extract WorkerEnvBuilder
 25. `latest` refactor(overseer): extract BeadDiscovery
+26. `latest` refactor(overseer): extract ProjectResolver
+27. `latest` refactor(overseer): extract WorkerLifecycle
+28. `latest` refactor(overseer): extract Scheduler
+29. `latest` refactor(overseer): extract ServiceStarter
 
 ## Metrics
 
 | Metric | Before | Current | Change |
 |---|---|---|---|
-| overseer.go lines | 3,976 | **2,424** | -1,552 |
-| Overseer methods | 112 | **90** | -22 |
+| overseer.go lines | 3,976 | **2,009** | -1,967 (-49%) |
+| Overseer methods | 112 | **83** | -29 |
 | Total source files | ~250 | ~250 | +0 (removed dead, added new) |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 16 | — |
+| New packages | — | 19 | — |
 | Tests | — | **542 passed** ✅ | — |
 
 ## New Packages
@@ -119,11 +126,14 @@
 | `internal/core/impact_analyzer.go` | TLDR-based impact analysis |
 | `internal/core/worker_env_builder.go` | Worker environment variables |
 | `internal/core/bead_discovery.go` | Ready bead finding from BR/BV |
+| `internal/core/project_resolver.go` | Path resolution for beads |
+| `internal/core/worker_lifecycle.go` | Worker process lifecycle |
+| `internal/core/scheduler.go` | Main scheduling loop |
+| `internal/core/service_starter.go` | Background service lifecycle |
 
 ## Next Steps
 
-1. **Extract WorkerManager** (spawn/cleanup/completion) — biggest remaining cluster (~220 lines in spawnWorkerInternal)
-2. **Extract Scheduler** (tick orchestration) — high coupling
-3. **Migrate refresh methods** to use IntelligenceHub (remove old fields)
-4. **Flatten Pi Config structs** (7 nested types → 3)
-5. **Extract test fixtures** from large test files
+1. **Extract WorkerSpawner** (spawnWorker + spawnWorkerInternal) — biggest remaining cluster (~240 lines)
+2. **Migrate refresh methods** to use IntelligenceHub (remove old fields)
+3. **Flatten Pi Config structs** (32 config struct types)
+4. **Extract test fixtures** from large test files
