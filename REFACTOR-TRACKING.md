@@ -7,7 +7,7 @@
 
 ### P0: Critical
 
-- [x] **1. Decompose Overseer God Object** (partial — 21 methods extracted)
+- [x] **1. Decompose Overseer God Object** (partial — 24 methods extracted)
   - [x] Extract SpawnRateLimiter (5 methods)
   - [x] Extract RetryManager (7 methods)
   - [x] Extract ProjectScanner (2 methods)
@@ -15,6 +15,9 @@
   - [x] Extract ErrorLogger (2 methods)
   - [x] Extract BeadAnalyzer (2 methods)
   - [x] Integrate IntelligenceHub (replaced initializeIntelligenceClients)
+  - [x] Extract DAGNavigator (DAG accessors)
+  - [x] Extract StateController (running, paused, maxWorkers, interval)
+  - [x] Extract ConfigManager (dynamic config changes)
   - [ ] Extract WorkerManager (deferred — high coupling)
   - [ ] Extract Scheduler (deferred — high coupling)
   - [ ] Extract ChainOrchestrator
@@ -52,7 +55,7 @@
 
 - [ ] **10. Package Reorganization**
 
-## Commits So Far (20)
+## Commits So Far (24)
 
 1. `a317e9c` refactor(cli): add unified CLI runner package
 2. `ece1b1d` refactor(cleanup): remove dead code packages
@@ -69,16 +72,19 @@
 13. `latest` refactor(overseer): extract ErrorLogger
 14. `latest` refactor(overseer): extract BeadAnalyzer
 15. `latest` refactor(overseer): integrate IntelligenceHub
+16. `latest` refactor(overseer): add DAGNavigator
+17. `latest` refactor(overseer): extract StateController
+18. `latest` refactor(overseer): extract ConfigManager
 
 ## Metrics
 
 | Metric | Before | Current | Change |
 |---|---|---|---|
-| overseer.go lines | 3,976 | **3,398** | -578 |
-| Overseer methods | 112 | **91** | -21 |
+| overseer.go lines | 3,976 | **3,285** | -691 |
+| Overseer methods | 112 | **92** | -20 |
 | Total source files | ~250 | ~250 | +0 (removed dead, added new) |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 8 | — |
+| New packages | — | 11 | — |
 | Tests | — | **542 passed** ✅ | — |
 
 ## New Packages
@@ -93,6 +99,9 @@
 | `internal/core/intelligence_hub.go` | TLDR/GPTCache/Hindsight clients |
 | `internal/core/error_logger.go` | Structured error logging |
 | `internal/core/bead_analyzer.go` | Bead metadata analysis |
+| `internal/core/dag_navigator.go` | Thread-safe DAG accessors |
+| `internal/core/state_controller.go` | Runtime state (running, paused, workers) |
+| `internal/core/config_manager.go` | Dynamic config changes |
 
 ## Next Steps
 
