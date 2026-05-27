@@ -10,7 +10,7 @@
 - [x] **1. Decompose Overseer God Object** (partial — 12 methods extracted)
   - [x] Extract SpawnRateLimiter (5 methods)
   - [x] Extract RetryManager (7 methods)
-  - [ ] Extract WorkerManager
+  - [ ] Extract WorkerManager (deferred — high coupling)
   - [ ] Extract Scheduler
   - [ ] Extract ChainOrchestrator
   - [ ] Extract ResourceGovernor
@@ -27,7 +27,7 @@
 ### P1: High Value
 
 - [ ] **4. Validation as Service**
-- [ ] **5. Intelligence Hub Facade**
+- [ ] **5. Intelligence Hub Facade** (file created)
 - [x] **8. Unified CLI Runner** — `pkg/cli/runner.go` created
 
 ### P2: Medium Value
@@ -57,7 +57,7 @@
 5. `88bae16` refactor(cleanup): remove unused AgentRegistry
 6. `c6add83` refactor(overseer): extract SpawnRateLimiter
 7. `ce30268` refactor(overseer): extract RetryManager
-8. `latest` refactor(overseer): add IntelligenceHub (ready for integration)
+8. `latest` refactor(overseer): add IntelligenceHub
 
 ## Metrics
 
@@ -68,10 +68,15 @@
 | Total source files | ~250 | ~246 | -4 |
 | Dead code removed | — | 1,336 lines | — |
 | New packages | — | 4 (cli, spawn_rate_limiter, retry_manager, intelligence_hub) | — |
+| Tests | — | **542 passed** ✅ | — |
 
 ## Next Steps
 
-1. **Extract IntelligenceHub** from Overseer (~10 methods)
-2. **Extract WorkerManager** from Overseer (~8 methods)
-3. **Flatten Pi Config structs** (7 nested types → 3)
-4. **Extract test fixtures** from large test files
+1. **Create PR** for current work (develop-merged or main?)
+2. **Flatten Pi Config structs** (mechanical, low risk)
+3. **Extract test fixtures** from large test files
+4. **Integrate IntelligenceHub** into Overseer (needs careful testing)
+
+## Recommendation
+
+Create a PR now. The current changes are substantial and stable. Further refactoring can continue in a follow-up branch.
