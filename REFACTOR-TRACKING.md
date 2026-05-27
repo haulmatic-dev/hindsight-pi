@@ -15,7 +15,7 @@
   - [ ] Extract ChainOrchestrator
   - [ ] Extract ResourceGovernor
   - [ ] Extract ValidationEngine
-  - [ ] Extract IntelligenceHub
+  - [x] Extract IntelligenceHub (file created, integration pending)
 
 - [ ] **2. Slim Down Test Files**
   - [ ] Extract test fixtures to `testdata/`
@@ -57,6 +57,7 @@
 5. `88bae16` refactor(cleanup): remove unused AgentRegistry
 6. `c6add83` refactor(overseer): extract SpawnRateLimiter
 7. `ce30268` refactor(overseer): extract RetryManager
+8. `latest` refactor(overseer): add IntelligenceHub (ready for integration)
 
 ## Metrics
 
@@ -64,9 +65,9 @@
 |---|---|---|---|
 | overseer.go lines | 3,976 | 3,739 | -237 |
 | Overseer methods | 112 | 101 | -11 |
-| Total source files | ~250 | ~245 | -5 |
+| Total source files | ~250 | ~246 | -4 |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 3 (cli, spawn_rate_limiter, retry_manager) | — |
+| New packages | — | 4 (cli, spawn_rate_limiter, retry_manager, intelligence_hub) | — |
 
 ## Next Steps
 
