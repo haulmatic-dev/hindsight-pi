@@ -194,12 +194,7 @@ type Overseer struct {
 	projects              []types.Project
 	activeWorkers         map[string]*types.Worker
 	workerMutex           sync.RWMutex
-	running               bool
-	paused                bool
-	pauseMutex            sync.RWMutex
-	beadDiscoveryInterval time.Duration
-	maxWorkers            int
-	maxWorkersMux         sync.RWMutex
+	stateController       *StateController                // Runtime state (running, paused, maxWorkers, interval)
 	beadsClient           BeadsClient
 	spawner               WorkerSpawner // Interface for spawning workers (allows mocking in tests)
 	dag                   *DAG
@@ -278,8 +273,7 @@ func NewOverseer(config *Config) *Overseer {
 	o := &Overseer{
 		config:                config,
 		activeWorkers:         make(map[string]*types.Worker),
-		beadDiscoveryInterval: config.Overseer.BeadDiscoveryInterval,
-		maxWorkers:            config.Overseer.MaxWorkers,
+		stateController:       NewStateController(config.Overseer.MaxWorkers, config.Overseer.BeadDiscoveryInterval),
 		beadsClient:           beads.NewClient(),
 		bvClient:              bv.NewClient(),
 		spawner:               &defaultWorkerSpawner{},
@@ -669,14 +663,14 @@ func (o *Overseer) Start(ctx context.Context) error {
 		log.Println("🏛️  Epic scanner started")
 	}
 
-	o.running = true
-	ticker := time.NewTicker(o.beadDiscoveryInterval)
+	o.stateController.SetRunning(true)
+	ticker := time.NewTicker(o.stateController.GetBeadDiscoveryInterval())
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			o.running = false
+			o.stateController.SetRunning(false)
 			// Stop orphan janitor
 			if o.orphanJanitor != nil {
 				o.orphanJanitor.Stop()
@@ -2486,45 +2480,35 @@ func (o *Overseer) findProjectPathForBeadID(beadID types.BeadID) string {
 
 // IsRunning returns whether the overseer is currently running
 func (o *Overseer) IsRunning() bool {
-	return o.running
+	return o.stateController.IsRunning()
 }
 
 // IsPaused returns whether the overseer is paused
 func (o *Overseer) IsPaused() bool {
-	o.pauseMutex.RLock()
-	defer o.pauseMutex.RUnlock()
-	return o.paused
+	return o.stateController.IsPaused()
 }
 
 // Pause stops the overseer from spawning new workers
 func (o *Overseer) Pause() {
-	o.pauseMutex.Lock()
-	defer o.pauseMutex.Unlock()
-	o.paused = true
+	o.stateController.Pause()
 	log.Println("⏸️  Overseer paused")
 }
 
 // Resume allows the overseer to spawn workers again
 func (o *Overseer) Resume() {
-	o.pauseMutex.Lock()
-	defer o.pauseMutex.Unlock()
-	o.paused = false
+	o.stateController.Resume()
 	log.Println("▶️  Overseer resumed")
 }
 
 // SetMaxWorkers updates the maximum number of concurrent workers
 func (o *Overseer) SetMaxWorkers(count int) {
-	o.maxWorkersMux.Lock()
-	defer o.maxWorkersMux.Unlock()
-	o.maxWorkers = count
+	o.stateController.SetMaxWorkers(count)
 	log.Printf("🔧 Max workers set to %d", count)
 }
 
 // GetMaxWorkers returns the current maximum worker count
 func (o *Overseer) GetMaxWorkers() int {
-	o.maxWorkersMux.RLock()
-	defer o.maxWorkersMux.RUnlock()
-	return o.maxWorkers
+	return o.stateController.GetMaxWorkers()
 }
 
 // GetDAGStats returns statistics about the current DAG
@@ -2599,13 +2583,13 @@ func (o *Overseer) GetBeadFromDAG(beadID string) (types.Bead, error) {
 
 // SetBeadDiscoveryInterval updates the bead discovery interval for the overseer
 func (o *Overseer) SetBeadDiscoveryInterval(interval time.Duration) {
-	o.beadDiscoveryInterval = interval
+	o.stateController.SetBeadDiscoveryInterval(interval)
 	log.Printf("🔧 Bead discovery interval set to %v", interval)
 }
 
 // GetBeadDiscoveryInterval returns the current bead discovery interval
 func (o *Overseer) GetBeadDiscoveryInterval() time.Duration {
-	return o.beadDiscoveryInterval
+	return o.stateController.GetBeadDiscoveryInterval()
 }
 
 // SetRetryDelay updates the base retry delay for the overseer
