@@ -254,6 +254,9 @@ type Overseer struct {
 
 	// Validation support for end-of-chain verification
 	validator *validation.Validator // Validates bead implementations before closure
+
+	// Bead file reader for fallback bead lookups
+	beadFileReader *BeadFileReader
 }
 
 // NewOverseer creates a new overseer instance
@@ -756,6 +759,9 @@ func (o *Overseer) Start(ctx context.Context) error {
 	o.projects = projectScanner.Projects()
 
 	log.Printf("📁 Discovered %d projects", len(o.projects))
+
+	// Initialize bead file reader
+	o.beadFileReader = NewBeadFileReader(o.projects)
 
 	// Start settled-state detection service if enabled
 	if o.settledStateSvc != nil {
@@ -1271,7 +1277,7 @@ func (o *Overseer) registerChainsFromBeadsClient() {
 
 	for _, project := range o.projects {
 		issuesFile := filepath.Join(project.Path, ".beads", "issues.jsonl")
-		beads, err := o.readBeadsFromFile(issuesFile)
+		beads, err := o.beadFileReader.ReadFile(issuesFile)
 		if err != nil {
 			log.Printf("[ChainCompletion] Could not read beads from %s: %v", issuesFile, err)
 			continue
@@ -1340,87 +1346,6 @@ func (o *Overseer) registerChainsFromBeadsClient() {
 }
 
 // GetBeadFromFile reads a single bead from issues.jsonl
-func (o *Overseer) GetBeadFromFile(beadID string) *types.Bead {
-	for _, project := range o.projects {
-		issuesFile := filepath.Join(project.Path, ".beads", "issues.jsonl")
-		beads, err := o.readBeadsFromFile(issuesFile)
-		if err != nil {
-			continue
-		}
-		for _, bead := range beads {
-			if string(bead.ID) == beadID {
-				return &bead
-			}
-		}
-	}
-	return nil
-}
-
-// readBeadsFromFile reads beads from .beads/issues.jsonl file
-func (o *Overseer) readBeadsFromFile(filepath string) ([]types.Bead, error) {
-	data, err := os.ReadFile(filepath)
-	if err != nil {
-		return nil, err
-	}
-
-	var beads []types.Bead
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		// Parse as generic map first to handle the nested dependencies
-		var raw map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &raw); err != nil {
-			continue
-		}
-
-		var bead types.Bead
-		// Manually map fields
-		if id, ok := raw["id"].(string); ok {
-			bead.ID = types.BeadID(id)
-		}
-		if title, ok := raw["title"].(string); ok {
-			bead.Title = title
-		}
-		if desc, ok := raw["description"].(string); ok {
-			bead.Description = desc
-		}
-		if t, ok := raw["type"].(string); ok {
-			bead.Type = t
-		}
-		if status, ok := raw["status"].(string); ok {
-			bead.Status = types.BeadStatus(status)
-		}
-		if project, ok := raw["project"].(string); ok {
-			bead.Project = project
-		}
-		if repo, ok := raw["source_repo"].(string); ok {
-			bead.Repo = repo
-		}
-
-		// Extract depends_on (what this bead needs to complete first)
-		// This is the INVERSE of Dependencies - it tells us what this bead DEPENDS on
-		if deps, ok := raw["dependencies"].([]interface{}); ok {
-			for _, d := range deps {
-				if depMap, ok := d.(map[string]interface{}); ok {
-					if dependsOn, ok := depMap["depends_on_id"].(string); ok {
-						// Store as DependsOn (what this bead depends on)
-						bead.Dependencies = append(bead.Dependencies, types.BeadID(dependsOn))
-					}
-				}
-			}
-		}
-
-		beads = append(beads, bead)
-	}
-
-	log.Printf("[ChainCompletion] Parsed %d beads from %s", len(beads), filepath)
-	return beads, nil
-}
-
 func (o *Overseer) getAllDescendants(nodeID string) []string {
 	var descendants []string
 	visited := make(map[string]bool)

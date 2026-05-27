@@ -155,7 +155,7 @@ func (d *ChainCompletionDetector) countCompletedBeads(beadIDs []types.BeadID) in
 	count := 0
 	for _, beadID := range beadIDs {
 		// Read bead status directly from issues.jsonl (bypasses DAG which may be empty)
-		bead := d.overseer.GetBeadFromFile(string(beadID))
+		bead := d.overseer.beadFileReader.FindByID(string(beadID))
 		if bead == nil {
 			continue
 		}
