@@ -7,14 +7,15 @@
 
 ### P0: Critical
 
-- [ ] **1. Decompose Overseer God Object**
+- [x] **1. Decompose Overseer God Object** (partial — 12 methods extracted)
+  - [x] Extract SpawnRateLimiter (5 methods)
+  - [x] Extract RetryManager (7 methods)
   - [ ] Extract WorkerManager
   - [ ] Extract Scheduler
   - [ ] Extract ChainOrchestrator
   - [ ] Extract ResourceGovernor
   - [ ] Extract ValidationEngine
   - [ ] Extract IntelligenceHub
-  - [ ] Slim down Overseer to coordinator
 
 - [ ] **2. Slim Down Test Files**
   - [ ] Extract test fixtures to `testdata/`
@@ -54,17 +55,22 @@
 3. `6c911a7` refactor(cleanup): remove dead consensus-facilitator code
 4. `f855478` refactor(cleanup): remove duplicate ActivityMonitor
 5. `88bae16` refactor(cleanup): remove unused AgentRegistry
+6. `c6add83` refactor(overseer): extract SpawnRateLimiter
+7. `ce30268` refactor(overseer): extract RetryManager
 
 ## Metrics
 
 | Metric | Before | Current | Change |
 |---|---|---|---|
+| overseer.go lines | 3,976 | 3,739 | -237 |
+| Overseer methods | 112 | 101 | -11 |
 | Total source files | ~250 | ~245 | -5 |
-| Dead code removed | — | 1,086 lines | — |
-| CLI runner unified | — | 189 lines | +1 pkg |
+| Dead code removed | — | 1,336 lines | — |
+| New packages | — | 3 (cli, spawn_rate_limiter, retry_manager) | — |
 
 ## Next Steps
 
-1. Extract test fixtures from large test files
-2. Flatten config structs (CollectiveUnconscious, Pi configs)
-3. Decompose Overseer (RetryManager, WorkerManager first)
+1. **Extract IntelligenceHub** from Overseer (~10 methods)
+2. **Extract WorkerManager** from Overseer (~8 methods)
+3. **Flatten Pi Config structs** (7 nested types → 3)
+4. **Extract test fixtures** from large test files
