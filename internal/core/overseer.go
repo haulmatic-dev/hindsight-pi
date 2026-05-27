@@ -3,7 +3,6 @@ package core
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -268,6 +267,9 @@ type Overseer struct {
 
 	// ErrorLogger provides structured logging
 	errorLogger *ErrorLogger
+
+	// WorkerEnvBuilder builds environment variables for worker processes
+	workerEnvBuilder *WorkerEnvBuilder
 }
 
 // NewOverseer creates a new overseer instance
@@ -303,6 +305,9 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize impact analyzer
 	o.impactAnalyzer = NewImpactAnalyzer(o.findProjectPath)
+
+	// Initialize worker environment builder
+	o.workerEnvBuilder = NewWorkerEnvBuilder(config)
 
 	// Initialize MCP client if enabled
 	if config.MCP.Enabled {
@@ -1546,97 +1551,7 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		// Fallback to go run
 		cmd = exec.Command("go", "run", "cmd/worker/main.go")
 	}
-	env := append(os.Environ(),
-		"HYDRA_WORKER=true", // Clear identifier that this is a Hydra-spawned worker
-		fmt.Sprintf("HYDRA_BEAD_ID=%s", beadIDStr),
-		fmt.Sprintf("HYDRA_PROJECT=%s", bead.Project),
-		fmt.Sprintf("HYDRA_PROJECT_PATH=%s", projectPath),
-		fmt.Sprintf("HYDRA_REPO=%s", bead.Repo),
-		fmt.Sprintf("HYDRA_AGENT_TYPE=%s", agentType),
-		fmt.Sprintf("HYDRA_RETRY_COUNT=%d", retryCount),
-		fmt.Sprintf("HYDRA_BEAD_TITLE=%s", bead.Title),
-		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
-	)
-
-	// Add full bead JSON for enhanced worker context
-	if bead.ID != "" {
-		// Filter empty dependency entries that break BeadID unmarshaling
-		cleanBead := bead
-		cleanDeps := make([]types.BeadID, 0, len(bead.Dependencies))
-		for _, dep := range bead.Dependencies {
-			if dep != "" {
-				cleanDeps = append(cleanDeps, dep)
-			}
-		}
-		cleanBead.Dependencies = cleanDeps
-		beadJSON, err := json.Marshal(cleanBead)
-		if err == nil {
-			env = append(env, fmt.Sprintf("HYDRA_BEAD_JSON=%s", string(beadJSON)))
-		} else {
-			log.Printf("[WARN] Failed to marshal bead to JSON: %v", err)
-		}
-	}
-
-	// Pass API key to worker if configured
-	if o.config != nil && o.config.Agents.Pi.ApiKeyName != "" {
-		if apiKey := os.Getenv(o.config.Agents.Pi.ApiKeyName); apiKey != "" {
-			env = append(env, fmt.Sprintf("%s=%s", o.config.Agents.Pi.ApiKeyName, apiKey))
-		}
-	}
-
-	// Add Hindsight configuration for memory-based context retrieval
-	if o.config != nil && o.config.Intelligence.Hindsight.Enabled {
-		h := o.config.Intelligence.Hindsight
-		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_ENABLED=true"))
-		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_BASE_URL=%s", h.BaseURL))
-		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_TIMEOUT=%s", h.Timeout))
-		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_LIMIT=%d", h.Limit))
-		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_MIN_SCORE=%.2f", h.MinScore))
-		log.Printf("[Worker] Hindsight config passed to worker (baseURL: %s)", h.BaseURL)
-	}
-
-	// Add Pi configuration for Pi agent execution (always enabled)
-	p := o.config.Agents.Pi
-	// Fallback to pi.standard-agent.llm if agents.pi is not set
-	std := o.config.Pi.StandardAgent.LLM
-	if p.Provider == "" && std.Provider != "" {
-		p.Provider = std.Provider
-	}
-	if p.Model == "" && std.Model != "" {
-		p.Model = std.Model
-	}
-	if p.ThinkingLevel == "" && std.ThinkingLevel != "" {
-		p.ThinkingLevel = std.ThinkingLevel
-	}
-	if p.Timeout == "" && std.Timeout != "" {
-		p.Timeout = std.Timeout
-	}
-	if p.ApiKeyName == "" && std.ApiKeyName != "" {
-		p.ApiKeyName = std.ApiKeyName
-	}
-	if p.Provider == "" {
-		p.Provider = "kimi-coding"
-	}
-	if p.Model == "" {
-		p.Model = "kimi-for-coding"
-	}
-	if p.ThinkingLevel == "" {
-		p.ThinkingLevel = "on"
-	}
-	if p.Timeout == "" {
-		p.Timeout = "10m"
-	}
-	if p.ApiKeyName == "" {
-		p.ApiKeyName = "KIMI_API_KEY"
-	}
-	env = append(env, fmt.Sprintf("HYDRA_PI_ENABLED=true"))
-	env = append(env, fmt.Sprintf("HYDRA_PI_PROVIDER=%s", p.Provider))
-	env = append(env, fmt.Sprintf("HYDRA_PI_MODEL=%s", p.Model))
-	env = append(env, fmt.Sprintf("HYDRA_PI_THINKING_LEVEL=%s", p.ThinkingLevel))
-	env = append(env, fmt.Sprintf("HYDRA_PI_TIMEOUT=%s", p.Timeout))
-	env = append(env, fmt.Sprintf("HYDRA_PI_API_KEY_NAME=%s", p.ApiKeyName))
-	env = append(env, fmt.Sprintf("HYDRA_PI_CONFIG_DIR=%s", o.config.Pi.ConfigDir))
-	log.Printf("[Worker] Pi config passed to worker (provider: %s, model: %s)", p.Provider, p.Model)
+	env := o.workerEnvBuilder.Build(bead, projectPath, string(agentType), retryCount)
 
 	cmd.Env = env
 
@@ -2824,71 +2739,9 @@ func (o *Overseer) spawnWorkerWithContextEnrichment(bead types.Bead) (*types.Wor
 	return o.spawnWorkerInternal(bead)
 }
 
-// buildWorkerEnvironmentWithContext builds worker environment with context enrichment
-// Includes Hindsight configuration for memory-based context retrieval
+// buildWorkerEnvironmentWithContext builds worker environment with context enrichment.
 func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead) []string {
-	// Start with basic environment
-	env := []string{
-		fmt.Sprintf("HYDRA_BEAD_ID=%s", bead.ID),
-		fmt.Sprintf("HYDRA_PROJECT=%s", bead.Project),
-		fmt.Sprintf("HYDRA_REPO=%s", bead.Repo),
-		fmt.Sprintf("HYDRA_BEAD_TITLE=%s", bead.Title),
-		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
-	}
-
-	// Add Hindsight configuration if enabled
-	if o.config.Intelligence.Hindsight.Enabled {
-		h := o.config.Intelligence.Hindsight
-		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_ENABLED=true"))
-		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_BASE_URL=%s", h.BaseURL))
-		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_TIMEOUT=%s", h.Timeout))
-		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_LIMIT=%d", h.Limit))
-		env = append(env, fmt.Sprintf("HYDRA_HISTORIESIGHT_MIN_SCORE=%.2f", h.MinScore))
-	}
-
-	// Add Pi configuration (always enabled)
-	p := o.config.Agents.Pi
-	// Fallback to pi.standard-agent.llm if agents.pi is not set
-	std := o.config.Pi.StandardAgent.LLM
-	if p.Provider == "" && std.Provider != "" {
-		p.Provider = std.Provider
-	}
-	if p.Model == "" && std.Model != "" {
-		p.Model = std.Model
-	}
-	if p.ThinkingLevel == "" && std.ThinkingLevel != "" {
-		p.ThinkingLevel = std.ThinkingLevel
-	}
-	if p.Timeout == "" && std.Timeout != "" {
-		p.Timeout = std.Timeout
-	}
-	if p.ApiKeyName == "" && std.ApiKeyName != "" {
-		p.ApiKeyName = std.ApiKeyName
-	}
-	if p.Provider == "" {
-		p.Provider = "kimi-coding"
-	}
-	if p.Model == "" {
-		p.Model = "kimi-for-coding"
-	}
-	if p.ThinkingLevel == "" {
-		p.ThinkingLevel = "on"
-	}
-	if p.Timeout == "" {
-		p.Timeout = "10m"
-	}
-	if p.ApiKeyName == "" {
-		p.ApiKeyName = "KIMI_API_KEY"
-	}
-	env = append(env, fmt.Sprintf("HYDRA_PI_ENABLED=true"))
-	env = append(env, fmt.Sprintf("HYDRA_PI_PROVIDER=%s", p.Provider))
-	env = append(env, fmt.Sprintf("HYDRA_PI_MODEL=%s", p.Model))
-	env = append(env, fmt.Sprintf("HYDRA_PI_THINKING_LEVEL=%s", p.ThinkingLevel))
-	env = append(env, fmt.Sprintf("HYDRA_PI_TIMEOUT=%s", p.Timeout))
-	env = append(env, fmt.Sprintf("HYDRA_PI_API_KEY_NAME=%s", p.ApiKeyName))
-	env = append(env, fmt.Sprintf("HYDRA_PI_CONFIG_DIR=%s", o.config.Pi.ConfigDir))
-
-	return env
+	return o.workerEnvBuilder.BuildForContextEnrichment(bead)
 }
 
 // runPiSetup initializes and runs the Pi ecosystem setup
