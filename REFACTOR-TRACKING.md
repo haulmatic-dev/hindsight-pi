@@ -7,7 +7,7 @@
 
 ### P0: Critical
 
-- [x] **1. Decompose Overseer God Object** (partial — 32 methods extracted)
+- [x] **1. Decompose Overseer God Object** (partial — 34 methods extracted)
   - [x] Extract SpawnRateLimiter (5 methods)
   - [x] Extract RetryManager (7 methods)
   - [x] Extract ProjectScanner (2 methods)
@@ -27,7 +27,7 @@
   - [x] Extract WorkerLifecycle (worker process lifecycle)
   - [x] Extract Scheduler (main scheduling loop)
   - [x] Extract ServiceStarter (background service lifecycle)
-  - [ ] Extract WorkerSpawner (spawnWorker + spawnWorkerInternal)
+  - [x] Extract WorkerSpawner (spawnWorker + spawnWorkerInternal)
   - [ ] Extract ChainOrchestrator
   - [ ] Extract ResourceGovernor
   - [ ] Extract ValidationEngine
@@ -60,10 +60,11 @@
   - `agents/consensus-facilitator.go`
   - `internal/core/activity_monitor.go` (duplicate)
   - `internal/agents/connector.go` AgentRegistry
+  - `WorkerSpawner` interface + `defaultWorkerSpawner` (unused)
 
 - [ ] **10. Package Reorganization**
 
-## Commits So Far (35)
+## Commits So Far (37)
 
 1. `a317e9c` refactor(cli): add unified CLI runner package
 2. `ece1b1d` refactor(cleanup): remove dead code packages
@@ -87,23 +88,24 @@
 20. `latest` refactor(overseer): extract ChainRegistrar
 21. `latest` refactor(overseer): extract DAGBuilder
 22. `latest` refactor(overseer): extract ImpactAnalyzer
-23. `latest` refactor(overseer): move batch retention to IntelligenceHub
+23. `latest` refactor(overseer): move batch retention submission to IntelligenceHub
 24. `latest` refactor(overseer): extract WorkerEnvBuilder
 25. `latest` refactor(overseer): extract BeadDiscovery
 26. `latest` refactor(overseer): extract ProjectResolver
 27. `latest` refactor(overseer): extract WorkerLifecycle
 28. `latest` refactor(overseer): extract Scheduler
 29. `latest` refactor(overseer): extract ServiceStarter
+30. `latest` refactor(overseer): extract WorkerSpawner
 
 ## Metrics
 
 | Metric | Before | Current | Change |
 |---|---|---|---|
-| overseer.go lines | 3,976 | **2,009** | -1,967 (-49%) |
-| Overseer methods | 112 | **83** | -29 |
+| overseer.go lines | 3,976 | **1,765** | -2,211 (-56%) |
+| Overseer methods | 112 | **84** | -28 |
 | Total source files | ~250 | ~250 | +0 (removed dead, added new) |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 19 | — |
+| New packages | — | 20 | — |
 | Tests | — | **542 passed** ✅ | — |
 
 ## New Packages
@@ -130,10 +132,28 @@
 | `internal/core/worker_lifecycle.go` | Worker process lifecycle |
 | `internal/core/scheduler.go` | Main scheduling loop |
 | `internal/core/service_starter.go` | Background service lifecycle |
+| `internal/core/worker_spawner.go` | Worker process creation |
+
+## Remaining Big Methods in Overseer
+
+| Method | Lines | Notes |
+|---|---|---|
+| Start | ~50 | Main loop, now delegates to ServiceStarter + Scheduler |
+| initializeMCP | ~49 | MCP-specific, could extract to MCPManager |
+| initializeSettledStateService | ~41 | Could extract to SettledStateInitializer |
+| initializeChainCompletionDetector | ~42 | Could extract to ChainCompletionInitializer |
+| submitExecutionResultToBatchRetention | ~49 | MCP message handler |
+| sendMCPWorkerCompletion | ~31 | MCP notification |
+| runPiSetup | ~47 | Pi ecosystem setup |
+| validateScope | ~31 | Scope validation |
+| closeBead | ~39 | Bead closure + validation |
+| spawnWorkersForNodes | ~39 | DAG-based spawning |
+| getRetryEligibleBeads | ~40 | Retry bead filtering |
 
 ## Next Steps
 
-1. **Extract WorkerSpawner** (spawnWorker + spawnWorkerInternal) — biggest remaining cluster (~240 lines)
-2. **Migrate refresh methods** to use IntelligenceHub (remove old fields)
+1. **Extract MCPManager** (MCP methods cluster)
+2. **Extract Initializer types** (settled-state, chain-completion)
 3. **Flatten Pi Config structs** (32 config struct types)
 4. **Extract test fixtures** from large test files
+5. **PR to fix/hindsight-consolidation**
