@@ -2,7 +2,6 @@ package agents
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -97,37 +96,4 @@ const (
 	AgentStateAborted
 )
 
-// AgentRegistry manages available agent connectors
-type AgentRegistry struct {
-	connectors map[string]AgentConnector
-	mu         sync.RWMutex
-}
 
-func NewAgentRegistry() *AgentRegistry {
-	return &AgentRegistry{
-		connectors: make(map[string]AgentConnector),
-	}
-}
-
-func (r *AgentRegistry) Register(name string, connector AgentConnector) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.connectors[name] = connector
-}
-
-func (r *AgentRegistry) Get(name string) (AgentConnector, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	c, ok := r.connectors[name]
-	return c, ok
-}
-
-func (r *AgentRegistry) List() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	names := make([]string, 0, len(r.connectors))
-	for name := range r.connectors {
-		names = append(names, name)
-	}
-	return names
-}
