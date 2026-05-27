@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/intelligence"
-	"github.com/haulmatic-dev/hydra/internal/mcp"
 )
 
 // ConfigManager handles dynamic configuration changes for the overseer.
@@ -129,27 +128,19 @@ func (cm *ConfigManager) refreshGPTCacheClient(change ToolConfigChange) {
 
 func (cm *ConfigManager) refreshMCPClient(change ToolConfigChange) {
 	o := cm.overseer
-	o.mcpMu.Lock()
-	defer o.mcpMu.Unlock()
 
 	if !change.EnabledAfter {
-		if o.mcpClient != nil {
-			if err := o.mcpClient.Disconnect(); err != nil {
-				log.Printf("[MCP] Error disconnecting: %v", err)
-			}
-			o.mcpClient = nil
-			log.Printf("[MCP] Client disabled")
+		if err := o.mcpManager.Stop(); err != nil {
+			log.Printf("[MCP] Error stopping: %v", err)
 		}
+		log.Printf("[MCP] Client disabled")
 		return
 	}
 
-	agentID := "hydra-overseer-" + time.Now().Format("20060102-150405")
-	client, err := mcp.NewHTTPClient(o.config.MCP.URL, agentID)
-	if err != nil {
-		log.Printf("[MCP] Error creating client: %v", err)
+	if err := o.mcpManager.Initialize(&o.config.MCP); err != nil {
+		log.Printf("[MCP] Error reinitializing client: %v", err)
 		return
 	}
 
-	o.mcpClient = client
 	log.Printf("[MCP] Client reinitialized")
 }
