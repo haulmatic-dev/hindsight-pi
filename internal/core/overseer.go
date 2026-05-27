@@ -204,6 +204,7 @@ type Overseer struct {
 	spawner               WorkerSpawner // Interface for spawning workers (allows mocking in tests)
 	dag                   *DAG
 	dagMu                 sync.RWMutex
+	dagNavigator          *DAGNavigator
 	completed             map[string]bool                 // Track completed beads for this session
 	retryManager          *RetryManager                   // Retry and validation-retry tracking
 	intelligenceHub       *IntelligenceHub                // Encapsulates TLDR, GPTCache, Hindsight clients
@@ -283,6 +284,7 @@ func NewOverseer(config *Config) *Overseer {
 		bvClient:              bv.NewClient(),
 		spawner:               &defaultWorkerSpawner{},
 		dag:                   NewDAG(),
+		dagNavigator:          NewDAGNavigator(NewDAG()),
 		completed:        make(map[string]bool),
 		retryManager:      NewRetryManager(defaultBaseDelay, defaultMaxDelay),
 		spawnRateLimiter:  NewSpawnRateLimiter(),
@@ -959,6 +961,7 @@ func (o *Overseer) buildDAG() error {
 	if o.dag == nil {
 		log.Printf("[DAG] DAG was nil, creating new instance")
 		o.dag = NewDAG()
+	o.dagNavigator = NewDAGNavigator(o.dag)
 	}
 
 	// Clear existing DAG
@@ -2574,47 +2577,24 @@ func (o *Overseer) GetReadyBeadsFromDAG() []types.Bead {
 }
 
 // GetBeadDependencies returns the IDs of beads that the given bead depends on.
-// This is a thread-safe wrapper around the DAG's GetDependencies method.
 func (o *Overseer) GetBeadDependencies(beadID string) ([]string, error) {
 	o.dagMu.RLock()
 	defer o.dagMu.RUnlock()
-
-	if o.dag == nil {
-		return nil, fmt.Errorf("DAG not initialized")
-	}
-
-	return o.dag.GetDependencies(beadID)
+	return o.dagNavigator.GetDependencies(beadID)
 }
 
 // GetBeadDependents returns the IDs of beads that depend on the given bead.
-// This is a thread-safe wrapper around the DAG's GetOutEdges method.
 func (o *Overseer) GetBeadDependents(beadID string) ([]string, error) {
 	o.dagMu.RLock()
 	defer o.dagMu.RUnlock()
-
-	if o.dag == nil {
-		return nil, fmt.Errorf("DAG not initialized")
-	}
-
-	return o.dag.GetOutEdges(beadID)
+	return o.dagNavigator.GetDependents(beadID)
 }
 
 // GetBeadFromDAG retrieves a single bead from the DAG by its ID.
-// Returns error if the bead is not found in the DAG.
 func (o *Overseer) GetBeadFromDAG(beadID string) (types.Bead, error) {
 	o.dagMu.RLock()
 	defer o.dagMu.RUnlock()
-
-	if o.dag == nil {
-		return types.Bead{}, fmt.Errorf("DAG not initialized")
-	}
-
-	node, exists := o.dag.GetNode(beadID)
-	if !exists {
-		return types.Bead{}, fmt.Errorf("bead %s not found in DAG", beadID)
-	}
-
-	return node.Bead, nil
+	return o.dagNavigator.GetBead(beadID)
 }
 
 // SetBeadDiscoveryInterval updates the bead discovery interval for the overseer
