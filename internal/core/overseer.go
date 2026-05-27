@@ -257,6 +257,9 @@ type Overseer struct {
 
 	// Bead file reader for fallback bead lookups
 	beadFileReader *BeadFileReader
+
+	// ErrorLogger provides structured logging
+	errorLogger *ErrorLogger
 }
 
 // NewOverseer creates a new overseer instance
@@ -340,6 +343,9 @@ func NewOverseer(config *Config) *Overseer {
 	// Initialize validation service
 	o.validator = validation.NewValidator(validation.DefaultValidationConfig())
 	log.Printf("[Validation] Initialized bead validation service")
+
+	// Initialize error logger
+	o.errorLogger = NewErrorLogger(o.retryManager.GetRetryCount)
 
 	// Initialize chain completion detector if enabled
 	if config.Overseer.ChainDetection.Enabled {
@@ -701,32 +707,6 @@ func (o *Overseer) validateScope(bundle *IntelligenceBundle, targetFiles []strin
 }
 
 // shouldRetry checks if a bead should be retried based on retry count and cooldown
-func (o *Overseer) logError(component, operation, beadID string, err error, severity string) {
-	retryCount := o.retryManager.GetRetryCount(beadID)
-
-	switch severity {
-	case "fatal":
-		log.Printf("[FATAL] [%s] %s failed | bead=%s | retries=%d | error=%v",
-			component, operation, beadID, retryCount, err)
-	case "error":
-		log.Printf("[ERROR] [%s] %s failed | bead=%s | retries=%d | error=%v",
-			component, operation, beadID, retryCount, err)
-	case "warn", "warning":
-		log.Printf("[WARN] [%s] %s issue | bead=%s | retries=%d | error=%v",
-			component, operation, beadID, retryCount, err)
-	default:
-		log.Printf("[INFO] [%s] %s | bead=%s | retries=%d | error=%v",
-			component, operation, beadID, retryCount, err)
-	}
-}
-
-// logGracefulDegradation logs a non-fatal error that the system recovered from
-func (o *Overseer) logGracefulDegradation(component, operation, action string, err error) {
-	log.Printf("[DEGRADED] [%s] %s failed but continuing | recovery=%s | error=%v",
-		component, operation, action, err)
-}
-
-// isIntelligenceEnabled checks if any intelligence services are enabled
 func (o *Overseer) isIntelligenceEnabled() bool {
 	o.intelMutex.RLock()
 	defer o.intelMutex.RUnlock()
@@ -902,7 +882,7 @@ func (o *Overseer) tick() error {
 	// Build/refresh DAG from all beads
 	if err := o.buildDAG(); err != nil {
 		// Graceful degradation: log error and continue with existing DAG
-		o.logGracefulDegradation("Overseer", "buildDAG", "using existing DAG", err)
+		o.errorLogger.GracefulDegradation("Overseer", "buildDAG", "using existing DAG", err)
 		// Continue with existing DAG if rebuild fails
 	}
 
@@ -1029,7 +1009,7 @@ func (o *Overseer) tick() error {
 			if !isResourceConstraint {
 				o.retryManager.RecordRetry(beadIDStr, err)
 			}
-			o.logError("Overseer", "spawnWorker", beadIDStr, err, "error")
+			o.errorLogger.Error("Overseer", "spawnWorker", beadIDStr, err, "error")
 			continue
 		}
 
@@ -1138,7 +1118,7 @@ func (o *Overseer) buildDAG() error {
 					Project: project.Name,
 					Err:     err,
 				}
-				o.logGracefulDegradation("beadsClient", "ListBeads",
+				o.errorLogger.GracefulDegradation("beadsClient", "ListBeads",
 					fmt.Sprintf("skipping project %s", project.Name), fetchErr)
 				fetchErrors = append(fetchErrors, fetchErr)
 				continue
@@ -1154,7 +1134,7 @@ func (o *Overseer) buildDAG() error {
 						Project: project.Name,
 						Err:     err,
 					}
-					o.logGracefulDegradation("beadsClient", "GetBead",
+					o.errorLogger.GracefulDegradation("beadsClient", "GetBead",
 						fmt.Sprintf("using list data for %s", bead.ID), fetchErr)
 					allBeads = append(allBeads, bead)
 				} else {
@@ -1173,7 +1153,7 @@ func (o *Overseer) buildDAG() error {
 						Repo:    repo.Name,
 						Err:     err,
 					}
-					o.logGracefulDegradation("beadsClient", "ListBeads",
+					o.errorLogger.GracefulDegradation("beadsClient", "ListBeads",
 						fmt.Sprintf("skipping repo %s/%s", project.Name, repo.Name), fetchErr)
 					fetchErrors = append(fetchErrors, fetchErr)
 					continue
@@ -1190,7 +1170,7 @@ func (o *Overseer) buildDAG() error {
 							Repo:    repo.Name,
 							Err:     err,
 						}
-						o.logGracefulDegradation("beadsClient", "GetBead",
+						o.errorLogger.GracefulDegradation("beadsClient", "GetBead",
 							fmt.Sprintf("using list data for %s", bead.ID), fetchErr)
 						allBeads = append(allBeads, bead)
 					} else {
@@ -1211,7 +1191,7 @@ func (o *Overseer) buildDAG() error {
 				log.Printf("[DAG] Duplicate bead skipped: %s", bead.ID)
 				continue
 			}
-			o.logError("DAG", "AddNode", string(bead.ID), err, "warn")
+			o.errorLogger.Error("DAG", "AddNode", string(bead.ID), err, "warn")
 			nodeErrors++
 		}
 	}
@@ -1231,7 +1211,7 @@ func (o *Overseer) buildDAG() error {
 				case errors.Is(err, ErrEdgeCreatesCycle):
 					log.Printf("[DAG] Cycle would be created: %s -> %s, skipping edge", depIDStr, beadID)
 				default:
-					o.logError("DAG", "AddEdge", beadID, err, "warn")
+					o.errorLogger.Error("DAG", "AddEdge", beadID, err, "warn")
 				}
 				edgeErrors++
 				// Continue even if edge creation fails (graceful degradation)
@@ -1241,7 +1221,7 @@ func (o *Overseer) buildDAG() error {
 
 	// Detect and log cycles
 	if cycle, err := o.dag.DetectCycle(); err != nil {
-		o.logError("DAG", "DetectCycle", "", err, "error")
+		o.errorLogger.Error("DAG", "DetectCycle", "", err, "error")
 	} else if cycle != nil {
 		log.Printf("[DAG] Cycle detected: %v", cycle)
 	}
@@ -1831,7 +1811,7 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 				} else {
 					// Worker is still tracked and not completed - it exists
 					o.workerMutex.Unlock()
-					o.logError("spawnWorker", "duplicate_check", beadIDStr, fmt.Errorf("worker already exists"), "warn")
+					o.errorLogger.Error("spawnWorker", "duplicate_check", beadIDStr, fmt.Errorf("worker already exists"), "warn")
 					return fmt.Errorf("worker already exists for bead %s", beadIDStr)
 				}
 			} else {
@@ -1843,7 +1823,7 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		} else {
 			// No worker tracker, just check activeWorkers
 			o.workerMutex.Unlock()
-			o.logError("spawnWorker", "duplicate_check", beadIDStr, fmt.Errorf("worker already exists"), "warn")
+			o.errorLogger.Error("spawnWorker", "duplicate_check", beadIDStr, fmt.Errorf("worker already exists"), "warn")
 			return fmt.Errorf("worker already exists for bead %s", beadIDStr)
 		}
 	}
@@ -1879,7 +1859,7 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 				Attempts:  count,
 				LastError: lastErr,
 			}
-			o.logError("spawnWorker", "retry_exhausted", beadIDStr, err, "error")
+			o.errorLogger.Error("spawnWorker", "retry_exhausted", beadIDStr, err, "error")
 			return err
 		}
 	}
@@ -1923,7 +1903,7 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 	agentTypes := types.DetermineAgentTypes(bead.Type)
 	if len(agentTypes) == 0 {
 		err := fmt.Errorf("no agent type found for bead type: %s", bead.Type)
-		o.logError("spawnWorker", "agent_type", beadIDStr, err, "error")
+		o.errorLogger.Error("spawnWorker", "agent_type", beadIDStr, err, "error")
 		return nil, err
 	}
 
@@ -2076,7 +2056,7 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 			AgentType: string(agentType),
 			Err:       err,
 		}
-		o.logError("spawnWorker", "process_start", beadIDStr, spawnErr, "error")
+		o.errorLogger.Error("spawnWorker", "process_start", beadIDStr, spawnErr, "error")
 
 		// Record spawn failure for exponential backoff
 		if strings.Contains(err.Error(), "resource temporarily unavailable") ||
@@ -2238,7 +2218,7 @@ func (o *Overseer) handleWorkerSuccess(worker *types.Worker, duration time.Durat
 
 	newlyReady, err := o.dag.MarkCompleted(worker.ID)
 	if err != nil {
-		o.logError("DAG", "MarkCompleted", worker.ID, err, "warn")
+		o.errorLogger.Error("DAG", "MarkCompleted", worker.ID, err, "warn")
 		return nil
 	}
 
@@ -2286,7 +2266,7 @@ func (o *Overseer) handleWorkerFailure(worker *types.Worker, exitCode int, durat
 	o.dagMu.Lock()
 	defer o.dagMu.Unlock()
 	if err := o.dag.MarkFailed(worker.ID); err != nil {
-		o.logError("DAG", "MarkFailed", worker.ID, err, "warn")
+		o.errorLogger.Error("DAG", "MarkFailed", worker.ID, err, "warn")
 	}
 }
 
@@ -2314,7 +2294,7 @@ func (o *Overseer) handleWorkerCompletion(comp workerCompletion) {
 	exitCode := comp.exitCode
 
 	if comp.closeError != nil {
-		o.logError("beadsClient", "CloseBead", comp.worker.ID, comp.closeError, "warn")
+		o.errorLogger.Error("beadsClient", "CloseBead", comp.worker.ID, comp.closeError, "warn")
 		if isDependencyError(comp.closeError) {
 			log.Printf("[Worker] Bead %s processed but not closed due to dependencies - will retry later", comp.worker.BeadID.String())
 			success = false

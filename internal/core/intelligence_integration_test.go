@@ -1116,7 +1116,7 @@ func TestLogGracefulDegradation(t *testing.T) {
 	overseer := NewOverseer(DefaultConfig())
 
 	// Test that logGracefulDegradation doesn't panic
-	overseer.logGracefulDegradation("TestComponent", "TestOperation", "fallback action", fmt.Errorf("test error"))
+	overseer.errorLogger.GracefulDegradation("TestComponent", "TestOperation", "fallback action", fmt.Errorf("test error"))
 
 	// If we get here without panic, the test passes
 	t.Log("logGracefulDegradation executed without panic")

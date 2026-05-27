@@ -20,7 +20,7 @@ func (o *Overseer) spawnWorkerViaAgent(bead types.Bead) (*types.Worker, error) {
 	agentTypes := types.DetermineAgentTypes(bead.Type)
 	if len(agentTypes) == 0 {
 		err := fmt.Errorf("no agent type found for bead type: %s", bead.Type)
-		o.logError("spawnWorkerViaAgent", "agent_type", beadIDStr, err, "error")
+		o.errorLogger.Error("spawnWorkerViaAgent", "agent_type", beadIDStr, err, "error")
 		return nil, err
 	}
 
@@ -77,7 +77,7 @@ func (o *Overseer) spawnWorkerViaAgent(bead types.Bead) (*types.Worker, error) {
 	ctx := context.Background()
 	session, err := connector.Start(ctx, bead, opts)
 	if err != nil {
-		o.logError("spawnWorkerViaAgent", "start_session", beadIDStr, err, "error")
+		o.errorLogger.Error("spawnWorkerViaAgent", "start_session", beadIDStr, err, "error")
 		return nil, err
 	}
 
