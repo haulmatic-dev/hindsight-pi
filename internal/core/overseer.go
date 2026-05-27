@@ -749,9 +749,11 @@ func (o *Overseer) Start(ctx context.Context) error {
 	}
 
 	// Discover projects
-	if err := o.discoverProjects(); err != nil {
+	projectScanner := NewProjectScanner(o.config)
+	if err := projectScanner.Discover(); err != nil {
 		return fmt.Errorf("failed to discover projects: %w", err)
 	}
+	o.projects = projectScanner.Projects()
 
 	log.Printf("📁 Discovered %d projects", len(o.projects))
 
@@ -864,116 +866,6 @@ func (o *Overseer) queueRepoIndexing(projectName, repoPath string) {
 		log.Printf("[TLDRIndexer] Queued for indexing: %s (%s)", projectName, repoPath)
 	}
 }
-
-// discoverProjects finds all projects in ~/source-code/
-func (o *Overseer) discoverProjects() error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	rootPath := filepath.Join(homeDir, "source-code")
-
-	// If projects are configured, use those
-	if len(o.config.Projects) > 0 {
-		for _, pc := range o.config.Projects {
-			project := types.Project{
-				Name: pc.Name,
-				Path: pc.Path,
-				Type: types.RepoType(pc.Type),
-			}
-
-			if pc.Type == "multi" {
-				for _, rc := range pc.Repos {
-					project.Repos = append(project.Repos, types.Repo{
-						Name: rc.Name,
-						Path: rc.Path,
-					})
-				}
-			}
-
-			o.projects = append(o.projects, project)
-		}
-		return nil
-	}
-
-	// Auto-discovery
-	entries, err := os.ReadDir(rootPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			log.Printf("⚠️  Projects directory not found: %s", rootPath)
-			return nil
-		}
-		return fmt.Errorf("failed to read projects directory: %w", err)
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		projectPath := filepath.Join(rootPath, entry.Name())
-		project, err := o.inspectProject(projectPath, entry.Name())
-		if err != nil {
-			log.Printf("⚠️  Could not inspect project %s: %v", entry.Name(), err)
-			continue
-		}
-
-		if project != nil {
-			o.projects = append(o.projects, *project)
-		}
-	}
-
-	return nil
-}
-
-// inspectProject determines if a directory is a project and its type
-func (o *Overseer) inspectProject(path, name string) (*types.Project, error) {
-	// Check for .beads directory at root (single repo)
-	beadsPath := filepath.Join(path, ".beads", "beads.db")
-	if _, err := os.Stat(beadsPath); err == nil {
-		return &types.Project{
-			Name: name,
-			Path: path,
-			Type: types.RepoTypeSingle,
-		}, nil
-	}
-
-	// Check subdirectories for .beads (multi-repo)
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var repos []types.Repo
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		subBeadsPath := filepath.Join(path, entry.Name(), ".beads", "beads.db")
-		if _, err := os.Stat(subBeadsPath); err == nil {
-			repos = append(repos, types.Repo{
-				Name: entry.Name(),
-				Path: entry.Name(),
-			})
-		}
-	}
-
-	if len(repos) > 0 {
-		return &types.Project{
-			Name:  name,
-			Path:  path,
-			Type:  types.RepoTypeMulti,
-			Repos: repos,
-		}, nil
-	}
-
-	// No beads found
-	return nil, nil
-}
-
-// tick performs one iteration of the scheduling loop
 func (o *Overseer) tick() error {
 	// Check if paused
 	if o.IsPaused() {
