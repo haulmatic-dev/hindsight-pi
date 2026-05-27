@@ -515,14 +515,14 @@ func TestIntelligenceConfigLoading(t *testing.T) {
 
 			overseer := NewOverseer(config)
 
-			// Check TLDR client initialization
-			hasTLDR := overseer.tldrClient != nil
+			// Check TLDR client initialization via hub
+			hasTLDR := overseer.intelligenceHub.TLDR() != nil
 			if hasTLDR != tt.expectTLDRInitialized {
 				t.Errorf("TLDR client initialized = %v, expected %v", hasTLDR, tt.expectTLDRInitialized)
 			}
 
-			// Check GPTCache client initialization
-			hasGPT := overseer.gptCache != nil
+			// Check GPTCache client initialization via hub
+			hasGPT := overseer.intelligenceHub.GPTCache() != nil
 			if hasGPT != tt.expectGPTInitialized {
 				t.Errorf("GPTCache client initialized = %v, expected %v", hasGPT, tt.expectGPTInitialized)
 			}

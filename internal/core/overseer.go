@@ -206,13 +206,15 @@ type Overseer struct {
 	dagMu                 sync.RWMutex
 	completed             map[string]bool                 // Track completed beads for this session
 	retryManager          *RetryManager                   // Retry and validation-retry tracking
+	intelligenceHub       *IntelligenceHub                // Encapsulates TLDR, GPTCache, Hindsight clients
+	// TODO: Migrate these fields to IntelligenceHub
 	tldrClient            *intelligence.TLDRClient        // TLDR client for impact analysis
 	gptCache              *GPTCacheClient                 // GPTCache client for caching
 	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
 	batchRetentionSvc     *services.BatchRetentionService // Batch retention service for efficient memory storage
 	hindsightLifecycle    *services.HindsightLifecycle    // Hindsight lifecycle manager for memory management
-	bvClient              *bv.Client                      // BV client for graph analytics
 	intelMutex            sync.RWMutex                    // Mutex for intelligence clients
+	bvClient              *bv.Client                      // BV client for graph analytics
 	settledStateSvc       *SettledStateService            // Settled-state detection service
 
 	// MCP (Model Context Protocol) fields
@@ -282,12 +284,13 @@ func NewOverseer(config *Config) *Overseer {
 		spawner:               &defaultWorkerSpawner{},
 		dag:                   NewDAG(),
 		completed:        make(map[string]bool),
-		retryManager:     NewRetryManager(defaultBaseDelay, defaultMaxDelay),
-		spawnRateLimiter: NewSpawnRateLimiter(),
+		retryManager:      NewRetryManager(defaultBaseDelay, defaultMaxDelay),
+		spawnRateLimiter:  NewSpawnRateLimiter(),
+		intelligenceHub:   NewIntelligenceHub(config.Intelligence),
 	}
 
-	// Initialize intelligence clients if enabled
-	o.initializeIntelligenceClients()
+	// Initialize intelligence hub
+	o.intelligenceHub.Initialize()
 
 	// Initialize MCP client if enabled
 	if config.MCP.Enabled {
@@ -402,79 +405,6 @@ func (o *Overseer) initializeSkillUpdater() error {
 }
 
 // initializeIntelligenceClients creates intelligence service clients based on config
-func (o *Overseer) initializeIntelligenceClients() {
-	o.intelMutex.Lock()
-	defer o.intelMutex.Unlock()
-
-	intellConfig := o.config.Intelligence
-
-	// Initialize TLDR client if enabled (CLI mode)
-	if intellConfig.TLDR.Enabled {
-		o.tldrClient = intelligence.NewTLDRClient(
-			intellConfig.TLDR.BaseURL,
-			true, // useCLI
-			"llm-tldr",
-			"",
-			intellConfig.TLDR.Timeout,
-		)
-		log.Printf("[Intelligence] TLDR client initialized (baseURL: %s, maxFiles: %d)",
-			intellConfig.TLDR.BaseURL, intellConfig.TLDR.MaxFiles)
-
-		// Initialize TLDR indexer if enabled
-		if intellConfig.TLDR.Indexing.Enabled {
-			o.tldrIndexer = NewTLDRIndexer(
-				intellConfig.TLDR.Indexing.MaxConcurrent,
-				intellConfig.TLDR.Indexing.RetryAttempts,
-				intellConfig.TLDR.Indexing.RetryDelay,
-				"llm-tldr",
-			)
-			log.Printf("[Intelligence] TLDR indexer initialized (maxConcurrent: %d, queueSize: %d)",
-				intellConfig.TLDR.Indexing.MaxConcurrent, intellConfig.TLDR.Indexing.QueueSize)
-		}
-	}
-
-	// Initialize GPTCache client if enabled
-	if intellConfig.GPTCache.Enabled {
-		o.gptCache = NewGPTCacheClient(
-			intellConfig.GPTCache.ServerURL,
-			5*time.Second,
-		)
-		log.Printf("[Intelligence] GPTCache client initialized (server: %s)",
-			intellConfig.GPTCache.ServerURL)
-	}
-
-	// Initialize Hindsight client if enabled
-	if intellConfig.Hindsight.Enabled {
-		o.hindsightClient = hindsight.NewClient(
-			hindsight.WithBaseURL(intellConfig.Hindsight.BaseURL),
-			hindsight.WithTimeout(intellConfig.Hindsight.Timeout),
-			hindsight.WithDefaultLimit(intellConfig.Hindsight.Limit),
-			hindsight.WithMinScore(intellConfig.Hindsight.MinScore),
-			hindsight.WithEnabled(true),
-		)
-		log.Printf("[Intelligence] Hindsight client initialized (baseURL: %s, limit: %d, minScore: %.2f)",
-			intellConfig.Hindsight.BaseURL, intellConfig.Hindsight.Limit, intellConfig.Hindsight.MinScore)
-
-		// Set environment variables so they're inherited by Pi connector and workers
-		os.Setenv("HYDRA_HISTORIESIGHT_ENABLED", "true")
-		os.Setenv("HYDRA_HISTORIESIGHT_BASE_URL", intellConfig.Hindsight.BaseURL)
-		os.Setenv("HYDRA_HISTORIESIGHT_TIMEOUT", intellConfig.Hindsight.Timeout.String())
-		os.Setenv("HYDRA_HISTORIESIGHT_LIMIT", fmt.Sprintf("%d", intellConfig.Hindsight.Limit))
-		os.Setenv("HYDRA_HISTORIESIGHT_MIN_SCORE", fmt.Sprintf("%.2f", intellConfig.Hindsight.MinScore))
-		log.Printf("[Intelligence] Hindsight environment variables set for child processes")
-
-		// Initialize batch retention service for efficient memory storage
-		o.batchRetentionSvc = services.NewBatchRetentionService(o.hindsightClient)
-		log.Printf("[Intelligence] Batch retention service initialized (batchSize: %d, flushInterval: %v)",
-			services.MemoryBatchSize, services.BatchFlushInterval)
-
-		// NOTE: Using external Hindsight server on port 8888.
-		// Lifecycle manager disabled to avoid starting a second embedded server.
-		// o.hindsightLifecycle = services.NewHindsightLifecycle(...)
-	}
-}
-
-// initializeSettledStateService creates and configures the settled-state detection service
 func (o *Overseer) initializeSettledStateService() {
 	config := o.config.Intelligence.SettledState
 
@@ -503,8 +433,9 @@ func (o *Overseer) initializeSettledStateService() {
 	}
 
 	// Set up Hindsight reflector for settled-state reflection
-	if o.hindsightClient != nil && o.hindsightClient.IsEnabled() {
-		o.settledStateSvc.SetReflector(o.hindsightClient)
+	hindsightClient := o.intelligenceHub.Hindsight()
+	if hindsightClient != nil && hindsightClient.IsEnabled() {
+		o.settledStateSvc.SetReflector(hindsightClient)
 		log.Printf("[SettledState] Hindsight reflection enabled")
 	}
 
@@ -674,11 +605,7 @@ func (o *Overseer) validateScope(bundle *IntelligenceBundle, targetFiles []strin
 
 // shouldRetry checks if a bead should be retried based on retry count and cooldown
 func (o *Overseer) isIntelligenceEnabled() bool {
-	o.intelMutex.RLock()
-	defer o.intelMutex.RUnlock()
-
-	return o.config.Intelligence.TLDR.Enabled ||
-		o.config.Intelligence.GPTCache.Enabled
+	return o.config.Intelligence.TLDR.Enabled || o.config.Intelligence.GPTCache.Enabled
 }
 
 // Start begins the overseer's main loop
@@ -726,12 +653,12 @@ func (o *Overseer) Start(ctx context.Context) error {
 	}
 
 	// Start TLDR indexer if enabled
-	if o.tldrIndexer != nil {
-		o.tldrIndexer.Start()
+	if indexer := o.intelligenceHub.Indexer(); indexer != nil {
+		indexer.Start()
 		log.Println("📇 TLDR indexer started")
 
 		// Queue initial indexing for all project repos
-		o.queueInitialIndexing()
+		o.intelligenceHub.QueueInitialIndexing(o.projects)
 	}
 
 	// Start epic scanner
@@ -766,8 +693,8 @@ func (o *Overseer) Start(ctx context.Context) error {
 				log.Println("📚 Skill updater stopped")
 			}
 			// Stop TLDR indexer
-			if o.tldrIndexer != nil {
-				o.tldrIndexer.Stop()
+			if indexer := o.intelligenceHub.Indexer(); indexer != nil {
+				indexer.Stop()
 				log.Println("📇 TLDR indexer stopped")
 			}
 			// Stop epic scanner
@@ -784,41 +711,7 @@ func (o *Overseer) Start(ctx context.Context) error {
 	}
 }
 
-// queueInitialIndexing queues all project repositories for initial TLDR indexing
-func (o *Overseer) queueInitialIndexing() {
-	if o.tldrIndexer == nil {
-		return
-	}
-
-	log.Printf("[TLDRIndexer] Queueing initial indexing for %d projects", len(o.projects))
-
-	for _, project := range o.projects {
-		if project.Type == "multi" {
-			// Multi-repo project: index each repo
-			for _, repo := range project.Repos {
-				if o.tldrIndexer.QueueIndex(repo.Path) {
-					log.Printf("[TLDRIndexer] Queued for indexing: %s/%s", project.Name, repo.Name)
-				}
-			}
-		} else {
-			// Single repo project: index project path
-			if o.tldrIndexer.QueueIndex(project.Path) {
-				log.Printf("[TLDRIndexer] Queued for indexing: %s", project.Name)
-			}
-		}
-	}
-}
-
-// queueRepoIndexing queues a repository for TLDR indexing after bead completion
-func (o *Overseer) queueRepoIndexing(projectName, repoPath string) {
-	if o.tldrIndexer == nil {
-		return
-	}
-
-	if o.tldrIndexer.QueueIndex(repoPath) {
-		log.Printf("[TLDRIndexer] Queued for indexing: %s (%s)", projectName, repoPath)
-	}
-}
+// tick performs one iteration of the scheduling loop
 func (o *Overseer) tick() error {
 	// Check if paused
 	if o.IsPaused() {
@@ -2324,7 +2217,7 @@ func (o *Overseer) closeBead(worker *types.Worker, success bool) error {
 		// Find the repo path
 		repoPath := o.resolveRepoPath(projectName, repoName, projectPath)
 		if repoPath != "" {
-			o.queueRepoIndexing(projectName, repoPath)
+			o.intelligenceHub.QueueRepoIndexing(projectName, repoPath)
 		}
 	}
 
@@ -3131,7 +3024,7 @@ func (o *Overseer) handleTaskCompleteMessage(msg *mcp.Message) {
 	log.Printf("[MCP] Task complete: bead=%s, status=%s, exit_code=%d", beadID, status, exitCode)
 
 	// Submit execution result to batch retention service for Hindsight storage
-	if o.batchRetentionSvc != nil {
+	if o.intelligenceHub.BatchRetention() != nil {
 		o.submitExecutionResultToBatchRetention(msg)
 	} else {
 		log.Printf("[MCP] Warning: batch retention service not available, skipping Hindsight retention")
@@ -3197,10 +3090,12 @@ func (o *Overseer) submitExecutionResultToBatchRetention(msg *mcp.Message) {
 	}
 
 	// Submit to batch retention service
-	if err := o.batchRetentionSvc.SubmitExecutionResult(bead, execResult, workerID); err != nil {
-		log.Printf("[MCP] Failed to submit execution result to batch retention: %v", err)
-	} else {
-		log.Printf("[MCP] Submitted execution result to batch retention for bead %s", beadIDStr)
+	if batchRetention := o.intelligenceHub.BatchRetention(); batchRetention != nil {
+		if err := batchRetention.SubmitExecutionResult(bead, execResult, workerID); err != nil {
+			log.Printf("[MCP] Failed to submit execution result to batch retention: %v", err)
+		} else {
+			log.Printf("[MCP] Submitted execution result to batch retention for bead %s", beadIDStr)
+		}
 	}
 }
 
