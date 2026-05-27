@@ -163,49 +163,6 @@ func calculateBackoff(attempt int, baseDelay, maxDelay time.Duration) time.Durat
 	return delay
 }
 
-// canSpawnWithinRateLimit checks if we can spawn a worker
-// Returns true if minimum interval has passed since last spawn (prevents bursts)
-func (o *Overseer) canSpawnWithinRateLimit() bool {
-	o.spawnRateMu.Lock()
-	defer o.spawnRateMu.Unlock()
-
-	now := time.Now()
-
-	// Clean up old timestamps (keep last 5 minutes for metrics)
-	cutoff := now.Add(-5 * time.Minute)
-	validTimestamps := make([]time.Time, 0, len(o.spawnTimestamps))
-	for _, ts := range o.spawnTimestamps {
-		if ts.After(cutoff) {
-			validTimestamps = append(validTimestamps, ts)
-		}
-	}
-	o.spawnTimestamps = validTimestamps
-
-	// Check minimum interval between spawns (prevents bursts)
-	if len(o.spawnTimestamps) > 0 {
-		lastSpawn := o.spawnTimestamps[len(o.spawnTimestamps)-1]
-		timeSinceLastSpawn := now.Sub(lastSpawn)
-		if timeSinceLastSpawn < minSpawnInterval {
-			waitTime := minSpawnInterval - timeSinceLastSpawn
-			log.Printf("[RateLimit] Blocking spawn: minimum interval not met (last spawn %v ago, need to wait %v)",
-				timeSinceLastSpawn.Round(time.Millisecond), waitTime.Round(time.Millisecond))
-			return false
-		}
-	}
-
-	return true
-}
-
-// recordWorkerSpawn records a worker spawn timestamp for rate limiting
-func (o *Overseer) recordWorkerSpawn() {
-	o.spawnRateMu.Lock()
-	defer o.spawnRateMu.Unlock()
-
-	o.spawnTimestamps = append(o.spawnTimestamps, time.Now())
-	log.Printf("[RateLimit] Spawn recorded: %d/%d workers in last %v",
-		len(o.spawnTimestamps), maxWorkersPerWindow, rateLimitWindow)
-}
-
 // BeadsClient defines the interface for beads operations
 // This allows for mocking in tests
 type BeadsClient interface {
@@ -291,14 +248,8 @@ type Overseer struct {
 	// Worker tracker for persistent PID tracking
 	workerTracker *WorkerTracker // Tracks worker PIDs to identify Hydra workers
 
-	// Rate limiting: track spawn timestamps to limit workers per time window
-	spawnTimestamps []time.Time // Timestamps of recent worker spawns
-	spawnRateMu     sync.Mutex  // Mutex for spawn rate tracking
-
-	// Spawn backoff tracking
-	lastSpawnFailure time.Time  // Last time a spawn failed (for exponential backoff)
-	spawnFailures    int        // Consecutive spawn failures count
-	spawnBackoffMu   sync.Mutex // Mutex for spawn backoff state
+	// Spawn rate limiting and backoff
+	spawnRateLimiter *SpawnRateLimiter // Tracks spawn timestamps and failure backoff
 
 	// Agent connector for modular agent support
 	agentConnector agents.AgentConnector // Agent connector interface
@@ -338,6 +289,7 @@ func NewOverseer(config *Config) *Overseer {
 		validationRetries:     make(map[string]int),
 		baseDelay:             defaultBaseDelay,
 		maxDelay:              defaultMaxDelay,
+		spawnRateLimiter:      NewSpawnRateLimiter(),
 	}
 
 	// Initialize intelligence clients if enabled
@@ -865,63 +817,6 @@ func (o *Overseer) clearValidationRetry(beadID string) {
 	}
 }
 
-// recordSpawnFailure records a spawn failure and calculates backoff
-func (o *Overseer) recordSpawnFailure() time.Duration {
-	o.spawnBackoffMu.Lock()
-	defer o.spawnBackoffMu.Unlock()
-
-	o.spawnFailures++
-	o.lastSpawnFailure = time.Now()
-
-	// Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 60s
-	backoff := time.Duration(1<<uint(o.spawnFailures-1)) * time.Second
-	if backoff > 60*time.Second {
-		backoff = 60 * time.Second
-	}
-
-	log.Printf("[Overseer] Spawn failure recorded (%d consecutive). Backoff: %v",
-		o.spawnFailures, backoff)
-
-	return backoff
-}
-
-// clearSpawnFailures resets the spawn failure count after a successful spawn
-func (o *Overseer) clearSpawnFailures() {
-	o.spawnBackoffMu.Lock()
-	defer o.spawnBackoffMu.Unlock()
-
-	if o.spawnFailures > 0 {
-		log.Printf("[Overseer] Spawn failures cleared (was %d)", o.spawnFailures)
-		o.spawnFailures = 0
-	}
-}
-
-// shouldSpawnBackoff returns true if we should wait before spawning more workers
-func (o *Overseer) shouldSpawnBackoff() bool {
-	o.spawnBackoffMu.Lock()
-	defer o.spawnBackoffMu.Unlock()
-
-	if o.spawnFailures == 0 {
-		return false
-	}
-
-	// Calculate backoff duration
-	backoff := time.Duration(1<<uint(o.spawnFailures-1)) * time.Second
-	if backoff > 60*time.Second {
-		backoff = 60 * time.Second
-	}
-
-	elapsed := time.Since(o.lastSpawnFailure)
-	shouldWait := elapsed < backoff
-
-	if shouldWait {
-		remaining := backoff - elapsed
-		log.Printf("[Overseer] Spawn backoff active: %v remaining", remaining)
-	}
-
-	return shouldWait
-}
-
 // logError logs an error with structured context information
 func (o *Overseer) logError(component, operation, beadID string, err error, severity string) {
 	retryCount := o.getRetryCount(beadID)
@@ -1339,7 +1234,7 @@ func (o *Overseer) tick() error {
 		}
 
 		// Check rate limiting: max 5 workers per 10 seconds
-		if !o.canSpawnWithinRateLimit() {
+		if !o.spawnRateLimiter.CanSpawn() {
 			log.Printf("[RateLimit] Blocking spawn for bead %s: rate limit exceeded", bead.ID)
 			// Break the loop - no more spawns in this window
 			break
@@ -1361,7 +1256,7 @@ func (o *Overseer) tick() error {
 		}
 
 		// Record successful spawn for rate limiting
-		o.recordWorkerSpawn()
+		o.spawnRateLimiter.RecordSpawn()
 
 		// Clear retry state on successful spawn
 		o.clearRetry(beadIDStr)
@@ -2224,13 +2119,11 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 	}
 
 	// Check if we should back off due to recent spawn failures
-	if o.shouldSpawnBackoff() {
-		o.spawnBackoffMu.Lock()
-		backoff := time.Duration(1<<uint(o.spawnFailures-1)) * time.Second
+	if o.spawnRateLimiter.shouldBackoff() {
+		backoff := time.Duration(1<<uint(o.spawnRateLimiter.FailureCount()-1)) * time.Second
 		if backoff > 60*time.Second {
 			backoff = 60 * time.Second
 		}
-		o.spawnBackoffMu.Unlock()
 		return fmt.Errorf("spawn backoff active: waiting %v before retry", backoff)
 	}
 
@@ -2321,7 +2214,7 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 	o.workerMutex.Unlock()
 
 	// Clear spawn failure count on successful spawn
-	o.clearSpawnFailures()
+	o.spawnRateLimiter.ClearFailures()
 
 	return nil
 }
@@ -2502,7 +2395,7 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 		if strings.Contains(err.Error(), "resource temporarily unavailable") ||
 			strings.Contains(err.Error(), "EAGAIN") ||
 			strings.Contains(err.Error(), "fork") {
-			o.recordSpawnFailure()
+			o.spawnRateLimiter.RecordFailure()
 		}
 
 		return nil, spawnErr
@@ -2897,7 +2790,7 @@ func (o *Overseer) triggerImmediateSchedule() {
 	}
 
 	// Check rate limit before spawning (same as tick())
-	if !o.canSpawnWithinRateLimit() {
+	if !o.spawnRateLimiter.CanSpawn() {
 		log.Println("[RateLimit] Immediate scheduling blocked: rate limit exceeded")
 		return
 	}
