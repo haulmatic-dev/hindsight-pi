@@ -7,7 +7,7 @@
 
 ### P0: Critical
 
-- [x] **1. Decompose Overseer God Object** (partial — 34 methods extracted)
+- [x] **1. Decompose Overseer God Object** (partial — 35 methods extracted)
   - [x] Extract SpawnRateLimiter (5 methods)
   - [x] Extract RetryManager (7 methods)
   - [x] Extract ProjectScanner (2 methods)
@@ -28,6 +28,7 @@
   - [x] Extract Scheduler (main scheduling loop)
   - [x] Extract ServiceStarter (background service lifecycle)
   - [x] Extract WorkerSpawner (spawnWorker + spawnWorkerInternal)
+  - [x] Extract MCPManager (Model Context Protocol operations)
   - [ ] Extract ChainOrchestrator
   - [ ] Extract ResourceGovernor
   - [ ] Extract ValidationEngine
@@ -61,10 +62,11 @@
   - `internal/core/activity_monitor.go` (duplicate)
   - `internal/agents/connector.go` AgentRegistry
   - `WorkerSpawner` interface + `defaultWorkerSpawner` (unused)
+  - 6 MCP fields from Overseer (mcpClient, mcpReservationMgr, mcpConfig, activeReservations, mcpMu, mcpMessageHandler)
 
 - [ ] **10. Package Reorganization**
 
-## Commits So Far (37)
+## Commits So Far (38)
 
 1. `a317e9c` refactor(cli): add unified CLI runner package
 2. `ece1b1d` refactor(cleanup): remove dead code packages
@@ -96,64 +98,65 @@
 28. `latest` refactor(overseer): extract Scheduler
 29. `latest` refactor(overseer): extract ServiceStarter
 30. `latest` refactor(overseer): extract WorkerSpawner
+31. `latest` refactor(overseer): extract MCPManager
 
 ## Metrics
 
 | Metric | Before | Current | Change |
 |---|---|---|---|
-| overseer.go lines | 3,976 | **1,765** | -2,211 (-56%) |
+| overseer.go lines | 3,976 | **1,403** | **-2,573 (-65%)** |
 | Overseer methods | 112 | **84** | -28 |
+| Overseer fields | ~40 | **~20** | -20 fields |
 | Total source files | ~250 | ~250 | +0 (removed dead, added new) |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 20 | — |
+| New packages | — | 21 | — |
 | Tests | — | **542 passed** ✅ | — |
 
 ## New Packages
 
-| Package | Purpose |
-|---|---|
-| `pkg/cli/runner.go` | Unified CLI command execution |
-| `internal/core/spawn_rate_limiter.go` | Spawn rate limiting + backoff |
-| `internal/core/retry_manager.go` | Bead retry + validation retry tracking |
-| `internal/core/project_scanner.go` | Project discovery (config + auto) |
-| `internal/core/bead_file_reader.go` | Bead file I/O (issues.jsonl) |
-| `internal/core/intelligence_hub.go` | TLDR/GPTCache/Hindsight clients |
-| `internal/core/error_logger.go` | Structured error logging |
-| `internal/core/bead_analyzer.go` | Bead metadata analysis |
-| `internal/core/dag_navigator.go` | Thread-safe DAG accessors |
-| `internal/core/state_controller.go` | Runtime state (running, paused, workers) |
-| `internal/core/config_manager.go` | Dynamic config changes |
-| `internal/core/chain_registrar.go` | Chain registration from issues.jsonl |
-| `internal/core/dag_builder.go` | Dependency graph construction |
-| `internal/core/impact_analyzer.go` | TLDR-based impact analysis |
-| `internal/core/worker_env_builder.go` | Worker environment variables |
-| `internal/core/bead_discovery.go` | Ready bead finding from BR/BV |
-| `internal/core/project_resolver.go` | Path resolution for beads |
-| `internal/core/worker_lifecycle.go` | Worker process lifecycle |
-| `internal/core/scheduler.go` | Main scheduling loop |
-| `internal/core/service_starter.go` | Background service lifecycle |
-| `internal/core/worker_spawner.go` | Worker process creation |
+| Package | Purpose | Lines Extracted |
+|---|---|---|
+| `pkg/cli/runner.go` | Unified CLI command execution | — |
+| `spawn_rate_limiter.go` | Spawn rate limiting + backoff | ~40 |
+| `retry_manager.go` | Bead retry + validation retry tracking | ~100 |
+| `project_scanner.go` | Project discovery (config + auto) | ~50 |
+| `bead_file_reader.go` | Bead file I/O (issues.jsonl) | ~40 |
+| `intelligence_hub.go` | TLDR/GPTCache/Hindsight clients | ~120 |
+| `error_logger.go` | Structured error logging | ~30 |
+| `bead_analyzer.go` | Bead metadata analysis | ~30 |
+| `dag_navigator.go` | Thread-safe DAG accessors | ~60 |
+| `state_controller.go` | Runtime state (running, paused, workers) | ~50 |
+| `config_manager.go` | Dynamic config changes | ~100 |
+| `chain_registrar.go` | Chain registration from issues.jsonl | ~80 |
+| `dag_builder.go` | Dependency graph construction | ~150 |
+| `impact_analyzer.go` | TLDR-based impact analysis | ~55 |
+| `worker_env_builder.go` | Worker environment variables | ~110 |
+| `bead_discovery.go` | Ready bead finding from BR/BV | ~350 |
+| `project_resolver.go` | Path resolution for beads | ~50 |
+| `worker_lifecycle.go` | Worker process lifecycle | ~200 |
+| `scheduler.go` | Main scheduling loop | ~175 |
+| `service_starter.go` | Background service lifecycle | ~90 |
+| `worker_spawner.go` | Worker process creation | ~240 |
+| `mcp_manager.go` | Model Context Protocol operations | ~350 |
 
-## Remaining Big Methods in Overseer
+## Remaining Methods in Overseer (>20 lines)
 
 | Method | Lines | Notes |
 |---|---|---|
-| Start | ~50 | Main loop, now delegates to ServiceStarter + Scheduler |
-| initializeMCP | ~49 | MCP-specific, could extract to MCPManager |
-| initializeSettledStateService | ~41 | Could extract to SettledStateInitializer |
-| initializeChainCompletionDetector | ~42 | Could extract to ChainCompletionInitializer |
-| submitExecutionResultToBatchRetention | ~49 | MCP message handler |
-| sendMCPWorkerCompletion | ~31 | MCP notification |
-| runPiSetup | ~47 | Pi ecosystem setup |
-| validateScope | ~31 | Scope validation |
-| closeBead | ~39 | Bead closure + validation |
-| spawnWorkersForNodes | ~39 | DAG-based spawning |
-| getRetryEligibleBeads | ~40 | Retry bead filtering |
+| `Start` | ~40 | Main loop, thin delegations |
+| `initializeSettledStateService` | ~41 | Could extract to initializer |
+| `initializeChainCompletionDetector` | ~42 | Could extract to initializer |
+| `runPiSetup` | ~47 | Pi ecosystem setup |
+| `closeBead` | ~39 | Bead closure + validation |
+| `validateScope` | ~31 | Scope validation |
+| `spawnWorkersForNodes` | ~39 | DAG-based spawning |
+| `buildDAG` | ~15 | Thin delegation to DAGBuilder |
+| `tick` | ~5 | Thin delegation to Scheduler |
+| `getReadyBeads` | ~10 | Thin delegation to BeadDiscovery |
 
 ## Next Steps
 
-1. **Extract MCPManager** (MCP methods cluster)
-2. **Extract Initializer types** (settled-state, chain-completion)
-3. **Flatten Pi Config structs** (32 config struct types)
-4. **Extract test fixtures** from large test files
-5. **PR to fix/hindsight-consolidation**
+1. **Extract Initializer types** (settled-state, chain-completion, pi-setup)
+2. **Flatten Pi Config structs** (32 config struct types)
+3. **Extract test fixtures** from large test files
+4. **PR to fix/hindsight-consolidation**
