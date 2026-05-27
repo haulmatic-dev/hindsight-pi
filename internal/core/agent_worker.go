@@ -164,9 +164,9 @@ func (o *Overseer) monitorAgentSession(worker *types.Worker, connector agents.Ag
 
 	// Handle completion
 	if success {
-		o.handleWorkerSuccess(worker, duration)
+		o.workerLifecycle.HandleSuccess(worker, duration)
 	} else {
-		o.handleWorkerFailure(worker, exitCode, duration)
+		o.workerLifecycle.HandleFailure(worker, exitCode, duration)
 	}
 
 	// Cleanup

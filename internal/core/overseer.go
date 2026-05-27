@@ -276,6 +276,9 @@ type Overseer struct {
 
 	// ProjectResolver resolves project and repo paths for beads
 	projectResolver *ProjectResolver
+
+	// WorkerLifecycle manages worker process lifecycle
+	workerLifecycle *WorkerLifecycle
 }
 
 // NewOverseer creates a new overseer instance
@@ -356,6 +359,22 @@ func NewOverseer(config *Config) *Overseer {
 		workerTimeout = config.Overseer.WorkerTimeout
 	}
 	o.orphanJanitor = NewCharon(o.beadsClient.(*beads.Client), o.workerTracker, workerTimeout)
+
+	// Initialize worker lifecycle manager
+	o.workerLifecycle = NewWorkerLifecycle(
+		o.retryManager,
+		o.errorLogger,
+		o.workerTracker,
+		o.settledStateSvc,
+		o.dag,
+		&o.dagMu,
+		o.completed,
+		o.removeActiveWorker,
+		o.closeBead,
+		o.triggerImmediateSchedule,
+		o.sendMCPWorkerCompletion,
+		o.getMaxRetries,
+	)
 
 	// Initialize agent connector (Pi by default)
 	piConfig := agents.PiConfig{
@@ -1256,7 +1275,7 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 	}
 
 	// Monitor in goroutine
-	go o.monitorWorker(worker, cmd)
+	go o.workerLifecycle.Monitor(worker, cmd)
 
 	return worker, nil
 }
@@ -1271,74 +1290,6 @@ type workerCompletion struct {
 	closeError error
 }
 
-// monitorWorker watches a worker process until completion
-func (o *Overseer) monitorWorker(worker *types.Worker, cmd *exec.Cmd) {
-	completion := o.waitForWorker(worker, cmd)
-	o.handleWorkerCompletion(completion)
-}
-
-// waitForWorker waits for a worker process to complete and returns completion details
-func (o *Overseer) waitForWorker(worker *types.Worker, cmd *exec.Cmd) workerCompletion {
-	log.Printf("[DEBUG] waitForWorker: waiting for worker %s (PID %d)", worker.ID, worker.PID)
-
-	// Create timeout channel
-	timeout := o.config.Overseer.WorkerTimeout
-	done := make(chan error, 1)
-
-	// Wait for process in goroutine
-	go func() {
-		done <- cmd.Wait()
-	}()
-
-	// Wait for either process completion or timeout
-	var err error
-	select {
-	case err = <-done:
-		// Process completed normally
-	case <-time.After(timeout):
-		// Timeout - kill the process
-		log.Printf("[Overseer] Worker %s timed out after %v, killing process", worker.ID, timeout)
-		if err := cmd.Process.Kill(); err != nil {
-			log.Printf("[Overseer] Failed to kill timed out worker: %v", err)
-		}
-		err = fmt.Errorf("worker timeout after %v", timeout)
-	}
-
-	exitCode := extractExitCode(err)
-	success := exitCode == 0
-	duration := time.Since(worker.StartTime)
-	log.Printf("[DEBUG] waitForWorker: worker %s finished with exitCode=%d, success=%v", worker.ID, exitCode, success)
-
-	var newlyReady []string
-	if success {
-		log.Printf("[DEBUG] waitForWorker: calling handleWorkerSuccess for %s", worker.ID)
-		newlyReady = o.handleWorkerSuccess(worker, duration)
-		log.Printf("[DEBUG] waitForWorker: handleWorkerSuccess returned for %s", worker.ID)
-	} else {
-		o.handleWorkerFailure(worker, exitCode, duration)
-	}
-
-	o.removeActiveWorker(worker.ID)
-
-	// Mark worker as completed in tracker
-	if o.workerTracker != nil {
-		if err := o.workerTracker.MarkWorkerCompleted(worker.PID, exitCode); err != nil {
-			log.Printf("[Overseer] Warning: failed to mark worker PID %d completed: %v", worker.PID, err)
-		}
-	}
-
-	closeErr := o.closeBead(worker, success)
-
-	return workerCompletion{
-		worker:     worker,
-		success:    success,
-		exitCode:   exitCode,
-		duration:   duration,
-		newlyReady: newlyReady,
-		closeError: closeErr,
-	}
-}
-
 // extractExitCode extracts the exit code from an exec error
 func extractExitCode(err error) int {
 	if err == nil {
@@ -1348,69 +1299,6 @@ func extractExitCode(err error) int {
 		return exitError.ExitCode()
 	}
 	return -1
-}
-
-// handleWorkerSuccess processes a successful worker completion
-func (o *Overseer) handleWorkerSuccess(worker *types.Worker, duration time.Duration) []string {
-	log.Printf("[Worker] Completed: %s (duration: %v)", worker.ID, duration)
-	worker.Status = string(types.WorkerStatusCompleted)
-	o.retryManager.ClearRetry(worker.ID)
-
-	o.dagMu.Lock()
-	defer o.dagMu.Unlock()
-
-	newlyReady, err := o.dag.MarkCompleted(worker.ID)
-	if err != nil {
-		o.errorLogger.Error("DAG", "MarkCompleted", worker.ID, err, "warn")
-		return nil
-	}
-
-	if len(newlyReady) > 0 {
-		log.Printf("[DAG] %d dependents now ready after %s completion", len(newlyReady), worker.ID)
-	}
-
-	// Note: Don't mark as completed here - wait for closeBead to succeed
-	// o.completed[worker.ID] = true
-
-	// Track bead for settled-state detection
-	log.Printf("[DEBUG] handleWorkerSuccess: settledStateSvc=%v, BeadID=%s", o.settledStateSvc != nil, worker.BeadID)
-	if o.settledStateSvc != nil {
-		if err := o.settledStateSvc.TrackBead(worker.BeadID); err != nil {
-			log.Printf("[SettledState] Failed to track bead %s: %v", worker.BeadID, err)
-		}
-	} else {
-		log.Printf("[DEBUG] handleWorkerSuccess: settledStateSvc is NIL, cannot track bead %s", worker.BeadID)
-	}
-
-	return newlyReady
-}
-
-// handleWorkerFailure processes a failed worker completion
-func (o *Overseer) handleWorkerFailure(worker *types.Worker, exitCode int, duration time.Duration) {
-	workerErr := fmt.Errorf("worker exited with code %d", exitCode)
-	o.retryManager.RecordRetry(worker.ID, workerErr)
-
-	retryCount := o.retryManager.GetRetryCount(worker.ID)
-	maxRetries := o.getMaxRetries()
-
-	if retryCount >= maxRetries {
-		// Exhausted retries, log as error
-		log.Printf("[Worker] Failed permanently: %s (exit code: %d, duration: %v, retries: %d/%d)",
-			worker.ID, exitCode, duration, retryCount, maxRetries)
-		worker.Status = string(types.WorkerStatusFailed)
-	} else {
-		// Will retry, log as warning
-		backoff := calculateBackoff(retryCount, o.retryManager.BaseDelay(), o.retryManager.MaxDelay())
-		log.Printf("[Worker] Failed but will retry: %s (exit code: %d, duration: %v, retry %d/%d, backoff: %v)",
-			worker.ID, exitCode, duration, retryCount, maxRetries, backoff)
-		worker.Status = string(types.WorkerStatusRetryPending)
-	}
-
-	o.dagMu.Lock()
-	defer o.dagMu.Unlock()
-	if err := o.dag.MarkFailed(worker.ID); err != nil {
-		o.errorLogger.Error("DAG", "MarkFailed", worker.ID, err, "warn")
-	}
 }
 
 // getMaxRetries returns the configured max retries with default fallback
@@ -1429,37 +1317,6 @@ func (o *Overseer) removeActiveWorker(workerID string) {
 	delete(o.activeWorkers, workerID)
 	countAfter := len(o.activeWorkers)
 	log.Printf("[WorkerTracking] Removed worker %s from activeWorkers. Count: %d -> %d", workerID, countBefore, countAfter)
-}
-
-// handleWorkerCompletion handles the final steps after worker completion
-func (o *Overseer) handleWorkerCompletion(comp workerCompletion) {
-	success := comp.success
-	exitCode := comp.exitCode
-
-	if comp.closeError != nil {
-		o.errorLogger.Error("beadsClient", "CloseBead", comp.worker.ID, comp.closeError, "warn")
-		if isDependencyError(comp.closeError) {
-			log.Printf("[Worker] Bead %s processed but not closed due to dependencies - will retry later", comp.worker.BeadID.String())
-			success = false
-			exitCode = 1
-		}
-	} else if success {
-		// Only mark as completed if close succeeded and worker succeeded
-		o.completed[comp.worker.ID] = true
-		log.Printf("[Worker] Bead %s marked as completed in session", comp.worker.ID)
-	}
-
-	o.scheduleAfterCompletion(comp.worker, success, comp.newlyReady)
-	o.sendMCPWorkerCompletion(comp.worker, success, exitCode, comp.duration)
-}
-
-// isDependencyError checks if an error is related to unresolved dependencies
-func isDependencyError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := err.Error()
-	return strings.Contains(errStr, "unresolved dependencies") || strings.Contains(errStr, "dependencies")
 }
 
 // scheduleAfterCompletion triggers scheduling based on completion outcome
