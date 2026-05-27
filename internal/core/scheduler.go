@@ -18,6 +18,64 @@ func NewScheduler(overseer *Overseer) *Scheduler {
 	return &Scheduler{overseer: overseer}
 }
 
+// getRetryEligibleBeads returns beads that are eligible for retry.
+func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead {
+	o := s.overseer
+	retrySnapshot := o.retryManager.Snapshot()
+	if len(retrySnapshot) == 0 {
+		return readyBeads
+	}
+
+	readyMap := make(map[string]types.Bead, len(readyBeads))
+	for _, bead := range readyBeads {
+		readyMap[string(bead.ID)] = bead
+	}
+
+	for beadID := range retrySnapshot {
+		if _, exists := readyMap[beadID]; exists {
+			continue
+		}
+
+		if !o.retryManager.ShouldRetry(beadID, o.config.Overseer.DefaultRetries) {
+			continue
+		}
+
+		count, _, _, _ := o.retryManager.RetryInfo(beadID)
+		maxRetries := o.config.Overseer.DefaultRetries
+		if maxRetries <= 0 {
+			maxRetries = defaultMaxRetries
+		}
+
+		if bead, err := s.getBeadFromDAG(beadID); err == nil {
+			readyBeads = append(readyBeads, bead)
+			log.Printf("[Retry] Bead %s added to retry queue (attempt %d/%d)",
+				beadID, count+1, maxRetries)
+		} else {
+			log.Printf("[Retry] Could not fetch bead %s for retry: %v", beadID, err)
+		}
+	}
+
+	return readyBeads
+}
+
+// getBeadFromDAG retrieves a bead from the DAG by ID.
+func (s *Scheduler) getBeadFromDAG(beadID string) (types.Bead, error) {
+	o := s.overseer
+	o.dagMu.RLock()
+	defer o.dagMu.RUnlock()
+
+	if o.dag == nil {
+		return types.Bead{}, fmt.Errorf("DAG not initialized")
+	}
+
+	node, exists := o.dag.GetNode(beadID)
+	if !exists {
+		return types.Bead{}, fmt.Errorf("bead %s not found in DAG", beadID)
+	}
+
+	return node.Bead, nil
+}
+
 // Tick performs one iteration of the scheduling loop.
 func (s *Scheduler) Tick() error {
 	o := s.overseer

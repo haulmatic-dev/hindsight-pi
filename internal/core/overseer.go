@@ -629,62 +629,12 @@ func (o *Overseer) tick() error {
 // getRetryEligibleBeads returns beads that are eligible for retry
 // It filters the ready beads and adds any failed beads that should be retried
 func (o *Overseer) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead {
-	retrySnapshot := o.retryManager.Snapshot()
-	if len(retrySnapshot) == 0 {
-		return readyBeads
-	}
-
-	// Create a map of already ready beads for deduplication
-	readyMap := make(map[string]types.Bead, len(readyBeads))
-	for _, bead := range readyBeads {
-		readyMap[string(bead.ID)] = bead
-	}
-
-	// Check failed beads for retry eligibility
-	for beadID := range retrySnapshot {
-		// Skip if already in ready pool
-		if _, exists := readyMap[beadID]; exists {
-			continue
-		}
-
-		if !o.retryManager.ShouldRetry(beadID, o.config.Overseer.DefaultRetries) {
-			continue
-		}
-
-		count, _, _, _ := o.retryManager.RetryInfo(beadID)
-		maxRetries := o.config.Overseer.DefaultRetries
-		if maxRetries <= 0 {
-			maxRetries = defaultMaxRetries
-		}
-
-		// Try to fetch the bead from the DAG
-		if bead, err := o.getBeadFromDAG(beadID); err == nil {
-			readyBeads = append(readyBeads, bead)
-			log.Printf("[Retry] Bead %s added to retry queue (attempt %d/%d)",
-				beadID, count+1, maxRetries)
-		} else {
-			log.Printf("[Retry] Could not fetch bead %s for retry: %v", beadID, err)
-		}
-	}
-
-	return readyBeads
+	return o.scheduler.getRetryEligibleBeads(readyBeads)
 }
 
 // getBeadFromDAG retrieves a bead from the DAG by ID
 func (o *Overseer) getBeadFromDAG(beadID string) (types.Bead, error) {
-	o.dagMu.RLock()
-	defer o.dagMu.RUnlock()
-
-	// Try to find the bead in the DAG
-	// This is a simplified implementation - in production, the DAG might have
-	// a direct lookup method
-	for _, node := range o.dag.GetReadyNodes() {
-		if string(node.Bead.ID) == beadID {
-			return node.Bead, nil
-		}
-	}
-
-	return types.Bead{}, fmt.Errorf("bead %s not found in DAG", beadID)
+	return o.scheduler.getBeadFromDAG(beadID)
 }
 
 // buildDAG fetches all beads from all projects and builds/refreshs the DAG
