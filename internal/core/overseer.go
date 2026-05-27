@@ -1,14 +1,11 @@
 package core
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -165,27 +162,6 @@ type BeadsClient interface {
 	CreateBead(projectPath string, req types.CreateBeadRequest) (types.BeadID, error)
 }
 
-// WorkerSpawner defines the interface for spawning workers
-// This allows for mocking in tests
-type WorkerSpawner interface {
-	Spawn(bead types.Bead, overseer *Overseer) (*types.Worker, error)
-}
-
-// defaultWorkerSpawner is the default implementation that spawns real worker processes
-type defaultWorkerSpawner struct{}
-
-// Spawn creates and starts a real worker process for a bead
-func (d *defaultWorkerSpawner) Spawn(bead types.Bead, overseer *Overseer) (*types.Worker, error) {
-	if err := overseer.spawnWorker(bead); err != nil {
-		return nil, err
-	}
-	// Return the worker from active workers map
-	overseer.workerMutex.RLock()
-	worker := overseer.activeWorkers[string(bead.ID)]
-	overseer.workerMutex.RUnlock()
-	return worker, nil
-}
-
 // Overseer is the main scheduler daemon
 type Overseer struct {
 	config          *Config
@@ -195,7 +171,7 @@ type Overseer struct {
 	stateController *StateController // Runtime state (running, paused, maxWorkers, interval)
 	configManager   *ConfigManager   // Dynamic configuration management
 	beadsClient     BeadsClient
-	spawner         WorkerSpawner // Interface for spawning workers (allows mocking in tests)
+	workerSpawner   *WorkerSpawner
 	dag             *DAG
 	dagMu           sync.RWMutex
 	dagNavigator    *DAGNavigator
@@ -300,7 +276,6 @@ func NewOverseer(config *Config) *Overseer {
 		stateController:  NewStateController(config.Overseer.MaxWorkers, config.Overseer.BeadDiscoveryInterval),
 		beadsClient:      beads.NewClient(),
 		bvClient:         bv.NewClient(),
-		spawner:          &defaultWorkerSpawner{},
 		dag:              NewDAG(),
 		dagNavigator:     NewDAGNavigator(NewDAG()),
 		completed:        make(map[string]bool),
@@ -324,7 +299,6 @@ func NewOverseer(config *Config) *Overseer {
 	// Initialize worker environment builder
 	o.workerEnvBuilder = NewWorkerEnvBuilder(config)
 
-	// Initialize bead discovery
 	o.beadDiscovery = NewBeadDiscovery(o.beadsClient, o.bvClient, o.projects, o.completed)
 
 	// Initialize project resolver
@@ -380,6 +354,21 @@ func NewOverseer(config *Config) *Overseer {
 		o.triggerImmediateSchedule,
 		o.sendMCPWorkerCompletion,
 		o.getMaxRetries,
+	)
+
+	// Initialize worker spawner
+	o.workerSpawner = NewWorkerSpawner(
+		o.activeWorkers,
+		&o.workerMutex,
+		o.workerTracker,
+		o.spawnRateLimiter,
+		o.errorLogger,
+		o.retryManager,
+		config,
+		o.beadsClient,
+		o.beadAnalyzer,
+		o.workerEnvBuilder,
+		o.workerLifecycle,
 	)
 
 	// Initialize scheduler
@@ -792,112 +781,7 @@ func (o *Overseer) getReadyBeadsFromBVPlan() ([]types.Bead, error) {
 // critical-path awareness, and impact scoring (unblocks count).
 // spawnWorker creates and starts a worker for a bead using the configured spawner
 func (o *Overseer) spawnWorker(bead types.Bead) error {
-	log.Printf("[DEBUG] spawnWorker called with bead: ID='%s', Title='%s', Project='%s'", bead.ID, bead.Title, bead.Project)
-	beadIDStr := bead.ID.String()
-	if beadIDStr == "" {
-		log.Printf("[ERROR] spawnWorker called with empty bead ID! Bead: %+v", bead)
-		return fmt.Errorf("cannot spawn worker for bead with empty ID")
-	}
-
-	// Check if we should back off due to recent spawn failures
-	if o.spawnRateLimiter.shouldBackoff() {
-		backoff := time.Duration(1<<uint(o.spawnRateLimiter.FailureCount()-1)) * time.Second
-		if backoff > 60*time.Second {
-			backoff = 60 * time.Second
-		}
-		return fmt.Errorf("spawn backoff active: waiting %v before retry", backoff)
-	}
-
-	// CRITICAL: Atomic check-and-reserve pattern to prevent race conditions
-	// Hold lock during check AND registration to ensure accurate worker count
-	o.workerMutex.Lock()
-
-	// Check if worker already exists in activeWorkers
-	if _, exists := o.activeWorkers[beadIDStr]; exists {
-		// Check if worker is actually still running via WorkerTracker
-		if o.workerTracker != nil {
-			if workerRecord, found := o.workerTracker.GetWorkerByBead(beadIDStr); found {
-				// If worker is marked as completed/failed in tracker, clean it up
-				if workerRecord.Status == "completed" || workerRecord.Status == "failed" {
-					log.Printf("[Overseer] Cleaning up stale worker %s (status: %s) from activeWorkers", beadIDStr, workerRecord.Status)
-					delete(o.activeWorkers, beadIDStr)
-					// Fall through to create new worker
-				} else {
-					// Worker is still tracked and not completed - it exists
-					o.workerMutex.Unlock()
-					o.errorLogger.Error("spawnWorker", "duplicate_check", beadIDStr, fmt.Errorf("worker already exists"), "warn")
-					return fmt.Errorf("worker already exists for bead %s", beadIDStr)
-				}
-			} else {
-				// Worker in activeWorkers but not in tracker - stale entry, clean it up
-				log.Printf("[Overseer] Cleaning up orphan worker %s (not in tracker)", beadIDStr)
-				delete(o.activeWorkers, beadIDStr)
-				// Fall through to create new worker
-			}
-		} else {
-			// No worker tracker, just check activeWorkers
-			o.workerMutex.Unlock()
-			o.errorLogger.Error("spawnWorker", "duplicate_check", beadIDStr, fmt.Errorf("worker already exists"), "warn")
-			return fmt.Errorf("worker already exists for bead %s", beadIDStr)
-		}
-	}
-
-	// Check worker limit
-	activeCount := len(o.activeWorkers)
-	maxWorkers := o.GetMaxWorkers()
-	if activeCount >= maxWorkers {
-		o.workerMutex.Unlock()
-		log.Printf("[Overseer] BLOCKING spawn for %s: at worker limit (%d/%d)", beadIDStr, activeCount, maxWorkers)
-		return fmt.Errorf("worker limit reached: %d/%d workers active", activeCount, maxWorkers)
-	}
-
-	// Pre-register worker slot (will be updated with actual worker after spawn)
-	// This prevents other ticks from spawning workers beyond the limit
-	placeholderWorker := &types.Worker{
-		ID:     beadIDStr,
-		Status: "spawning",
-	}
-	o.activeWorkers[beadIDStr] = placeholderWorker
-	log.Printf("[WorkerTracking] Added placeholder for %s to activeWorkers. Count: %d", beadIDStr, len(o.activeWorkers))
-	o.workerMutex.Unlock()
-
-	// Check if bead has exhausted retries
-	if count, lastErr, _, exists := o.retryManager.RetryInfo(beadIDStr); exists {
-		maxRetries := o.config.Overseer.DefaultRetries
-		if maxRetries <= 0 {
-			maxRetries = defaultMaxRetries
-		}
-		if count >= maxRetries {
-			err := &RetryExhaustedError{
-				BeadID:    beadIDStr,
-				Attempts:  count,
-				LastError: lastErr,
-			}
-			o.errorLogger.Error("spawnWorker", "retry_exhausted", beadIDStr, err, "error")
-			return err
-		}
-	}
-
-	// Create the worker using the worker binary with Pi agent support
-	// This ensures Hindsight memory retention happens after execution
-	worker, err := o.spawnWorkerInternal(bead)
-	if err != nil {
-		// Remove placeholder on spawn failure
-		o.workerMutex.Lock()
-		delete(o.activeWorkers, beadIDStr)
-		o.workerMutex.Unlock()
-		return err
-	}
-
-	// Update placeholder with real worker
-	o.workerMutex.Lock()
-	o.activeWorkers[beadIDStr] = worker
-	o.workerMutex.Unlock()
-
-	// Clear spawn failure count on successful spawn
-	o.spawnRateLimiter.ClearFailures()
-
-	return nil
+	return o.workerSpawner.Spawn(bead)
 }
 
 // HindsightClient defines the interface for Hindsight memory operations
@@ -911,135 +795,7 @@ type HindsightClient interface {
 // spawnWorkerInternal creates and starts a real worker process for a bead
 // This is the actual implementation used by defaultWorkerSpawner
 func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
-	beadIDStr := bead.ID.String()
-
-	// Determine agent type
-	agentTypes := types.DetermineAgentTypes(bead.Type)
-	if len(agentTypes) == 0 {
-		err := fmt.Errorf("no agent type found for bead type: %s", bead.Type)
-		o.errorLogger.Error("spawnWorker", "agent_type", beadIDStr, err, "error")
-		return nil, err
-	}
-
-	agentType := agentTypes[0] // Use primary agent
-
-	retryCount := o.retryManager.GetRetryCount(beadIDStr)
-	if retryCount > 0 {
-		log.Printf("[Worker] Spawning retry worker for bead: %s (attempt %d, agent: %s)", beadIDStr, retryCount+1, agentType)
-	} else {
-		log.Printf("[Worker] Spawning worker for bead: %s (agent: %s)", beadIDStr, agentType)
-	}
-
-	// Find project path
-	projectPath := o.beadAnalyzer.FindProjectPath(&bead)
-	if projectPath == "" {
-		projectPath = bead.Project // Fallback to project name
-	}
-
-	// Mark bead as in_progress before spawning worker
-	if o.beadsClient != nil && projectPath != "" {
-		log.Printf("[Overseer] Marking bead %s as in_progress", beadIDStr)
-		if err := o.beadsClient.UpdateBeadStatus(projectPath, bead.ID, types.StatusInProgress); err != nil {
-			// Non-fatal: bead may already be in_progress or locked by concurrent process
-			log.Printf("[Overseer] Debug: could not mark bead %s as in_progress: %v", beadIDStr, err)
-		}
-	}
-
-	// Build worker command - use compiled binary if available, otherwise fallback to go run
-	workerBinary := os.Getenv("HYDRA_WORKER_BINARY")
-	if workerBinary == "" {
-		workerBinary = filepath.Join(os.Getenv("HYDRA_HOME"), "bin", "worker")
-	}
-
-	// Check if compiled binary exists, otherwise use go run
-	var cmd *exec.Cmd
-	if _, err := os.Stat(workerBinary); err == nil {
-		cmd = exec.Command(workerBinary)
-	} else {
-		// Fallback to go run
-		cmd = exec.Command("go", "run", "cmd/worker/main.go")
-	}
-	env := o.workerEnvBuilder.Build(bead, projectPath, string(agentType), retryCount)
-
-	cmd.Env = env
-
-	// Capture stdout and stderr from worker
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
-
-	// Start process
-	if err := cmd.Start(); err != nil {
-		spawnErr := &WorkerSpawnError{
-			BeadID:    beadIDStr,
-			AgentType: string(agentType),
-			Err:       err,
-		}
-		o.errorLogger.Error("spawnWorker", "process_start", beadIDStr, spawnErr, "error")
-
-		// Record spawn failure for exponential backoff
-		if strings.Contains(err.Error(), "resource temporarily unavailable") ||
-			strings.Contains(err.Error(), "EAGAIN") ||
-			strings.Contains(err.Error(), "fork") {
-			o.spawnRateLimiter.RecordFailure()
-		}
-
-		return nil, spawnErr
-	}
-
-	log.Printf("[Worker] Process started with PID %d for bead %s (workerTracker nil: %v)", cmd.Process.Pid, beadIDStr, o.workerTracker == nil)
-
-	// Stream worker stdout/stderr to logs
-	go func() {
-		scanner := bufio.NewScanner(stdoutPipe)
-		for scanner.Scan() {
-			log.Printf("[Worker:%s] %s", beadIDStr, scanner.Text())
-		}
-	}()
-	go func() {
-		scanner := bufio.NewScanner(stderrPipe)
-		for scanner.Scan() {
-			log.Printf("[Worker:%s] [stderr] %s", beadIDStr, scanner.Text())
-		}
-	}()
-
-	// Create worker record
-	worker := &types.Worker{
-		ID:          beadIDStr,
-		BeadID:      bead.ID,
-		PID:         cmd.Process.Pid,
-		AgentType:   agentType,
-		StartTime:   time.Now(),
-		Status:      "running",
-		ProjectPath: projectPath,
-	}
-
-	// Track worker PID for orphan detection
-	if o.workerTracker != nil {
-		if cmd.Process.Pid <= 0 {
-			// Skip tracking placeholder PIDs
-			log.Printf("[Overseer] Skipping tracking of invalid PID %d for bead %s", cmd.Process.Pid, beadIDStr)
-		} else {
-			log.Printf("[Overseer] Tracking worker PID %d for bead %s", cmd.Process.Pid, beadIDStr)
-			if err := o.workerTracker.TrackWorker(cmd.Process.Pid, beadIDStr, projectPath); err != nil {
-				log.Printf("[Overseer] Warning: failed to track worker PID %d: %v", cmd.Process.Pid, err)
-			} else {
-				log.Printf("[Overseer] Successfully tracked worker PID %d for bead %s", cmd.Process.Pid, beadIDStr)
-			}
-		}
-	} else {
-		log.Printf("[Overseer] Warning: workerTracker is nil, cannot track worker PID %d", cmd.Process.Pid)
-	}
-
-	// Monitor in goroutine
-	go o.workerLifecycle.Monitor(worker, cmd)
-
-	return worker, nil
+	return o.workerSpawner.SpawnInternal(bead)
 }
 
 // workerCompletion encapsulates the result of a worker's execution
