@@ -7,19 +7,19 @@
 
 ### P0: Critical
 
-- [x] **1. Decompose Overseer God Object** (partial — 20 methods extracted)
+- [x] **1. Decompose Overseer God Object** (partial — 21 methods extracted)
   - [x] Extract SpawnRateLimiter (5 methods)
   - [x] Extract RetryManager (7 methods)
   - [x] Extract ProjectScanner (2 methods)
   - [x] Extract BeadFileReader (2 methods)
   - [x] Extract ErrorLogger (2 methods)
   - [x] Extract BeadAnalyzer (2 methods)
+  - [x] Integrate IntelligenceHub (replaced initializeIntelligenceClients)
   - [ ] Extract WorkerManager (deferred — high coupling)
   - [ ] Extract Scheduler (deferred — high coupling)
   - [ ] Extract ChainOrchestrator
   - [ ] Extract ResourceGovernor
   - [ ] Extract ValidationEngine
-  - [x] Extract IntelligenceHub (file created, integration pending)
 
 - [ ] **2. Slim Down Test Files**
   - [ ] Extract test fixtures to `testdata/`
@@ -31,7 +31,7 @@
 ### P1: High Value
 
 - [ ] **4. Validation as Service**
-- [ ] **5. Intelligence Hub Facade** (file created)
+- [x] **5. Intelligence Hub Facade** (integrated into Overseer)
 - [x] **8. Unified CLI Runner** — `pkg/cli/runner.go` created
 
 ### P2: Medium Value
@@ -52,7 +52,7 @@
 
 - [ ] **10. Package Reorganization**
 
-## Commits So Far (18)
+## Commits So Far (20)
 
 1. `a317e9c` refactor(cli): add unified CLI runner package
 2. `ece1b1d` refactor(cleanup): remove dead code packages
@@ -62,22 +62,23 @@
 6. `c6add83` refactor(overseer): extract SpawnRateLimiter
 7. `ce30268` refactor(overseer): extract RetryManager
 8. `ac163e1` docs: update refactor tracking with metrics
-9. `34fda3e` refactor(overseer): add IntelligenceHub (not yet integrated)
+9. `34fda3e` refactor(overseer): add IntelligenceHub
 10. `f0a84bb` refactor(overseer): extract ProjectScanner
 11. `a0b9443` refactor(overseer): extract BeadFileReader
 12. `9298f9f` docs: update refactor tracking with latest metrics
 13. `latest` refactor(overseer): extract ErrorLogger
 14. `latest` refactor(overseer): extract BeadAnalyzer
+15. `latest` refactor(overseer): integrate IntelligenceHub
 
 ## Metrics
 
 | Metric | Before | Current | Change |
 |---|---|---|---|
-| overseer.go lines | 3,976 | **3,503** | -473 |
-| Overseer methods | 112 | **94** | -18 |
+| overseer.go lines | 3,976 | **3,398** | -578 |
+| Overseer methods | 112 | **91** | -21 |
 | Total source files | ~250 | ~250 | +0 (removed dead, added new) |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 7 | — |
+| New packages | — | 8 | — |
 | Tests | — | **542 passed** ✅ | — |
 
 ## New Packages
@@ -95,8 +96,8 @@
 
 ## Next Steps
 
-1. **Integrate IntelligenceHub** into Overseer (replaces initializeIntelligenceClients)
-2. **Extract WorkerManager** (spawn/cleanup/completion) — needs careful testing
-3. **Extract Scheduler** (getReadyBeads, getAllDescendants) — high coupling
+1. **Extract WorkerManager** (spawn/cleanup/completion) — biggest remaining cluster
+2. **Extract Scheduler** (getReadyBeads, getAllDescendants) — high coupling
+3. **Migrate refresh methods** to use IntelligenceHub (remove old fields)
 4. **Flatten Pi Config structs** (7 nested types → 3)
 5. **Extract test fixtures** from large test files
