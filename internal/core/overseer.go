@@ -195,6 +195,7 @@ type Overseer struct {
 	activeWorkers         map[string]*types.Worker
 	workerMutex           sync.RWMutex
 	stateController       *StateController                // Runtime state (running, paused, maxWorkers, interval)
+	configManager         *ConfigManager                  // Dynamic configuration management
 	beadsClient           BeadsClient
 	spawner               WorkerSpawner // Interface for spawning workers (allows mocking in tests)
 	dag                   *DAG
@@ -287,6 +288,9 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize intelligence hub
 	o.intelligenceHub.Initialize()
+
+	// Initialize config manager
+	o.configManager = NewConfigManager(o)
 
 	// Initialize MCP client if enabled
 	if config.MCP.Enabled {
@@ -2622,93 +2626,33 @@ func (o *Overseer) CloseBead(projectPath, repoName string, beadID types.BeadID, 
 	return o.beadsClient.CloseBead(projectPath, repoName, beadID, reason)
 }
 
-// RefreshToolClients reinitializes tool clients based on detected config changes
-// This method is thread-safe and can be called when configuration changes
+// RefreshToolClients reinitializes tool clients based on detected config changes.
 func (o *Overseer) RefreshToolClients(changes []ToolConfigChange) {
-	for _, change := range changes {
-		o.applyToolConfigChange(change)
-	}
+	o.configManager.RefreshToolClients(changes)
 }
 
-// applyToolConfigChange applies a single tool configuration change
+// applyToolConfigChange applies a single tool configuration change.
 func (o *Overseer) applyToolConfigChange(change ToolConfigChange) {
-	switch change.Tool {
-	case ToolTLDR:
-		o.refreshTLDRClient(change)
-	case ToolGPTCache:
-		o.refreshGPTCacheClient(change)
-	case ToolMCP:
-		o.refreshMCPClient(change)
-	}
+	o.configManager.applyToolConfigChange(change)
 }
 
-// refreshTLDRClient reinitializes the TLDR client
+// refreshTLDRClient reinitializes the TLDR client.
 func (o *Overseer) refreshTLDRClient(change ToolConfigChange) {
-	o.intelMutex.Lock()
-	defer o.intelMutex.Unlock()
-
-	config := o.config.Intelligence.TLDR
-
-	if !config.Enabled {
-		// Disable the client
-		if o.tldrClient != nil {
-			o.tldrClient = nil
-			log.Printf("[Intelligence] TLDR client disabled")
-		}
-		return
-	}
-
-	// Reinitialize the client with new settings (CLI mode)
-	o.tldrClient = intelligence.NewTLDRClient(
-		config.BaseURL,
-		true, // useCLI
-		"llm-tldr",
-		"",
-		config.Timeout,
-	)
-
-	if change.EnabledBefore && change.EnabledAfter {
-		log.Printf("[Intelligence] TLDR client reinitialized (baseURL: %s, timeout: %v)",
-			config.BaseURL, config.Timeout)
-	} else {
-		log.Printf("[Intelligence] TLDR client initialized (baseURL: %s, timeout: %v)",
-			config.BaseURL, config.Timeout)
-	}
+	o.configManager.refreshTLDRClient(change)
 }
 
-// refreshGPTCacheClient reinitializes the GPTCache client
+// refreshGPTCacheClient reinitializes the GPTCache client.
 func (o *Overseer) refreshGPTCacheClient(change ToolConfigChange) {
-	o.intelMutex.Lock()
-	defer o.intelMutex.Unlock()
-
-	config := o.config.Intelligence.GPTCache
-
-	if !config.Enabled {
-		// Disable the client
-		if o.gptCache != nil {
-			o.gptCache = nil
-			log.Printf("[Intelligence] GPTCache client disabled")
-		}
-		return
-	}
-
-	// Reinitialize the client with new settings
-	o.gptCache = NewGPTCacheClient(
-		config.ServerURL,
-		5*time.Second,
-	)
-
-	if change.EnabledBefore && change.EnabledAfter {
-		log.Printf("[Intelligence] GPTCache client reinitialized (server: %s)",
-			config.ServerURL)
-	} else {
-		log.Printf("[Intelligence] GPTCache client initialized (server: %s)",
-			config.ServerURL)
-	}
+	o.configManager.refreshGPTCacheClient(change)
 }
 
-// refreshMCPClient reinitializes the MCP client
+// refreshMCPClient reinitializes the MCP client.
 func (o *Overseer) refreshMCPClient(change ToolConfigChange) {
+	o.configManager.refreshMCPClient(change)
+}
+
+// Old implementation placeholder - moved to ConfigManager
+func (o *Overseer) _refreshMCPClient(change ToolConfigChange) {
 	o.mcpMu.Lock()
 	defer o.mcpMu.Unlock()
 
@@ -2776,30 +2720,9 @@ func (o *Overseer) refreshMCPClient(change ToolConfigChange) {
 	}
 }
 
-// UpdateConfig updates the overseer's configuration and refreshes affected clients
-// This method should be called when the config file changes
-func (o *Overseer) UpdateConfig(newConfig *Config) {
-	if newConfig == nil {
-		log.Printf("[Overseer] Cannot update with nil config")
-		return
-	}
-
-	// Detect which tool configs have changed
-	detector := NewConfigChangeDetector()
-	changes := detector.DetectChanges(o.config, newConfig)
-
-	if len(changes) == 0 {
-		log.Printf("[Overseer] No tool configuration changes detected")
-		return
-	}
-
-	log.Printf("[Overseer] Detected %d tool configuration changes", len(changes))
-
-	// Update the config reference
-	o.config = newConfig
-
-	// Refresh affected clients
-	o.RefreshToolClients(changes)
+// UpdateConfig updates the overseer's configuration and refreshes affected clients.
+func (o *Overseer) UpdateConfig(newConfig *Config) error {
+	return o.configManager.UpdateConfig(newConfig)
 }
 
 // GetBeadsClient returns the beads client
