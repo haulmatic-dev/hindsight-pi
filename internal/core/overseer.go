@@ -273,6 +273,9 @@ type Overseer struct {
 
 	// BeadDiscovery finds beads ready to execute from various sources
 	beadDiscovery *BeadDiscovery
+
+	// ProjectResolver resolves project and repo paths for beads
+	projectResolver *ProjectResolver
 }
 
 // NewOverseer creates a new overseer instance
@@ -314,6 +317,9 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize bead discovery
 	o.beadDiscovery = NewBeadDiscovery(o.beadsClient, o.bvClient, o.projects, o.completed)
+
+	// Initialize project resolver
+	o.projectResolver = NewProjectResolver(o.projects)
 
 	// Initialize MCP client if enabled
 	if config.MCP.Enabled {
@@ -522,20 +528,12 @@ func (o *Overseer) analyzeImpactWithTLDR(client *intelligence.TLDRClient, bead *
 }
 
 // findProjectPath finds the project path for a given bead.
-// Falls back to beadAnalyzer if initialized, otherwise uses local projects.
+// Falls back to beadAnalyzer if initialized, otherwise uses projectResolver.
 func (o *Overseer) findProjectPath(bead *types.Bead) string {
 	if o.beadAnalyzer != nil {
 		return o.beadAnalyzer.FindProjectPath(bead)
 	}
-	for _, project := range o.projects {
-		if project.Name == bead.Project {
-			if bead.Repo != "" && project.Type == types.RepoTypeMulti {
-				return filepath.Join(project.Path, bead.Repo)
-			}
-			return project.Path
-		}
-	}
-	return ""
+	return o.projectResolver.ResolveProjectPath(bead)
 }
 
 // validateScope validates the scope of changes against configured limits
@@ -1523,42 +1521,24 @@ func (o *Overseer) closeBead(worker *types.Worker, success bool) error {
 	return o.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason)
 }
 
-// resolveRepoPath finds the repository path for a given project and repo
+// resolveRepoPath finds the repository path for a given project and repo.
 func (o *Overseer) resolveRepoPath(projectName, repoName, projectPath string) string {
-	// Find the project
-	for _, p := range o.projects {
-		if p.Name == projectName {
-			if p.Type == "multi" {
-				// Multi-repo: find specific repo
-				for _, r := range p.Repos {
-					if r.Name == repoName {
-						return r.Path
-					}
-				}
-			}
-			// Single repo or default to project path
-			return p.Path
-		}
-	}
-	// Fallback to project path
-	return projectPath
+	return o.projectResolver.ResolveRepoPath(projectName, repoName, projectPath)
 }
 
-// resolveProjectPath determines the project path using multiple resolution strategies
+// resolveProjectPath determines the project path using multiple resolution strategies.
 func (o *Overseer) resolveProjectPath(worker *types.Worker, projectName string) string {
 	// Priority 1: Use path stored in worker record
 	if worker.ProjectPath != "" {
 		return worker.ProjectPath
 	}
 
-	// Priority 2: Find by project name in discovered projects
-	for _, p := range o.projects {
-		if p.Name == projectName {
-			return p.Path
-		}
+	// Priority 2-3: Delegate to projectResolver
+	if path := o.projectResolver.ResolveProjectPathByWorker(worker, projectName); path != "" {
+		return path
 	}
 
-	// Priority 3: Find by project name in config
+	// Priority 4: Find by project name in config
 	if o.config != nil {
 		for _, proj := range o.config.Projects {
 			if proj.Name == projectName {
@@ -1567,22 +1547,8 @@ func (o *Overseer) resolveProjectPath(worker *types.Worker, projectName string) 
 		}
 	}
 
-	// Priority 4: Use first project with valid .beads directory
-	for _, proj := range o.projects {
-		if hasBeadsDirectory(proj.Path) {
-			return proj.Path
-		}
-	}
-
 	log.Printf("[resolveProjectPath] ERROR: Project %s not found in %d projects", projectName, len(o.projects))
 	return ""
-}
-
-// hasBeadsDirectory checks if a path contains a .beads directory
-func hasBeadsDirectory(projectPath string) bool {
-	beadsDir := filepath.Join(projectPath, ".beads")
-	_, err := os.Stat(beadsDir)
-	return err == nil
 }
 
 // statusReason returns the appropriate status string based on success.
