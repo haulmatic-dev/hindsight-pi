@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -190,29 +189,29 @@ func (d *defaultWorkerSpawner) Spawn(bead types.Bead, overseer *Overseer) (*type
 
 // Overseer is the main scheduler daemon
 type Overseer struct {
-	config                *Config
-	projects              []types.Project
-	activeWorkers         map[string]*types.Worker
-	workerMutex           sync.RWMutex
-	stateController       *StateController                // Runtime state (running, paused, maxWorkers, interval)
-	configManager         *ConfigManager                  // Dynamic configuration management
-	beadsClient           BeadsClient
-	spawner               WorkerSpawner // Interface for spawning workers (allows mocking in tests)
-	dag                   *DAG
-	dagMu                 sync.RWMutex
-	dagNavigator          *DAGNavigator
-	completed             map[string]bool                 // Track completed beads for this session
-	retryManager          *RetryManager                   // Retry and validation-retry tracking
-	intelligenceHub       *IntelligenceHub                // Encapsulates TLDR, GPTCache, Hindsight clients
+	config          *Config
+	projects        []types.Project
+	activeWorkers   map[string]*types.Worker
+	workerMutex     sync.RWMutex
+	stateController *StateController // Runtime state (running, paused, maxWorkers, interval)
+	configManager   *ConfigManager   // Dynamic configuration management
+	beadsClient     BeadsClient
+	spawner         WorkerSpawner // Interface for spawning workers (allows mocking in tests)
+	dag             *DAG
+	dagMu           sync.RWMutex
+	dagNavigator    *DAGNavigator
+	completed       map[string]bool  // Track completed beads for this session
+	retryManager    *RetryManager    // Retry and validation-retry tracking
+	intelligenceHub *IntelligenceHub // Encapsulates TLDR, GPTCache, Hindsight clients
 	// TODO: Migrate these fields to IntelligenceHub
-	tldrClient            *intelligence.TLDRClient        // TLDR client for impact analysis
-	gptCache              *GPTCacheClient                 // GPTCache client for caching
-	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
-	batchRetentionSvc     *services.BatchRetentionService // Batch retention service for efficient memory storage
-	hindsightLifecycle    *services.HindsightLifecycle    // Hindsight lifecycle manager for memory management
-	intelMutex            sync.RWMutex                    // Mutex for intelligence clients
-	bvClient              *bv.Client                      // BV client for graph analytics
-	settledStateSvc       *SettledStateService            // Settled-state detection service
+	tldrClient         *intelligence.TLDRClient        // TLDR client for impact analysis
+	gptCache           *GPTCacheClient                 // GPTCache client for caching
+	hindsightClient    HindsightClient                 // Hindsight client for pre-execution context retrieval
+	batchRetentionSvc  *services.BatchRetentionService // Batch retention service for efficient memory storage
+	hindsightLifecycle *services.HindsightLifecycle    // Hindsight lifecycle manager for memory management
+	intelMutex         sync.RWMutex                    // Mutex for intelligence clients
+	bvClient           *bv.Client                      // BV client for graph analytics
+	settledStateSvc    *SettledStateService            // Settled-state detection service
 
 	// MCP (Model Context Protocol) fields
 	mcpClient          *mcp.HTTPClient             // MCP HTTP client (Streamable HTTP)
@@ -232,6 +231,9 @@ type Overseer struct {
 	chainCompletionDetector *ChainCompletionDetector // Detects chain completion and triggers pattern extraction
 	chainRegistrar          *ChainRegistrar          // Registers bead chains from issues.jsonl
 	chainsRegistered        bool                     // Track if chains have been registered (only once at startup)
+
+	// DAG builder for dependency graph construction
+	dagBuilder *DAGBuilder // Builds DAG from project beads
 
 	// Worker tracker for persistent PID tracking
 	workerTracker *WorkerTracker // Tracks worker PIDs to identify Hydra workers
@@ -273,18 +275,18 @@ func NewOverseer(config *Config) *Overseer {
 	}
 
 	o := &Overseer{
-		config:                config,
-		activeWorkers:         make(map[string]*types.Worker),
-		stateController:       NewStateController(config.Overseer.MaxWorkers, config.Overseer.BeadDiscoveryInterval),
-		beadsClient:           beads.NewClient(),
-		bvClient:              bv.NewClient(),
-		spawner:               &defaultWorkerSpawner{},
-		dag:                   NewDAG(),
-		dagNavigator:          NewDAGNavigator(NewDAG()),
+		config:           config,
+		activeWorkers:    make(map[string]*types.Worker),
+		stateController:  NewStateController(config.Overseer.MaxWorkers, config.Overseer.BeadDiscoveryInterval),
+		beadsClient:      beads.NewClient(),
+		bvClient:         bv.NewClient(),
+		spawner:          &defaultWorkerSpawner{},
+		dag:              NewDAG(),
+		dagNavigator:     NewDAGNavigator(NewDAG()),
 		completed:        make(map[string]bool),
-		retryManager:      NewRetryManager(defaultBaseDelay, defaultMaxDelay),
-		spawnRateLimiter:  NewSpawnRateLimiter(),
-		intelligenceHub:   NewIntelligenceHub(config.Intelligence),
+		retryManager:     NewRetryManager(defaultBaseDelay, defaultMaxDelay),
+		spawnRateLimiter: NewSpawnRateLimiter(),
+		intelligenceHub:  NewIntelligenceHub(config.Intelligence),
 	}
 
 	// Initialize intelligence hub
@@ -292,6 +294,9 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize config manager
 	o.configManager = NewConfigManager(o)
+
+	// Initialize DAG builder
+	o.dagBuilder = NewDAGBuilder(o.errorLogger)
 
 	// Initialize MCP client if enabled
 	if config.MCP.Enabled {
@@ -956,159 +961,19 @@ func (o *Overseer) buildDAG() error {
 	o.dagMu.Lock()
 	defer o.dagMu.Unlock()
 
-	// If DAG is nil, create a new one (graceful degradation)
 	if o.dag == nil {
 		log.Printf("[DAG] DAG was nil, creating new instance")
 		o.dag = NewDAG()
-	o.dagNavigator = NewDAGNavigator(o.dag)
+		o.dagNavigator = NewDAGNavigator(o.dag)
 	}
 
-	// Clear existing DAG
-	o.dag.Clear()
-
-	var allBeads []types.Bead
-	var fetchErrors []error
-
-	// Fetch all beads from all projects
-	for _, project := range o.projects {
-		if project.Type == types.RepoTypeSingle {
-			beads, err := o.beadsClient.ListBeads(project.Path, "")
-			if err != nil {
-				// Graceful degradation: log error and continue
-				fetchErr := &BeadFetchError{
-					Op:      "list",
-					Project: project.Name,
-					Err:     err,
-				}
-				o.errorLogger.GracefulDegradation("beadsClient", "ListBeads",
-					fmt.Sprintf("skipping project %s", project.Name), fetchErr)
-				fetchErrors = append(fetchErrors, fetchErr)
-				continue
-			}
-
-			// Fetch full details for each bead to get dependencies
-			for _, bead := range beads {
-				fullBead, err := o.beadsClient.GetBead(project.Path, "", bead.ID)
-				if err != nil {
-					// Graceful degradation: use list bead if details fetch fails
-					fetchErr := &BeadFetchError{
-						Op:      "get",
-						Project: project.Name,
-						Err:     err,
-					}
-					o.errorLogger.GracefulDegradation("beadsClient", "GetBead",
-						fmt.Sprintf("using list data for %s", bead.ID), fetchErr)
-					allBeads = append(allBeads, bead)
-				} else {
-					allBeads = append(allBeads, *fullBead)
-				}
-			}
-		} else {
-			// Multi-repo project
-			for _, repo := range project.Repos {
-				beads, err := o.beadsClient.ListBeads(project.Path, repo.Name)
-				if err != nil {
-					// Graceful degradation: log error and continue
-					fetchErr := &BeadFetchError{
-						Op:      "list",
-						Project: project.Name,
-						Repo:    repo.Name,
-						Err:     err,
-					}
-					o.errorLogger.GracefulDegradation("beadsClient", "ListBeads",
-						fmt.Sprintf("skipping repo %s/%s", project.Name, repo.Name), fetchErr)
-					fetchErrors = append(fetchErrors, fetchErr)
-					continue
-				}
-
-				// Fetch full details for each bead to get dependencies
-				for _, bead := range beads {
-					fullBead, err := o.beadsClient.GetBead(project.Path, repo.Name, bead.ID)
-					if err != nil {
-						// Graceful degradation: use list bead if details fetch fails
-						fetchErr := &BeadFetchError{
-							Op:      "get",
-							Project: project.Name,
-							Repo:    repo.Name,
-							Err:     err,
-						}
-						o.errorLogger.GracefulDegradation("beadsClient", "GetBead",
-							fmt.Sprintf("using list data for %s", bead.ID), fetchErr)
-						allBeads = append(allBeads, bead)
-					} else {
-						allBeads = append(allBeads, *fullBead)
-					}
-				}
-			}
-		}
-	}
-
-	log.Printf("[DAG] Building DAG with %d beads (from %d projects)", len(allBeads), len(o.projects))
-
-	// Add all beads as nodes to the DAG
-	nodeErrors := 0
-	for _, bead := range allBeads {
-		if err := o.dag.AddNode(bead); err != nil {
-			if errors.Is(err, ErrNodeAlreadyExists) {
-				log.Printf("[DAG] Duplicate bead skipped: %s", bead.ID)
-				continue
-			}
-			o.errorLogger.Error("DAG", "AddNode", string(bead.ID), err, "warn")
-			nodeErrors++
-		}
-	}
-
-	// Add edges for dependencies
-	edgeErrors := 0
-	for _, bead := range allBeads {
-		beadID := string(bead.ID)
-		for _, depID := range bead.Dependencies {
-			depIDStr := string(depID)
-			if err := o.dag.AddEdge(beadID, depIDStr); err != nil {
-				switch {
-				case errors.Is(err, ErrNodeNotFound):
-					log.Printf("[DAG] Dependency not found: %s -> %s (may be in different project)", depIDStr, beadID)
-				case errors.Is(err, ErrSelfReference):
-					log.Printf("[DAG] Self-reference detected in bead %s, skipping edge", beadID)
-				case errors.Is(err, ErrEdgeCreatesCycle):
-					log.Printf("[DAG] Cycle would be created: %s -> %s, skipping edge", depIDStr, beadID)
-				default:
-					o.errorLogger.Error("DAG", "AddEdge", beadID, err, "warn")
-				}
-				edgeErrors++
-				// Continue even if edge creation fails (graceful degradation)
-			}
-		}
-	}
-
-	// Detect and log cycles
-	if cycle, err := o.dag.DetectCycle(); err != nil {
-		o.errorLogger.Error("DAG", "DetectCycle", "", err, "error")
-	} else if cycle != nil {
-		log.Printf("[DAG] Cycle detected: %v", cycle)
-	}
-
-	stats := DAGStats{
-		TotalNodes:     o.dag.GetNodeCount(),
-		ReadyNodes:     len(o.dag.GetReadyNodes()),
-		BlockedNodes:   o.dag.GetBlockedCount(),
-		CompletedNodes: o.dag.GetCompletedCount(),
-		FailedNodes:    o.dag.GetFailedCount(),
-	}
-
-	log.Printf("[DAG] Build complete: %+v (fetch errors: %d, node errors: %d, edge errors: %d)",
-		stats, len(fetchErrors), nodeErrors, edgeErrors)
-
-	// Return error only if we couldn't fetch any beads at all
-	if len(allBeads) == 0 && len(fetchErrors) > 0 {
-		return fmt.Errorf("failed to fetch any beads: %d fetch errors occurred", len(fetchErrors))
+	if err := o.dagBuilder.Build(o.dag, o.beadsClient, o.projects); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-// registerChainsFromBeadsClient registers chains by reading beads directly from .beads/issues.jsonl
-// This gets ALL beads regardless of status (open/closed), unlike br list which only returns open
 // GetBeadFromFile reads a single bead from issues.jsonl
 func (o *Overseer) getAllDescendants(nodeID string) []string {
 	var descendants []string
@@ -1138,9 +1003,9 @@ func (o *Overseer) getAllDescendants(nodeID string) []string {
 
 // getReadyBeads retrieves beads that are ready to execute.
 // Priority:
-//   1. bv --robot-plan (dependency-respecting tracks with impact scoring)
-//   2. br ready (all unblocked beads, maximum parallelism)
-//   3. bv --robot-triage (intelligent prioritization fallback)
+//  1. bv --robot-plan (dependency-respecting tracks with impact scoring)
+//  2. br ready (all unblocked beads, maximum parallelism)
+//  3. bv --robot-triage (intelligent prioritization fallback)
 func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
 	// 1. Try bv --robot-plan first for dependency-respecting scheduling
 	if o.bvClient != nil {
@@ -1526,8 +1391,8 @@ func (o *Overseer) getReadyBeadsFromBVPlan() ([]types.Bead, error) {
 						Repo:     repoName,
 						Status:   types.StatusOpen,
 						Metadata: map[string]string{
-							"bv_track":    track.TrackID,
-							"bv_source":   "robot-plan",
+							"bv_track":  track.TrackID,
+							"bv_source": "robot-plan",
 						},
 					}
 				}
