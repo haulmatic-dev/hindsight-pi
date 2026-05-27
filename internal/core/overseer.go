@@ -270,6 +270,9 @@ type Overseer struct {
 
 	// WorkerEnvBuilder builds environment variables for worker processes
 	workerEnvBuilder *WorkerEnvBuilder
+
+	// BeadDiscovery finds beads ready to execute from various sources
+	beadDiscovery *BeadDiscovery
 }
 
 // NewOverseer creates a new overseer instance
@@ -308,6 +311,9 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize worker environment builder
 	o.workerEnvBuilder = NewWorkerEnvBuilder(config)
+
+	// Initialize bead discovery
+	o.beadDiscovery = NewBeadDiscovery(o.beadsClient, o.bvClient, o.projects, o.completed)
 
 	// Initialize MCP client if enabled
 	if config.MCP.Enabled {
@@ -959,429 +965,52 @@ func (o *Overseer) getAllDescendants(nodeID string) []string {
 }
 
 // getReadyBeads retrieves beads that are ready to execute.
-// Priority:
-//  1. bv --robot-plan (dependency-respecting tracks with impact scoring)
-//  2. br ready (all unblocked beads, maximum parallelism)
-//  3. bv --robot-triage (intelligent prioritization fallback)
 func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
-	// 1. Try bv --robot-plan first for dependency-respecting scheduling
-	if o.bvClient != nil {
-		planBeads, planErr := o.getReadyBeadsFromBVPlan()
-		if planErr != nil {
-			log.Printf("⚠️  [BV-Plan] failed: %v", planErr)
-		}
-		if planErr == nil && len(planBeads) > 0 {
-			log.Printf("✅ Using bv robot-plan: found %d actionable beads", len(planBeads))
-			return planBeads, nil
-		}
+	o.workerMutex.RLock()
+	activeWorkers := make(map[string]bool, len(o.activeWorkers))
+	for id := range o.activeWorkers {
+		activeWorkers[id] = true
 	}
-
-	// 2. Fallback to br ready for maximum parallelism
-	brBeads, brErr := o.getReadyBeadsFromBR()
-	if brErr != nil {
-		log.Printf("⚠️  br ready failed: %v", brErr)
-	}
-	if brErr == nil && len(brBeads) > 0 {
-		log.Printf("✅ Using br ready: found %d unblocked beads", len(brBeads))
-		return brBeads, nil
-	}
-
-	// 3. Fallback to bv --robot-triage for intelligent prioritization
-	if o.bvClient != nil {
-		log.Printf("⚠️  br ready failed or returned 0 beads, falling back to bv triage")
-		beads, err := o.getReadyBeadsFromBV()
-		if err != nil {
-			return nil, fmt.Errorf("bv triage failed: %w", err)
-		}
-		return beads, nil
-	}
-
-	if brErr != nil {
-		return nil, fmt.Errorf("all bead discovery methods failed: br: %w", brErr)
-	}
-	return nil, fmt.Errorf("no beads found")
+	o.workerMutex.RUnlock()
+	return o.beadDiscovery.FindReadyBeads(activeWorkers)
 }
 
 // getReadyBeadsFromBR retrieves beads using br ready (legacy method)
+// getReadyBeadsFromBR retrieves beads using br ready (legacy method).
 func (o *Overseer) getReadyBeadsFromBR() ([]types.Bead, error) {
-	var allReadyBeads []types.Bead
-
-	for _, project := range o.projects {
-		if project.Type == types.RepoTypeSingle {
-			beads, err := o.beadsClient.GetReadyBeads(project.Name, project.Path, "")
-			if err != nil {
-				return nil, fmt.Errorf("could not get beads for project %s: %w", project.Name, err)
-			}
-			allReadyBeads = append(allReadyBeads, beads...)
-		} else {
-			// Multi-repo project
-			for _, repo := range project.Repos {
-				beads, err := o.beadsClient.GetReadyBeads(project.Name, project.Path, repo.Name)
-				if err != nil {
-					return nil, fmt.Errorf("could not get beads for repo %s/%s: %w", project.Name, repo.Name, err)
-				}
-				allReadyBeads = append(allReadyBeads, beads...)
-			}
-		}
-	}
-
-	// Filter out beads that are already running or completed
 	o.workerMutex.RLock()
-	var readyBeads []types.Bead
-	filteredCounts := map[string]int{
-		"activeWorkers":      0,
-		"completed":          0,
-		"approvalGate":       0,
-		"approvalInProgress": 0,
-	}
-	for _, bead := range allReadyBeads {
-		beadIDStr := string(bead.ID)
-
-		// Filter: not already running
-		if _, isRunning := o.activeWorkers[beadIDStr]; isRunning {
-			log.Printf("[FilterDebug] Filtering out %s: already in activeWorkers", beadIDStr)
-			filteredCounts["activeWorkers"]++
-			continue
-		}
-
-		// Filter: not already completed in this session
-		if o.completed[beadIDStr] {
-			log.Printf("[FilterDebug] Filtering out %s: already completed in this session", beadIDStr)
-			filteredCounts["completed"]++
-			continue
-		}
-
-		// Skip approval gates
-		if bead.Type == "approval-gate" {
-			log.Printf("[FilterDebug] Filtering out %s: approval-gate type", beadIDStr)
-			filteredCounts["approvalGate"]++
-			continue
-		}
-
-		// Skip approval beads that are in progress (waiting for user approval)
-		if bead.Type == "approval" && bead.Status == types.StatusInProgress {
-			log.Printf("[FilterDebug] Filtering out %s: approval in progress", beadIDStr)
-			filteredCounts["approvalInProgress"]++
-			continue
-		}
-
-		// Note: br ready already returns beads with satisfied dependencies
-		// The bead.Dependencies field shows all dependencies, but br ready ensures
-		// they are resolved. We don't need to filter here - br ready did it already.
-
-		readyBeads = append(readyBeads, bead)
+	activeWorkers := make(map[string]bool, len(o.activeWorkers))
+	for id := range o.activeWorkers {
+		activeWorkers[id] = true
 	}
 	o.workerMutex.RUnlock()
-
-	// Log filter statistics
-	if len(allReadyBeads) > 0 && len(readyBeads) < len(allReadyBeads) {
-		log.Printf("[FilterDebug] Filtered out %d beads: activeWorkers=%d, completed=%d, approvalGate=%d, approvalInProgress=%d",
-			len(allReadyBeads)-len(readyBeads),
-			filteredCounts["activeWorkers"],
-			filteredCounts["completed"],
-			filteredCounts["approvalGate"],
-			filteredCounts["approvalInProgress"])
-	}
-
-	// Sort by priority (high to low)
-	sort.Slice(readyBeads, func(i, j int) bool {
-		return readyBeads[i].Priority > readyBeads[j].Priority
-	})
-
-	log.Printf("📋 Found %d ready beads from 'br ready' (after filtering)", len(readyBeads))
-
-	return readyBeads, nil
+	return o.beadDiscovery.findFromBR(activeWorkers)
 }
 
-// getReadyBeadsFromBV retrieves beads that are ready to execute using bv --robot-triage
-// This provides intelligent prioritization with PageRank, critical path, and dependency analysis
-// Falls back to br ready if bv is not available (fail hard if bv fails when enabled)
+// getReadyBeadsFromBV retrieves beads using bv --robot-triage.
 func (o *Overseer) getReadyBeadsFromBV() ([]types.Bead, error) {
-	if o.bvClient == nil {
-		return nil, fmt.Errorf("bv client not initialized")
+	o.workerMutex.RLock()
+	activeWorkers := make(map[string]bool, len(o.activeWorkers))
+	for id := range o.activeWorkers {
+		activeWorkers[id] = true
 	}
-
-	var allReadyBeads []types.Bead
-
-	for _, project := range o.projects {
-		// Get triage from bv for this project
-		triage, err := o.bvClient.GetTriage(project.Path)
-		if err != nil {
-			return nil, fmt.Errorf("bv triage failed for project %s: %w", project.Name, err)
-		}
-
-		log.Printf("[BV] Triage for %s: %d recommendations, %d ready, %d blocked",
-			project.Name, len(triage.Recommendations), triage.ReadyCount, triage.BlockedCount)
-
-		// Process each recommendation
-		for _, rec := range triage.Recommendations {
-			beadID := types.BeadID(rec.BeadID)
-			beadIDStr := string(beadID)
-
-			// Filter: not already running
-			o.workerMutex.RLock()
-			if _, isRunning := o.activeWorkers[beadIDStr]; isRunning {
-				o.workerMutex.RUnlock()
-				continue
-			}
-			o.workerMutex.RUnlock()
-
-			// Filter: not already completed in this session
-			if o.completed[beadIDStr] {
-				continue
-			}
-
-			// Skip beads that are blocked by dependencies
-			if len(rec.BlockedBy) > 0 {
-				log.Printf("⏸️  [BV] Skipping blocked bead: %s (blocked by: %v)", beadID, rec.BlockedBy)
-				continue
-			}
-
-			// Skip approval gates
-			if rec.Type == "approval-gate" {
-				log.Printf("⏸️  [BV] Skipping approval gate: %s", beadID)
-				continue
-			}
-
-			// Fetch full bead details from database (triage only has summary)
-			var repoName string
-			if project.Type != types.RepoTypeSingle && len(project.Repos) > 0 {
-				repoName = project.Repos[0].Name // Use first repo for multi-repo projects
-			}
-
-			bead, err := o.beadsClient.GetBead(project.Path, repoName, beadID)
-			if err != nil {
-				log.Printf("⚠️  [BV] Could not get bead details for %s: %v", beadID, err)
-				// Create minimal bead from triage data as fallback
-				bead = &types.Bead{
-					ID:          beadID,
-					Title:       rec.Title,
-					Type:        rec.Type,
-					Priority:    rec.Priority,
-					Project:     project.Name,
-					Repo:        repoName,
-					Status:      types.StatusOpen, // Assume open since bv recommended it
-					Labels:      rec.Labels,
-					Description: rec.Reason, // Use reason as description
-					Metadata: map[string]string{
-						"bv_confidence":     fmt.Sprintf("%f", rec.Confidence),
-						"bv_reason":         rec.Reason,
-						"bv_estimated_time": rec.EstimatedTime,
-					},
-				}
-			}
-
-			// Skip approval beads that are in progress (waiting for user approval)
-			if bead.Type == "approval" && bead.Status == types.StatusInProgress {
-				log.Printf("⏸️  [BV] Skipping approval bead (waiting for user approval): %s", beadID)
-				continue
-			}
-
-			// Add confidence score to metadata for logging/debugging
-			if bead.Metadata == nil {
-				bead.Metadata = make(map[string]string)
-			}
-			bead.Metadata["bv_confidence"] = fmt.Sprintf("%f", rec.Confidence)
-			bead.Metadata["bv_reason"] = rec.Reason
-
-			allReadyBeads = append(allReadyBeads, *bead)
-		}
-
-		// Also process blockers_to_clear for actionable beads not in recommendations
-		for _, blocker := range triage.BlockersToClear {
-			if !blocker.Actionable {
-				continue // Skip non-actionable blockers
-			}
-
-			beadID := types.BeadID(blocker.BeadID)
-			beadIDStr := string(beadID)
-
-			// Filter: not already running
-			o.workerMutex.RLock()
-			if _, isRunning := o.activeWorkers[beadIDStr]; isRunning {
-				o.workerMutex.RUnlock()
-				continue
-			}
-			o.workerMutex.RUnlock()
-
-			// Filter: not already completed
-			if o.completed[beadIDStr] {
-				continue
-			}
-
-			// Skip if already in allReadyBeads (avoid duplicates)
-			alreadyAdded := false
-			for _, existing := range allReadyBeads {
-				if existing.ID == beadID {
-					alreadyAdded = true
-					break
-				}
-			}
-			if alreadyAdded {
-				continue
-			}
-
-			// Skip if blocked
-			if len(blocker.BlockedBy) > 0 {
-				log.Printf("⏸️  [BV] Skipping blocked bead from blockers_to_clear: %s (blocked by: %v)", beadID, blocker.BlockedBy)
-				continue
-			}
-
-			log.Printf("[BV] Found actionable blocker to clear: %s - %s", beadID, blocker.Title)
-
-			// Fetch full bead details
-			var repoName string
-			if project.Type != types.RepoTypeSingle && len(project.Repos) > 0 {
-				repoName = project.Repos[0].Name
-			}
-
-			bead, err := o.beadsClient.GetBead(project.Path, repoName, beadID)
-			if err != nil {
-				log.Printf("⚠️  [BV] Could not get bead details for blocker %s: %v", beadID, err)
-				// Create minimal bead as fallback
-				bead = &types.Bead{
-					ID:       beadID,
-					Title:    blocker.Title,
-					Type:     "task",
-					Priority: 3, // Default priority
-					Project:  project.Name,
-					Repo:     repoName,
-					Status:   types.StatusOpen,
-					Metadata: map[string]string{
-						"bv_source":     "blockers_to_clear",
-						"bv_unblocks":   fmt.Sprintf("%d", blocker.UnblocksCount),
-						"bv_confidence": "0.8",
-						"bv_reason":     fmt.Sprintf("Unblocks %d items", blocker.UnblocksCount),
-					},
-				}
-			}
-
-			// Add metadata for sorting
-			if bead.Metadata == nil {
-				bead.Metadata = make(map[string]string)
-			}
-			bead.Metadata["bv_source"] = "blockers_to_clear"
-			bead.Metadata["bv_unblocks"] = fmt.Sprintf("%d", blocker.UnblocksCount)
-			bead.Metadata["bv_confidence"] = "0.8" // High confidence for unblocking beads
-			bead.Metadata["bv_reason"] = fmt.Sprintf("Unblocks %d items: %v", blocker.UnblocksCount, blocker.UnblocksIDs)
-
-			allReadyBeads = append(allReadyBeads, *bead)
-		}
-	}
-
-	// Sort by bv confidence (highest first), then by priority
-	sort.Slice(allReadyBeads, func(i, j int) bool {
-		confI := 0.0
-		confJ := 0.0
-		if c, err := fmt.Sscanf(allReadyBeads[i].Metadata["bv_confidence"], "%f", &confI); err == nil && c == 1 {
-			// parsed
-		}
-		if c, err := fmt.Sscanf(allReadyBeads[j].Metadata["bv_confidence"], "%f", &confJ); err == nil && c == 1 {
-			// parsed
-		}
-
-		// Higher confidence first, then higher priority
-		if confI != confJ {
-			return confI > confJ
-		}
-		return allReadyBeads[i].Priority > allReadyBeads[j].Priority
-	})
-
-	log.Printf("📋 [BV] Found %d ready beads from triage (after filtering)", len(allReadyBeads))
-
-	return allReadyBeads, nil
+	o.workerMutex.RUnlock()
+	return o.beadDiscovery.findFromBV(activeWorkers)
 }
 
+// Falls back to br ready if bv is not available (fail hard if bv fails when enabled)
 // getReadyBeadsFromBVPlan retrieves beads using bv --robot-plan.
-// It returns parallel execution tracks with dependency-respecting ordering,
-// critical-path awareness, and impact scoring (unblocks count).
 func (o *Overseer) getReadyBeadsFromBVPlan() ([]types.Bead, error) {
-	if o.bvClient == nil {
-		return nil, fmt.Errorf("bv client not initialized")
+	o.workerMutex.RLock()
+	activeWorkers := make(map[string]bool, len(o.activeWorkers))
+	for id := range o.activeWorkers {
+		activeWorkers[id] = true
 	}
-
-	var allReadyBeads []types.Bead
-
-	for _, project := range o.projects {
-		plan, err := o.bvClient.GetPlan(project.Path)
-		if err != nil {
-			log.Printf("⚠️  [BV-Plan] GetPlan failed for %s: %v", project.Name, err)
-			continue
-		}
-
-		log.Printf("[BV-Plan] %s: %d tracks, %d actionable, %d blocked, highest_impact=%s",
-			project.Name, len(plan.Tracks), plan.TotalActionable, plan.TotalBlocked, plan.Summary.HighestImpact)
-
-		for _, track := range plan.Tracks {
-			for _, item := range track.Items {
-				beadID := types.BeadID(item.ID)
-				beadIDStr := string(beadID)
-
-				// Filter: not already running
-				o.workerMutex.RLock()
-				if _, isRunning := o.activeWorkers[beadIDStr]; isRunning {
-					o.workerMutex.RUnlock()
-					continue
-				}
-				o.workerMutex.RUnlock()
-
-				// Filter: not already completed in this session
-				if o.completed[beadIDStr] {
-					continue
-				}
-
-				// Fetch full bead details
-				var repoName string
-				if project.Type != types.RepoTypeSingle && len(project.Repos) > 0 {
-					repoName = project.Repos[0].Name
-				}
-
-				bead, err := o.beadsClient.GetBead(project.Path, repoName, beadID)
-				if err != nil {
-					log.Printf("⚠️  [BV-Plan] Could not get bead details for %s: %v", beadID, err)
-					// Fallback: create minimal bead from plan data
-					bead = &types.Bead{
-						ID:       beadID,
-						Title:    item.Title,
-						Priority: item.Priority,
-						Project:  project.Name,
-						Repo:     repoName,
-						Status:   types.StatusOpen,
-						Metadata: map[string]string{
-							"bv_track":  track.TrackID,
-							"bv_source": "robot-plan",
-						},
-					}
-				}
-
-				// Skip approval gates
-				if bead.Type == "approval-gate" {
-					continue
-				}
-
-				// Skip approval beads in progress
-				if bead.Type == "approval" && bead.Status == types.StatusInProgress {
-					continue
-				}
-
-				if bead.Metadata == nil {
-					bead.Metadata = make(map[string]string)
-				}
-				bead.Metadata["bv_track"] = track.TrackID
-				bead.Metadata["bv_source"] = "robot-plan"
-				if len(item.Unblocks) > 0 {
-					bead.Metadata["bv_unblocks"] = strings.Join(item.Unblocks, ",")
-				}
-
-				allReadyBeads = append(allReadyBeads, *bead)
-			}
-		}
-	}
-
-	log.Printf("📋 [BV-Plan] Found %d ready beads from plan (after filtering)", len(allReadyBeads))
-	return allReadyBeads, nil
+	o.workerMutex.RUnlock()
+	return o.beadDiscovery.findFromBVPlan(activeWorkers)
 }
 
+// critical-path awareness, and impact scoring (unblocks count).
 // spawnWorker creates and starts a worker for a bead using the configured spawner
 func (o *Overseer) spawnWorker(bead types.Bead) error {
 	log.Printf("[DEBUG] spawnWorker called with bead: ID='%s', Title='%s', Project='%s'", bead.ID, bead.Title, bead.Project)
