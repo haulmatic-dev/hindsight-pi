@@ -235,6 +235,9 @@ type Overseer struct {
 	// DAG builder for dependency graph construction
 	dagBuilder *DAGBuilder // Builds DAG from project beads
 
+	// Impact analyzer for TLDR-based impact analysis
+	impactAnalyzer *ImpactAnalyzer // Analyzes code impact using TLDR
+
 	// Worker tracker for persistent PID tracking
 	workerTracker *WorkerTracker // Tracks worker PIDs to identify Hydra workers
 
@@ -297,6 +300,9 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize DAG builder
 	o.dagBuilder = NewDAGBuilder(o.errorLogger)
+
+	// Initialize impact analyzer
+	o.impactAnalyzer = NewImpactAnalyzer(o.findProjectPath)
 
 	// Initialize MCP client if enabled
 	if config.MCP.Enabled {
@@ -501,61 +507,7 @@ func (o *Overseer) initializeChainCompletionDetector() {
 
 // analyzeImpactWithTLDR performs impact analysis using TLDR service
 func (o *Overseer) analyzeImpactWithTLDR(client *intelligence.TLDRClient, bead *types.Bead, files []string) (*ImpactAnalysis, error) {
-	// Find project path for the bead
-	projectPath := o.findProjectPath(bead)
-	if projectPath == "" {
-		return nil, fmt.Errorf("could not find project path for bead %s", bead.ID)
-	}
-
-	// Set search path for CLI mode
-	client.SetSearchPath(projectPath)
-
-	// Analyze first file (TLDR analyzes one file at a time)
-	if len(files) == 0 {
-		return nil, fmt.Errorf("no files to analyze")
-	}
-
-	// Use depth 2 for moderate analysis depth
-	resp, err := client.ImpactAnalysis(files[0], 2)
-	if err != nil {
-		return nil, fmt.Errorf("TLDR impact analysis failed: %w", err)
-	}
-
-	// Convert TLDRImpactResponse to ImpactAnalysis
-	analysis := &ImpactAnalysis{
-		TargetFiles: files,
-	}
-
-	// Build call graph from TLDR response
-	if len(resp.Impact.Callers) > 0 || len(resp.Impact.Callees) > 0 {
-		callGraph := &CallGraph{}
-
-		// Add caller nodes
-		for _, caller := range resp.Impact.Callers {
-			nodeID := fmt.Sprintf("%s:%s", caller.File, caller.Function)
-			callGraph.Nodes = append(callGraph.Nodes, CallNode{
-				ID:       nodeID,
-				Name:     caller.Function,
-				File:     caller.File,
-				NodeType: "caller",
-			})
-		}
-
-		// Add callee nodes
-		for _, callee := range resp.Impact.Callees {
-			nodeID := fmt.Sprintf("%s:%s", callee.File, callee.Function)
-			callGraph.Nodes = append(callGraph.Nodes, CallNode{
-				ID:       nodeID,
-				Name:     callee.Function,
-				File:     callee.File,
-				NodeType: "callee",
-			})
-		}
-
-		analysis.CallGraph = callGraph
-	}
-
-	return analysis, nil
+	return o.impactAnalyzer.Analyze(client, bead, files)
 }
 
 // findProjectPath finds the project path for a given bead.
