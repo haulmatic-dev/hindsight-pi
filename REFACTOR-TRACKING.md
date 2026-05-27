@@ -7,11 +7,12 @@
 
 ### P0: Critical
 
-- [x] **1. Decompose Overseer God Object** (partial — 16 methods extracted)
+- [x] **1. Decompose Overseer God Object** (partial — 18 methods extracted)
   - [x] Extract SpawnRateLimiter (5 methods)
   - [x] Extract RetryManager (7 methods)
   - [x] Extract ProjectScanner (2 methods)
   - [x] Extract BeadFileReader (2 methods)
+  - [x] Extract ErrorLogger (2 methods)
   - [ ] Extract WorkerManager (deferred — high coupling)
   - [ ] Extract Scheduler (deferred — high coupling)
   - [ ] Extract ChainOrchestrator
@@ -50,7 +51,7 @@
 
 - [ ] **10. Package Reorganization**
 
-## Commits So Far (14)
+## Commits So Far (16)
 
 1. `a317e9c` refactor(cli): add unified CLI runner package
 2. `ece1b1d` refactor(cleanup): remove dead code packages
@@ -63,16 +64,18 @@
 9. `34fda3e` refactor(overseer): add IntelligenceHub (not yet integrated)
 10. `f0a84bb` refactor(overseer): extract ProjectScanner
 11. `a0b9443` refactor(overseer): extract BeadFileReader
+12. `9298f9f` docs: update refactor tracking with latest metrics
+13. `latest` refactor(overseer): extract ErrorLogger
 
 ## Metrics
 
 | Metric | Before | Current | Change |
 |---|---|---|---|
-| overseer.go lines | 3,976 | **3,556** | -420 |
-| Overseer methods | 112 | **97** | -15 |
-| Total source files | ~250 | ~248 | -2 |
+| overseer.go lines | 3,976 | **3,536** | -440 |
+| Overseer methods | 112 | **95** | -17 |
+| Total source files | ~250 | ~249 | -1 |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 5 | — |
+| New packages | — | 6 | — |
 | Tests | — | **542 passed** ✅ | — |
 
 ## New Packages
@@ -85,6 +88,7 @@
 | `internal/core/project_scanner.go` | Project discovery (config + auto) |
 | `internal/core/bead_file_reader.go` | Bead file I/O (issues.jsonl) |
 | `internal/core/intelligence_hub.go` | TLDR/GPTCache/Hindsight clients |
+| `internal/core/error_logger.go` | Structured error logging |
 
 ## Next Steps
 
