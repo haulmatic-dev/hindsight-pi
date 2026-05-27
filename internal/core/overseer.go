@@ -138,13 +138,6 @@ const (
 	minSpawnInterval    = 500 * time.Millisecond // Minimum time between individual spawns (0.5s)
 )
 
-// beadRetryInfo tracks retry state for a bead
-type beadRetryInfo struct {
-	count     int
-	lastError time.Time
-	lastErr   error
-}
-
 // calculateBackoff calculates exponential backoff delay with jitter protection
 // Formula: baseDelay * 2^attempt, capped at maxDelay
 func calculateBackoff(attempt int, baseDelay, maxDelay time.Duration) time.Duration {
@@ -212,12 +205,7 @@ type Overseer struct {
 	dag                   *DAG
 	dagMu                 sync.RWMutex
 	completed             map[string]bool                 // Track completed beads for this session
-	retries               map[string]*beadRetryInfo       // Track retry state for failed beads
-	retriesMu             sync.RWMutex                    // Mutex for retries map
-	validationRetries     map[string]int                  // Track validation retry count per bead
-	validationRetriesMu   sync.RWMutex                    // Mutex for validation retries map
-	baseDelay             time.Duration                   // Base delay for exponential backoff
-	maxDelay              time.Duration                   // Maximum delay for exponential backoff
+	retryManager          *RetryManager                   // Retry and validation-retry tracking
 	tldrClient            *intelligence.TLDRClient        // TLDR client for impact analysis
 	gptCache              *GPTCacheClient                 // GPTCache client for caching
 	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
@@ -284,12 +272,9 @@ func NewOverseer(config *Config) *Overseer {
 		bvClient:              bv.NewClient(),
 		spawner:               &defaultWorkerSpawner{},
 		dag:                   NewDAG(),
-		completed:             make(map[string]bool),
-		retries:               make(map[string]*beadRetryInfo),
-		validationRetries:     make(map[string]int),
-		baseDelay:             defaultBaseDelay,
-		maxDelay:              defaultMaxDelay,
-		spawnRateLimiter:      NewSpawnRateLimiter(),
+		completed:        make(map[string]bool),
+		retryManager:     NewRetryManager(defaultBaseDelay, defaultMaxDelay),
+		spawnRateLimiter: NewSpawnRateLimiter(),
 	}
 
 	// Initialize intelligence clients if enabled
@@ -368,9 +353,9 @@ func NewOverseer(config *Config) *Overseer {
 	// Override defaults if configured
 	if config.Overseer.WorkerTimeout > 0 {
 		// WorkerTimeout can be used to derive maxDelay
-		o.maxDelay = config.Overseer.WorkerTimeout / 6 // Reasonable fraction
-		if o.maxDelay > defaultMaxDelay {
-			o.maxDelay = defaultMaxDelay
+		o.retryManager.SetMaxDelay(config.Overseer.WorkerTimeout / 6) // Reasonable fraction
+		if o.retryManager.MaxDelay() > defaultMaxDelay {
+			o.retryManager.SetMaxDelay(defaultMaxDelay)
 		}
 	}
 
@@ -713,113 +698,8 @@ func (o *Overseer) validateScope(bundle *IntelligenceBundle, targetFiles []strin
 }
 
 // shouldRetry checks if a bead should be retried based on retry count and cooldown
-func (o *Overseer) shouldRetry(beadID string) bool {
-	o.retriesMu.RLock()
-	defer o.retriesMu.RUnlock()
-
-	retryInfo, exists := o.retries[beadID]
-	if !exists {
-		// No retries yet, allow first attempt
-		return true
-	}
-
-	maxRetries := o.config.Overseer.DefaultRetries
-	if maxRetries <= 0 {
-		maxRetries = defaultMaxRetries
-	}
-
-	// Check if we've exceeded max retries
-	if retryInfo.count >= maxRetries {
-		log.Printf("[Retry] Bead %s exhausted all %d retry attempts", beadID, maxRetries)
-		return false
-	}
-
-	// Check if enough time has passed since last attempt (cooldown + exponential backoff)
-	backoff := calculateBackoff(retryInfo.count, o.baseDelay, o.maxDelay)
-	minInterval := defaultRetryCooldown + backoff
-	elapsed := time.Since(retryInfo.lastError)
-
-	if elapsed < minInterval {
-		log.Printf("[Retry] Bead %s in cooldown period (%v remaining)", beadID, minInterval-elapsed)
-		return false
-	}
-
-	return true
-}
-
-// recordRetry records a retry attempt for a bead
-func (o *Overseer) recordRetry(beadID string, err error) {
-	o.retriesMu.Lock()
-	defer o.retriesMu.Unlock()
-
-	if info, exists := o.retries[beadID]; exists {
-		info.count++
-		info.lastError = time.Now()
-		info.lastErr = err
-		log.Printf("[Retry] Bead %s retry attempt %d recorded: %v", beadID, info.count, err)
-	} else {
-		o.retries[beadID] = &beadRetryInfo{
-			count:     1,
-			lastError: time.Now(),
-			lastErr:   err,
-		}
-		log.Printf("[Retry] Bead %s first retry recorded: %v", beadID, err)
-	}
-}
-
-// clearRetry removes retry tracking for a bead (called on success)
-func (o *Overseer) clearRetry(beadID string) {
-	o.retriesMu.Lock()
-	defer o.retriesMu.Unlock()
-
-	if _, exists := o.retries[beadID]; exists {
-		delete(o.retries, beadID)
-		log.Printf("[Retry] Bead %s retry state cleared after successful execution", beadID)
-	}
-}
-
-// getRetryCount returns the current retry count for a bead
-func (o *Overseer) getRetryCount(beadID string) int {
-	o.retriesMu.RLock()
-	defer o.retriesMu.RUnlock()
-
-	if info, exists := o.retries[beadID]; exists {
-		return info.count
-	}
-	return 0
-}
-
-// getValidationRetryCount returns the current validation retry count for a bead
-func (o *Overseer) getValidationRetryCount(beadID string) int {
-	o.validationRetriesMu.RLock()
-	defer o.validationRetriesMu.RUnlock()
-
-	return o.validationRetries[beadID]
-}
-
-// incrementValidationRetry increments the validation retry count for a bead
-func (o *Overseer) incrementValidationRetry(beadID string) {
-	o.validationRetriesMu.Lock()
-	defer o.validationRetriesMu.Unlock()
-
-	o.validationRetries[beadID]++
-	log.Printf("[Validation] Bead %s validation retry count: %d", beadID, o.validationRetries[beadID])
-}
-
-// clearValidationRetry removes the validation retry count for a bead
-func (o *Overseer) clearValidationRetry(beadID string) {
-	o.validationRetriesMu.Lock()
-	defer o.validationRetriesMu.Unlock()
-
-	if _, exists := o.validationRetries[beadID]; exists {
-		delete(o.validationRetries, beadID)
-		log.Printf("[Validation] Bead %s validation retry state cleared", beadID)
-	}
-}
-
-// logError logs an error with structured context information
 func (o *Overseer) logError(component, operation, beadID string, err error, severity string) {
-	retryCount := o.getRetryCount(beadID)
+	retryCount := o.retryManager.GetRetryCount(beadID)
 
 	switch severity {
 	case "fatal":
@@ -1202,9 +1082,9 @@ func (o *Overseer) tick() error {
 		beadIDStr := string(bead.ID)
 
 		// Check if this is a retry
-		if retryInfo, exists := o.retries[beadIDStr]; exists {
+		if count, _, _, exists := o.retryManager.RetryInfo(beadIDStr); exists {
 			log.Printf("[Retry] Attempting retry %d/%d for bead %s",
-				retryInfo.count+1, o.config.Overseer.DefaultRetries, bead.ID)
+				count+1, o.config.Overseer.DefaultRetries, bead.ID)
 		}
 
 		// Skip approval gates (require manual br close)
@@ -1249,7 +1129,7 @@ func (o *Overseer) tick() error {
 				strings.Contains(errMsg, "resource limits exceeded")
 
 			if !isResourceConstraint {
-				o.recordRetry(beadIDStr, err)
+				o.retryManager.RecordRetry(beadIDStr, err)
 			}
 			o.logError("Overseer", "spawnWorker", beadIDStr, err, "error")
 			continue
@@ -1259,7 +1139,7 @@ func (o *Overseer) tick() error {
 		o.spawnRateLimiter.RecordSpawn()
 
 		// Clear retry state on successful spawn
-		o.clearRetry(beadIDStr)
+		o.retryManager.ClearRetry(beadIDStr)
 		availableSlots--
 		spawnedCount++
 	}
@@ -1274,10 +1154,8 @@ func (o *Overseer) tick() error {
 // getRetryEligibleBeads returns beads that are eligible for retry
 // It filters the ready beads and adds any failed beads that should be retried
 func (o *Overseer) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead {
-	o.retriesMu.RLock()
-	defer o.retriesMu.RUnlock()
-
-	if len(o.retries) == 0 {
+	retrySnapshot := o.retryManager.Snapshot()
+	if len(retrySnapshot) == 0 {
 		return readyBeads
 	}
 
@@ -1288,35 +1166,27 @@ func (o *Overseer) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead {
 	}
 
 	// Check failed beads for retry eligibility
-	for beadID, retryInfo := range o.retries {
+	for beadID := range retrySnapshot {
 		// Skip if already in ready pool
 		if _, exists := readyMap[beadID]; exists {
 			continue
 		}
 
+		if !o.retryManager.ShouldRetry(beadID, o.config.Overseer.DefaultRetries) {
+			continue
+		}
+
+		count, _, _, _ := o.retryManager.RetryInfo(beadID)
 		maxRetries := o.config.Overseer.DefaultRetries
 		if maxRetries <= 0 {
 			maxRetries = defaultMaxRetries
-		}
-
-		// Check if retries exhausted
-		if retryInfo.count >= maxRetries {
-			log.Printf("[Retry] Bead %s exhausted all %d retry attempts, skipping", beadID, maxRetries)
-			continue
-		}
-
-		// Check cooldown period
-		backoff := calculateBackoff(retryInfo.count, o.baseDelay, o.maxDelay)
-		minInterval := defaultRetryCooldown + backoff
-		if time.Since(retryInfo.lastError) < minInterval {
-			continue
 		}
 
 		// Try to fetch the bead from the DAG
 		if bead, err := o.getBeadFromDAG(beadID); err == nil {
 			readyBeads = append(readyBeads, bead)
 			log.Printf("[Retry] Bead %s added to retry queue (attempt %d/%d)",
-				beadID, retryInfo.count+1, maxRetries)
+				beadID, count+1, maxRetries)
 		} else {
 			log.Printf("[Retry] Could not fetch bead %s for retry: %v", beadID, err)
 		}
@@ -2181,16 +2051,16 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 	o.workerMutex.Unlock()
 
 	// Check if bead has exhausted retries
-	if retryInfo, exists := o.retries[beadIDStr]; exists {
+	if count, lastErr, _, exists := o.retryManager.RetryInfo(beadIDStr); exists {
 		maxRetries := o.config.Overseer.DefaultRetries
 		if maxRetries <= 0 {
 			maxRetries = defaultMaxRetries
 		}
-		if retryInfo.count >= maxRetries {
+		if count >= maxRetries {
 			err := &RetryExhaustedError{
 				BeadID:    beadIDStr,
-				Attempts:  retryInfo.count,
-				LastError: retryInfo.lastErr,
+				Attempts:  count,
+				LastError: lastErr,
 			}
 			o.logError("spawnWorker", "retry_exhausted", beadIDStr, err, "error")
 			return err
@@ -2242,7 +2112,7 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 
 	agentType := agentTypes[0] // Use primary agent
 
-	retryCount := o.getRetryCount(beadIDStr)
+	retryCount := o.retryManager.GetRetryCount(beadIDStr)
 	if retryCount > 0 {
 		log.Printf("[Worker] Spawning retry worker for bead: %s (attempt %d, agent: %s)", beadIDStr, retryCount+1, agentType)
 	} else {
@@ -2544,7 +2414,7 @@ func extractExitCode(err error) int {
 func (o *Overseer) handleWorkerSuccess(worker *types.Worker, duration time.Duration) []string {
 	log.Printf("[Worker] Completed: %s (duration: %v)", worker.ID, duration)
 	worker.Status = string(types.WorkerStatusCompleted)
-	o.clearRetry(worker.ID)
+	o.retryManager.ClearRetry(worker.ID)
 
 	o.dagMu.Lock()
 	defer o.dagMu.Unlock()
@@ -2578,9 +2448,9 @@ func (o *Overseer) handleWorkerSuccess(worker *types.Worker, duration time.Durat
 // handleWorkerFailure processes a failed worker completion
 func (o *Overseer) handleWorkerFailure(worker *types.Worker, exitCode int, duration time.Duration) {
 	workerErr := fmt.Errorf("worker exited with code %d", exitCode)
-	o.recordRetry(worker.ID, workerErr)
+	o.retryManager.RecordRetry(worker.ID, workerErr)
 
-	retryCount := o.getRetryCount(worker.ID)
+	retryCount := o.retryManager.GetRetryCount(worker.ID)
 	maxRetries := o.getMaxRetries()
 
 	if retryCount >= maxRetries {
@@ -2590,7 +2460,7 @@ func (o *Overseer) handleWorkerFailure(worker *types.Worker, exitCode int, durat
 		worker.Status = string(types.WorkerStatusFailed)
 	} else {
 		// Will retry, log as warning
-		backoff := calculateBackoff(retryCount, o.baseDelay, o.maxDelay)
+		backoff := calculateBackoff(retryCount, o.retryManager.BaseDelay(), o.retryManager.MaxDelay())
 		log.Printf("[Worker] Failed but will retry: %s (exit code: %d, duration: %v, retry %d/%d, backoff: %v)",
 			worker.ID, exitCode, duration, retryCount, maxRetries, backoff)
 		worker.Status = string(types.WorkerStatusRetryPending)
@@ -2661,7 +2531,7 @@ func (o *Overseer) scheduleAfterCompletion(worker *types.Worker, success bool, n
 			log.Printf("[Scheduler] Worker completed, triggering immediate scheduling cycle")
 		}
 		go o.triggerImmediateSchedule()
-	} else if o.getRetryCount(worker.ID) < o.getMaxRetries() {
+	} else if o.retryManager.GetRetryCount(worker.ID) < o.getMaxRetries() {
 		log.Printf("[Scheduler] Triggering scheduling to attempt retry for %s", worker.ID)
 		go o.triggerImmediateSchedule()
 	}
@@ -3103,13 +2973,13 @@ func (o *Overseer) GetBeadDiscoveryInterval() time.Duration {
 
 // SetRetryDelay updates the base retry delay for the overseer
 func (o *Overseer) SetRetryDelay(delay time.Duration) {
-	o.baseDelay = delay
+	o.retryManager.SetBaseDelay(delay)
 	log.Printf("🔧 Retry delay set to %v", delay)
 }
 
 // GetRetryDelay returns the current base retry delay
 func (o *Overseer) GetRetryDelay() time.Duration {
-	return o.baseDelay
+	return o.retryManager.BaseDelay()
 }
 
 // CloseBead closes a bead using the beads client
@@ -3722,7 +3592,7 @@ func (o *Overseer) sendMCPWorkerCompletion(worker *types.Worker, success bool, e
 
 	status := "success"
 	if !success {
-		if o.getRetryCount(worker.ID) >= o.config.Overseer.DefaultRetries {
+		if o.retryManager.GetRetryCount(worker.ID) >= o.config.Overseer.DefaultRetries {
 			status = "failure"
 		} else {
 			status = "partial"

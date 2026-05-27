@@ -39,12 +39,12 @@ func (o *Overseer) RunTDDValidation(refactorBead types.Bead, projectPath string)
 
 	if result.Passed {
 		log.Printf("[TDDValidation] PASSED for %s", beadID)
-		o.clearValidationRetry(beadID)
+		o.retryManager.ClearValidationRetry(beadID)
 		return nil
 	}
 
 	// Validation failed - check retry count
-	retryCount := o.getValidationRetryCount(beadID)
+	retryCount := o.retryManager.GetValidationRetryCount(beadID)
 	maxRounds := o.config.Validation.MaxRounds
 	if maxRounds <= 0 {
 		maxRounds = 3
@@ -84,7 +84,7 @@ func (o *Overseer) RunTDDValidation(refactorBead types.Bead, projectPath string)
 		log.Printf("[TDDValidation] Created fix bead %s for gap in %s", fixBeadID, beadID)
 	}
 
-	o.incrementValidationRetry(beadID)
+	o.retryManager.IncrementValidationRetry(beadID)
 	return nil
 }
 
@@ -127,12 +127,12 @@ func (o *Overseer) RunPRDValidation(chainInfo *ChainInfo, projectPath string) er
 
 	if result.Passed {
 		log.Printf("[PRDValidation] PASSED for chain %s", rootBeadID)
-		o.clearValidationRetry(string(rootBeadID))
+		o.retryManager.ClearValidationRetry(string(rootBeadID))
 		return nil
 	}
 
 	// Validation failed - check retry count
-	retryCount := o.getValidationRetryCount(string(rootBeadID))
+	retryCount := o.retryManager.GetValidationRetryCount(string(rootBeadID))
 	maxRounds := o.config.Validation.MaxRounds
 	if maxRounds <= 0 {
 		maxRounds = 3
@@ -191,7 +191,7 @@ func (o *Overseer) RunPRDValidation(chainInfo *ChainInfo, projectPath string) er
 		}
 	}
 
-	o.incrementValidationRetry(string(rootBeadID))
+	o.retryManager.IncrementValidationRetry(string(rootBeadID))
 	return nil
 }
 

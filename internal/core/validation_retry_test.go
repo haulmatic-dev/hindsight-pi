@@ -15,30 +15,30 @@ func TestValidationRetryTracking(t *testing.T) {
 	beadID := "test-bead-123"
 
 	// Initially zero
-	if count := o.getValidationRetryCount(beadID); count != 0 {
+	if count := o.retryManager.GetValidationRetryCount(beadID); count != 0 {
 		t.Errorf("Expected initial count 0, got %d", count)
 	}
 
 	// Increment
-	o.incrementValidationRetry(beadID)
-	if count := o.getValidationRetryCount(beadID); count != 1 {
+	o.retryManager.IncrementValidationRetry(beadID)
+	if count := o.retryManager.GetValidationRetryCount(beadID); count != 1 {
 		t.Errorf("Expected count 1, got %d", count)
 	}
 
 	// Increment again
-	o.incrementValidationRetry(beadID)
-	if count := o.getValidationRetryCount(beadID); count != 2 {
+	o.retryManager.IncrementValidationRetry(beadID)
+	if count := o.retryManager.GetValidationRetryCount(beadID); count != 2 {
 		t.Errorf("Expected count 2, got %d", count)
 	}
 
 	// Clear
-	o.clearValidationRetry(beadID)
-	if count := o.getValidationRetryCount(beadID); count != 0 {
+	o.retryManager.ClearValidationRetry(beadID)
+	if count := o.retryManager.GetValidationRetryCount(beadID); count != 0 {
 		t.Errorf("Expected count 0 after clear, got %d", count)
 	}
 
 	// Clear unknown bead (no panic)
-	o.clearValidationRetry("unknown-bead")
+	o.retryManager.ClearValidationRetry("unknown-bead")
 }
 
 func TestValidationRetryCount_MaxRounds(t *testing.T) {
@@ -49,17 +49,17 @@ func TestValidationRetryCount_MaxRounds(t *testing.T) {
 	beadID := "test-bead-456"
 
 	// Simulate exhausted retries
-	o.incrementValidationRetry(beadID) // count = 1
-	o.incrementValidationRetry(beadID) // count = 2
+	o.retryManager.IncrementValidationRetry(beadID) // count = 1
+	o.retryManager.IncrementValidationRetry(beadID) // count = 2
 
-	if count := o.getValidationRetryCount(beadID); count != 2 {
+	if count := o.retryManager.GetValidationRetryCount(beadID); count != 2 {
 		t.Errorf("Expected count 2, got %d", count)
 	}
 
 	// One more increment
-	o.incrementValidationRetry(beadID) // count = 3
+	o.retryManager.IncrementValidationRetry(beadID) // count = 3
 
-	if count := o.getValidationRetryCount(beadID); count != 3 {
+	if count := o.retryManager.GetValidationRetryCount(beadID); count != 3 {
 		t.Errorf("Expected count 3, got %d", count)
 	}
 }
@@ -73,7 +73,7 @@ func TestValidationRetry_ConcurrentAccess(t *testing.T) {
 	done := make(chan bool, 10)
 	for i := 0; i < 10; i++ {
 		go func() {
-			o.incrementValidationRetry(beadID)
+			o.retryManager.IncrementValidationRetry(beadID)
 			done <- true
 		}()
 	}
@@ -82,7 +82,7 @@ func TestValidationRetry_ConcurrentAccess(t *testing.T) {
 		<-done
 	}
 
-	if count := o.getValidationRetryCount(beadID); count != 10 {
+	if count := o.retryManager.GetValidationRetryCount(beadID); count != 10 {
 		t.Errorf("Expected count 10 after concurrent increments, got %d", count)
 	}
 }

@@ -26,7 +26,7 @@ func (o *Overseer) spawnWorkerViaAgent(bead types.Bead) (*types.Worker, error) {
 
 	agentType := agentTypes[0]
 
-	retryCount := o.getRetryCount(beadIDStr)
+	retryCount := o.retryManager.GetRetryCount(beadIDStr)
 	if retryCount > 0 {
 		log.Printf("[AgentWorker] Spawning retry worker for bead: %s (attempt %d, agent: %s)", beadIDStr, retryCount+1, agentType)
 	} else {

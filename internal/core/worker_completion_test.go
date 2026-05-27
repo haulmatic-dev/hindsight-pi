@@ -129,8 +129,8 @@ func setupWorkerCompletionTest(t *testing.T) (*Overseer, *enhancedMockBeadsClien
 	overseer.projects = testProjects
 
 	// Initialize baseDelay and maxDelay
-	overseer.baseDelay = 5 * time.Second
-	overseer.maxDelay = 5 * time.Minute
+	overseer.retryManager.SetBaseDelay(5 * time.Second)
+	overseer.retryManager.SetMaxDelay(5 * time.Minute)
 
 	return overseer, mockBeads, testProjects
 }
@@ -453,34 +453,34 @@ func TestWorkerCompletion_RetryTrackingOnFailure(t *testing.T) {
 	}
 
 	// Record initial retry count
-	initialRetryCount := overseer.getRetryCount(worker.ID)
+	initialRetryCount := overseer.retryManager.GetRetryCount(worker.ID)
 	if initialRetryCount != 0 {
 		t.Fatalf("Expected initial retry count of 0, got %d", initialRetryCount)
 	}
 
 	// Record a retry for the worker (simulating monitorWorker behavior)
-	overseer.recordRetry(worker.ID, errors.New("worker failed"))
+	overseer.retryManager.RecordRetry(worker.ID, errors.New("worker failed"))
 
 	// Verify retry was tracked
-	retryCount := overseer.getRetryCount(worker.ID)
+	retryCount := overseer.retryManager.GetRetryCount(worker.ID)
 	if retryCount != 1 {
 		t.Errorf("Expected retry count of 1 after failure, got %d", retryCount)
 	}
 
 	// After just recording a retry, shouldRetry returns false due to cooldown period
 	// This is expected behavior - we don't want to retry immediately
-	if overseer.shouldRetry(worker.ID) {
+	if overseer.retryManager.ShouldRetry(worker.ID, overseer.config.Overseer.DefaultRetries) {
 		t.Error("Expected worker to NOT be eligible for retry immediately (cooldown period)")
 	}
 
 	// Record more retries up to max
 	maxRetries := overseer.config.Overseer.DefaultRetries
 	for i := 1; i < maxRetries; i++ {
-		overseer.recordRetry(worker.ID, errors.New("worker failed"))
+		overseer.retryManager.RecordRetry(worker.ID, errors.New("worker failed"))
 	}
 
 	// Now shouldRetry should return false (max retries exceeded)
-	if overseer.shouldRetry(worker.ID) {
+	if overseer.retryManager.ShouldRetry(worker.ID, overseer.config.Overseer.DefaultRetries) {
 		t.Error("Expected worker to NOT be eligible for retry after max retries exceeded")
 	}
 }
@@ -510,19 +510,19 @@ func TestWorkerCompletion_ClearRetryOnSuccess(t *testing.T) {
 	}
 
 	// Record some retries first
-	overseer.recordRetry(worker.ID, errors.New("first failure"))
-	overseer.recordRetry(worker.ID, errors.New("second failure"))
+	overseer.retryManager.RecordRetry(worker.ID, errors.New("first failure"))
+	overseer.retryManager.RecordRetry(worker.ID, errors.New("second failure"))
 
-	if overseer.getRetryCount(worker.ID) != 2 {
+	if overseer.retryManager.GetRetryCount(worker.ID) != 2 {
 		t.Fatalf("Expected 2 retries recorded")
 	}
 
 	// Clear retry state (simulating successful completion)
-	overseer.clearRetry(worker.ID)
+	overseer.retryManager.ClearRetry(worker.ID)
 
 	// Verify retry state was cleared
-	if overseer.getRetryCount(worker.ID) != 0 {
-		t.Errorf("Expected retry count to be 0 after clear, got %d", overseer.getRetryCount(worker.ID))
+	if overseer.retryManager.GetRetryCount(worker.ID) != 0 {
+		t.Errorf("Expected retry count to be 0 after clear, got %d", overseer.retryManager.GetRetryCount(worker.ID))
 	}
 }
 

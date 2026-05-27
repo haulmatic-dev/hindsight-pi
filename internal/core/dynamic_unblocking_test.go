@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -262,33 +263,33 @@ func TestDynamicUnblocking_RetryFailedBead(t *testing.T) {
 	beadID := "test-project-retry"
 
 	// Before recording any retries, shouldRetry should return true
-	shouldRetry := test.overseer.shouldRetry(beadID)
+	shouldRetry := test.overseer.retryManager.ShouldRetry(beadID, test.overseer.config.Overseer.DefaultRetries)
 	if !shouldRetry {
 		t.Error("Expected shouldRetry=true when no retries recorded")
 	}
 
 	// Record a failure
-	test.overseer.recordRetry(beadID, nil)
+	test.overseer.retryManager.RecordRetry(beadID, nil)
 
 	// Check retry count
-	count := test.overseer.getRetryCount(beadID)
+	count := test.overseer.retryManager.GetRetryCount(beadID)
 	if count != 1 {
 		t.Errorf("Expected retry count=1, got %d", count)
 	}
 
 	// After recording, shouldRetry should be false (cooldown)
-	shouldRetry = test.overseer.shouldRetry(beadID)
+	shouldRetry = test.overseer.retryManager.ShouldRetry(beadID, test.overseer.config.Overseer.DefaultRetries)
 	if shouldRetry {
 		t.Error("Expected shouldRetry=false due to cooldown after recording")
 	}
 
 	// Record more failures up to max retries
 	for i := 0; i < 2; i++ {
-		test.overseer.recordRetry(beadID, nil)
+		test.overseer.retryManager.RecordRetry(beadID, nil)
 	}
 
 	// After exceeding max retries, shouldRetry should be false
-	shouldRetry = test.overseer.shouldRetry(beadID)
+	shouldRetry = test.overseer.retryManager.ShouldRetry(beadID, test.overseer.config.Overseer.DefaultRetries)
 	if shouldRetry {
 		t.Error("Expected shouldRetry=false after max retries exhausted")
 	}
@@ -301,10 +302,10 @@ func TestDynamicUnblocking_RetryCooldown(t *testing.T) {
 	beadID := "test-project-cooldown"
 
 	// Record a failure with recent timestamp
-	test.overseer.recordRetry(beadID, nil)
+	test.overseer.retryManager.RecordRetry(beadID, nil)
 
 	// Immediately check - should be in cooldown
-	shouldRetry := test.overseer.shouldRetry(beadID)
+	shouldRetry := test.overseer.retryManager.ShouldRetry(beadID, test.overseer.config.Overseer.DefaultRetries)
 	if shouldRetry {
 		t.Error("Expected shouldRetry=false during cooldown period")
 	}
@@ -461,26 +462,26 @@ func TestDynamicUnblocking_ClearRetryAfterSuccess(t *testing.T) {
 	beadID := "test-project-clear"
 
 	// Record some retries
-	test.overseer.recordRetry(beadID, nil)
-	test.overseer.recordRetry(beadID, nil)
+	test.overseer.retryManager.RecordRetry(beadID, nil)
+	test.overseer.retryManager.RecordRetry(beadID, nil)
 
 	// Verify retry count
-	count := test.overseer.getRetryCount(beadID)
+	count := test.overseer.retryManager.GetRetryCount(beadID)
 	if count != 2 {
 		t.Errorf("Expected retry count=2, got %d", count)
 	}
 
 	// Clear retry state (simulating success)
-	test.overseer.clearRetry(beadID)
+	test.overseer.retryManager.ClearRetry(beadID)
 
 	// Verify retry state is cleared
-	count = test.overseer.getRetryCount(beadID)
+	count = test.overseer.retryManager.GetRetryCount(beadID)
 	if count != 0 {
 		t.Errorf("Expected retry count=0 after clear, got %d", count)
 	}
 
 	// Should be able to retry again
-	shouldRetry := test.overseer.shouldRetry(beadID)
+	shouldRetry := test.overseer.retryManager.ShouldRetry(beadID, test.overseer.config.Overseer.DefaultRetries)
 	if !shouldRetry {
 		t.Error("Expected shouldRetry=true after clearing retry state")
 	}
@@ -512,10 +513,9 @@ func TestDynamicUnblocking_GetRetryEligibleBeads(t *testing.T) {
 
 	// Add a failed bead that's eligible for retry (but wait for cooldown)
 	failedBeadID := "test-project-failed"
-	test.overseer.retries[failedBeadID] = &beadRetryInfo{
-		count:     1,
-		lastError: time.Now().Add(-1 * time.Hour), // Far in the past to bypass cooldown
-	}
+	test.overseer.retryManager.RecordRetry(failedBeadID, errors.New("test failure"))
+	// Manually set lastError to bypass cooldown (hack for test)
+	test.overseer.retryManager.retries[failedBeadID].lastError = time.Now().Add(-1 * time.Hour)
 
 	// Get retry eligible beads
 	retryEligible := test.overseer.getRetryEligibleBeads(readyBeads)

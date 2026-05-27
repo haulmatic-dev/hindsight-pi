@@ -100,8 +100,8 @@ func TestRunTDDValidation_CreatesFixBeadOnGap(t *testing.T) {
 	}
 
 	// Should have created fix beads
-	if o.getValidationRetryCount("test-refactor") != 1 {
-		t.Errorf("Expected validation retry count 1, got %d", o.getValidationRetryCount("test-refactor"))
+	if o.retryManager.GetValidationRetryCount("test-refactor") != 1 {
+		t.Errorf("Expected validation retry count 1, got %d", o.retryManager.GetValidationRetryCount("test-refactor"))
 	}
 }
 
@@ -153,8 +153,8 @@ func TestRunTDDValidation_ExhaustedRetries(t *testing.T) {
 	// Second call: retry count 1 >= maxRounds 1, exhausted, no increment
 	o.RunTDDValidation(refactorBead, projectPath)
 
-	if o.getValidationRetryCount("test-refactor") != 1 {
-		t.Errorf("Expected validation retry count 1, got %d", o.getValidationRetryCount("test-refactor"))
+	if o.retryManager.GetValidationRetryCount("test-refactor") != 1 {
+		t.Errorf("Expected validation retry count 1, got %d", o.retryManager.GetValidationRetryCount("test-refactor"))
 	}
 }
 
@@ -252,8 +252,8 @@ func TestRunPRDValidation_CreatesFixBeads(t *testing.T) {
 	}
 
 	// Should have created fix beads and re-validation bead
-	if o.getValidationRetryCount("test-root") != 1 {
-		t.Errorf("Expected validation retry count 1, got %d", o.getValidationRetryCount("test-root"))
+	if o.retryManager.GetValidationRetryCount("test-root") != 1 {
+		t.Errorf("Expected validation retry count 1, got %d", o.retryManager.GetValidationRetryCount("test-root"))
 	}
 }
 
