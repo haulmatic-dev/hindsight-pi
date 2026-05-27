@@ -7,11 +7,13 @@
 
 ### P0: Critical
 
-- [x] **1. Decompose Overseer God Object** (partial — 12 methods extracted)
+- [x] **1. Decompose Overseer God Object** (partial — 16 methods extracted)
   - [x] Extract SpawnRateLimiter (5 methods)
   - [x] Extract RetryManager (7 methods)
+  - [x] Extract ProjectScanner (2 methods)
+  - [x] Extract BeadFileReader (2 methods)
   - [ ] Extract WorkerManager (deferred — high coupling)
-  - [ ] Extract Scheduler
+  - [ ] Extract Scheduler (deferred — high coupling)
   - [ ] Extract ChainOrchestrator
   - [ ] Extract ResourceGovernor
   - [ ] Extract ValidationEngine
@@ -48,7 +50,7 @@
 
 - [ ] **10. Package Reorganization**
 
-## Commits So Far
+## Commits So Far (14)
 
 1. `a317e9c` refactor(cli): add unified CLI runner package
 2. `ece1b1d` refactor(cleanup): remove dead code packages
@@ -57,26 +59,37 @@
 5. `88bae16` refactor(cleanup): remove unused AgentRegistry
 6. `c6add83` refactor(overseer): extract SpawnRateLimiter
 7. `ce30268` refactor(overseer): extract RetryManager
-8. `latest` refactor(overseer): add IntelligenceHub
+8. `ac163e1` docs: update refactor tracking with metrics
+9. `34fda3e` refactor(overseer): add IntelligenceHub (not yet integrated)
+10. `f0a84bb` refactor(overseer): extract ProjectScanner
+11. `a0b9443` refactor(overseer): extract BeadFileReader
 
 ## Metrics
 
 | Metric | Before | Current | Change |
 |---|---|---|---|
-| overseer.go lines | 3,976 | 3,739 | -237 |
-| Overseer methods | 112 | 101 | -11 |
-| Total source files | ~250 | ~246 | -4 |
+| overseer.go lines | 3,976 | **3,556** | -420 |
+| Overseer methods | 112 | **97** | -15 |
+| Total source files | ~250 | ~248 | -2 |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 4 (cli, spawn_rate_limiter, retry_manager, intelligence_hub) | — |
+| New packages | — | 5 | — |
 | Tests | — | **542 passed** ✅ | — |
+
+## New Packages
+
+| Package | Purpose |
+|---|---|
+| `pkg/cli/runner.go` | Unified CLI command execution |
+| `internal/core/spawn_rate_limiter.go` | Spawn rate limiting + backoff |
+| `internal/core/retry_manager.go` | Bead retry + validation retry tracking |
+| `internal/core/project_scanner.go` | Project discovery (config + auto) |
+| `internal/core/bead_file_reader.go` | Bead file I/O (issues.jsonl) |
+| `internal/core/intelligence_hub.go` | TLDR/GPTCache/Hindsight clients |
 
 ## Next Steps
 
-1. **Create PR** for current work (develop-merged or main?)
-2. **Flatten Pi Config structs** (mechanical, low risk)
-3. **Extract test fixtures** from large test files
-4. **Integrate IntelligenceHub** into Overseer (needs careful testing)
-
-## Recommendation
-
-Create a PR now. The current changes are substantial and stable. Further refactoring can continue in a follow-up branch.
+1. **Integrate IntelligenceHub** into Overseer (replaces initializeIntelligenceClients)
+2. **Extract WorkerManager** (spawn/cleanup/completion) — needs careful testing
+3. **Extract Scheduler** (getReadyBeads, getAllDescendants) — high coupling
+4. **Flatten Pi Config structs** (7 nested types → 3)
+5. **Extract test fixtures** from large test files
