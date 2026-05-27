@@ -7,7 +7,7 @@
 
 ### P0: Critical
 
-- [x] **1. Decompose Overseer God Object** (partial — 24 methods extracted)
+- [x] **1. Decompose Overseer God Object** (partial — 25 methods extracted)
   - [x] Extract SpawnRateLimiter (5 methods)
   - [x] Extract RetryManager (7 methods)
   - [x] Extract ProjectScanner (2 methods)
@@ -18,6 +18,7 @@
   - [x] Extract DAGNavigator (DAG accessors)
   - [x] Extract StateController (running, paused, maxWorkers, interval)
   - [x] Extract ConfigManager (dynamic config changes)
+  - [x] Extract ChainRegistrar (chain registration from issues.jsonl)
   - [ ] Extract WorkerManager (deferred — high coupling)
   - [ ] Extract Scheduler (deferred — high coupling)
   - [ ] Extract ChainOrchestrator
@@ -55,7 +56,7 @@
 
 - [ ] **10. Package Reorganization**
 
-## Commits So Far (24)
+## Commits So Far (26)
 
 1. `a317e9c` refactor(cli): add unified CLI runner package
 2. `ece1b1d` refactor(cleanup): remove dead code packages
@@ -75,16 +76,18 @@
 16. `latest` refactor(overseer): add DAGNavigator
 17. `latest` refactor(overseer): extract StateController
 18. `latest` refactor(overseer): extract ConfigManager
+19. `latest` refactor(overseer): remove _refreshMCPClient placeholder
+20. `latest` refactor(overseer): extract ChainRegistrar
 
 ## Metrics
 
 | Metric | Before | Current | Change |
 |---|---|---|---|
-| overseer.go lines | 3,976 | **3,285** | -691 |
-| Overseer methods | 112 | **92** | -20 |
+| overseer.go lines | 3,976 | **3,137** | -839 |
+| Overseer methods | 112 | **90** | -22 |
 | Total source files | ~250 | ~250 | +0 (removed dead, added new) |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 11 | — |
+| New packages | — | 12 | — |
 | Tests | — | **542 passed** ✅ | — |
 
 ## New Packages
@@ -102,6 +105,7 @@
 | `internal/core/dag_navigator.go` | Thread-safe DAG accessors |
 | `internal/core/state_controller.go` | Runtime state (running, paused, workers) |
 | `internal/core/config_manager.go` | Dynamic config changes |
+| `internal/core/chain_registrar.go` | Chain registration from issues.jsonl |
 
 ## Next Steps
 
