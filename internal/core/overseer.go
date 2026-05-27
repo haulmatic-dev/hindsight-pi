@@ -282,6 +282,9 @@ type Overseer struct {
 
 	// Scheduler orchestrates the main scheduling loop
 	scheduler *Scheduler
+
+	// ServiceStarter starts and stops background services
+	serviceStarter *ServiceStarter
 }
 
 // NewOverseer creates a new overseer instance
@@ -381,6 +384,9 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize scheduler
 	o.scheduler = NewScheduler(o)
+
+	// Initialize service starter
+	o.serviceStarter = NewServiceStarter(o)
 
 	// Initialize agent connector (Pi by default)
 	piConfig := agents.PiConfig{
@@ -604,59 +610,8 @@ func (o *Overseer) isIntelligenceEnabled() bool {
 func (o *Overseer) Start(ctx context.Context) error {
 	log.Println("🚀 Starting Hydra overseer...")
 
-	// Start orphan process janitor
-	if o.orphanJanitor != nil {
-		o.orphanJanitor.Start()
-		log.Println("🧹 Orphan janitor started")
-	}
-
-	// Run Pi ecosystem setup
-	if err := o.runPiSetup(); err != nil {
-		log.Printf("[Overseer] Pi setup warning: %v", err)
-		// Continue even if Pi setup fails - not critical for Hydra operation
-	}
-
-	// Discover projects
-	projectScanner := NewProjectScanner(o.config)
-	if err := projectScanner.Discover(); err != nil {
-		return fmt.Errorf("failed to discover projects: %w", err)
-	}
-	o.projects = projectScanner.Projects()
-
-	log.Printf("📁 Discovered %d projects", len(o.projects))
-
-	// Initialize bead file reader and analyzer
-	o.beadFileReader = NewBeadFileReader(o.projects)
-	o.beadAnalyzer = NewBeadAnalyzer(o.projects)
-
-	// Start settled-state detection service if enabled
-	if o.settledStateSvc != nil {
-		if err := o.settledStateSvc.Start(ctx); err != nil {
-			log.Printf("[SettledState] Failed to start service: %v", err)
-		} else {
-			log.Println("🔒 Settled-state detection service started")
-		}
-	}
-
-	// Start skill updater if initialized
-	if o.skillUpdater != nil {
-		o.skillUpdater.Start()
-		log.Println("📚 Skill updater started")
-	}
-
-	// Start TLDR indexer if enabled
-	if indexer := o.intelligenceHub.Indexer(); indexer != nil {
-		indexer.Start()
-		log.Println("📇 TLDR indexer started")
-
-		// Queue initial indexing for all project repos
-		o.intelligenceHub.QueueInitialIndexing(o.projects)
-	}
-
-	// Start epic scanner
-	if o.epicScanner != nil {
-		o.epicScanner.Start()
-		log.Println("🏛️  Epic scanner started")
+	if err := o.serviceStarter.Start(ctx); err != nil {
+		return err
 	}
 
 	o.stateController.SetRunning(true)
@@ -667,33 +622,7 @@ func (o *Overseer) Start(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			o.stateController.SetRunning(false)
-			// Stop orphan janitor
-			if o.orphanJanitor != nil {
-				o.orphanJanitor.Stop()
-			}
-			// Stop settled-state detection service
-			if o.settledStateSvc != nil {
-				if err := o.settledStateSvc.Stop(); err != nil {
-					log.Printf("[SettledState] Error stopping service: %v", err)
-				} else {
-					log.Println("🔒 Settled-state detection service stopped")
-				}
-			}
-			// Stop skill updater
-			if o.skillUpdater != nil {
-				o.skillUpdater.Stop()
-				log.Println("📚 Skill updater stopped")
-			}
-			// Stop TLDR indexer
-			if indexer := o.intelligenceHub.Indexer(); indexer != nil {
-				indexer.Stop()
-				log.Println("📇 TLDR indexer stopped")
-			}
-			// Stop epic scanner
-			if o.epicScanner != nil {
-				o.epicScanner.Stop()
-				log.Println("🏛️  Epic scanner stopped")
-			}
+			o.serviceStarter.Stop()
 			return nil
 		case <-ticker.C:
 			if err := o.tick(); err != nil {
