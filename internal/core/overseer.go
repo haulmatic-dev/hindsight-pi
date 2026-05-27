@@ -279,6 +279,9 @@ type Overseer struct {
 
 	// WorkerLifecycle manages worker process lifecycle
 	workerLifecycle *WorkerLifecycle
+
+	// Scheduler orchestrates the main scheduling loop
+	scheduler *Scheduler
 }
 
 // NewOverseer creates a new overseer instance
@@ -375,6 +378,9 @@ func NewOverseer(config *Config) *Overseer {
 		o.sendMCPWorkerCompletion,
 		o.getMaxRetries,
 	)
+
+	// Initialize scheduler
+	o.scheduler = NewScheduler(o)
 
 	// Initialize agent connector (Pi by default)
 	piConfig := agents.PiConfig{
@@ -697,182 +703,9 @@ func (o *Overseer) Start(ctx context.Context) error {
 	}
 }
 
-// tick performs one iteration of the scheduling loop
+// tick performs one iteration of the scheduling loop.
 func (o *Overseer) tick() error {
-	// Check if paused
-	if o.IsPaused() {
-		return nil
-	}
-
-	// Get active worker count
-	o.workerMutex.RLock()
-	activeCount := len(o.activeWorkers)
-	o.workerMutex.RUnlock()
-
-	maxWorkers := o.GetMaxWorkers()
-
-	// Handle max_workers = 0 as "unlimited"
-	var availableSlots int
-	if maxWorkers == 0 {
-		// Unlimited mode: allow spawning based on available CPU/Memory resources only
-		// Still limit to reasonable batch size to prevent overwhelming the system
-		availableSlots = 20 // Reasonable default batch size for unlimited mode
-		log.Printf("📊 Unlimited worker mode active (max_workers=0), allowing up to %d slots per tick", availableSlots)
-	} else {
-		availableSlots = maxWorkers - activeCount
-		if availableSlots <= 0 {
-			return nil
-		}
-	}
-
-	// Build/refresh DAG from all beads
-	if err := o.buildDAG(); err != nil {
-		// Graceful degradation: log error and continue with existing DAG
-		o.errorLogger.GracefulDegradation("Overseer", "buildDAG", "using existing DAG", err)
-		// Continue with existing DAG if rebuild fails
-	}
-
-	// Register chains only ONCE at startup (not on every discovery cycle)
-	// This is called from the main loop but we track registration state
-	if o.chainCompletionDetector != nil && !o.chainsRegistered {
-		o.chainRegistrar.RegisterFromProjects(o.projects)
-		o.chainsRegistered = true
-	}
-
-	// Get ready beads using beadsClient (calls 'br ready' directly)
-	// This is more reliable than DAG which may have stale dependency data
-	readyBeads, err := o.getReadyBeads()
-	if err != nil {
-		return fmt.Errorf("failed to get ready beads: %w", err)
-	}
-
-	// Include failed beads that are eligible for retry
-	retryBeads := o.getRetryEligibleBeads(readyBeads)
-
-	if len(retryBeads) == 0 {
-		return nil
-	}
-
-	// Count retry beads separately for logging
-	originalCount := len(readyBeads)
-	retryCount := len(retryBeads) - originalCount
-
-	if retryCount > 0 {
-		log.Printf("📊 Active workers: %d/%d, Ready beads: %d (original: %d, retries: %d)",
-			activeCount, maxWorkers, len(retryBeads), originalCount, retryCount)
-	} else {
-		log.Printf("📊 Active workers: %d/%d, Ready beads from DAG: %d", activeCount, maxWorkers, len(retryBeads))
-	}
-
-	// Apply 70% batch spawning rule: only spawn up to 70% of available slots per tick
-	// This prevents overwhelming the system and allows for better resource management
-	batchLimit := int(float64(availableSlots) * 0.7)
-	if batchLimit < 1 {
-		batchLimit = 1 // Always allow at least 1 worker to spawn
-	}
-	log.Printf("📊 Batch spawning limit: %d workers (70%% of %d available slots)", batchLimit, availableSlots)
-
-	// Register chains before spawning workers (to catch beads just before execution)
-	// This ensures we track chains even when beads complete in milliseconds
-	if o.chainCompletionDetector != nil && !o.chainsRegistered && o.dag != nil {
-		o.chainRegistrar.RegisterFromProjects(o.projects)
-		o.chainsRegistered = true
-		log.Printf("[ChainCompletion] Registered chains before worker spawn")
-	}
-
-	// Spawn workers for ready beads
-	spawnedCount := 0
-	for _, bead := range retryBeads {
-		// CRITICAL: Recalculate available slots before each spawn
-		// This prevents race conditions where workers complete between spawns
-		o.workerMutex.RLock()
-		currentActive := len(o.activeWorkers)
-		o.workerMutex.RUnlock()
-
-		currentAvailable := maxWorkers - currentActive
-		if maxWorkers == 0 {
-			currentAvailable = 20 // Unlimited mode
-		}
-
-		if currentAvailable <= 0 || spawnedCount >= batchLimit {
-			if spawnedCount >= batchLimit {
-				log.Printf("📊 Reached batch limit (%d workers), deferring remaining beads to next tick", batchLimit)
-			} else if currentAvailable <= 0 {
-				log.Printf("📊 No available slots (active: %d/%d), breaking spawn loop", currentActive, maxWorkers)
-			}
-			break
-		}
-
-		beadIDStr := string(bead.ID)
-
-		// Check if this is a retry
-		if count, _, _, exists := o.retryManager.RetryInfo(beadIDStr); exists {
-			log.Printf("[Retry] Attempting retry %d/%d for bead %s",
-				count+1, o.config.Overseer.DefaultRetries, bead.ID)
-		}
-
-		// Skip approval gates (require manual br close)
-		if bead.Type == "approval-gate" {
-			log.Printf("⏸️  Skipping approval gate: %s", bead.ID)
-			continue
-		}
-
-		// Skip approval beads that are in progress (waiting for user approval)
-		if bead.Type == "approval" && bead.Status == types.StatusInProgress {
-			log.Printf("⏸️  Skipping approval bead (waiting for user approval): %s", bead.ID)
-			continue
-		}
-
-		// Skip if project path is not found (can't execute without knowing where the project is)
-		projectPath := o.beadAnalyzer.FindProjectPath(&bead)
-		if projectPath == "" {
-			log.Printf("⚠️  Skipping bead %s: project '%s' not configured or found", bead.ID, bead.Project)
-			continue
-		}
-
-		// Check resource limits before spawning
-		if o.resourceMonitor != nil && !o.resourceMonitor.CanSpawnWorker() {
-			log.Printf("[ResourceMonitor] Blocking worker spawn for bead %s: resource limits exceeded", bead.ID)
-			// Don't decrease availableSlots - we want to retry this bead
-			continue
-		}
-
-		// Check rate limiting: max 5 workers per 10 seconds
-		if !o.spawnRateLimiter.CanSpawn() {
-			log.Printf("[RateLimit] Blocking spawn for bead %s: rate limit exceeded", bead.ID)
-			// Break the loop - no more spawns in this window
-			break
-		}
-
-		if err := o.spawnWorker(bead); err != nil {
-			// Don't record retry for worker limit or rate limit - these are resource constraints, not failures
-			// The bead will naturally be retried in the next tick without accumulating failure counts
-			errMsg := err.Error()
-			isResourceConstraint := strings.Contains(errMsg, "worker limit reached") ||
-				strings.Contains(errMsg, "rate limit exceeded") ||
-				strings.Contains(errMsg, "resource limits exceeded")
-
-			if !isResourceConstraint {
-				o.retryManager.RecordRetry(beadIDStr, err)
-			}
-			o.errorLogger.Error("Overseer", "spawnWorker", beadIDStr, err, "error")
-			continue
-		}
-
-		// Record successful spawn for rate limiting
-		o.spawnRateLimiter.RecordSpawn()
-
-		// Clear retry state on successful spawn
-		o.retryManager.ClearRetry(beadIDStr)
-		availableSlots--
-		spawnedCount++
-	}
-
-	if spawnedCount > 0 {
-		log.Printf("📊 Spawned %d workers this tick (batch limit: %d)", spawnedCount, batchLimit)
-	}
-
-	return nil
+	return o.scheduler.Tick()
 }
 
 // getRetryEligibleBeads returns beads that are eligible for retry
