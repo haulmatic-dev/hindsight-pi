@@ -120,6 +120,18 @@ func (h *IntelligenceHub) BatchRetention() *services.BatchRetentionService {
 	return h.batchRetentionSvc
 }
 
+// SubmitExecutionResult submits an execution result to batch retention.
+func (h *IntelligenceHub) SubmitExecutionResult(bead types.Bead, execResult services.ExecutionResult, workerID string) {
+	if h.batchRetentionSvc == nil {
+		return
+	}
+	if err := h.batchRetentionSvc.SubmitExecutionResult(bead, execResult, workerID); err != nil {
+		log.Printf("[IntelligenceHub] Failed to submit execution result: %v", err)
+	} else {
+		log.Printf("[IntelligenceHub] Submitted execution result for bead %s", bead.ID)
+	}
+}
+
 // Indexer returns the TLDR indexer (may be nil).
 func (h *IntelligenceHub) Indexer() *TLDRIndexer {
 	h.mu.RLock()
