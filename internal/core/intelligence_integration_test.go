@@ -705,7 +705,7 @@ func TestPreExecutionIntelligence_NoTargetFiles(t *testing.T) {
 	}
 
 	// Extract target files
-	targetFiles := overseer.extractTargetFiles(bead)
+	targetFiles := overseer.beadAnalyzer.ExtractTargetFiles(bead)
 
 	// Should return empty slice for beads without file references
 	// Note: The actual implementation may extract some words as "files" based on heuristics
@@ -942,7 +942,7 @@ func TestExtractTargetFiles(t *testing.T) {
 				Metadata:    tt.metadata,
 			}
 
-			files := overseer.extractTargetFiles(bead)
+			files := overseer.beadAnalyzer.ExtractTargetFiles(bead)
 
 			// Note: The actual implementation uses heuristics that may find more files
 			// than expected, so we're lenient with the count check
@@ -967,24 +967,26 @@ func TestExtractTargetFiles(t *testing.T) {
 }
 
 func TestFindProjectPath(t *testing.T) {
-	overseer := &Overseer{
-		config: DefaultConfig(),
-		projects: []types.Project{
-			{
-				Name: "single-project",
-				Path: "/home/user/source-code/single-project",
-				Type: types.RepoTypeSingle,
-			},
-			{
-				Name: "multi-project",
-				Path: "/home/user/source-code/multi-project",
-				Type: types.RepoTypeMulti,
-				Repos: []types.Repo{
-					{Name: "backend", Path: "backend"},
-					{Name: "frontend", Path: "frontend"},
-				},
+	projects := []types.Project{
+		{
+			Name: "single-project",
+			Path: "/home/user/source-code/single-project",
+			Type: types.RepoTypeSingle,
+		},
+		{
+			Name: "multi-project",
+			Path: "/home/user/source-code/multi-project",
+			Type: types.RepoTypeMulti,
+			Repos: []types.Repo{
+				{Name: "backend", Path: "backend"},
+				{Name: "frontend", Path: "frontend"},
 			},
 		},
+	}
+	overseer := &Overseer{
+		config:       DefaultConfig(),
+		projects:     projects,
+		beadAnalyzer: NewBeadAnalyzer(projects),
 	}
 
 	tests := []struct {
@@ -1031,7 +1033,7 @@ func TestFindProjectPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := overseer.findProjectPath(&tt.bead)
+			got := overseer.beadAnalyzer.FindProjectPath(&tt.bead)
 
 			if tt.wantNotEmpty && got == "" {
 				t.Error("Expected non-empty path, got empty")

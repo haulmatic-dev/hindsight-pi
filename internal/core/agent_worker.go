@@ -34,7 +34,7 @@ func (o *Overseer) spawnWorkerViaAgent(bead types.Bead) (*types.Worker, error) {
 	}
 
 	// Find project path
-	projectPath := o.findProjectPath(&bead)
+	projectPath := o.beadAnalyzer.FindProjectPath(&bead)
 	if projectPath == "" {
 		projectPath = bead.Project
 	}

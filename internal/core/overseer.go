@@ -258,6 +258,9 @@ type Overseer struct {
 	// Bead file reader for fallback bead lookups
 	beadFileReader *BeadFileReader
 
+	// Bead analyzer for metadata extraction
+	beadAnalyzer *BeadAnalyzer
+
 	// ErrorLogger provides structured logging
 	errorLogger *ErrorLogger
 }
@@ -618,52 +621,15 @@ func (o *Overseer) analyzeImpactWithTLDR(client *intelligence.TLDRClient, bead *
 	return analysis, nil
 }
 
-// extractTargetFiles extracts target file paths from bead metadata and description
-func (o *Overseer) extractTargetFiles(bead *types.Bead) []string {
-	var files []string
-	seen := make(map[string]bool)
-
-	// Check metadata for explicit file list
-	if bead.Metadata != nil {
-		if fileList, ok := bead.Metadata["files"]; ok {
-			for _, file := range strings.Split(fileList, ",") {
-				file = strings.TrimSpace(file)
-				if file != "" && !seen[file] {
-					files = append(files, file)
-					seen[file] = true
-				}
-			}
-		}
-	}
-
-	// Parse description for file references (e.g., "modify internal/core/config.go")
-	// This is a simple heuristic - can be enhanced with more sophisticated parsing
-	desc := bead.Description + " " + bead.Title
-	words := strings.Fields(desc)
-
-	for _, word := range words {
-		// Check for common file patterns
-		if strings.Contains(word, "/") || strings.Contains(word, ".go") ||
-			strings.Contains(word, ".js") || strings.Contains(word, ".ts") ||
-			strings.Contains(word, ".py") || strings.Contains(word, ".java") {
-			// Clean up the word (remove punctuation)
-			cleaned := strings.Trim(word, ".,;:!?()[]{}\"")
-			if cleaned != "" && !seen[cleaned] && len(cleaned) < 200 {
-				files = append(files, cleaned)
-				seen[cleaned] = true
-			}
-		}
-	}
-
-	return files
-}
-
-// findProjectPath finds the project path for a given bead
+// findProjectPath finds the project path for a given bead.
+// Falls back to beadAnalyzer if initialized, otherwise uses local projects.
 func (o *Overseer) findProjectPath(bead *types.Bead) string {
+	if o.beadAnalyzer != nil {
+		return o.beadAnalyzer.FindProjectPath(bead)
+	}
 	for _, project := range o.projects {
 		if project.Name == bead.Project {
 			if bead.Repo != "" && project.Type == types.RepoTypeMulti {
-				// For multi-repo projects, return the specific repo path
 				return filepath.Join(project.Path, bead.Repo)
 			}
 			return project.Path
@@ -740,8 +706,9 @@ func (o *Overseer) Start(ctx context.Context) error {
 
 	log.Printf("📁 Discovered %d projects", len(o.projects))
 
-	// Initialize bead file reader
+	// Initialize bead file reader and analyzer
 	o.beadFileReader = NewBeadFileReader(o.projects)
+	o.beadAnalyzer = NewBeadAnalyzer(o.projects)
 
 	// Start settled-state detection service if enabled
 	if o.settledStateSvc != nil {
@@ -978,7 +945,7 @@ func (o *Overseer) tick() error {
 		}
 
 		// Skip if project path is not found (can't execute without knowing where the project is)
-		projectPath := o.findProjectPath(&bead)
+		projectPath := o.beadAnalyzer.FindProjectPath(&bead)
 		if projectPath == "" {
 			log.Printf("⚠️  Skipping bead %s: project '%s' not configured or found", bead.ID, bead.Project)
 			continue
@@ -1917,7 +1884,7 @@ func (o *Overseer) spawnWorkerInternal(bead types.Bead) (*types.Worker, error) {
 	}
 
 	// Find project path
-	projectPath := o.findProjectPath(&bead)
+	projectPath := o.beadAnalyzer.FindProjectPath(&bead)
 	if projectPath == "" {
 		projectPath = bead.Project // Fallback to project name
 	}
