@@ -68,7 +68,7 @@
   - `WorkerSpawner` interface + `defaultWorkerSpawner` (unused)
   - 6 MCP fields from Overseer
 
-- [ ] **10. Package Reorganization**
+- [x] **10. Package Reorganization** (partial: extracted gpt_cache_client, type_aliases, moved intelligence types to pkg/types)
 
 ## Commits So Far (40)
 
@@ -111,6 +111,8 @@
 37. `latest` refactor(validation): extract ValidationService from Overseer
 38. `latest` refactor(errors): add typed errors for common failures
 39. `latest` refactor(types): move intelligence types to pkg/types
+40. `latest` refactor(errors): add more typed errors
+41. `latest` refactor(overseer): extract GPTCacheClient and type aliases
 
 ## Metrics
 
@@ -121,7 +123,7 @@
 | Overseer fields | ~40 | **~24** | -16 fields |
 | Total source files | ~250 | ~250 | +0 (removed dead, added new) |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 31 | — |
+| New packages | — | 33 | — |
 | Tests | — | **542 passed** ✅ | — |
 
 ## New Packages
