@@ -2,9 +2,7 @@ package core
 
 import (
 	"context"
-	"fmt"
 	"log"
-	"net/http"
 	"os/exec"
 	"sync"
 	"time"
@@ -22,41 +20,6 @@ import (
 
 // IntelligenceBundle, Pattern, ContextEntry, ImpactAnalysis, CallGraph, CallNode, CallEdge
 // moved to pkg/types/intelligence.go
-
-// GPTCacheClient provides access to GPTCache service
-type GPTCacheClient struct {
-	serverURL  string
-	httpClient *http.Client
-}
-
-// NewGPTCacheClient creates a new GPTCache client
-func NewGPTCacheClient(serverURL string, timeout time.Duration) *GPTCacheClient {
-	if timeout == 0 {
-		timeout = 5 * time.Second
-	}
-	return &GPTCacheClient{
-		serverURL: serverURL,
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
-	}
-}
-
-// IsHealthy checks if the GPTCache service is available
-func (c *GPTCacheClient) IsHealthy() bool {
-	if c.serverURL == "" {
-		return false
-	}
-
-	url := fmt.Sprintf("%s/health", c.serverURL)
-	resp, err := c.httpClient.Get(url)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-
-	return resp.StatusCode == http.StatusOK
-}
 
 // Retry configuration constants
 const (
@@ -1057,11 +1020,3 @@ func (o *Overseer) runPiSetup() error {
 }
 
 
-// Type aliases for backward compatibility
-type IntelligenceBundle = types.IntelligenceBundle
-type Pattern = types.Pattern
-type ContextEntry = types.ContextEntry
-type ImpactAnalysis = types.ImpactAnalysis
-type CallGraph = types.CallGraph
-type CallNode = types.CallNode
-type CallEdge = types.CallEdge
