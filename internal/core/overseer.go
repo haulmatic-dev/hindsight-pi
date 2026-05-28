@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
-	"sort"
 	"sync"
 	"time"
 
@@ -220,6 +219,9 @@ type Overseer struct {
 	// Skill updater for periodic skill updates
 	skillUpdater *pi.SkillUpdater // Skill updater for background updates
 
+	// SkillUpdaterInitializer creates and configures the skill updater
+	skillUpdaterInitializer *SkillUpdaterInitializer
+
 	// TLDR indexer for deterministic code indexing
 	tldrIndexer *TLDRIndexer // Indexes repositories after code changes
 
@@ -286,7 +288,6 @@ func NewOverseer(config *Config) *Overseer {
 		beadsClient:      beads.NewClient(),
 		bvClient:         bv.NewClient(),
 		dag:              NewDAG(),
-		dagNavigator:     NewDAGNavigator(NewDAG()),
 		completed:        make(map[string]bool),
 		retryManager:     NewRetryManager(defaultBaseDelay, defaultMaxDelay),
 		spawnRateLimiter: NewSpawnRateLimiter(),
@@ -426,6 +427,9 @@ func NewOverseer(config *Config) *Overseer {
 	// Initialize bead closer
 	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o)
 
+	// Initialize skill updater initializer
+	o.skillUpdaterInitializer = NewSkillUpdaterInitializer(config, &o.skillUpdater)
+
 	// Initialize skill updater if auto-update is enabled
 	if config.Pi.Skills.AutoUpdate {
 		if err := o.initializeSkillUpdater(); err != nil {
@@ -451,25 +455,7 @@ func NewOverseer(config *Config) *Overseer {
 
 // initializeSkillUpdater creates and configures the skill updater
 func (o *Overseer) initializeSkillUpdater() error {
-	configDir := o.config.Pi.ConfigDir
-	if configDir == "" {
-		configDir = "./pi-config"
-	}
-
-	updateInterval := o.config.Pi.Skills.UpdateInterval
-	if updateInterval == "" {
-		updateInterval = "24h"
-	}
-
-	setupManager := pi.NewSetupManager(configDir, configDir)
-	skillUpdater, err := pi.NewSkillUpdater(setupManager, updateInterval)
-	if err != nil {
-		return fmt.Errorf("failed to create skill updater: %w", err)
-	}
-
-	o.skillUpdater = skillUpdater
-	log.Printf("[SkillUpdater] Initialized with interval: %s", updateInterval)
-	return nil
+	return o.skillUpdaterInitializer.Initialize()
 }
 
 // initializeIntelligenceClients creates intelligence service clients based on config
@@ -556,8 +542,8 @@ func (o *Overseer) buildDAG() error {
 	if o.dag == nil {
 		log.Printf("[DAG] DAG was nil, creating new instance")
 		o.dag = NewDAG()
-		o.dagNavigator = NewDAGNavigator(o.dag)
 	}
+	o.dagNavigator = NewDAGNavigator(o.dag)
 
 	if err := o.dagBuilder.Build(o.dag, o.beadsClient, o.projects); err != nil {
 		return err
@@ -705,17 +691,9 @@ func (o *Overseer) resolveRepoPath(projectName, repoName, projectPath string) st
 
 // resolveProjectPath determines the project path using multiple resolution strategies.
 func (o *Overseer) resolveProjectPath(worker *types.Worker, projectName string) string {
-	// Priority 1: Use path stored in worker record
-	if worker.ProjectPath != "" {
-		return worker.ProjectPath
-	}
-
-	// Priority 2-3: Delegate to projectResolver
 	if path := o.projectResolver.ResolveProjectPathByWorker(worker, projectName); path != "" {
 		return path
 	}
-
-	// Priority 4: Find by project name in config
 	if o.config != nil {
 		for _, proj := range o.config.Projects {
 			if proj.Name == projectName {
@@ -723,8 +701,7 @@ func (o *Overseer) resolveProjectPath(worker *types.Worker, projectName string) 
 			}
 		}
 	}
-
-	log.Printf("[resolveProjectPath] ERROR: Project %s not found in %d projects", projectName, len(o.projects))
+	log.Printf("[resolveProjectPath] ERROR: Project %s not found", projectName)
 	return ""
 }
 
@@ -924,31 +901,7 @@ func (o *Overseer) GetDAGStats() DAGStats {
 func (o *Overseer) GetReadyBeadsFromDAG() []types.Bead {
 	o.dagMu.RLock()
 	defer o.dagMu.RUnlock()
-
-	if o.dag == nil {
-		return nil
-	}
-
-	readyNodes := o.dag.GetReadyNodes()
-	var beads []types.Bead
-	for _, node := range readyNodes {
-		// Skip approval gates
-		if node.Bead.Type == "approval-gate" {
-			continue
-		}
-		// Skip beads already completed in this session
-		if o.completed[string(node.Bead.ID)] {
-			continue
-		}
-		beads = append(beads, node.Bead)
-	}
-
-	// Sort by priority descending (highest first)
-	sort.Slice(beads, func(i, j int) bool {
-		return beads[i].Priority > beads[j].Priority
-	})
-
-	return beads
+	return o.dagNavigator.GetReadyBeads(o.completed)
 }
 
 // GetBeadDependencies returns the IDs of beads that the given bead depends on.

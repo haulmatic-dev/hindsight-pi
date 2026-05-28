@@ -2,6 +2,8 @@ package core
 
 import (
 	"fmt"
+	"sort"
+
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -82,6 +84,32 @@ func (n *DAGNavigator) Clear() {
 	}
 }
 
+
+// GetReadyBeads returns beads that are ready for execution, filtering out
+// approval gates and already-completed beads, sorted by priority descending.
+func (n *DAGNavigator) GetReadyBeads(completed map[string]bool) []types.Bead {
+	if n.dag == nil {
+		return nil
+	}
+
+	readyNodes := n.dag.GetReadyNodes()
+	var beads []types.Bead
+	for _, node := range readyNodes {
+		if node.Bead.Type == "approval-gate" {
+			continue
+		}
+		if completed != nil && completed[string(node.Bead.ID)] {
+			continue
+		}
+		beads = append(beads, node.Bead)
+	}
+
+	sort.Slice(beads, func(i, j int) bool {
+		return beads[i].Priority > beads[j].Priority
+	})
+
+	return beads
+}
 
 // GetAllDescendants returns all descendant node IDs for a given node ID.
 func (n *DAGNavigator) GetAllDescendants(nodeID string) []string {
