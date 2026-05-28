@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"fmt"
 	"log"
 )
 
@@ -34,7 +33,7 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	// Discover projects
 	projectScanner := NewProjectScanner(o.config)
 	if err := projectScanner.Discover(); err != nil {
-		return fmt.Errorf("failed to discover projects: %w", err)
+		return &ServiceError{Op: "discover projects", Err: err}
 	}
 	o.projects = projectScanner.Projects()
 	log.Printf("📁 Discovered %d projects", len(o.projects))

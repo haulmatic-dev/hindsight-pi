@@ -1,7 +1,6 @@
 package core
 
 import (
-	"fmt"
 	"log"
 
 	"github.com/haulmatic-dev/hydra/internal/pi"
@@ -36,7 +35,7 @@ func (i *SkillUpdaterInitializer) Initialize() error {
 	setupManager := pi.NewSetupManager(configDir, configDir)
 	skillUpdater, err := pi.NewSkillUpdater(setupManager, updateInterval)
 	if err != nil {
-		return fmt.Errorf("failed to create skill updater: %w", err)
+		return &ServiceError{Op: "create skill updater", Err: err}
 	}
 
 	*i.skillUpdater = skillUpdater

@@ -21,18 +21,18 @@ func NewImpactAnalyzer(findProjectPath func(bead *types.Bead) string) *ImpactAna
 func (a *ImpactAnalyzer) Analyze(client *intelligence.TLDRClient, bead *types.Bead, files []string) (*types.ImpactAnalysis, error) {
 	projectPath := a.findProjectPath(bead)
 	if projectPath == "" {
-		return nil, fmt.Errorf("could not find project path for bead %s", bead.ID)
+		return nil, &ImpactAnalyzerError{Op: "find project path", BeadID: string(bead.ID)}
 	}
 
 	client.SetSearchPath(projectPath)
 
 	if len(files) == 0 {
-		return nil, fmt.Errorf("no files to analyze")
+		return nil, &ImpactAnalyzerError{Op: "no files"}
 	}
 
 	resp, err := client.ImpactAnalysis(files[0], 2)
 	if err != nil {
-		return nil, fmt.Errorf("TLDR impact analysis failed: %w", err)
+		return nil, &ImpactAnalyzerError{Op: "TLDR analysis", Err: err}
 	}
 
 	analysis := &types.ImpactAnalysis{

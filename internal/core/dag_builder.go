@@ -152,7 +152,7 @@ func (b *DAGBuilder) Build(dag *DAG, beadsClient BeadsClient, projects []types.P
 		stats, len(fetchErrors), nodeErrors, edgeErrors)
 
 	if len(allBeads) == 0 && len(fetchErrors) > 0 {
-		return fmt.Errorf("failed to fetch any beads: %d fetch errors occurred", len(fetchErrors))
+		return &BeadFetchError{Op: "fetch all", Err: fmt.Errorf("%d fetch errors", len(fetchErrors))}
 	}
 
 	return nil

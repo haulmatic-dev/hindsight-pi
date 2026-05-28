@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"time"
 
@@ -19,7 +18,7 @@ func (o *Overseer) spawnWorkerViaAgent(bead types.Bead) (*types.Worker, error) {
 	// Determine agent type
 	agentTypes := types.DetermineAgentTypes(bead.Type)
 	if len(agentTypes) == 0 {
-		err := fmt.Errorf("no agent type found for bead type: %s", bead.Type)
+		err := &AgentError{Op: "type lookup", BeadType: bead.Type}
 		o.errorLogger.Error("spawnWorkerViaAgent", "agent_type", beadIDStr, err, "error")
 		return nil, err
 	}
@@ -63,7 +62,7 @@ func (o *Overseer) spawnWorkerViaAgent(bead types.Bead) (*types.Worker, error) {
 	o.agentConnMu.RUnlock()
 
 	if connector == nil {
-		return nil, fmt.Errorf("agent connector not initialized")
+		return nil, &AgentError{Op: "connector not initialized"}
 	}
 
 	// Start session

@@ -120,7 +120,7 @@ func (s *Scheduler) Tick() error {
 	// Get ready beads
 	readyBeads, err := o.getReadyBeads()
 	if err != nil {
-		return fmt.Errorf("failed to get ready beads: %w", err)
+		return fmt.Errorf("scheduler failed: %w", err)
 	}
 
 	// Include failed beads that are eligible for retry

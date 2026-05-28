@@ -240,3 +240,107 @@ type ValidationFailedError struct {
 func (e *ValidationFailedError) Error() string {
 	return fmt.Sprintf("validation failed for bead %s: %s", e.BeadID, e.Details)
 }
+
+
+// MCPError represents an MCP-related error.
+type MCPError struct {
+	Op  string
+	Err error
+}
+
+func (e *MCPError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("mcp %s failed: %v", e.Op, e.Err)
+	}
+	return fmt.Sprintf("mcp %s failed", e.Op)
+}
+
+func (e *MCPError) Unwrap() error {
+	return e.Err
+}
+
+// AgentError represents an agent-related error.
+type AgentError struct {
+	Op      string
+	BeadType string
+	Err     error
+}
+
+func (e *AgentError) Error() string {
+	if e.BeadType != "" {
+		return fmt.Sprintf("agent %s failed for bead type %s: %v", e.Op, e.BeadType, e.Err)
+	}
+	return fmt.Sprintf("agent %s failed: %v", e.Op, e.Err)
+}
+
+func (e *AgentError) Unwrap() error {
+	return e.Err
+}
+
+// WorkerTrackerError represents a worker tracking error.
+type WorkerTrackerError struct {
+	Op  string
+	PID int
+	Err error
+}
+
+func (e *WorkerTrackerError) Error() string {
+	if e.PID > 0 {
+		return fmt.Sprintf("worker tracker %s failed for PID %d: %v", e.Op, e.PID, e.Err)
+	}
+	return fmt.Sprintf("worker tracker %s failed: %v", e.Op, e.Err)
+}
+
+func (e *WorkerTrackerError) Unwrap() error {
+	return e.Err
+}
+
+// SettledStateError represents a settled-state service error.
+type SettledStateError struct {
+	Op     string
+	BeadID string
+	Err    error
+}
+
+func (e *SettledStateError) Error() string {
+	if e.BeadID != "" {
+		return fmt.Sprintf("settled-state %s failed for bead %s: %v", e.Op, e.BeadID, e.Err)
+	}
+	return fmt.Sprintf("settled-state %s failed: %v", e.Op, e.Err)
+}
+
+func (e *SettledStateError) Unwrap() error {
+	return e.Err
+}
+
+// ServiceError represents a background service error.
+type ServiceError struct {
+	Op  string
+	Err error
+}
+
+func (e *ServiceError) Error() string {
+	return fmt.Sprintf("service %s failed: %v", e.Op, e.Err)
+}
+
+func (e *ServiceError) Unwrap() error {
+	return e.Err
+}
+
+// ImpactAnalyzerError represents an impact analysis error.
+type ImpactAnalyzerError struct {
+	Op     string
+	BeadID string
+	Err    error
+}
+
+func (e *ImpactAnalyzerError) Error() string {
+	if e.BeadID != "" {
+		return fmt.Sprintf("impact analysis %s failed for bead %s: %v", e.Op, e.BeadID, e.Err)
+	}
+	return fmt.Sprintf("impact analysis %s failed: %v", e.Op, e.Err)
+}
+
+func (e *ImpactAnalyzerError) Unwrap() error {
+	return e.Err
+}
