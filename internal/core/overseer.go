@@ -255,6 +255,18 @@ type Overseer struct {
 
 	// ServiceStarter starts and stops background services
 	serviceStarter *ServiceStarter
+
+	// SettledStateInitializer creates and configures settled-state service
+	settledStateInitializer *SettledStateInitializer
+
+	// ChainCompletionInitializer creates and configures chain completion detector
+	chainCompletionInitializer *ChainCompletionInitializer
+
+	// PiSetupManager initializes and runs Pi ecosystem setup
+	piSetupManager *PiSetupManager
+
+	// BeadCloser closes beads based on worker completion
+	beadCloser *BeadCloser
 }
 
 // NewOverseer creates a new overseer instance
@@ -386,8 +398,9 @@ func NewOverseer(config *Config) *Overseer {
 		piConfig.Provider, piConfig.Model, piConfig.ApiKeyName)
 
 	// Initialize settled-state detection service if enabled
+	o.settledStateInitializer = NewSettledStateInitializer(o)
 	if config.Intelligence.SettledState.Enabled {
-		o.initializeSettledStateService()
+		o.settledStateInitializer.Initialize()
 	}
 
 	// Initialize validation service
@@ -398,9 +411,16 @@ func NewOverseer(config *Config) *Overseer {
 	o.errorLogger = NewErrorLogger(o.retryManager.GetRetryCount)
 
 	// Initialize chain completion detector if enabled
+	o.chainCompletionInitializer = NewChainCompletionInitializer(o)
 	if config.Overseer.ChainDetection.Enabled {
-		o.initializeChainCompletionDetector()
+		o.chainCompletionInitializer.Initialize()
 	}
+
+	// Initialize Pi setup manager
+	o.piSetupManager = NewPiSetupManager(config)
+
+	// Initialize bead closer
+	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o)
 
 	// Initialize skill updater if auto-update is enabled
 	if config.Pi.Skills.AutoUpdate {
@@ -450,91 +470,12 @@ func (o *Overseer) initializeSkillUpdater() error {
 
 // initializeIntelligenceClients creates intelligence service clients based on config
 func (o *Overseer) initializeSettledStateService() {
-	config := o.config.Intelligence.SettledState
-
-	// Create the service
-	o.settledStateSvc = NewSettledStateService(config, o.beadsClient, o)
-
-	// Set up pattern extractor if enabled
-	if o.config.Intelligence.Patterns.Enabled {
-		extractorConfig := intelligence.DefaultPatternExtractorConfig()
-		extractorConfig.Enabled = o.config.Intelligence.Patterns.Enabled
-		extractorConfig.MinConfidence = o.config.Intelligence.Patterns.MinConfidence
-		extractorConfig.MaxPatternsPerBead = o.config.Intelligence.Patterns.MaxPatternsPerBead
-		extractorConfig.ExtractCodeSnippets = o.config.Intelligence.Patterns.ExtractCodeSnippets
-
-		if o.config.Intelligence.Patterns.StoragePath != "" {
-			extractorConfig.StoragePath = o.config.Intelligence.Patterns.StoragePath
-		}
-
-		extractor, err := intelligence.NewBeadPatternExtractor(extractorConfig)
-		if err != nil {
-			log.Printf("[SettledState] Failed to create pattern extractor: %v", err)
-		} else {
-			o.settledStateSvc.SetPatternExtractor(extractor)
-			log.Printf("[SettledState] Pattern extractor initialized (storage: %s)", extractorConfig.StoragePath)
-		}
-	}
-
-	// Set up Hindsight reflector for settled-state reflection
-	hindsightClient := o.intelligenceHub.Hindsight()
-	if hindsightClient != nil && hindsightClient.IsEnabled() {
-		o.settledStateSvc.SetReflector(hindsightClient)
-		log.Printf("[SettledState] Hindsight reflection enabled")
-	}
-
-	// Register callback for when beads become settled
-	o.settledStateSvc.OnSettled(func(beadID types.BeadID, info *types.SettledBeadInfo) {
-		log.Printf("[Overseer] Bead settled: %s (stability: %.2f)", beadID, info.StabilityScore)
-	})
-
-	log.Printf("[SettledState] Service initialized (check interval: %v, settlement delay: %v)",
-		config.CheckInterval, config.SettlementDelay)
+	o.settledStateInitializer.Initialize()
 }
 
 // initializeChainCompletionDetector creates and configures the chain completion detector
 func (o *Overseer) initializeChainCompletionDetector() {
-	config := ChainCompletionConfig{
-		Enabled:           o.config.Overseer.ChainDetection.Enabled,
-		DetectionInterval: o.config.Overseer.ChainDetection.Interval,
-		Timeout:           o.config.Overseer.ChainDetection.Timeout,
-	}
-
-	if config.DetectionInterval == 0 {
-		config.DetectionInterval = 10 * time.Second
-	}
-	if config.Timeout == 0 {
-		config.Timeout = 10 * time.Minute
-	}
-
-	o.chainCompletionDetector = NewChainCompletionDetector(config, o)
-
-	o.chainCompletionDetector.Start() // Start the polling loop
-
-	extractor := NewChainPatternExtractor(
-		o,
-		intelligence.NewQualityGateService(),
-		nil,
-	)
-
-	o.chainCompletionDetector.SetCallback(func(event ChainCompletedEvent) {
-		log.Printf("[Overseer] Chain completed: root=%s", event.ChainInfo.RootBeadID)
-
-		// Run PRD validation
-		projectPath := o.findProjectPathForBeadID(event.ChainInfo.RootBeadID)
-		if projectPath != "" {
-			if err := o.RunPRDValidation(event.ChainInfo, projectPath); err != nil {
-				log.Printf("[Overseer] PRD validation failed: %v", err)
-			}
-		}
-
-		if err := extractor.ExtractPatterns(event); err != nil {
-			log.Printf("[Overseer] Chain pattern extraction failed: %v", err)
-		}
-	})
-
-	log.Printf("[ChainCompletion] Detector initialized (interval: %v, timeout: %v)",
-		config.DetectionInterval, config.Timeout)
+	o.chainCompletionInitializer.Initialize()
 }
 
 // analyzeImpactWithTLDR performs impact analysis using TLDR service
@@ -801,44 +742,7 @@ func (o *Overseer) scheduleAfterCompletion(worker *types.Worker, success bool, n
 // It determines the appropriate status reason and handles project path resolution.
 // On successful completion, it queues the repository for TLDR indexing.
 func (o *Overseer) closeBead(worker *types.Worker, success bool) error {
-	projectName := worker.BeadID.Project()
-	repoName := worker.BeadID.Repo()
-
-	log.Printf("[closeBead] Closing bead %s (project: %s, repo: %s)",
-		worker.BeadID.String(), projectName, repoName)
-
-	projectPath := o.resolveProjectPath(worker, projectName)
-	if projectPath == "" {
-		return fmt.Errorf("project %s not found", projectName)
-	}
-
-	reason := statusReason(success)
-	log.Printf("[closeBead] Closing with reason: %s (path: %s)", reason, projectPath)
-
-	// Queue TLDR indexing on successful completion
-	if success && o.config.Intelligence.TLDR.Indexing.Enabled {
-		// Find the repo path
-		repoPath := o.resolveRepoPath(projectName, repoName, projectPath)
-		if repoPath != "" {
-			o.intelligenceHub.QueueRepoIndexing(projectName, repoPath)
-		}
-	}
-
-	// Verify bead is not already closed (worker may have closed it)
-	bead, err := o.beadsClient.GetBead(projectPath, repoName, worker.BeadID)
-	if err == nil && bead.Status.IsTerminal() {
-		log.Printf("[closeBead] Bead %s already closed (status: %s), skipping", worker.BeadID.String(), bead.Status)
-		return nil
-	}
-
-	// Run TDD validation for REFACTOR beads before closing
-	if success && bead != nil && bead.Type == "refactor" {
-		if err := o.RunTDDValidation(*bead, projectPath); err != nil {
-			log.Printf("[closeBead] TDD validation error for %s: %v", worker.BeadID.String(), err)
-		}
-	}
-
-	return o.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason)
+	return o.beadCloser.Close(worker, success)
 }
 
 // resolveRepoPath finds the repository path for a given project and repo.
@@ -1354,50 +1258,5 @@ func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead) []string {
 
 // runPiSetup initializes and runs the Pi ecosystem setup
 func (o *Overseer) runPiSetup() error {
-	log.Println("[Overseer] Initializing Pi ecosystem setup...")
-
-	// Import the pi package and create setup manager
-	configDir := o.config.Pi.ConfigDir
-	piConfigDir := o.config.Pi.PiConfigDir
-	if configDir == "" {
-		configDir = ""
-	}
-	if piConfigDir == "" {
-		piConfigDir = ".pi/hydra-config"
-	}
-	setupManager := pi.NewSetupManager(configDir, piConfigDir)
-
-	// Run setup
-	result, err := setupManager.RunSetup()
-	if err != nil {
-		return fmt.Errorf("pi setup failed: %w", err)
-	}
-
-	// Log results
-	if result.PiInstalled {
-		log.Println("[Overseer] ✅ Pi agent ready")
-	} else {
-		log.Println("[Overseer] ⚠️  Pi agent not installed")
-	}
-
-	if result.LSPInstalled {
-		log.Println("[Overseer] ✅ LSP servers ready")
-	} else {
-		log.Println("[Overseer] ⚠️  LSP servers may be missing")
-	}
-
-	if result.SkillsInstalled {
-		log.Println("[Overseer] ✅ Pi skills ready")
-	} else {
-		log.Println("[Overseer] ⚠️  Pi skills may be missing")
-	}
-
-	if len(result.Errors) > 0 {
-		log.Printf("[Overseer] Pi setup completed with %d errors", len(result.Errors))
-		for _, err := range result.Errors {
-			log.Printf("[Overseer]   - %s", err)
-		}
-	}
-
-	return nil
+	return o.piSetupManager.RunSetup()
 }
