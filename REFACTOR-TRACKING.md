@@ -104,6 +104,7 @@
 30. `latest` refactor(overseer): extract WorkerSpawner
 31. `latest` refactor(overseer): extract MCPManager
 32. `latest` refactor(overseer): extract 4 remaining initializers
+33. `latest` refactor(overseer): extract remaining scheduling and scope methods
 
 ## Metrics
 
@@ -114,7 +115,7 @@
 | Overseer fields | ~40 | **~24** | -16 fields |
 | Total source files | ~250 | ~250 | +0 (removed dead, added new) |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 25 | — |
+| New packages | — | 28 | — |
 | Tests | — | **542 passed** ✅ | — |
 
 ## New Packages
