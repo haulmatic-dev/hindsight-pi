@@ -1,7 +1,6 @@
 package core
 
 import (
-	"fmt"
 	"log"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -35,7 +34,7 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool) error {
 
 	projectPath := c.projectResolver.ResolveProjectPathByWorker(worker, projectName)
 	if projectPath == "" {
-		return fmt.Errorf("project %s not found", projectName)
+		return &ProjectNotFoundError{Project: projectName}
 	}
 
 	reason := statusReason(success)

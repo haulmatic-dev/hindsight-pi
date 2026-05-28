@@ -458,13 +458,13 @@ func LoadConfig(path string) (*Config, error) {
 	// Load from file
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
+		return nil, &ConfigError{Op: "read", Err: err}
 	}
 
 	// Get file info for cache timestamp
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to stat config file: %w", err)
+		return nil, &ConfigError{Op: "stat", Err: err}
 	}
 
 	// Start with default config
@@ -473,7 +473,7 @@ func LoadConfig(path string) (*Config, error) {
 	// Parse raw config to handle projects array vs object
 	var raw rawConfig
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("failed to parse config YAML: %w", err)
+		return nil, &ConfigError{Op: "parse", Err: err}
 	}
 
 	// Copy non-project fields
@@ -524,7 +524,7 @@ func LoadConfig(path string) (*Config, error) {
 func LoadConfigUncached(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
+		return nil, &ConfigError{Op: "read", Err: err}
 	}
 
 	// Start with default config
@@ -533,7 +533,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 	// Parse raw config to handle projects array vs object
 	var raw rawConfig
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("failed to parse config YAML: %w", err)
+		return nil, &ConfigError{Op: "parse", Err: err}
 	}
 
 	// Copy non-project fields

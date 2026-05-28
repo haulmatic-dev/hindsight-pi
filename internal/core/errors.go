@@ -193,3 +193,50 @@ func (e *GracefulDegradationError) Error() string {
 func (e *GracefulDegradationError) Unwrap() error {
 	return e.Err
 }
+
+
+// ProjectNotFoundError represents an error when a project cannot be resolved.
+type ProjectNotFoundError struct {
+	Project string
+}
+
+func (e *ProjectNotFoundError) Error() string {
+	return fmt.Sprintf("project %s not found", e.Project)
+}
+
+// BeadNotFoundError represents an error when a bead cannot be found.
+type BeadNotFoundError struct {
+	BeadID string
+	Where  string
+}
+
+func (e *BeadNotFoundError) Error() string {
+	if e.Where != "" {
+		return fmt.Sprintf("bead %s not found in %s", e.BeadID, e.Where)
+	}
+	return fmt.Sprintf("bead %s not found", e.BeadID)
+}
+
+// ConfigError represents an error loading or parsing configuration.
+type ConfigError struct {
+	Op  string
+	Err error
+}
+
+func (e *ConfigError) Error() string {
+	return fmt.Sprintf("config %s failed: %v", e.Op, e.Err)
+}
+
+func (e *ConfigError) Unwrap() error {
+	return e.Err
+}
+
+// ValidationFailedError represents a validation failure.
+type ValidationFailedError struct {
+	BeadID  string
+	Details string
+}
+
+func (e *ValidationFailedError) Error() string {
+	return fmt.Sprintf("validation failed for bead %s: %s", e.BeadID, e.Details)
+}

@@ -70,7 +70,7 @@ func (s *Scheduler) getBeadFromDAG(beadID string) (types.Bead, error) {
 
 	node, exists := o.dag.GetNode(beadID)
 	if !exists {
-		return types.Bead{}, fmt.Errorf("bead %s not found in DAG", beadID)
+		return types.Bead{}, &BeadNotFoundError{BeadID: beadID, Where: "DAG"}
 	}
 
 	return node.Bead, nil
