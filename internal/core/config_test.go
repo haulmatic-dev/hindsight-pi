@@ -398,107 +398,12 @@ func TestValidateConfig_PISkillsAutoUpdate(t *testing.T) {
 	}
 }
 
-func TestValidateConfig_PISkillsList(t *testing.T) {
-	tests := []struct {
-		name      string
-		skills    []SkillEntry
-		wantError bool
-		errField  string
-	}{
-		{
-			name:      "empty skills list",
-			skills:    []SkillEntry{},
-			wantError: false,
-		},
-		{
-			name: "valid skill with https repo",
-			skills: []SkillEntry{
-				{Name: "go-skill", Repo: "https://github.com/user/go-skill.git"},
-			},
-			wantError: false,
-		},
-		{
-			name: "valid skill with ssh repo",
-			skills: []SkillEntry{
-				{Name: "go-skill", Repo: "git@github.com:user/go-skill.git"},
-			},
-			wantError: false,
-		},
-		{
-			name: "valid skill with local path",
-			skills: []SkillEntry{
-				{Name: "local-skill", Repo: "./skills/local"},
-			},
-			wantError: false,
-		},
-		{
-			name: "skill without name",
-			skills: []SkillEntry{
-				{Name: "", Repo: "https://github.com/user/skill.git"},
-			},
-			wantError: true,
-			errField:  "pi.skills.list[0].name",
-		},
-		{
-			name: "skill with invalid repo URL",
-			skills: []SkillEntry{
-				{Name: "bad-skill", Repo: "not-a-valid-url"},
-			},
-			wantError: true,
-			errField:  "pi.skills.list[0].repo",
-		},
-		{
-			name: "skill with git:// protocol",
-			skills: []SkillEntry{
-				{Name: "git-skill", Repo: "git://github.com/user/skill.git"},
-			},
-			wantError: false,
-		},
-		{
-			name: "multiple skills some invalid",
-			skills: []SkillEntry{
-				{Name: "valid-skill", Repo: "https://github.com/user/skill.git"},
-				{Name: "", Repo: "https://github.com/user/skill2.git"},
-			},
-			wantError: true,
-			errField:  "pi.skills.list[1].name",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := DefaultConfig()
-			cfg.Pi.Skills.List = tt.skills
-
-			errors := ValidateConfig(cfg)
-
-			if tt.wantError {
-				found := false
-				for _, err := range errors {
-					if err.Field == tt.errField {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("Expected error for field %s, got errors: %v", tt.errField, errors)
-				}
-			}
-		})
-	}
-}
-
 func TestValidateConfig_PIComplete(t *testing.T) {
 	// Test a complete valid PI configuration
 	cfg := DefaultConfig()
 	cfg.Pi.ConfigDir = "/opt/pi-config"
 	cfg.Pi.Skills.UpdateInterval = "6h"
 	cfg.Pi.Skills.AutoUpdate = true
-	cfg.Pi.Skills.Global = false
-	cfg.Pi.Skills.List = []SkillEntry{
-		{Name: "go-coding", Repo: "https://github.com/example/go-coding.git"},
-		{Name: "python-helpers", Repo: "git@github.com:example/python.git"},
-	}
 
 	errors := ValidateConfig(cfg)
 
@@ -578,23 +483,6 @@ pi:
 		t.Error("Expected pi.skills.auto_update=true")
 	}
 
-	if config.Pi.Skills.Global {
-		t.Error("Expected pi.skills.global=false")
-	}
-
-	// Verify skills list
-	if len(config.Pi.Skills.List) != 2 {
-		t.Fatalf("Expected 2 skills, got %d", len(config.Pi.Skills.List))
-	}
-
-	if config.Pi.Skills.List[0].Name != "go-skill" {
-		t.Errorf("Expected first skill name 'go-skill', got '%s'", config.Pi.Skills.List[0].Name)
-	}
-
-	if config.Pi.Skills.List[1].Repo != "git@github.com:example/python-skill.git" {
-		t.Errorf("Expected second skill repo 'git@github.com:example/python-skill.git', got '%s'", config.Pi.Skills.List[1].Repo)
-	}
-
 	// Validate the loaded config
 	errors := ValidateConfig(config)
 	if !errors.IsValid() {
@@ -620,9 +508,6 @@ pi:
   skills:
     update_interval: invalid-duration
     auto_update: true
-    list:
-      - name: ""
-        repo: not-a-valid-url
 `
 
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
@@ -639,31 +524,14 @@ pi:
 
 	// Check for expected validation errors
 	hasIntervalError := false
-	hasNameError := false
-	hasRepoError := false
-
 	for _, err := range errors {
 		if err.Field == "pi.skills.update_interval" {
 			hasIntervalError = true
-		}
-		if err.Field == "pi.skills.list[0].name" {
-			hasNameError = true
-		}
-		if err.Field == "pi.skills.list[0].repo" {
-			hasRepoError = true
 		}
 	}
 
 	if !hasIntervalError {
 		t.Error("Expected validation error for invalid update_interval")
-	}
-
-	if !hasNameError {
-		t.Error("Expected validation error for empty skill name")
-	}
-
-	if !hasRepoError {
-		t.Error("Expected validation error for invalid repo URL")
 	}
 }
 

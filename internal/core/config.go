@@ -41,19 +41,15 @@ type PiConfig struct {
 
 // PiRootConfig contains Pi-specific configuration settings
 type PiRootConfig struct {
-	ConfigDir       string         `yaml:"config_dir"`
-	PiConfigDir     string         `yaml:"pi_config_dir"`
-	Skills          PiSkillsConfig `yaml:"skills"`
-	LSP             LSPConfig      `yaml:"lsp"`
-	StandardAgent   PiAgentConfig  `yaml:"standard-agent"`
-	ValidationAgent PiAgentConfig  `yaml:"validation-agent"`
+	ConfigDir     string         `yaml:"config_dir"`
+	PiConfigDir   string         `yaml:"pi_config_dir"`
+	Skills        PiSkillsConfig `yaml:"skills"`
+	StandardAgent PiAgentConfig  `yaml:"standard-agent"`
 }
 
 // PiAgentConfig contains a Pi agent sub-configuration (standard-agent, validation-agent)
 type PiAgentConfig struct {
-	Enabled bool      `yaml:"enabled"`
-	LLM     LLMConfig `yaml:"llm"`
-	Skills  PiSkillsConfig `yaml:"skills"`
+	LLM LLMConfig `yaml:"llm"`
 }
 
 // LLMConfig contains LLM provider settings
@@ -65,32 +61,10 @@ type LLMConfig struct {
 	ApiKeyName    string `yaml:"api_key_name"`
 }
 
-// LSPConfig contains LSP (Language Server Protocol) settings
-type LSPConfig struct {
-	Enabled bool                       `yaml:"enabled"`
-	Servers map[string]LSPServerConfig `yaml:"servers"`
-}
-
-// LSPServerConfig contains configuration for an individual LSP server
-type LSPServerConfig struct {
-	Command      string   `yaml:"command"`
-	Args         []string `yaml:"args"`
-	InstallCheck string   `yaml:"install_check"`
-	InstallCmd   string   `yaml:"install_cmd"`
-}
-
 // PiSkillsConfig contains Pi skills configuration
 type PiSkillsConfig struct {
-	UpdateInterval string       `yaml:"update_interval"`
-	AutoUpdate     bool         `yaml:"auto_update"`
-	Global         bool         `yaml:"global"`
-	List           []SkillEntry `yaml:"list"`
-}
-
-// SkillEntry represents a skill in the Pi skills list
-type SkillEntry struct {
-	Name string `yaml:"name"`
-	Repo string `yaml:"repo"`
+	UpdateInterval string `yaml:"update_interval"`
+	AutoUpdate     bool   `yaml:"auto_update"`
 }
 
 // rawConfig is used for YAML parsing to handle the nested projects structure
@@ -101,18 +75,8 @@ type rawConfig struct {
 	API          APIConfig          `yaml:"api"`
 	Intelligence IntelligenceConfig `yaml:"intelligence"`
 	Agents       AgentsConfig       `yaml:"agents"`
-	Pi           rawPiConfig        `yaml:"pi"`
+	Pi           PiRootConfig       `yaml:"pi"`
 	Validation   ValidationConfig   `yaml:"validation"`
-}
-
-// rawPiConfig is used for YAML parsing of Pi configuration
-type rawPiConfig struct {
-	ConfigDir       string         `yaml:"config_dir"`
-	PiConfigDir     string         `yaml:"pi_config_dir"`
-	Skills          PiSkillsConfig `yaml:"skills"`
-	LSP             LSPConfig      `yaml:"lsp"`
-	StandardAgent   PiAgentConfig  `yaml:"standard-agent"`
-	ValidationAgent PiAgentConfig  `yaml:"validation-agent"`
 }
 
 // projectsListConfig handles the case where projects is an object with 'list' field
@@ -412,12 +376,6 @@ func DefaultConfig() *Config {
 			Skills: PiSkillsConfig{
 				UpdateInterval: "24h",
 				AutoUpdate:     true,
-				Global:         false,
-				List:           []SkillEntry{},
-			},
-			LSP: LSPConfig{
-				Enabled: true,
-				Servers: map[string]LSPServerConfig{},
 			},
 		},
 	}
@@ -529,9 +487,7 @@ func LoadConfig(path string) (*Config, error) {
 		ConfigDir:       raw.Pi.ConfigDir,
 		PiConfigDir:     raw.Pi.PiConfigDir,
 		Skills:          raw.Pi.Skills,
-		LSP:             raw.Pi.LSP,
 		StandardAgent:   raw.Pi.StandardAgent,
-		ValidationAgent: raw.Pi.ValidationAgent,
 	}
 	// Handle projects field - can be:
 	// 1. An array of ProjectConfig (direct list)
@@ -590,9 +546,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 		ConfigDir:       raw.Pi.ConfigDir,
 		PiConfigDir:     raw.Pi.PiConfigDir,
 		Skills:          raw.Pi.Skills,
-		LSP:             raw.Pi.LSP,
 		StandardAgent:   raw.Pi.StandardAgent,
-		ValidationAgent: raw.Pi.ValidationAgent,
 	}
 	// Handle projects field
 	if !isZeroNode(raw.Projects) {
@@ -685,8 +639,6 @@ const (
 	fieldOverseerBeadDiscovery     = "overseer.bead_discovery_interval"
 	fieldPiConfigDir               = "pi.config_dir"
 	fieldPiSkillsUpdateInterval    = "pi.skills.update_interval"
-	fieldPiSkillsListName          = "pi.skills.list[%d].name"
-	fieldPiSkillsListRepo          = "pi.skills.list[%d].repo"
 	msgNoProjects                  = "no projects configured"
 	msgMaxWorkersNegative          = "max_workers cannot be negative (use 0 for unlimited)"
 	msgBeadDiscoveryIntervalTooLow = "bead_discovery_interval must be at least 1 second"
@@ -803,64 +755,7 @@ func validatePiConfigFast(cfg *PiRootConfig) ValidationErrors {
 		}
 	}
 
-	// Validate skill entries - pre-check if any skills exist
-	if len(cfg.Skills.List) > 0 {
-		for i, skill := range cfg.Skills.List {
-			if skill.Name == "" {
-				errors = append(errors, ValidationError{
-					Field:   fmt.Sprintf(fieldPiSkillsListName, i),
-					Message: msgSkillNameRequired,
-				})
-			}
-			if skill.Repo != "" && !isValidSkillRepoFast(skill.Repo) {
-				errors = append(errors, ValidationError{
-					Field:   fmt.Sprintf(fieldPiSkillsListRepo, i),
-					Message: msgSkillRepoInvalid,
-				})
-			}
-		}
-	}
-
 	return errors
-}
-
-// isValidSkillRepoFast is an optimized version with early returns
-func isValidSkillRepoFast(repo string) bool {
-	if repo == "" {
-		return true
-	}
-
-	// Check most common prefixes first (https and git@)
-	if len(repo) > 8 {
-		switch repo[0] {
-		case 'h':
-			if repo[0:8] == "https://" {
-				return true
-			}
-			if len(repo) > 7 && repo[0:7] == "http://" {
-				return true
-			}
-		case 'g':
-			if len(repo) > 4 && repo[0:4] == "git@" {
-				return true
-			}
-			if len(repo) > 6 && repo[0:6] == "git://" {
-				return true
-			}
-		case 's':
-			if len(repo) > 6 && repo[0:6] == "ssh://" {
-				return true
-			}
-		case '/':
-			return true
-		case '.':
-			if len(repo) > 1 && repo[1] == '/' {
-				return true
-			}
-		}
-	}
-
-	return false
 }
 
 // ValidateConfigSingleError validates the config and returns a single error if any validation fails.
@@ -892,9 +787,4 @@ func (v *ConfigValidator) Validate(cfg *Config) error {
 // validatePiConfig validates PI-specific configuration settings (kept for backward compatibility)
 func validatePiConfig(cfg *PiRootConfig) ValidationErrors {
 	return validatePiConfigFast(cfg)
-}
-
-// isValidSkillRepo checks if a skill repository URL is valid (kept for backward compatibility)
-func isValidSkillRepo(repo string) bool {
-	return isValidSkillRepoFast(repo)
 }

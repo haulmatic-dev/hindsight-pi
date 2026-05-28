@@ -183,7 +183,7 @@ func BenchmarkValidateConfig(b *testing.B) {
 	b.Run("invalid_config", func(b *testing.B) {
 		invalidCfg := cfg.Clone()
 		invalidCfg.Pi.Skills.UpdateInterval = "invalid"
-		invalidCfg.Pi.Skills.List = append(invalidCfg.Pi.Skills.List, SkillEntry{Name: "", Repo: "not-valid"})
+		// Skills list removed during Pi config flattening
 
 		for i := 0; i < b.N; i++ {
 			errors := ValidateConfig(invalidCfg)
@@ -205,28 +205,6 @@ func BenchmarkConfigClone(b *testing.B) {
 	})
 }
 
-// BenchmarkIsValidSkillRepo benchmarks skill repo validation
-func BenchmarkIsValidSkillRepo(b *testing.B) {
-	testCases := []struct {
-		name string
-		repo string
-	}{
-		{"https", "https://github.com/example/skill.git"},
-		{"http", "http://github.com/example/skill.git"},
-		{"ssh", "git@github.com:example/skill.git"},
-		{"local", "./skills/local"},
-		{"invalid", "not-a-valid-url"},
-	}
-
-	for _, tc := range testCases {
-		b.Run(tc.name, func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
-				_ = isValidSkillRepoFast(tc.repo)
-			}
-		})
-	}
-}
-
 // BenchmarkValidationErrors benchmarks error message generation
 func BenchmarkValidationErrors(b *testing.B) {
 	// Create a config with multiple validation errors
@@ -234,9 +212,7 @@ func BenchmarkValidationErrors(b *testing.B) {
 	cfg.Overseer.MaxWorkers = -1
 	cfg.Overseer.BeadDiscoveryInterval = 0
 	cfg.Pi.Skills.UpdateInterval = "invalid"
-	cfg.Pi.Skills.List = []SkillEntry{
-		{Name: "", Repo: "invalid"},
-	}
+	// Skills list removed during Pi config flattening
 
 	b.Run("error_string", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
@@ -260,14 +236,7 @@ func createLargeConfig() *Config {
 		}
 	}
 
-	// Add many skills
-	cfg.Pi.Skills.List = make([]SkillEntry, 50)
-	for i := 0; i < 50; i++ {
-		cfg.Pi.Skills.List[i] = SkillEntry{
-			Name: fmt.Sprintf("skill-%d", i),
-			Repo: "https://github.com/example/skill.git",
-		}
-	}
+	// Skills list removed during Pi config flattening
 
 	return cfg
 }
