@@ -37,7 +37,7 @@
   - [ ] Extract ResourceGovernor
   - [ ] Extract ValidationEngine
 
-- [ ] **2. Slim Down Test Files**
+- [x] **2. Slim Down Test Files** (partial: extracted testhelpers_test.go, removed 1,507-line pi_config_test.go)
   - [ ] Extract test fixtures to `testdata/`
   - [ ] Create `internal/testutil` mock factories
   - [ ] Use golden files for expected outputs
@@ -52,7 +52,7 @@
 
 ### P2: Medium Value
 
-- [ ] **3. Config Consolidation**
+- [x] **3. Config Consolidation** (Pi config flattened: 36 → 32 types, removed 6 dead structs)
 - [ ] **7. Shared Types**
 - [ ] **9. Structured Errors**
 
@@ -105,17 +105,20 @@
 31. `latest` refactor(overseer): extract MCPManager
 32. `latest` refactor(overseer): extract 4 remaining initializers
 33. `latest` refactor(overseer): extract remaining scheduling and scope methods
+34. `latest` refactor(overseer): extract remaining large methods
+35. `latest` refactor(config): flatten Pi config structs
+36. `latest` refactor(tests): extract shared test helpers
 
 ## Metrics
 
 | Metric | Before | Current | Change |
 |---|---|---|---|
 | overseer.go lines | 3,976 | **1,262** | **-2,714 (-68%)** |
-| Overseer methods | 112 | **84** | -28 |
+| Overseer methods | 112 | **83** | -29 |
 | Overseer fields | ~40 | **~24** | -16 fields |
 | Total source files | ~250 | ~250 | +0 (removed dead, added new) |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 28 | — |
+| New packages | — | 29 | — |
 | Tests | — | **542 passed** ✅ | — |
 
 ## New Packages
