@@ -3,6 +3,8 @@ package core
 import (
 	"fmt"
 	"log"
+
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // ScopeValidator validates the scope of changes against configured limits.
@@ -16,7 +18,7 @@ func NewScopeValidator(config *Config) *ScopeValidator {
 }
 
 // Validate validates the scope of changes against configured limits.
-func (v *ScopeValidator) Validate(bundle *IntelligenceBundle, targetFiles []string) error {
+func (v *ScopeValidator) Validate(bundle *types.IntelligenceBundle, targetFiles []string) error {
 	config := v.config.Intelligence
 
 	if config.TLDR.Enabled && len(targetFiles) > config.TLDR.MaxFiles {

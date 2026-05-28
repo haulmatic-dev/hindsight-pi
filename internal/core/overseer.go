@@ -20,65 +20,8 @@ import (
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
-// IntelligenceBundle contains context and patterns gathered from intelligence services
-type IntelligenceBundle struct {
-	Patterns        []Pattern       `json:"patterns"`
-	ContextEntries  []ContextEntry  `json:"context_entries"`
-	ImpactAnalysis  *ImpactAnalysis `json:"impact_analysis,omitempty"`
-	ScopeValidated  bool            `json:"scope_validated"`
-	ValidationError string          `json:"validation_error,omitempty"`
-	GatheredAt      time.Time       `json:"gathered_at"`
-}
-
-// Pattern represents a learned pattern from Hindsight
-type Pattern struct {
-	ID          string    `json:"id"`
-	Type        string    `json:"type"`
-	Description string    `json:"description"`
-	Confidence  float64   `json:"confidence"`
-	Tags        []string  `json:"tags"`
-	CreatedAt   time.Time `json:"created_at"`
-}
-
-// ContextEntry represents a relevant historical context entry
-type ContextEntry struct {
-	ID        string    `json:"id"`
-	BeadType  string    `json:"bead_type"`
-	Files     []string  `json:"files"`
-	Summary   string    `json:"summary"`
-	Relevance float64   `json:"relevance"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// ImpactAnalysis represents TLDR impact analysis results
-type ImpactAnalysis struct {
-	TargetFiles     []string   `json:"target_files"`
-	AffectedFiles   []string   `json:"affected_files"`
-	CallGraph       *CallGraph `json:"call_graph,omitempty"`
-	Complexity      int        `json:"complexity"`
-	RiskLevel       string     `json:"risk_level"`
-	Recommendations []string   `json:"recommendations"`
-}
-
-// CallGraph represents function call relationships
-type CallGraph struct {
-	Nodes []CallNode `json:"nodes"`
-	Edges []CallEdge `json:"edges"`
-}
-
-// CallNode represents a function or method in the call graph
-type CallNode struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	File     string `json:"file"`
-	NodeType string `json:"node_type"`
-}
-
-// CallEdge represents a call relationship between nodes
-type CallEdge struct {
-	From string `json:"from"`
-	To   string `json:"to"`
-}
+// IntelligenceBundle, Pattern, ContextEntry, ImpactAnalysis, CallGraph, CallNode, CallEdge
+// moved to pkg/types/intelligence.go
 
 // GPTCacheClient provides access to GPTCache service
 type GPTCacheClient struct {
@@ -468,7 +411,7 @@ func (o *Overseer) initializeChainCompletionDetector() {
 }
 
 // analyzeImpactWithTLDR performs impact analysis using TLDR service
-func (o *Overseer) analyzeImpactWithTLDR(client *intelligence.TLDRClient, bead *types.Bead, files []string) (*ImpactAnalysis, error) {
+func (o *Overseer) analyzeImpactWithTLDR(client *intelligence.TLDRClient, bead *types.Bead, files []string) (*types.ImpactAnalysis, error) {
 	return o.impactAnalyzer.Analyze(client, bead, files)
 }
 
@@ -482,7 +425,7 @@ func (o *Overseer) findProjectPath(bead *types.Bead) string {
 }
 
 // validateScope validates the scope of changes against configured limits
-func (o *Overseer) validateScope(bundle *IntelligenceBundle, targetFiles []string) error {
+func (o *Overseer) validateScope(bundle *types.IntelligenceBundle, targetFiles []string) error {
 	return o.scopeValidator.Validate(bundle, targetFiles)
 }
 
@@ -1112,3 +1055,13 @@ func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead) []string {
 func (o *Overseer) runPiSetup() error {
 	return o.piSetupManager.RunSetup()
 }
+
+
+// Type aliases for backward compatibility
+type IntelligenceBundle = types.IntelligenceBundle
+type Pattern = types.Pattern
+type ContextEntry = types.ContextEntry
+type ImpactAnalysis = types.ImpactAnalysis
+type CallGraph = types.CallGraph
+type CallNode = types.CallNode
+type CallEdge = types.CallEdge

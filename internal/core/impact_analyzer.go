@@ -18,7 +18,7 @@ func NewImpactAnalyzer(findProjectPath func(bead *types.Bead) string) *ImpactAna
 }
 
 // Analyze performs impact analysis for a bead's files.
-func (a *ImpactAnalyzer) Analyze(client *intelligence.TLDRClient, bead *types.Bead, files []string) (*ImpactAnalysis, error) {
+func (a *ImpactAnalyzer) Analyze(client *intelligence.TLDRClient, bead *types.Bead, files []string) (*types.ImpactAnalysis, error) {
 	projectPath := a.findProjectPath(bead)
 	if projectPath == "" {
 		return nil, fmt.Errorf("could not find project path for bead %s", bead.ID)
@@ -35,16 +35,16 @@ func (a *ImpactAnalyzer) Analyze(client *intelligence.TLDRClient, bead *types.Be
 		return nil, fmt.Errorf("TLDR impact analysis failed: %w", err)
 	}
 
-	analysis := &ImpactAnalysis{
+	analysis := &types.ImpactAnalysis{
 		TargetFiles: files,
 	}
 
 	if len(resp.Impact.Callers) > 0 || len(resp.Impact.Callees) > 0 {
-		callGraph := &CallGraph{}
+		callGraph := &types.CallGraph{}
 
 		for _, caller := range resp.Impact.Callers {
 			nodeID := fmt.Sprintf("%s:%s", caller.File, caller.Function)
-			callGraph.Nodes = append(callGraph.Nodes, CallNode{
+			callGraph.Nodes = append(callGraph.Nodes, types.CallNode{
 				ID:       nodeID,
 				Name:     caller.Function,
 				File:     caller.File,
@@ -54,7 +54,7 @@ func (a *ImpactAnalyzer) Analyze(client *intelligence.TLDRClient, bead *types.Be
 
 		for _, callee := range resp.Impact.Callees {
 			nodeID := fmt.Sprintf("%s:%s", callee.File, callee.Function)
-			callGraph.Nodes = append(callGraph.Nodes, CallNode{
+			callGraph.Nodes = append(callGraph.Nodes, types.CallNode{
 				ID:       nodeID,
 				Name:     callee.Function,
 				File:     callee.File,
