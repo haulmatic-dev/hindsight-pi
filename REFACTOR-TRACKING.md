@@ -53,8 +53,8 @@
 ### P2: Medium Value
 
 - [x] **3. Config Consolidation** (Pi config flattened: 36 → 32 types, removed 6 dead structs)
-- [ ] **7. Shared Types**
-- [ ] **9. Structured Errors**
+- [x] **7. Shared Types** (moved intelligence types to pkg/types/intelligence.go)
+- [x] **9. Structured Errors** (added ProjectNotFoundError, BeadNotFoundError, ConfigError, ValidationFailedError)
 
 ### P3: Cleanup
 
@@ -109,6 +109,8 @@
 35. `latest` refactor(config): flatten Pi config structs
 36. `latest` refactor(tests): extract shared test helpers
 37. `latest` refactor(validation): extract ValidationService from Overseer
+38. `latest` refactor(errors): add typed errors for common failures
+39. `latest` refactor(types): move intelligence types to pkg/types
 
 ## Metrics
 
@@ -119,7 +121,7 @@
 | Overseer fields | ~40 | **~24** | -16 fields |
 | Total source files | ~250 | ~250 | +0 (removed dead, added new) |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 30 | — |
+| New packages | — | 31 | — |
 | Tests | — | **542 passed** ✅ | — |
 
 ## New Packages
