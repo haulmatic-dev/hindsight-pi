@@ -256,6 +256,9 @@ type Overseer struct {
 	// ServiceStarter starts and stops background services
 	serviceStarter *ServiceStarter
 
+	// ScopeValidator validates the scope of changes
+	scopeValidator *ScopeValidator
+
 	// SettledStateInitializer creates and configures settled-state service
 	settledStateInitializer *SettledStateInitializer
 
@@ -380,6 +383,7 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize scheduler
 	o.scheduler = NewScheduler(o)
+	o.scopeValidator = NewScopeValidator(config)
 
 	// Initialize service starter
 	o.serviceStarter = NewServiceStarter(o)
@@ -494,36 +498,7 @@ func (o *Overseer) findProjectPath(bead *types.Bead) string {
 
 // validateScope validates the scope of changes against configured limits
 func (o *Overseer) validateScope(bundle *IntelligenceBundle, targetFiles []string) error {
-	config := o.config.Intelligence
-
-	// Validate file count against TLDR max files
-	if config.TLDR.Enabled && len(targetFiles) > config.TLDR.MaxFiles {
-		return fmt.Errorf("too many target files: %d exceeds limit of %d",
-			len(targetFiles), config.TLDR.MaxFiles)
-	}
-
-	// Validate impact scope if analysis available
-	if bundle.ImpactAnalysis != nil {
-		totalFiles := len(targetFiles) + len(bundle.ImpactAnalysis.AffectedFiles)
-
-		if totalFiles > config.TLDR.MaxFiles*2 {
-			return fmt.Errorf("impact scope too large: %d total files affected exceeds safe threshold",
-				totalFiles)
-		}
-
-		// Check complexity score
-		if bundle.ImpactAnalysis.Complexity > 100 {
-			return fmt.Errorf("complexity score too high: %d (max recommended: 100)",
-				bundle.ImpactAnalysis.Complexity)
-		}
-
-		// Flag high-risk changes for review
-		if bundle.ImpactAnalysis.RiskLevel == "high" {
-			log.Printf("[Intelligence] Warning: High risk level detected for change scope")
-		}
-	}
-
-	return nil
+	return o.scopeValidator.Validate(bundle, targetFiles)
 }
 
 // shouldRetry checks if a bead should be retried based on retry count and cooldown
@@ -593,29 +568,7 @@ func (o *Overseer) buildDAG() error {
 
 // GetBeadFromFile reads a single bead from issues.jsonl
 func (o *Overseer) getAllDescendants(nodeID string) []string {
-	var descendants []string
-	visited := make(map[string]bool)
-
-	var dfs func(id string)
-	dfs = func(id string) {
-		if visited[id] {
-			return
-		}
-		visited[id] = true
-
-		node, exists := o.dag.GetNode(id)
-		if !exists {
-			return
-		}
-
-		for _, outEdge := range node.OutEdges {
-			descendants = append(descendants, outEdge)
-			dfs(outEdge)
-		}
-	}
-
-	dfs(nodeID)
-	return descendants
+	return o.dagNavigator.GetAllDescendants(nodeID)
 }
 
 // getReadyBeads retrieves beads that are ready to execute.
@@ -786,52 +739,28 @@ func statusReason(success bool) string {
 
 // triggerImmediateSchedule spawns workers for ready beads without waiting for next poll
 func (o *Overseer) triggerImmediateSchedule() {
-	if o.IsPaused() {
-		log.Println("⏸️  Immediate scheduling skipped: overseer is paused")
-		return
-	}
-
-	// Check rate limit before spawning (same as tick())
-	if !o.spawnRateLimiter.CanSpawn() {
-		log.Println("[RateLimit] Immediate scheduling blocked: rate limit exceeded")
-		return
-	}
-
-	availableSlots := o.getAvailableWorkerSlots()
-	if availableSlots <= 0 {
-		return
-	}
-
-	readyNodes := o.getReadyNodes()
-	if len(readyNodes) == 0 {
-		return
-	}
-
-	log.Printf("📊 Immediate schedule: %d ready beads available", len(readyNodes))
-	spawned := o.spawnWorkersForNodes(readyNodes, availableSlots)
-
-	if spawned > 0 {
-		log.Printf("🚀 Immediate scheduling complete: spawned %d workers", spawned)
+	if o.scheduler != nil {
+		o.scheduler.TriggerImmediateSchedule()
 	}
 }
 
 // getAvailableWorkerSlots returns the number of available worker slots
 func (o *Overseer) getAvailableWorkerSlots() int {
+	if o.scheduler != nil {
+		return o.scheduler.GetAvailableWorkerSlots()
+	}
+
 	o.workerMutex.RLock()
 	activeCount := len(o.activeWorkers)
 	o.workerMutex.RUnlock()
-
-	maxWorkers := o.GetMaxWorkers()
-	available := maxWorkers - activeCount
-
-	if available <= 0 {
-		log.Printf("📊 No available slots (%d/%d workers active)", activeCount, maxWorkers)
-	}
-	return available
+	return o.GetMaxWorkers() - activeCount
 }
 
 // getReadyNodes returns nodes that are ready for execution
 func (o *Overseer) getReadyNodes() []*Node {
+	if o.scheduler != nil {
+		return o.scheduler.GetReadyNodes()
+	}
 	o.dagMu.RLock()
 	defer o.dagMu.RUnlock()
 	return o.dag.GetReadyNodes()
@@ -839,39 +768,32 @@ func (o *Overseer) getReadyNodes() []*Node {
 
 // spawnWorkersForNodes spawns workers for the given nodes up to available slots
 func (o *Overseer) spawnWorkersForNodes(nodes []*Node, maxSlots int) int {
+	if o.scheduler != nil {
+		return o.scheduler.SpawnWorkersForNodes(nodes, maxSlots)
+	}
+
 	spawned := 0
 	for _, node := range nodes {
-		// CRITICAL: Recalculate available slots before each spawn
-		// This prevents race conditions between multiple callers
 		o.workerMutex.RLock()
 		currentActive := len(o.activeWorkers)
 		o.workerMutex.RUnlock()
-
 		maxWorkers := o.GetMaxWorkers()
 		currentAvailable := maxWorkers - currentActive
 		if maxWorkers == 0 {
-			currentAvailable = 20 // Unlimited mode
+			currentAvailable = 20
 		}
-
-		// Use minimum of maxSlots (batch limit) and currentAvailable (real-time)
 		effectiveLimit := maxSlots
 		if currentAvailable < effectiveLimit {
 			effectiveLimit = currentAvailable
 		}
-
 		if spawned >= effectiveLimit {
-			if currentAvailable <= 0 {
-				log.Printf("📊 spawnWorkersForNodes: No available slots (active: %d/%d), stopping", currentActive, maxWorkers)
-			}
 			break
 		}
-
 		if !o.shouldSpawnWorker(node) {
 			continue
 		}
-
 		if err := o.spawnWorker(node.Bead); err != nil {
-			log.Printf("❌ Failed to spawn worker for bead %s: %v", node.Bead.ID, err)
+			log.Printf("Failed to spawn worker for bead %s: %v", node.Bead.ID, err)
 			continue
 		}
 		spawned++
@@ -881,29 +803,20 @@ func (o *Overseer) spawnWorkersForNodes(nodes []*Node, maxSlots int) int {
 
 // shouldSpawnWorker determines if a worker should be spawned for a node
 func (o *Overseer) shouldSpawnWorker(node *Node) bool {
-	beadID := string(node.Bead.ID)
+	if o.scheduler != nil {
+		return o.scheduler.ShouldSpawnWorker(node)
+	}
 
+	beadID := string(node.Bead.ID)
 	if o.isBeadRunning(beadID) {
 		return false
 	}
-
-	if node.Bead.Type == "approval-gate" {
-		log.Printf("⏸️  Skipping approval gate: %s", beadID)
+	if node.Bead.Type == "approval-gate" || node.Bead.Type == "epic" {
 		return false
 	}
-
-	// Skip approval beads that are in progress (waiting for user approval)
 	if node.Bead.Type == "approval" && node.Bead.Status == types.StatusInProgress {
-		log.Printf("⏸️  Skipping approval bead (waiting for user approval): %s", beadID)
 		return false
 	}
-
-	// Skip epics (organizational containers, not actionable)
-	if node.Bead.Type == "epic" {
-		log.Printf("⏸️  Skipping epic (organizational): %s", beadID)
-		return false
-	}
-
 	return true
 }
 

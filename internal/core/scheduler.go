@@ -244,3 +244,109 @@ func (s *Scheduler) Tick() error {
 
 	return nil
 }
+
+
+// TriggerImmediateSchedule spawns workers for ready beads without waiting for next poll.
+func (s *Scheduler) TriggerImmediateSchedule() {
+	o := s.overseer
+	if o.IsPaused() {
+		log.Println("Immediate scheduling skipped: overseer is paused")
+		return
+	}
+	if !o.spawnRateLimiter.CanSpawn() {
+		log.Println("[RateLimit] Immediate scheduling blocked: rate limit exceeded")
+		return
+	}
+	availableSlots := s.GetAvailableWorkerSlots()
+	if availableSlots <= 0 {
+		return
+	}
+	readyNodes := s.GetReadyNodes()
+	if len(readyNodes) == 0 {
+		return
+	}
+	log.Printf("Immediate schedule: %d ready beads available", len(readyNodes))
+	spawned := s.SpawnWorkersForNodes(readyNodes, availableSlots)
+	if spawned > 0 {
+		log.Printf("Immediate scheduling complete: spawned %d workers", spawned)
+	}
+}
+
+// GetAvailableWorkerSlots returns the number of available worker slots.
+func (s *Scheduler) GetAvailableWorkerSlots() int {
+	o := s.overseer
+	o.workerMutex.RLock()
+	activeCount := len(o.activeWorkers)
+	o.workerMutex.RUnlock()
+	maxWorkers := o.GetMaxWorkers()
+	available := maxWorkers - activeCount
+	if available <= 0 {
+		log.Printf("No available slots (%d/%d workers active)", activeCount, maxWorkers)
+	}
+	return available
+}
+
+// GetReadyNodes returns nodes that are ready for execution.
+func (s *Scheduler) GetReadyNodes() []*Node {
+	o := s.overseer
+	o.dagMu.RLock()
+	defer o.dagMu.RUnlock()
+	return o.dag.GetReadyNodes()
+}
+
+// SpawnWorkersForNodes spawns workers for the given nodes up to available slots.
+func (s *Scheduler) SpawnWorkersForNodes(nodes []*Node, maxSlots int) int {
+	o := s.overseer
+	spawned := 0
+	for _, node := range nodes {
+		o.workerMutex.RLock()
+		currentActive := len(o.activeWorkers)
+		o.workerMutex.RUnlock()
+		maxWorkers := o.GetMaxWorkers()
+		currentAvailable := maxWorkers - currentActive
+		if maxWorkers == 0 {
+			currentAvailable = 20
+		}
+		effectiveLimit := maxSlots
+		if currentAvailable < effectiveLimit {
+			effectiveLimit = currentAvailable
+		}
+		if spawned >= effectiveLimit {
+			if currentAvailable <= 0 {
+				log.Printf("No available slots (active: %d/%d), stopping", currentActive, maxWorkers)
+			}
+			break
+		}
+		if !s.ShouldSpawnWorker(node) {
+			continue
+		}
+		if err := o.spawnWorker(node.Bead); err != nil {
+			log.Printf("Failed to spawn worker for bead %s: %v", node.Bead.ID, err)
+			continue
+		}
+		spawned++
+	}
+	return spawned
+}
+
+// ShouldSpawnWorker determines if a worker should be spawned for a node.
+func (s *Scheduler) ShouldSpawnWorker(node *Node) bool {
+	o := s.overseer
+	beadID := string(node.Bead.ID)
+	if o.isBeadRunning(beadID) {
+		return false
+	}
+	if node.Bead.Type == "approval-gate" {
+		log.Printf("Skipping approval gate: %s", beadID)
+		return false
+	}
+	if node.Bead.Type == "approval" && node.Bead.Status == types.StatusInProgress {
+		log.Printf("Skipping approval bead (waiting for user approval): %s", beadID)
+		return false
+	}
+	if node.Bead.Type == "epic" {
+		log.Printf("Skipping epic (organizational): %s", beadID)
+		return false
+	}
+	return true
+}

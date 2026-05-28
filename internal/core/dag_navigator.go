@@ -81,3 +81,31 @@ func (n *DAGNavigator) Clear() {
 		n.dag.Clear()
 	}
 }
+
+
+// GetAllDescendants returns all descendant node IDs for a given node ID.
+func (n *DAGNavigator) GetAllDescendants(nodeID string) []string {
+	var descendants []string
+	visited := make(map[string]bool)
+
+	var dfs func(id string)
+	dfs = func(id string) {
+		if visited[id] {
+			return
+		}
+		visited[id] = true
+
+		node, exists := n.dag.GetNode(id)
+		if !exists {
+			return
+		}
+
+		for _, outEdge := range node.OutEdges {
+			descendants = append(descendants, outEdge)
+			dfs(outEdge)
+		}
+	}
+
+	dfs(nodeID)
+	return descendants
+}
