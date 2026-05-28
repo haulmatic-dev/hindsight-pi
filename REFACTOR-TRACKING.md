@@ -7,7 +7,7 @@
 
 ### P0: Critical
 
-- [x] **1. Decompose Overseer God Object** (partial — 35 methods extracted)
+- [x] **1. Decompose Overseer God Object** (partial — 39 methods extracted)
   - [x] Extract SpawnRateLimiter (5 methods)
   - [x] Extract RetryManager (7 methods)
   - [x] Extract ProjectScanner (2 methods)
@@ -29,6 +29,10 @@
   - [x] Extract ServiceStarter (background service lifecycle)
   - [x] Extract WorkerSpawner (spawnWorker + spawnWorkerInternal)
   - [x] Extract MCPManager (Model Context Protocol operations)
+  - [x] Extract SettledStateInitializer (settled-state service setup)
+  - [x] Extract ChainCompletionInitializer (chain completion detector setup)
+  - [x] Extract PiSetupManager (Pi ecosystem setup)
+  - [x] Extract BeadCloser (bead closure logic)
   - [ ] Extract ChainOrchestrator
   - [ ] Extract ResourceGovernor
   - [ ] Extract ValidationEngine
@@ -62,11 +66,11 @@
   - `internal/core/activity_monitor.go` (duplicate)
   - `internal/agents/connector.go` AgentRegistry
   - `WorkerSpawner` interface + `defaultWorkerSpawner` (unused)
-  - 6 MCP fields from Overseer (mcpClient, mcpReservationMgr, mcpConfig, activeReservations, mcpMu, mcpMessageHandler)
+  - 6 MCP fields from Overseer
 
 - [ ] **10. Package Reorganization**
 
-## Commits So Far (38)
+## Commits So Far (40)
 
 1. `a317e9c` refactor(cli): add unified CLI runner package
 2. `ece1b1d` refactor(cleanup): remove dead code packages
@@ -99,17 +103,18 @@
 29. `latest` refactor(overseer): extract ServiceStarter
 30. `latest` refactor(overseer): extract WorkerSpawner
 31. `latest` refactor(overseer): extract MCPManager
+32. `latest` refactor(overseer): extract 4 remaining initializers
 
 ## Metrics
 
 | Metric | Before | Current | Change |
 |---|---|---|---|
-| overseer.go lines | 3,976 | **1,403** | **-2,573 (-65%)** |
+| overseer.go lines | 3,976 | **1,262** | **-2,714 (-68%)** |
 | Overseer methods | 112 | **84** | -28 |
-| Overseer fields | ~40 | **~20** | -20 fields |
+| Overseer fields | ~40 | **~24** | -16 fields |
 | Total source files | ~250 | ~250 | +0 (removed dead, added new) |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 21 | — |
+| New packages | — | 25 | — |
 | Tests | — | **542 passed** ✅ | — |
 
 ## New Packages
@@ -138,25 +143,26 @@
 | `service_starter.go` | Background service lifecycle | ~90 |
 | `worker_spawner.go` | Worker process creation | ~240 |
 | `mcp_manager.go` | Model Context Protocol operations | ~350 |
+| `settled_state_initializer.go` | Settled-state service setup | ~42 |
+| `chain_completion_initializer.go` | Chain completion detector setup | ~43 |
+| `pi_setup_manager.go` | Pi ecosystem setup | ~48 |
+| `bead_closer.go` | Bead closure logic | ~40 |
 
 ## Remaining Methods in Overseer (>20 lines)
 
 | Method | Lines | Notes |
 |---|---|---|
-| `Start` | ~40 | Main loop, thin delegations |
-| `initializeSettledStateService` | ~41 | Could extract to initializer |
-| `initializeChainCompletionDetector` | ~42 | Could extract to initializer |
-| `runPiSetup` | ~47 | Pi ecosystem setup |
-| `closeBead` | ~39 | Bead closure + validation |
-| `validateScope` | ~31 | Scope validation |
+| `Start` | ~23 | Main loop, thin delegations |
 | `spawnWorkersForNodes` | ~39 | DAG-based spawning |
-| `buildDAG` | ~15 | Thin delegation to DAGBuilder |
-| `tick` | ~5 | Thin delegation to Scheduler |
-| `getReadyBeads` | ~10 | Thin delegation to BeadDiscovery |
+| `validateScope` | ~31 | Scope validation |
+| `triggerImmediateSchedule` | ~28 | Immediate scheduling trigger |
+| `GetReadyBeadsFromDAG` | ~28 | DAG ready bead filtering |
+| `shouldSpawnWorker` | ~25 | Spawn validation |
+| `getAllDescendants` | ~24 | DAG descendant traversal |
 
 ## Next Steps
 
-1. **Extract Initializer types** (settled-state, chain-completion, pi-setup)
+1. **Extract remaining small methods** (spawnWorkersForNodes, validateScope, etc.)
 2. **Flatten Pi Config structs** (32 config struct types)
 3. **Extract test fixtures** from large test files
 4. **PR to fix/hindsight-consolidation**
