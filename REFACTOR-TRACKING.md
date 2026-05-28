@@ -46,7 +46,7 @@
 
 ### P1: High Value
 
-- [ ] **4. Validation as Service**
+- [x] **4. Validation as Service** (extracted ValidationService with TDD/PRD/close validation)
 - [x] **5. Intelligence Hub Facade** (integrated into Overseer)
 - [x] **8. Unified CLI Runner** — `pkg/cli/runner.go` created
 
@@ -108,6 +108,7 @@
 34. `latest` refactor(overseer): extract remaining large methods
 35. `latest` refactor(config): flatten Pi config structs
 36. `latest` refactor(tests): extract shared test helpers
+37. `latest` refactor(validation): extract ValidationService from Overseer
 
 ## Metrics
 
@@ -118,7 +119,7 @@
 | Overseer fields | ~40 | **~24** | -16 fields |
 | Total source files | ~250 | ~250 | +0 (removed dead, added new) |
 | Dead code removed | — | 1,336 lines | — |
-| New packages | — | 29 | — |
+| New packages | — | 30 | — |
 | Tests | — | **542 passed** ✅ | — |
 
 ## New Packages
