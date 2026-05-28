@@ -17,7 +17,6 @@ import (
 	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/internal/pi"
 	"github.com/haulmatic-dev/hydra/internal/services"
-	"github.com/haulmatic-dev/hydra/internal/validation"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -228,8 +227,8 @@ type Overseer struct {
 	// Epic scanner for periodic epic auto-close
 	epicScanner *EpicScanner // Scans and closes epics when all tasks complete
 
-	// Validation support for end-of-chain verification
-	validator *validation.Validator // Validates bead implementations before closure
+	// ValidationService orchestrates TDD, PRD, and end-of-chain validation
+	validationService *ValidationService
 
 	// Bead file reader for fallback bead lookups
 	beadFileReader *BeadFileReader
@@ -409,7 +408,7 @@ func NewOverseer(config *Config) *Overseer {
 	}
 
 	// Initialize validation service
-	o.validator = validation.NewValidator(validation.DefaultValidationConfig())
+	o.validationService = NewValidationService(config, o.retryManager, o.beadsClient)
 	log.Printf("[Validation] Initialized bead validation service")
 
 	// Initialize error logger
@@ -425,7 +424,7 @@ func NewOverseer(config *Config) *Overseer {
 	o.piSetupManager = NewPiSetupManager(config)
 
 	// Initialize bead closer
-	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o)
+	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o.validationService)
 
 	// Initialize skill updater initializer
 	o.skillUpdaterInitializer = NewSkillUpdaterInitializer(config, &o.skillUpdater)
@@ -950,20 +949,7 @@ func (o *Overseer) GetRetryDelay() time.Duration {
 // CloseBead closes a bead using the beads client
 // If validation is enabled, it validates end-of-chain beads before closure
 func (o *Overseer) CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error {
-	// Check if validation is enabled
-	if o.validator != nil {
-		return validation.CloseBeadWithValidation(
-			o.beadsClient,
-			o.validator,
-			projectPath,
-			repoName,
-			beadID,
-			reason,
-		)
-	}
-
-	// Validation disabled, close directly
-	return o.beadsClient.CloseBead(projectPath, repoName, beadID, reason)
+	return o.validationService.CloseBead(projectPath, repoName, beadID, reason)
 }
 
 // RefreshToolClients reinitializes tool clients based on detected config changes.

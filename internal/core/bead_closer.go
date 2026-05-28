@@ -9,19 +9,19 @@ import (
 
 // BeadCloser closes beads via beadsClient based on worker completion status.
 type BeadCloser struct {
-	beadsClient     BeadsClient
-	intelligenceHub *IntelligenceHub
-	projectResolver *ProjectResolver
-	overseer        *Overseer
+	beadsClient      BeadsClient
+	intelligenceHub  *IntelligenceHub
+	projectResolver  *ProjectResolver
+	validationService *ValidationService
 }
 
 // NewBeadCloser creates a new bead closer.
-func NewBeadCloser(beadsClient BeadsClient, intelligenceHub *IntelligenceHub, projectResolver *ProjectResolver, overseer *Overseer) *BeadCloser {
+func NewBeadCloser(beadsClient BeadsClient, intelligenceHub *IntelligenceHub, projectResolver *ProjectResolver, validationService *ValidationService) *BeadCloser {
 	return &BeadCloser{
-		beadsClient:     beadsClient,
-		intelligenceHub: intelligenceHub,
-		projectResolver: projectResolver,
-		overseer:        overseer,
+		beadsClient:      beadsClient,
+		intelligenceHub:  intelligenceHub,
+		projectResolver:  projectResolver,
+		validationService: validationService,
 	}
 }
 
@@ -57,7 +57,7 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool) error {
 
 	// Run TDD validation for REFACTOR beads before closing
 	if success && bead != nil && bead.Type == "refactor" {
-		if err := c.overseer.RunTDDValidation(*bead, projectPath); err != nil {
+		if err := c.validationService.RunTDDValidation(*bead, projectPath); err != nil {
 			log.Printf("[closeBead] TDD validation error for %s: %v", worker.BeadID.String(), err)
 		}
 	}

@@ -1,0 +1,245 @@
+package core
+
+import (
+	"fmt"
+	"log"
+	"strings"
+
+	"github.com/haulmatic-dev/hydra/internal/validation"
+	"github.com/haulmatic-dev/hydra/pkg/types"
+)
+
+// ValidationService orchestrates TDD, PRD, and end-of-chain validation.
+type ValidationService struct {
+	config       *Config
+	retryManager *RetryManager
+	beadsClient  BeadsClient
+}
+
+// NewValidationService creates a new validation service.
+func NewValidationService(config *Config, retryManager *RetryManager, beadsClient BeadsClient) *ValidationService {
+	return &ValidationService{
+		config:       config,
+		retryManager: retryManager,
+		beadsClient:  beadsClient,
+	}
+}
+
+// CloseBead closes a bead with optional end-of-chain validation.
+func (v *ValidationService) CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error {
+	if v.config.Validation.Enabled {
+		validator := validation.NewValidator(validation.DefaultValidationConfig())
+		return validation.CloseBeadWithValidation(
+			v.beadsClient,
+			validator,
+			projectPath,
+			repoName,
+			beadID,
+			reason,
+		)
+	}
+	return v.beadsClient.CloseBead(projectPath, repoName, beadID, reason)
+}
+
+// RunTDDValidation validates a REFACTOR bead's TDD chain and creates fix beads on failure.
+func (v *ValidationService) RunTDDValidation(refactorBead types.Bead, projectPath string) error {
+	if !v.config.Validation.Enabled || !v.config.Validation.TDDValidationEnabled {
+		return nil
+	}
+
+	beadID := string(refactorBead.ID)
+
+	redBead, greenBead, err := v.findTDDChainBeads(refactorBead)
+	if err != nil {
+		log.Printf("[TDDValidation] Could not find RED/GREEN beads for %s: %v", beadID, err)
+		return nil
+	}
+
+	tddValidator := validation.NewTDDValidator(validation.ValidationConfig{
+		Enabled:                  v.config.Validation.Enabled,
+		AgentVerificationEnabled: v.config.Validation.AgentVerificationEnabled,
+	})
+
+	result, err := tddValidator.ValidateTDDChain(redBead, greenBead, refactorBead, projectPath)
+	if err != nil {
+		log.Printf("[TDDValidation] Validation error for %s: %v", beadID, err)
+		return nil
+	}
+
+	if result.Passed {
+		log.Printf("[TDDValidation] PASSED for %s", beadID)
+		v.retryManager.ClearValidationRetry(beadID)
+		return nil
+	}
+
+	retryCount := v.retryManager.GetValidationRetryCount(beadID)
+	maxRounds := v.config.Validation.MaxRounds
+	if maxRounds <= 0 {
+		maxRounds = 3
+	}
+
+	if retryCount >= maxRounds {
+		log.Printf("[TDDValidation] Bead %s exhausted %d/%d validation rounds, proceeding", beadID, retryCount, maxRounds)
+		return nil
+	}
+
+	log.Printf("[TDDValidation] FAILED for %s (round %d/%d), creating fix beads for %d gaps", beadID, retryCount+1, maxRounds, len(result.Gaps))
+
+	for _, gap := range result.Gaps {
+		fixType := "fix"
+		if gap.Type == "red" {
+			fixType = "test"
+		}
+
+		fixTitle := fmt.Sprintf("Fix: %s (validation round %d)", refactorBead.Title, retryCount+1)
+		fixDesc := fmt.Sprintf("TDD validation gap (%s): %s\n\nOriginal bead: %s", gap.Type, gap.Description, refactorBead.ID)
+
+		req := types.CreateBeadRequest{
+			Title:        fixTitle,
+			Description:  fixDesc,
+			Type:         fixType,
+			Priority:     refactorBead.Priority,
+			Dependencies: []types.BeadID{refactorBead.ID},
+			Labels:       []string{"auto-fix", fmt.Sprintf("tdd-validate-round-%d", retryCount+1)},
+		}
+
+		fixBeadID, err := v.beadsClient.CreateBead(projectPath, req)
+		if err != nil {
+			log.Printf("[TDDValidation] Failed to create fix bead for %s: %v", beadID, err)
+			continue
+		}
+		log.Printf("[TDDValidation] Created fix bead %s for gap in %s", fixBeadID, beadID)
+	}
+
+	v.retryManager.IncrementValidationRetry(beadID)
+	return nil
+}
+
+// RunPRDValidation validates a completed chain against its root PRD and creates fix beads on failure.
+func (v *ValidationService) RunPRDValidation(chainInfo *ChainInfo, projectPath string) error {
+	log.Printf("[PRDValidation] DEBUG START enabled=%v prd=%v maxRounds=%d", v.config.Validation.Enabled, v.config.Validation.PRDValidationEnabled, v.config.Validation.MaxRounds)
+	if !v.config.Validation.Enabled || !v.config.Validation.PRDValidationEnabled {
+		return nil
+	}
+
+	rootBeadID := chainInfo.RootBeadID
+	rootBead, err := v.beadsClient.GetBead(projectPath, "", rootBeadID)
+	if err != nil {
+		log.Printf("[PRDValidation] Could not get root bead %s: %v", rootBeadID, err)
+		return nil
+	}
+
+	leafBeads := make([]types.Bead, 0, len(chainInfo.LeafBeadIDs))
+	for _, leafID := range chainInfo.LeafBeadIDs {
+		bead, err := v.beadsClient.GetBead(projectPath, "", leafID)
+		if err != nil {
+			log.Printf("[PRDValidation] Could not get leaf bead %s: %v", leafID, err)
+			continue
+		}
+		leafBeads = append(leafBeads, *bead)
+	}
+
+	prdValidator := validation.NewPRDValidator(validation.ValidationConfig{
+		Enabled:                  v.config.Validation.Enabled,
+		AgentVerificationEnabled: v.config.Validation.AgentVerificationEnabled,
+	})
+
+	result, err := prdValidator.ValidateChainAgainstPRD(*rootBead, leafBeads, projectPath)
+	if err != nil {
+		log.Printf("[PRDValidation] Validation error for chain %s: %v", rootBeadID, err)
+		return nil
+	}
+
+	if result.Passed {
+		log.Printf("[PRDValidation] PASSED for chain %s", rootBeadID)
+		v.retryManager.ClearValidationRetry(string(rootBeadID))
+		return nil
+	}
+
+	retryCount := v.retryManager.GetValidationRetryCount(string(rootBeadID))
+	maxRounds := v.config.Validation.MaxRounds
+	if maxRounds <= 0 {
+		maxRounds = 3
+	}
+
+	if retryCount >= maxRounds {
+		log.Printf("[PRDValidation] Chain %s exhausted %d/%d validation rounds, marking complete", rootBeadID, retryCount, maxRounds)
+		return nil
+	}
+
+	log.Printf("[PRDValidation] FAILED for chain %s (round %d/%d), creating fix beads for %d gaps", rootBeadID, retryCount+1, maxRounds, len(result.Gaps))
+
+	fixBeadIDs := make([]types.BeadID, 0, len(result.Gaps))
+	for _, gap := range result.Gaps {
+		fixTitle := fmt.Sprintf("Fix: %s (validation round %d)", gap.Title, retryCount+1)
+		fixDesc := fmt.Sprintf("PRD validation gap: %s\n\nRoot bead: %s", gap.Description, rootBeadID)
+
+		req := types.CreateBeadRequest{
+			Title:        fixTitle,
+			Description:  fixDesc,
+			Type:         "fix",
+			Priority:     rootBead.Priority,
+			Dependencies: []types.BeadID{},
+			Labels:       []string{"auto-fix", fmt.Sprintf("prd-validate-round-%d", retryCount+1)},
+		}
+
+		fixBeadID, err := v.beadsClient.CreateBead(projectPath, req)
+		if err != nil {
+			log.Printf("[PRDValidation] Failed to create fix bead for chain %s: %v", rootBeadID, err)
+			continue
+		}
+		fixBeadIDs = append(fixBeadIDs, fixBeadID)
+		log.Printf("[PRDValidation] Created fix bead %s for gap in chain %s", fixBeadID, rootBeadID)
+	}
+
+	if len(fixBeadIDs) > 0 {
+		validateTitle := fmt.Sprintf("Re-validate: %s (round %d)", rootBead.Title, retryCount+1)
+		validateDesc := fmt.Sprintf("Re-validate chain against PRD after fixes\n\nRoot bead: %s", rootBeadID)
+
+		req := types.CreateBeadRequest{
+			Title:        validateTitle,
+			Description:  validateDesc,
+			Type:         "validation",
+			Priority:     rootBead.Priority,
+			Dependencies: fixBeadIDs,
+			Labels:       []string{"auto-validate", fmt.Sprintf("prd-validate-round-%d", retryCount+1)},
+		}
+
+		validateBeadID, err := v.beadsClient.CreateBead(projectPath, req)
+		if err != nil {
+			log.Printf("[PRDValidation] Failed to create re-validation bead for chain %s: %v", rootBeadID, err)
+		} else {
+			log.Printf("[PRDValidation] Created re-validation bead %s for chain %s", validateBeadID, rootBeadID)
+		}
+	}
+
+	v.retryManager.IncrementValidationRetry(string(rootBeadID))
+	return nil
+}
+
+// findTDDChainBeads locates RED and GREEN beads that are dependencies of a REFACTOR bead.
+func (v *ValidationService) findTDDChainBeads(refactorBead types.Bead) (types.Bead, types.Bead, error) {
+	var redBead, greenBead types.Bead
+	var redFound, greenFound bool
+
+	for _, depID := range refactorBead.Dependencies {
+		bead, err := v.beadsClient.GetBead(refactorBead.Project, refactorBead.Repo, depID)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(strings.ToLower(bead.Title), "red") || bead.Type == "test" {
+			redBead = *bead
+			redFound = true
+		}
+		if strings.Contains(strings.ToLower(bead.Title), "green") || bead.Type == "implement" {
+			greenBead = *bead
+			greenFound = true
+		}
+	}
+
+	if !redFound && !greenFound {
+		return types.Bead{}, types.Bead{}, fmt.Errorf("no RED or GREEN beads found as dependencies of %s", refactorBead.ID)
+	}
+
+	return redBead, greenBead, nil
+}

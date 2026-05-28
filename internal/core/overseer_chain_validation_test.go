@@ -16,6 +16,7 @@ func TestRunTDDValidation_SkipsWhenDisabled(t *testing.T) {
 	o := NewOverseer(config)
 	mockBeads := newMockBeadsClient()
 	o.beadsClient = mockBeads
+	o.validationService = NewValidationService(config, o.retryManager, o.beadsClient)
 
 	refactorBead := types.Bead{
 		ID:   "test-refactor",
@@ -36,6 +37,7 @@ func TestRunTDDValidation_NoRedGreenBeads(t *testing.T) {
 	o := NewOverseer(config)
 	mockBeads := newMockBeadsClient()
 	o.beadsClient = mockBeads
+	o.validationService = NewValidationService(config, o.retryManager, o.beadsClient)
 
 	refactorBead := types.Bead{
 		ID:           "test-refactor",
@@ -58,6 +60,7 @@ func TestRunTDDValidation_CreatesFixBeadOnGap(t *testing.T) {
 	o := NewOverseer(config)
 	mockBeads := newMockBeadsClient()
 	o.beadsClient = mockBeads
+	o.validationService = NewValidationService(config, o.retryManager, o.beadsClient)
 
 	projectPath := t.TempDir()
 
@@ -113,6 +116,7 @@ func TestRunTDDValidation_ExhaustedRetries(t *testing.T) {
 	o := NewOverseer(config)
 	mockBeads := newMockBeadsClient()
 	o.beadsClient = mockBeads
+	o.validationService = NewValidationService(config, o.retryManager, o.beadsClient)
 
 	projectPath := t.TempDir()
 
@@ -165,6 +169,7 @@ func TestRunPRDValidation_SkipsWhenDisabled(t *testing.T) {
 	o := NewOverseer(config)
 	mockBeads := newMockBeadsClient()
 	o.beadsClient = mockBeads
+	o.validationService = NewValidationService(config, o.retryManager, o.beadsClient)
 
 	chain := &ChainInfo{
 		RootBeadID: "test-root",
@@ -216,6 +221,7 @@ func TestRunPRDValidation_CreatesFixBeads(t *testing.T) {
 	o := NewOverseer(config)
 	mockBeads := newMockBeadsClient()
 	o.beadsClient = mockBeads
+	o.validationService = NewValidationService(config, o.retryManager, o.beadsClient)
 
 	projectPath := t.TempDir()
 
@@ -265,6 +271,7 @@ func TestRunPRDValidation_WithExistingFiles(t *testing.T) {
 	o := NewOverseer(config)
 	mockBeads := newMockBeadsClient()
 	o.beadsClient = mockBeads
+	o.validationService = NewValidationService(config, o.retryManager, o.beadsClient)
 
 	projectPath := t.TempDir()
 

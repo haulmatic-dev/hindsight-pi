@@ -128,7 +128,7 @@ func setupWorkerCompletionTest(t *testing.T) (*Overseer, *enhancedMockBeadsClien
 	}
 	overseer.projects = testProjects
 	overseer.projectResolver = NewProjectResolver(testProjects)
-	overseer.beadCloser = NewBeadCloser(overseer.beadsClient, overseer.intelligenceHub, overseer.projectResolver, overseer)
+	overseer.beadCloser = NewBeadCloser(overseer.beadsClient, overseer.intelligenceHub, overseer.projectResolver, overseer.validationService)
 
 	// Initialize baseDelay and maxDelay
 	overseer.retryManager.SetBaseDelay(5 * time.Second)
