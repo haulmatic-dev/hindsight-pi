@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"sync"
 
 	"strings"
 
@@ -18,17 +19,26 @@ type BeadDiscovery struct {
 	projects    []types.Project
 	completed   map[string]bool
 	useBV       bool
+	dag         *DAG
+	dagMu       *sync.RWMutex
 }
 
 // NewBeadDiscovery creates a new bead discovery service.
-func NewBeadDiscovery(beadsClient BeadsClient, bvClient *bv.Client, projects []types.Project, completed map[string]bool, ) *BeadDiscovery {
+func NewBeadDiscovery(beadsClient BeadsClient, bvClient *bv.Client, projects []types.Project, completed map[string]bool, dag *DAG, dagMu *sync.RWMutex) *BeadDiscovery {
 	return &BeadDiscovery{
 		beadsClient: beadsClient,
 		bvClient:    bvClient,
 		projects:    projects,
 		completed:   completed,
-		
+		dag:         dag,
+		dagMu:       dagMu,
 	}
+}
+
+// SetProjects updates the projects list for bead discovery.
+// Must be called after project discovery to ensure beads can be found.
+func (d *BeadDiscovery) SetProjects(projects []types.Project) {
+	d.projects = projects
 }
 
 // FindReadyBeads retrieves beads that are ready to execute.
@@ -124,7 +134,7 @@ func (d *BeadDiscovery) findFromBR(activeWorkers map[string]bool) ([]types.Bead,
 	})
 
 	log.Printf("📋 Found %d ready beads from 'br ready' (after filtering)", len(readyBeads))
-	return readyBeads, nil
+	return d.filterByDAG(readyBeads), nil
 }
 
 // findFromBV retrieves beads using bv --robot-triage.
@@ -281,7 +291,7 @@ func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead,
 	})
 
 	log.Printf("📋 [BV] Found %d ready beads from triage (after filtering)", len(allReadyBeads))
-	return allReadyBeads, nil
+	return d.filterByDAG(allReadyBeads), nil
 }
 
 // findFromBVPlan retrieves beads using bv --robot-plan.
@@ -363,5 +373,35 @@ func (d *BeadDiscovery) findFromBVPlan(activeWorkers map[string]bool) ([]types.B
 	})
 
 	log.Printf("📋 [BV-Plan] Found %d ready beads from plan (after filtering)", len(allReadyBeads))
-	return allReadyBeads, nil
+	return d.filterByDAG(allReadyBeads), nil
+}
+
+
+// filterByDAG intersects candidate beads with the DAG's ready nodes.
+// This prevents duplicate scheduling when external sources (br, bv) return beads
+// whose dependencies are not yet satisfied in our view of the world.
+func (d *BeadDiscovery) filterByDAG(candidates []types.Bead) []types.Bead {
+	if d.dag == nil || d.dagMu == nil {
+		return candidates
+	}
+	d.dagMu.RLock()
+	readyNodes := d.dag.GetReadyNodes()
+	d.dagMu.RUnlock()
+
+	readySet := make(map[string]bool, len(readyNodes))
+	for _, node := range readyNodes {
+		readySet[string(node.Bead.ID)] = true
+	}
+
+	var filtered []types.Bead
+	for _, bead := range candidates {
+		if readySet[string(bead.ID)] {
+			filtered = append(filtered, bead)
+		}
+	}
+
+	if len(filtered) != len(candidates) {
+		log.Printf("[DAG-Filter] Filtered %d candidates down to %d DAG-ready beads", len(candidates), len(filtered))
+	}
+	return filtered
 }

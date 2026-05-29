@@ -214,7 +214,7 @@ func NewOverseer(config *Config) *Overseer {
 	// Initialize worker environment builder
 	o.workerEnvBuilder = NewWorkerEnvBuilder(config)
 
-	o.beadDiscovery = NewBeadDiscovery(o.beadsClient, o.bvClient, o.projects, o.completed)
+	o.beadDiscovery = NewBeadDiscovery(o.beadsClient, o.bvClient, o.projects, o.completed, o.dag, &o.dagMu)
 
 	// Initialize project resolver
 	o.projectResolver = NewProjectResolver(o.projects)
@@ -271,6 +271,9 @@ func NewOverseer(config *Config) *Overseer {
 		o.sendMCPWorkerCompletion,
 		o.getMaxRetries,
 	)
+
+	// Initialize bead analyzer (projects will be updated after discovery)
+	o.beadAnalyzer = NewBeadAnalyzer(o.projects)
 
 	// Initialize worker spawner
 	o.workerSpawner = NewWorkerSpawner(
@@ -450,7 +453,7 @@ func (o *Overseer) buildDAG() error {
 	}
 	o.dagNavigator = NewDAGNavigator(o.dag)
 
-	if err := o.dagBuilder.Build(o.dag, o.beadsClient, o.projects); err != nil {
+	if err := o.dagBuilder.Build(o.dag, o.beadsClient, o.projects, o.completed); err != nil {
 		return err
 	}
 

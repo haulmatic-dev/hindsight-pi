@@ -20,7 +20,8 @@ func TestParseFullBeadDetails_EventsMetadata(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-events",
 		"title": "Bead with Events",
 		"description": "Testing events parsing",
@@ -55,7 +56,8 @@ func TestParseFullBeadDetails_EventsMetadata(t *testing.T) {
 				"comment": "Work completed successfully"
 			}
 		]
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -89,7 +91,8 @@ func TestParseFullBeadDetails_DependentsMetadata(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-dependents",
 		"title": "Bead with Dependents",
 		"description": "Testing dependents parsing",
@@ -114,7 +117,8 @@ func TestParseFullBeadDetails_DependentsMetadata(t *testing.T) {
 				"dependency_type": "requires"
 			}
 		]
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -144,7 +148,8 @@ func TestParseFullBeadDetails_DependencyStatusMetadata(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-deps",
 		"title": "Bead with Dependency Status",
 		"description": "Testing dependency status parsing",
@@ -155,28 +160,29 @@ func TestParseFullBeadDetails_DependencyStatusMetadata(t *testing.T) {
 		"updated_at": "2026-03-09T10:00:00Z",
 		"dependencies": [
 			{
-				"depends_on_id": "dep-123",
-				"issue_id": "test-deps",
-				"type": "blocks",
-				"created_at": "2026-03-09T09:00:00Z",
-				"status": "completed"
+				"id": "dep-123",
+				"title": "Dependency dep-123",
+				"status": "completed",
+				"priority": 1,
+				"dependency_type": "blocks"
 			},
 			{
-				"depends_on_id": "dep-456",
-				"issue_id": "test-deps",
-				"type": "requires",
-				"created_at": "2026-03-09T09:00:00Z",
-				"status": "open"
+				"id": "dep-456",
+				"title": "Dependency dep-456",
+				"status": "open",
+				"priority": 1,
+				"dependency_type": "requires"
 			},
 			{
-				"depends_on_id": "dep-789",
-				"issue_id": "test-deps",
-				"type": "related_to",
-				"created_at": "2026-03-09T09:00:00Z",
-				"status": "in_progress"
+				"id": "dep-789",
+				"title": "Dependency dep-789",
+				"status": "in_progress",
+				"priority": 1,
+				"dependency_type": "related_to"
 			}
 		]
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -213,7 +219,8 @@ func TestParseFullBeadDetails_OptionalTimeFields(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-times",
 		"title": "Bead with Time Fields",
 		"description": "Testing time fields parsing",
@@ -225,7 +232,8 @@ func TestParseFullBeadDetails_OptionalTimeFields(t *testing.T) {
 		"closed_at": "2026-03-09T12:00:00Z",
 		"due_at": "2026-03-15T00:00:00Z",
 		"defer_until": "2026-03-10T00:00:00Z"
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -264,7 +272,8 @@ func TestParseFullBeadDetails_AssignmentFields(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-assignment",
 		"title": "Bead with Assignment Fields",
 		"description": "Testing assignment fields parsing",
@@ -276,7 +285,8 @@ func TestParseFullBeadDetails_AssignmentFields(t *testing.T) {
 		"created_by": "user123",
 		"assignee": "dev456",
 		"owner": "team-backend"
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -310,7 +320,8 @@ func TestParseFullBeadDetails_WorkFields(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-work",
 		"title": "Bead with Work Fields",
 		"description": "Testing work fields parsing",
@@ -323,7 +334,8 @@ func TestParseFullBeadDetails_WorkFields(t *testing.T) {
 		"external_ref": "JIRA-123",
 		"source_system": "jira",
 		"notes": "Important implementation notes"
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -362,7 +374,8 @@ func TestParseFullBeadDetails_DesignAndACFields(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-design",
 		"title": "Bead with Design and AC",
 		"description": "Testing design and AC fields parsing",
@@ -373,7 +386,8 @@ func TestParseFullBeadDetails_DesignAndACFields(t *testing.T) {
 		"updated_at": "2026-03-09T10:00:00Z",
 		"design": "https://figma.com/design123",
 		"acceptance_criteria": "1. Must pass all tests\n2. Must have 80% coverage"
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -403,7 +417,8 @@ func TestParseFullBeadDetails_FlagFields(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-flags",
 		"title": "Bead with Flags",
 		"description": "Testing flag fields parsing",
@@ -414,7 +429,8 @@ func TestParseFullBeadDetails_FlagFields(t *testing.T) {
 		"updated_at": "2026-03-09T10:00:00Z",
 		"pinned": true,
 		"ephemeral": false
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -443,14 +459,20 @@ func TestParseFullBeadDetails_AllFieldsTogether(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "hydra", Repo: "backend"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "hydra-backend-abc123",
 		"title": "Complete Full Featured Bead",
 		"description": "A bead with every possible field populated",
 		"status": "closed",
 		"priority": 10,
 		"issue_type": "feature",
-		"labels": ["urgent", "backend", "api", "v2"],
+		"labels": [
+			"urgent",
+			"backend",
+			"api",
+			"v2"
+		],
 		"created_at": "2026-03-01T08:00:00Z",
 		"updated_at": "2026-03-09T16:00:00Z",
 		"closed_at": "2026-03-09T16:00:00Z",
@@ -471,18 +493,18 @@ func TestParseFullBeadDetails_AllFieldsTogether(t *testing.T) {
 		"ephemeral": false,
 		"dependencies": [
 			{
-				"depends_on_id": "hydra-backend-dep1",
-				"issue_id": "hydra-backend-abc123",
-				"type": "blocks",
-				"created_at": "2026-03-01T07:00:00Z",
-				"status": "completed"
+				"id": "hydra-backend-dep1",
+				"title": "Dependency hydra-backend-dep1",
+				"status": "completed",
+				"priority": 1,
+				"dependency_type": "blocks"
 			},
 			{
-				"depends_on_id": "hydra-backend-dep2",
-				"issue_id": "hydra-backend-abc123",
-				"type": "requires",
-				"created_at": "2026-03-01T07:00:00Z",
-				"status": "in_progress"
+				"id": "hydra-backend-dep2",
+				"title": "Dependency hydra-backend-dep2",
+				"status": "in_progress",
+				"priority": 1,
+				"dependency_type": "requires"
 			}
 		],
 		"dependents": [
@@ -511,7 +533,8 @@ func TestParseFullBeadDetails_AllFieldsTogether(t *testing.T) {
 				"comment": "All acceptance criteria met"
 			}
 		]
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -602,7 +625,8 @@ func TestParseFullBeadDetails_MissingOptionalFields(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-minimal",
 		"title": "Minimal Bead",
 		"description": "Only required fields",
@@ -611,7 +635,8 @@ func TestParseFullBeadDetails_MissingOptionalFields(t *testing.T) {
 		"issue_type": "task",
 		"created_at": "2026-03-09T10:00:00Z",
 		"updated_at": "2026-03-09T10:00:00Z"
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -693,7 +718,8 @@ func TestParseFullBeadDetails_NullFields(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-nulls",
 		"title": "Bead with Nulls",
 		"description": null,
@@ -706,7 +732,8 @@ func TestParseFullBeadDetails_NullFields(t *testing.T) {
 		"close_reason": null,
 		"created_by": null,
 		"assignee": null
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -788,17 +815,19 @@ func TestParseFullBeadDetails_SpecialCharacters(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-special",
 		"title": "Title with \"quotes\" and \t tabs \n newlines",
-		"description": "Description with emojis 🎉 🚀 and unicode 中文",
+		"description": "Description with emojis \ud83c\udf89 \ud83d\ude80 and unicode \u4e2d\u6587",
 		"status": "open",
 		"priority": 5,
 		"issue_type": "task",
 		"created_at": "2026-03-09T10:00:00Z",
 		"updated_at": "2026-03-09T10:00:00Z",
 		"notes": "Notes with <html> & \"special\" 'chars'"
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -833,7 +862,8 @@ func TestParseFullBeadDetails_DependencyRelationshipTypes(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-rel-types",
 		"title": "Bead with Relationship Types",
 		"description": "Testing relationship type storage",
@@ -844,21 +874,22 @@ func TestParseFullBeadDetails_DependencyRelationshipTypes(t *testing.T) {
 		"updated_at": "2026-03-09T10:00:00Z",
 		"dependencies": [
 			{
-				"depends_on_id": "dep-blocks",
-				"issue_id": "test-rel-types",
-				"type": "blocks",
-				"created_at": "2026-03-09T09:00:00Z",
-				"status": "completed"
+				"id": "dep-blocks",
+				"title": "Dependency dep-blocks",
+				"status": "completed",
+				"priority": 1,
+				"dependency_type": "blocks"
 			},
 			{
-				"depends_on_id": "dep-requires",
-				"issue_id": "test-rel-types",
-				"type": "requires",
-				"created_at": "2026-03-09T09:00:00Z",
-				"status": "open"
+				"id": "dep-requires",
+				"title": "Dependency dep-requires",
+				"status": "open",
+				"priority": 1,
+				"dependency_type": "requires"
 			}
 		]
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 

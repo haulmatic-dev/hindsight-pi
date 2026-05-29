@@ -17,6 +17,11 @@ func NewBeadAnalyzer(projects []types.Project) *BeadAnalyzer {
 	return &BeadAnalyzer{projects: projects}
 }
 
+// SetProjects updates the projects list.
+func (ba *BeadAnalyzer) SetProjects(projects []types.Project) {
+	ba.projects = projects
+}
+
 // ExtractTargetFiles extracts target file paths from bead metadata and description.
 func (ba *BeadAnalyzer) ExtractTargetFiles(bead *types.Bead) []string {
 	var files []string

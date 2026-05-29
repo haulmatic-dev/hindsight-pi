@@ -110,7 +110,8 @@ func TestParseBeadDetail_WithDependencyStatus(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-abc123",
 		"title": "Test Title",
 		"description": "Test description",
@@ -121,21 +122,22 @@ func TestParseBeadDetail_WithDependencyStatus(t *testing.T) {
 		"updated_at": "2026-03-09T10:00:00Z",
 		"dependencies": [
 			{
-				"depends_on_id": "dep-123",
-				"issue_id": "test-abc123",
-				"type": "blocks",
-				"created_at": "2026-03-09T09:00:00Z",
-				"status": "completed"
+				"id": "dep-123",
+				"title": "Dependency dep-123",
+				"status": "completed",
+				"priority": 1,
+				"dependency_type": "blocks"
 			},
 			{
-				"depends_on_id": "dep-456",
-				"issue_id": "test-abc123",
-				"type": "requires",
-				"created_at": "2026-03-09T09:00:00Z",
-				"status": "open"
+				"id": "dep-456",
+				"title": "Dependency dep-456",
+				"status": "open",
+				"priority": 1,
+				"dependency_type": "requires"
 			}
 		]
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -175,7 +177,8 @@ func TestParseBeadDetail_SingleRepoProject(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "myproject", Repo: ""}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "myproject-abc123",
 		"title": "Single Repo Bead",
 		"description": "Test single repo",
@@ -184,7 +187,8 @@ func TestParseBeadDetail_SingleRepoProject(t *testing.T) {
 		"issue_type": "feature",
 		"created_at": "2026-03-09T10:00:00Z",
 		"updated_at": "2026-03-09T10:00:00Z"
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -217,7 +221,8 @@ func TestParseBeadDetail_MultiRepoProject(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "myproject", Repo: "frontend"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "myproject-frontend-abc123",
 		"title": "Multi Repo Frontend Bead",
 		"description": "Test multi repo frontend",
@@ -227,7 +232,8 @@ func TestParseBeadDetail_MultiRepoProject(t *testing.T) {
 		"created_at": "2026-03-09T10:00:00Z",
 		"updated_at": "2026-03-09T10:00:00Z",
 		"source_repo": "frontend"
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -260,7 +266,8 @@ func TestParseBeadDetail_ComplexDependencies(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-complex",
 		"title": "Complex Bead",
 		"description": "Test with complex dependencies",
@@ -271,25 +278,25 @@ func TestParseBeadDetail_ComplexDependencies(t *testing.T) {
 		"updated_at": "2026-03-09T10:00:00Z",
 		"dependencies": [
 			{
-				"depends_on_id": "dep-blocks-1",
-				"issue_id": "test-complex",
-				"type": "blocks",
-				"created_at": "2026-03-09T08:00:00Z",
-				"status": "completed"
+				"id": "dep-blocks-1",
+				"title": "Dependency dep-blocks-1",
+				"status": "completed",
+				"priority": 1,
+				"dependency_type": "blocks"
 			},
 			{
-				"depends_on_id": "dep-requires-2",
-				"issue_id": "test-complex",
-				"type": "requires",
-				"created_at": "2026-03-09T08:00:00Z",
-				"status": "open"
+				"id": "dep-requires-2",
+				"title": "Dependency dep-requires-2",
+				"status": "open",
+				"priority": 1,
+				"dependency_type": "requires"
 			},
 			{
-				"depends_on_id": "dep-related-3",
-				"issue_id": "test-complex",
-				"type": "related_to",
-				"created_at": "2026-03-09T08:00:00Z",
-				"status": "in_progress"
+				"id": "dep-related-3",
+				"title": "Dependency dep-related-3",
+				"status": "in_progress",
+				"priority": 1,
+				"dependency_type": "related_to"
 			}
 		],
 		"dependents": [
@@ -301,7 +308,8 @@ func TestParseBeadDetail_ComplexDependencies(t *testing.T) {
 				"dependency_type": "blocks"
 			}
 		]
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -336,14 +344,19 @@ func TestParseBeadDetail_AllOptionalFields(t *testing.T) {
 	createdAt := makeTime(2026, 3, 9)
 	_ = createdAt
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-full",
 		"title": "Full Featured Bead",
 		"description": "A complete bead with all fields",
 		"status": "closed",
 		"priority": 10,
 		"issue_type": "feature",
-		"labels": ["urgent", "backend", "api"],
+		"labels": [
+			"urgent",
+			"backend",
+			"api"
+		],
 		"created_at": "2026-03-09T10:00:00Z",
 		"updated_at": "2026-03-09T11:00:00Z",
 		"closed_at": "2026-03-09T12:00:00Z",
@@ -362,7 +375,8 @@ func TestParseBeadDetail_AllOptionalFields(t *testing.T) {
 		"acceptance_criteria": "Must pass all tests",
 		"pinned": true,
 		"ephemeral": false
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -430,70 +444,80 @@ func TestParseBeadDetail_EdgeCases(t *testing.T) {
 		},
 		{
 			name: "null description",
-			json: `[{
-				"id": "test-null",
-				"title": "Null Desc",
-				"description": null,
-				"status": "open",
-				"priority": 1,
-				"issue_type": "task",
-				"created_at": "2026-03-09T10:00:00Z",
-				"updated_at": "2026-03-09T10:00:00Z"
-			}]`,
+			json: `[
+	{
+		"id": "test-null",
+		"title": "Null Desc",
+		"description": null,
+		"status": "open",
+		"priority": 1,
+		"issue_type": "task",
+		"created_at": "2026-03-09T10:00:00Z",
+		"updated_at": "2026-03-09T10:00:00Z"
+	}
+]`,
 			wantErr: false,
 		},
 		{
 			name: "empty string description",
-			json: `[{
-				"id": "test-empty",
-				"title": "Empty Desc",
-				"description": "",
-				"status": "open",
-				"priority": 1,
-				"issue_type": "task",
-				"created_at": "2026-03-09T10:00:00Z",
-				"updated_at": "2026-03-09T10:00:00Z"
-			}]`,
+			json: `[
+	{
+		"id": "test-empty",
+		"title": "Empty Desc",
+		"description": "",
+		"status": "open",
+		"priority": 1,
+		"issue_type": "task",
+		"created_at": "2026-03-09T10:00:00Z",
+		"updated_at": "2026-03-09T10:00:00Z"
+	}
+]`,
 			wantErr: false,
 		},
 		{
 			name: "zero priority",
-			json: `[{
-				"id": "test-zero-priority",
-				"title": "Zero Priority",
-				"status": "open",
-				"priority": 0,
-				"issue_type": "task",
-				"created_at": "2026-03-09T10:00:00Z",
-				"updated_at": "2026-03-09T10:00:00Z"
-			}]`,
+			json: `[
+	{
+		"id": "test-zero-priority",
+		"title": "Zero Priority",
+		"status": "open",
+		"priority": 0,
+		"issue_type": "task",
+		"created_at": "2026-03-09T10:00:00Z",
+		"updated_at": "2026-03-09T10:00:00Z"
+	}
+]`,
 			wantErr: false,
 		},
 		{
 			name: "unicode in title and description",
-			json: `[{
-				"id": "test-unicode",
-				"title": "Test with emojis and unicode",
-				"description": "Description with special chars",
-				"status": "open",
-				"priority": 1,
-				"issue_type": "task",
-				"created_at": "2026-03-09T10:00:00Z",
-				"updated_at": "2026-03-09T10:00:00Z"
-			}]`,
+			json: `[
+	{
+		"id": "test-unicode",
+		"title": "Test with emojis and unicode",
+		"description": "Description with special chars",
+		"status": "open",
+		"priority": 1,
+		"issue_type": "task",
+		"created_at": "2026-03-09T10:00:00Z",
+		"updated_at": "2026-03-09T10:00:00Z"
+	}
+]`,
 			wantErr: false,
 		},
 		{
 			name: "special characters in ID",
-			json: `[{
-				"id": "test-special_id-123.456",
-				"title": "Special ID",
-				"status": "open",
-				"priority": 1,
-				"issue_type": "task",
-				"created_at": "2026-03-09T10:00:00Z",
-				"updated_at": "2026-03-09T10:00:00Z"
-			}]`,
+			json: `[
+	{
+		"id": "test-special_id-123.456",
+		"title": "Special ID",
+		"status": "open",
+		"priority": 1,
+		"issue_type": "task",
+		"created_at": "2026-03-09T10:00:00Z",
+		"updated_at": "2026-03-09T10:00:00Z"
+	}
+]`,
 			wantErr: false,
 		},
 	}
@@ -531,7 +555,8 @@ func TestParseBeadDetail_DependencyTypes(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-deps",
 		"title": "Dependency Types Test",
 		"description": "Testing various dependency types",
@@ -541,13 +566,44 @@ func TestParseBeadDetail_DependencyTypes(t *testing.T) {
 		"created_at": "2026-03-09T10:00:00Z",
 		"updated_at": "2026-03-09T10:00:00Z",
 		"dependencies": [
-			{"depends_on_id": "dep-1", "issue_id": "test-deps", "type": "blocks", "created_at": "2026-03-09T09:00:00Z"},
-			{"depends_on_id": "dep-2", "issue_id": "test-deps", "type": "requires", "created_at": "2026-03-09T09:00:00Z"},
-			{"depends_on_id": "dep-3", "issue_id": "test-deps", "type": "related_to", "created_at": "2026-03-09T09:00:00Z"},
-			{"depends_on_id": "dep-4", "issue_id": "test-deps", "type": "duplicates", "created_at": "2026-03-09T09:00:00Z"},
-			{"depends_on_id": "dep-5", "issue_id": "test-deps", "type": "depends_on", "created_at": "2026-03-09T09:00:00Z"}
+			{
+				"id": "dep-1",
+				"title": "Dependency dep-1",
+				"status": "open",
+				"priority": 1,
+				"dependency_type": "blocks"
+			},
+			{
+				"id": "dep-2",
+				"title": "Dependency dep-2",
+				"status": "open",
+				"priority": 1,
+				"dependency_type": "requires"
+			},
+			{
+				"id": "dep-3",
+				"title": "Dependency dep-3",
+				"status": "open",
+				"priority": 1,
+				"dependency_type": "related_to"
+			},
+			{
+				"id": "dep-4",
+				"title": "Dependency dep-4",
+				"status": "open",
+				"priority": 1,
+				"dependency_type": "duplicates"
+			},
+			{
+				"id": "dep-5",
+				"title": "Dependency dep-5",
+				"status": "open",
+				"priority": 1,
+				"dependency_type": "depends_on"
+			}
 		]
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 
@@ -579,7 +635,8 @@ func TestParseBeadDetail_Events(t *testing.T) {
 	parser := NewParser()
 	ctx := BeadContext{Project: "test-project", Repo: "test-repo"}
 
-	jsonOutput := []byte(`[{
+	jsonOutput := []byte(`[
+	{
 		"id": "test-events",
 		"title": "Bead with Events",
 		"description": "Testing events parsing",
@@ -614,7 +671,8 @@ func TestParseBeadDetail_Events(t *testing.T) {
 				"comment": "Work completed successfully"
 			}
 		]
-	}]`)
+	}
+]`)
 
 	bead, err := parser.ParseBeadDetail(jsonOutput, ctx)
 

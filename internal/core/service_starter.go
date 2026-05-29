@@ -40,7 +40,17 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 
 	// Initialize bead file reader and analyzer
 	o.beadFileReader = NewBeadFileReader(o.projects)
-	o.beadAnalyzer = NewBeadAnalyzer(o.projects)
+	o.beadAnalyzer.SetProjects(o.projects)
+
+	// Update bead discovery with discovered projects
+	if o.beadDiscovery != nil {
+		o.beadDiscovery.SetProjects(o.projects)
+	}
+
+	// Initialize chain registrar (depends on chainCompletionDetector and beadFileReader)
+	if o.chainCompletionDetector != nil && o.beadFileReader != nil {
+		o.chainRegistrar = NewChainRegistrar(o.chainCompletionDetector, o.beadFileReader)
+	}
 
 	// Start settled-state detection service if enabled
 	if o.settledStateSvc != nil {

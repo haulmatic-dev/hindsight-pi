@@ -21,7 +21,9 @@ func NewDAGBuilder(errorLogger *ErrorLogger) *DAGBuilder {
 }
 
 // Build fetches all beads from projects and builds the DAG.
-func (b *DAGBuilder) Build(dag *DAG, beadsClient BeadsClient, projects []types.Project) error {
+// completedBeads contains bead IDs that were closed in previous ticks — they are
+// injected as ghost nodes so that dependency edges from still-open children remain valid.
+func (b *DAGBuilder) Build(dag *DAG, beadsClient BeadsClient, projects []types.Project, completedBeads map[string]bool) error {
 	// If DAG is nil, create a new one
 	if dag == nil {
 		log.Printf("[DAG] DAG was nil, creating new instance")
@@ -113,11 +115,24 @@ func (b *DAGBuilder) Build(dag *DAG, beadsClient BeadsClient, projects []types.P
 		}
 	}
 
+	// Inject ghost nodes for completed beads so their children's dependency edges don't break.
+	// br list drops closed beads, but issues.jsonl / the DAG still need them as edge targets.
+	for beadID := range completedBeads {
+		if !dag.HasNode(beadID) {
+			_ = dag.AddNode(types.Bead{ID: types.BeadID(beadID), Status: types.StatusClosed})
+		}
+	}
+
 	edgeErrors := 0
 	for _, bead := range allBeads {
 		beadID := string(bead.ID)
 		for _, depID := range bead.Dependencies {
 			depIDStr := string(depID)
+			// Skip edges to already-completed dependencies — their dependents
+			// should be treated as unblocked (InDegree stays 0).
+			if completedBeads[depIDStr] {
+				continue
+			}
 			if err := dag.AddEdge(beadID, depIDStr); err != nil {
 				switch {
 				case errors.Is(err, ErrNodeNotFound):

@@ -37,16 +37,14 @@ type ReadyBead struct {
 	Notes     *string `json:"notes"`
 }
 
-// Dependency represents a bead dependency relationship
+// Dependency represents a bead dependency relationship from 'br show <id> --json'.
+// Fields match the current br output schema exactly.
 type Dependency struct {
-	ID          string    `json:"id"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	IssueID     string    `json:"issue_id"`
-	DependsOnID string    `json:"depends_on_id"`
-	Type        string    `json:"type"`
-	Metadata    *string   `json:"metadata"`
-	Status      string    `json:"status"`
+	ID             string `json:"id"`               // ID of the depended-on bead
+	Title          string `json:"title"`            // Title of the depended-on bead
+	Status         string `json:"status"`           // Status of the depended-on bead
+	Priority       int    `json:"priority"`         // Priority of the depended-on bead
+	DependencyType string `json:"dependency_type"`  // Relationship type: blocks, requires, etc.
 }
 
 // BeadSummary represents a bead with dependency counts from 'br list --json'
@@ -211,16 +209,17 @@ func setIntIfNotNil(metadata map[string]string, key string, value *int) {
 	}
 }
 
-// extractDependencies converts dependency JSON to bead dependencies and metadata
+// extractDependencies converts br dependency JSON to bead dependency IDs and metadata.
+// Depends on br's current output schema (id, title, status, priority, dependency_type).
 func extractDependencies(deps []Dependency, metadata map[string]string) []types.BeadID {
 	dependencies := make([]types.BeadID, len(deps))
 	for i, dep := range deps {
-		dependencies[i] = types.BeadID(dep.DependsOnID)
+		dependencies[i] = types.BeadID(dep.ID)
 		if dep.Status != "" {
-			metadata[dep.DependsOnID+"_status"] = dep.Status
+			metadata[dep.ID+"_status"] = dep.Status
 		}
-		if dep.Type != "" {
-			metadata[dep.DependsOnID+"_relationship"] = dep.Type
+		if dep.DependencyType != "" {
+			metadata[dep.ID+"_relationship"] = dep.DependencyType
 		}
 	}
 	return dependencies
