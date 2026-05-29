@@ -1,3 +1,6 @@
+# Hydra Production Configuration
+# See hydra-config.yaml.example for full documentation of all fields.
+
 overseer:
   bead_discovery_interval: 10s
   max_workers: 5
@@ -73,21 +76,17 @@ mcp:
   heartbeat_interval: 30s
   file_reservation_ttl: 30m
 
-dryad:
-  base_path: /opt/dev-tools/components/hydra/.hydra/dryad
-  max_worktrees: 10
-  lease_timeout: 2h
-  setup:
-    pi_provider: minimax
-    pi_model: MiniMax-M2.7
-    timeout: 5m
-    skills_path: /opt/dev-tools/config/pi/skills
-    nodejs:
-      preferred_manager: npm
-      global_virtual_store: false
+validation:
+  enabled: true
+  tdd_validation_enabled: true
+  prd_validation_enabled: true
+  max_rounds: 3
+  agent_verification_enabled: false
 
+# CRITICAL: pi.config_dir must point to a valid Pi config with skills.
+# See hydra-config.yaml.example and AGENTS.md for details.
 pi:
-  config_dir: /opt/dev-tools/components/hydra/pi-config
+  config_dir: /opt/dev-tools/config/pi
 
   standard-agent:
     enabled: true
@@ -100,12 +99,10 @@ pi:
     skills:
       update_interval: 24h
       auto_update: false
-      global: false
-      list: []
 
   validation-agent:
     enabled: true
-    agent_verification_enabled: true
+    agent_verification_enabled: false
     timeout: 10m
     max_retries: 3
     llm:
@@ -115,5 +112,3 @@ pi:
     skills:
       update_interval: 24h
       auto_update: false
-      global: false
-      list: []

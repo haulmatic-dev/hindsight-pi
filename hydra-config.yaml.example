@@ -1,0 +1,186 @@
+# Hydra Configuration File
+# ========================
+# Copy this file to hydra-config.yaml and customize for your environment.
+# All paths should be absolute. See AGENTS.md for E2E testing setup guidance.
+
+# ------------------------------------------------------------------------------
+# OVERSEER — Core scheduling and worker management
+# ------------------------------------------------------------------------------
+overseer:
+  # How often to scan for new ready beads (seconds or duration string)
+  bead_discovery_interval: 10s
+
+  # Max concurrent workers running at once
+  max_workers: 5
+
+  # Retry settings for failed beads
+  default_retries: 3
+  max_retries: 5
+  retry_delay: 30s
+
+  # How long a single worker can run before being considered stuck
+  worker_timeout: 10m
+
+  # How long to wait for a worker to accept a handoff
+  handoff_timeout: 6m
+
+  # Resource monitoring — pauses scheduling if CPU/memory too high
+  resource_monitoring:
+    enabled: true
+    max_cpu_percent: 80
+    max_memory_percent: 80
+    mode: hydra
+
+  # Chain completion detection — triggers PRD validation when a full chain finishes
+  chain_detection:
+    enabled: true
+    interval: 10s
+    timeout: 10m
+
+# ------------------------------------------------------------------------------
+# PROJECTS — What repositories Hydra should watch and process
+# ------------------------------------------------------------------------------
+projects:
+  # Set to true to auto-discover projects by walking parent directories
+  auto_discover: false
+
+  # Explicit project list (used when auto_discover is false)
+  list:
+    - name: my-project
+      path: /path/to/my-project
+      type: single
+
+# ------------------------------------------------------------------------------
+# INTELLIGENCE — Optional AI/memory features (all can be disabled)
+# ------------------------------------------------------------------------------
+intelligence:
+  # TLDR — Semantic code search for context enrichment
+  tldr:
+    enabled: false
+    base_url: http://127.0.0.1:8787
+    timeout: 30s
+    max_files: 20
+    max_tokens: 100000
+    indexing:
+      enabled: false
+      max_concurrent: 2
+      queue_size: 100
+      retry_attempts: 3
+      retry_delay: 5s
+
+  # Hindsight — Durable memory of past executions
+  hindsight:
+    enabled: false
+    base_url: http://127.0.0.1:8888
+    timeout: 10s
+    limit: 5
+    min_score: 0.7
+
+  # Pattern extraction — Auto-extract reusable patterns from completed chains
+  patterns:
+    enabled: false
+    min_confidence: 0.7
+    max_patterns_per_bead: 5
+    extract_code_snippets: true
+    storage_path: /path/to/.hydra/patterns
+
+  # Settled state detection — Detects when a project has no more work
+  settled_state:
+    enabled: false
+    check_interval: 30s
+    settlement_delay: 2m
+    stability_threshold: 0.95
+    max_concurrent_checks: 10
+    extract_patterns_on_settle: true
+    pattern_extraction_timeout: 5m
+    retain_unsettled_beads: 1000
+    min_settlement_checks: 3
+
+# ------------------------------------------------------------------------------
+# VALIDATION — Self-healing validation loops (TDD + PRD)
+# ------------------------------------------------------------------------------
+validation:
+  enabled: true
+
+  # Validate REFACTOR beads have matching RED/GREEN beads
+  tdd_validation_enabled: true
+
+  # Validate completed chains against their root PRD
+  prd_validation_enabled: true
+
+  # Max validation retry rounds before giving up
+  max_rounds: 3
+
+  # Requires agent verification endpoint (usually disabled)
+  agent_verification_enabled: false
+
+# ------------------------------------------------------------------------------
+# API — HTTP API for external control/query
+# ------------------------------------------------------------------------------
+api:
+  enabled: false
+  port: 8089
+
+# ------------------------------------------------------------------------------
+# MCP — Model Context Protocol for real-time worker coordination
+# ------------------------------------------------------------------------------
+mcp:
+  enabled: false
+  url: http://127.0.0.1:8765
+  port: 8765
+  base_url: http://127.0.0.1:8765
+  reconnect_interval: 5s
+  max_reconnect_attempts: 10
+  heartbeat_interval: 30s
+  file_reservation_ttl: 30m
+
+# ------------------------------------------------------------------------------
+# PI — Pi agent configuration for code generation
+# ------------------------------------------------------------------------------
+# CRITICAL: config_dir must point to a directory containing a .pi/ folder
+# with skills. Use the centralized dev-tools config or the local hydra .pi.
+pi:
+  # Path to Pi configuration directory (must contain skills/ subdirectory)
+  # Centralized (recommended): <dev-tools-checkout>/config/pi
+  # Local fallback: <hydra-repo>/.pi
+  config_dir: /opt/dev-tools/config/pi
+
+  # Standard agent settings (used by workers for code generation)
+  standard-agent:
+    enabled: true
+    llm:
+      provider: kimi-coding
+      model: kimi-for-coding
+      thinking_level: medium
+      timeout: 10m
+      api_key_name: KIMI_API_KEY
+    skills:
+      update_interval: 24h
+      auto_update: false
+
+  # Validation agent settings (used for self-healing validation)
+  validation-agent:
+    enabled: true
+    agent_verification_enabled: false
+    timeout: 10m
+    max_retries: 3
+    llm:
+      provider: kimi-coding
+      model: kimi-for-coding
+      api_key_name: KIMI_API_KEY
+    skills:
+      update_interval: 24h
+      auto_update: false
+
+# ------------------------------------------------------------------------------
+# AGENTS — Agent connector configuration
+# ------------------------------------------------------------------------------
+agents:
+  enabled: false
+  default_agent: pi
+  pi:
+    enabled: false
+    provider: kimi-coding
+    model: kimi-for-coding
+    timeout: 10m
+    api_key_name: KIMI_API_KEY
