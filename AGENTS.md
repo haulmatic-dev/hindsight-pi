@@ -116,3 +116,153 @@ Before marking any task complete:
 - [ ] Tests pass: `go test ./...`
 - [ ] New patterns saved to CASS (`cm add`)
 - [ ] Project insights saved to Hindsight (`hindsight_retain`)
+
+---
+
+## End-to-End Testing Setup
+
+When running Hydra end-to-end on a real project, the following configuration MUST be correct. Getting any of these wrong causes silent failures (0 skills loaded, stub workers, malformed beads).
+
+### 1. Pi Config Directory (CRITICAL)
+
+`hydra.yaml` MUST point `pi.config_dir` to the actual `.pi` directory in the Hydra repo:
+
+```yaml
+pi:
+  config_dir: /opt/dev-tools/components/hydra/.pi
+```
+
+**WRONG** (creates empty pi-config, 0 skills):
+```yaml
+pi:
+  config_dir: /tmp/hydra-e2e-test/pi-config
+```
+
+**Why it matters:**
+- The worker looks for skills at `{pi.config_dir}/skills/`
+- The Hydra repo has 16 skills as symlinks in `.pi/skills/`
+- Pointing to a non-existent directory results in `0/16 skills available`
+- Code generation still works without skills, but quality is degraded
+
+**Verify:**
+```bash
+ls /opt/dev-tools/components/hydra/.pi/skills/
+# Should show: angular-component, golang-patterns, test-driven-development, ...
+```
+
+### 2. Worker Binary (CRITICAL)
+
+Hydra MUST use the **real worker** (`cmd/worker/main.go`) to test code generation:
+
+```bash
+# Build the real worker
+go build -o /tmp/hydra-e2e-test/real-worker ./cmd/worker
+
+# Run Hydra with it
+HYDRA_WORKER_BINARY=/tmp/hydra-e2e-test/real-worker ./hydra -config hydra.yaml
+```
+
+**WRONG** (uses stub, no code generation):
+```bash
+# Do NOT use a stub worker for E2E code generation tests
+HYDRA_WORKER_BINARY=/tmp/hydra-e2e-test/worker-stub ./hydra -config hydra.yaml
+```
+
+**Why it matters:**
+- The stub just sleeps and exits — it never invokes the Pi agent
+- The real worker builds Pi commands, sends prompts via stdin, and captures LLM output
+- Only the real worker modifies project files (writes tests, implementations)
+
+### 3. Bead Creation via `br` CLI (CRITICAL)
+
+Beads MUST be created through the `br` CLI — never hand-craft `.beads/issues.jsonl`:
+
+```bash
+cd /path/to/project
+B1=$(br create "RED: Write tests" --type test --priority 4 --silent)
+B2=$(br create "GREEN: Implement" --type implement --priority 4 --silent)
+B3=$(br create "REFACTOR: Clean up" --type refactor --priority 2 --silent)
+
+# Link dependencies
+br dep add "$B2" "$B1"   # B2 depends on B1
+br dep add "$B3" "$B2"   # B3 depends on B2
+```
+
+**WRONG** (malformed JSONL, br rejects it):
+```bash
+# Do NOT hand-craft .beads/issues.jsonl
+cat > .beads/issues.jsonl << 'EOF'
+{"id":"test-001","type":"test",...}
+EOF
+```
+
+**Why it matters:**
+- `br` validates JSONL against its Rust struct schema on every `list`/`show`
+- Missing fields (`created_at`, `created_by`) or wrong types cause `exit status 7`
+- Hand-crafted files fail preflight checks: `json_valid: Found N invalid issue record(s)`
+
+### 4. Minimal E2E Test Config
+
+```yaml
+overseer:
+  max_workers: 2
+  bead_discovery_interval: 3s
+  default_retries: 1
+  worker_timeout: 1m
+
+projects:
+  auto_discover: false
+  list:
+    - name: url-shortener
+      path: /tmp/hydra-e2e-test/url-shortener
+      type: single
+
+# Disable heavy features for faster startup
+intelligence:
+  tldr: { enabled: false }
+  gptcache: { enabled: false }
+  hindsight: { enabled: false }
+  patterns: { enabled: false }
+  settled_state: { enabled: false }
+  collective_unconscious: { enabled: false }
+
+agents:
+  enabled: false
+
+# Point to REAL pi config with skills
+pi:
+  config_dir: /opt/dev-tools/components/hydra/.pi
+  skills:
+    update_interval: 24h
+    auto_update: false
+
+validation:
+  enabled: true
+  tdd_validation_enabled: true
+  prd_validation_enabled: true
+  max_rounds: 2
+  agent_verification_enabled: false
+
+mcp: { enabled: false }
+api: { enabled: false }
+```
+
+### 5. Expected E2E Output
+
+When correctly configured, you should see:
+
+```
+[PiSetup] ✅ Pi skills ready
+[Worker] Added 27 skill flags
+🔧 Executing Pi: /bin/pi --no-session --provider kimi-coding --model kimi-for-coding
+📁 Working directory: /tmp/hydra-e2e-test/url-shortener
+✅ Pi completed successfully
+📝 Execution output written to: /tmp/hydra-executions/br-xxx-YYYYMMDD-HHMMSS.json
+```
+
+And the project files should be modified:
+```bash
+ls -la /tmp/hydra-e2e-test/url-shortener/
+# main.go        — implementation written by Pi
+# main_test.go   — tests written by Pi
+```
