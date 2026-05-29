@@ -1,0 +1,21 @@
+{
+  "capabilities": {
+    "completionProvider": {
+      "triggerCharacters": [
+        ".",
+        ":",
+        "\u003e"
+      ]
+    },
+    "hoverProvider": true,
+    "textDocumentSync": 1
+  },
+  "servers": {
+    "lsp": {
+      "args": [],
+      "command": "pi-lsp",
+      "enabled": true
+    }
+  },
+  "version": "1.0"
+}
