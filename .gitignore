@@ -79,3 +79,4 @@ hydra.pid
 internal/integration/.hydra/
 
 .gograph/
+.pi/

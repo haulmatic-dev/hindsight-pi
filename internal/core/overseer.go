@@ -199,6 +199,9 @@ func NewOverseer(config *Config) *Overseer {
 		intelligenceHub:  NewIntelligenceHub(config.Intelligence),
 	}
 
+	// Initialize error logger FIRST — many components depend on it
+	o.errorLogger = NewErrorLogger(o.retryManager.GetRetryCount)
+
 	// Initialize intelligence hub
 	o.intelligenceHub.Initialize()
 
@@ -319,9 +322,6 @@ func NewOverseer(config *Config) *Overseer {
 	// Initialize validation service
 	o.validationService = NewValidationService(config, o.retryManager, o.beadsClient)
 	log.Printf("[Validation] Initialized bead validation service")
-
-	// Initialize error logger
-	o.errorLogger = NewErrorLogger(o.retryManager.GetRetryCount)
 
 	// Initialize chain completion detector if enabled
 	o.chainCompletionInitializer = NewChainCompletionInitializer(o)
