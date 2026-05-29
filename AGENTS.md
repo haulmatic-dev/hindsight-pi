@@ -129,13 +129,15 @@ When running Hydra end-to-end on a real project, the following configuration MUS
 
 ```yaml
 pi:
-  config_dir: /opt/dev-tools/config/pi
+  config_dir: <dev-tools-checkout>/config/pi
 ```
+
+Where `<dev-tools-checkout>` is the path to your `dev-tools` repository (e.g., `~/workspace/dev-tools`, `/opt/dev-tools`, etc.).
 
 **For isolated testing** (no centralized config available), use the Hydra repo's local `.pi`:
 ```yaml
 pi:
-  config_dir: /opt/dev-tools/components/hydra/.pi
+  config_dir: <hydra-repo>/.pi
 ```
 
 **WRONG** (creates empty pi-config, 0 skills):
@@ -153,13 +155,13 @@ pi:
 
 **Verify centralized config:**
 ```bash
-ls /opt/dev-tools/config/pi/skills/
+ls <dev-tools-checkout>/config/pi/skills/
 # Should show: angular-component, golang-patterns, test-driven-development, tdd-chain-validation, ...
 ```
 
 **Verify local fallback:**
 ```bash
-ls /opt/dev-tools/components/hydra/.pi/skills/
+ls <hydra-repo>/.pi/skills/
 # Should show symlinks to ../../.agents/skills/...
 ```
 
@@ -244,7 +246,7 @@ agents:
 
 # Point to centralized pi config with skills
 pi:
-  config_dir: /opt/dev-tools/config/pi
+  config_dir: <dev-tools-checkout>/config/pi
   skills:
     update_interval: 24h
     auto_update: false
