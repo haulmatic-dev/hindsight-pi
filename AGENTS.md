@@ -125,8 +125,14 @@ When running Hydra end-to-end on a real project, the following configuration MUS
 
 ### 1. Pi Config Directory (CRITICAL)
 
-`hydra.yaml` MUST point `pi.config_dir` to the actual `.pi` directory in the Hydra repo:
+`hydra.yaml` MUST point `pi.config_dir` to the **centralized Pi config** (not a temp directory):
 
+```yaml
+pi:
+  config_dir: /opt/dev-tools/config/pi
+```
+
+**For isolated testing** (no centralized config available), use the Hydra repo's local `.pi`:
 ```yaml
 pi:
   config_dir: /opt/dev-tools/components/hydra/.pi
@@ -140,14 +146,21 @@ pi:
 
 **Why it matters:**
 - The worker looks for skills at `{pi.config_dir}/skills/`
-- The Hydra repo has 16 skills as symlinks in `.pi/skills/`
+- The centralized config has **30+ skills** (`golang-patterns`, `test-driven-development`, `tdd-chain-validation`, etc.)
+- The Hydra repo has **27 skills** as symlinks in `.pi/skills/` (fallback only)
 - Pointing to a non-existent directory results in `0/16 skills available`
 - Code generation still works without skills, but quality is degraded
 
-**Verify:**
+**Verify centralized config:**
+```bash
+ls /opt/dev-tools/config/pi/skills/
+# Should show: angular-component, golang-patterns, test-driven-development, tdd-chain-validation, ...
+```
+
+**Verify local fallback:**
 ```bash
 ls /opt/dev-tools/components/hydra/.pi/skills/
-# Should show: angular-component, golang-patterns, test-driven-development, ...
+# Should show symlinks to ../../.agents/skills/...
 ```
 
 ### 2. Worker Binary (CRITICAL)
@@ -229,9 +242,9 @@ intelligence:
 agents:
   enabled: false
 
-# Point to REAL pi config with skills
+# Point to centralized pi config with skills
 pi:
-  config_dir: /opt/dev-tools/components/hydra/.pi
+  config_dir: /opt/dev-tools/config/pi
   skills:
     update_interval: 24h
     auto_update: false
