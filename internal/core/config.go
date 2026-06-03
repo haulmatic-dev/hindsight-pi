@@ -19,7 +19,8 @@ type Config struct {
 	Intelligence IntelligenceConfig `yaml:"intelligence"`
 	Agents       AgentsConfig       `yaml:"agents"`
 	Pi           PiRootConfig       `yaml:"pi"`
-	Validation   ValidationConfig   `yaml:"validation"`
+	Validation      ValidationConfig      `yaml:"validation"`
+	ComplianceCycle ComplianceCycleConfig `yaml:"compliance_cycle"`
 }
 
 // AgentsConfig contains agent connector settings
@@ -76,7 +77,8 @@ type rawConfig struct {
 	Intelligence IntelligenceConfig `yaml:"intelligence"`
 	Agents       AgentsConfig       `yaml:"agents"`
 	Pi           PiRootConfig       `yaml:"pi"`
-	Validation   ValidationConfig   `yaml:"validation"`
+	Validation      ValidationConfig      `yaml:"validation"`
+	ComplianceCycle ComplianceCycleConfig `yaml:"compliance_cycle"`
 }
 
 // projectsListConfig handles the case where projects is an object with 'list' field
@@ -276,6 +278,11 @@ func DefaultConfig() *Config {
 			PRDValidationEnabled:     true,
 			MaxRounds:                3,
 			AgentVerificationEnabled: true,
+		},
+		ComplianceCycle: ComplianceCycleConfig{
+			Enabled:      false,
+			MaxCycles:    5,
+			PollInterval: 30 * time.Second,
 		},
 		MCP: MCPConfig{
 			Enabled:              true,
@@ -483,6 +490,7 @@ func LoadConfig(path string) (*Config, error) {
 	config.Intelligence = raw.Intelligence
 	config.Agents = raw.Agents
 	config.Validation = raw.Validation
+	config.ComplianceCycle = raw.ComplianceCycle
 	config.Pi = PiRootConfig{
 		ConfigDir:       raw.Pi.ConfigDir,
 		PiConfigDir:     raw.Pi.PiConfigDir,
