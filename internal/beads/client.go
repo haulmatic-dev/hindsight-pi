@@ -242,13 +242,29 @@ func (c *Client) CloseBead(projectPath, repoName string, beadID types.BeadID, re
 	return nil
 }
 
-// ListBeads lists all beads in a project/repo
+// ListBeads lists all beads in a project/repo with pagination support.
 func (c *Client) ListBeads(projectPath, repoName string) ([]types.Bead, error) {
-	output, err := c.execInDir(projectPath, "br", "list", "--json")
-	if err != nil {
-		return nil, err
+	var allBeads []types.Bead
+	offset := 0
+	limit := 500
+	ctx := c.newContext(projectPath, repoName)
+
+	for {
+		output, err := c.execInDir(projectPath, "br", "list", "--json", "--limit", fmt.Sprintf("%d", limit), "--offset", fmt.Sprintf("%d", offset))
+		if err != nil {
+			return nil, err
+		}
+		beads, hasMore, err := c.parser.ParseBeadListPaginated(output, ctx)
+		if err != nil {
+			return nil, err
+		}
+		allBeads = append(allBeads, beads...)
+		if !hasMore {
+			break
+		}
+		offset += limit
 	}
-	return c.parser.ParseBeadList(output, c.newContext(projectPath, repoName))
+	return allBeads, nil
 }
 
 // CreateBead creates a new bead using the br CLI.

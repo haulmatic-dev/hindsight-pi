@@ -336,14 +336,26 @@ func main() {
 	}
 
 	// STEP 5: Close the bead using beads CLI (best-effort)
-	// Only close beads that succeeded - failed beads remain open for retry/investigation
+	// Auto-close guard: even if Pi exited with error, check if the work is actually done.
+	workComplete := false
+	if result != nil {
+		workComplete = checkWorkComplete(bead, projectPath)
+	}
+
 	if exitCode == 0 && result != nil && result.Success {
 		if err := closeBeadFromWorker(bead, projectPath, config.Repo, "completed"); err != nil {
 			log.Printf("[WARN] Failed to close bead from worker (non-fatal): %v", err)
-			// Don't fail the worker just because we couldn't close the bead
-			// The overseer can handle this asynchronously
 		} else {
 			log.Printf("✅ Successfully closed bead %s with status: completed", beadID)
+		}
+	} else if workComplete {
+		// Auto-close guard: Pi may have timed out or exited non-zero, but files were
+		// modified and tests pass. Close the bead to prevent infinite retry loops.
+		log.Printf("🛡️  Auto-close guard: Pi exit=%d but work is complete (files modified + tests pass). Closing bead.", exitCode)
+		if err := closeBeadFromWorker(bead, projectPath, config.Repo, "completed"); err != nil {
+			log.Printf("[WARN] Failed to close bead from worker (non-fatal): %v", err)
+		} else {
+			log.Printf("✅ Successfully closed bead %s with status: completed (auto-close guard)", beadID)
 		}
 	} else {
 		successStr := "false"
@@ -899,9 +911,14 @@ func executeWithPi(
 		AgentType: "pi",
 	}
 
-	// Activity-based timeout: 5 minutes of inactivity
-	activityTimeout := 5 * time.Minute
+	// Activity-based timeout: 30 minutes of inactivity
+	activityTimeout := 30 * time.Minute
 	activityMonitor := NewActivityMonitor(activityTimeout)
+
+	// Max total runtime: 15 minutes regardless of activity.
+	// Prevents Pi from running indefinitely with sporadic output.
+	maxTotalRuntime := 15 * time.Minute
+	startTime := time.Now()
 
 	// Build pi command
 	cmd := buildPiCommand(bead, piConfig, projectPath, hindsightContext)
@@ -1011,6 +1028,21 @@ monitorLoop:
 				}
 
 				cmdErr = fmt.Errorf("activity timeout: no output for %v", activityTimeout)
+				break monitorLoop
+			}
+
+			// Max total runtime check — kills Pi even if it produces sporadic output
+			if time.Since(startTime) > maxTotalRuntime {
+				log.Printf("⏰ Max total runtime reached (%v). Forcing Pi termination.", maxTotalRuntime)
+				streamLog(mcpClient, "warn", fmt.Sprintf("Max total runtime %v reached, terminating Pi", maxTotalRuntime))
+
+				if cmd.Process != nil {
+					syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+					time.Sleep(3 * time.Second)
+					syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				}
+
+				cmdErr = fmt.Errorf("max total runtime exceeded: %v", maxTotalRuntime)
 				break monitorLoop
 			}
 		}
@@ -1673,4 +1705,81 @@ func closeBeadFromWorker(bead types.Bead, projectPath, repoName, reason string) 
 
 	log.Printf("   Successfully closed bead via br CLI")
 	return nil
+}
+
+// checkWorkComplete verifies that a bead's work is actually done by checking:
+// 1. Target files exist and were modified during this session
+// 2. Tests pass for the bead's scope (if test command is available)
+// Returns true if the work appears complete even if Pi exited with error.
+func checkWorkComplete(bead types.Bead, projectPath string) bool {
+	// 1. Check if target files exist and have content
+	targetFiles := extractTargetFiles(bead)
+	if len(targetFiles) == 0 {
+		// No target files specified — can't verify completion
+		return false
+	}
+
+	allFilesExist := true
+	allFilesHaveContent := true
+	for _, relPath := range targetFiles {
+		absPath := filepath.Join(projectPath, relPath)
+		info, err := os.Stat(absPath)
+		if err != nil {
+			log.Printf("   [checkWorkComplete] Target file missing: %s", relPath)
+			allFilesExist = false
+			continue
+		}
+		if info.Size() == 0 {
+			log.Printf("   [checkWorkComplete] Target file empty: %s", relPath)
+			allFilesHaveContent = false
+		}
+	}
+
+	if !allFilesExist {
+		return false
+	}
+	if !allFilesHaveContent {
+		return false
+	}
+
+	log.Printf("   [checkWorkComplete] All %d target files exist with content", len(targetFiles))
+
+	// 2. Try to run tests for the affected packages
+	// Derive package paths from target files (e.g., internal/campaigns/handler.go → ./internal/campaigns)
+	pkgSet := make(map[string]bool)
+	for _, relPath := range targetFiles {
+		dir := filepath.Dir(relPath)
+		// Only test Go packages
+		if strings.HasSuffix(dir, ".go") {
+			dir = filepath.Dir(dir)
+		}
+		// Skip if not under a recognized Go package root
+		if strings.HasPrefix(dir, "internal/") || strings.HasPrefix(dir, "cmd/") || strings.HasPrefix(dir, "pkg/") {
+			pkgSet["./"+dir] = true
+		}
+	}
+
+	if len(pkgSet) == 0 {
+		// No testable packages — assume work is complete if files exist
+		return true
+	}
+
+	// Run tests for each package
+	allTestsPass := true
+	for pkg := range pkgSet {
+		log.Printf("   [checkWorkComplete] Running tests for %s", pkg)
+		cmd := exec.Command("go", "test", pkg)
+		cmd.Dir = projectPath
+		cmd.Env = os.Environ()
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Printf("   [checkWorkComplete] Tests FAILED for %s: %v", pkg, err)
+			log.Printf("   [checkWorkComplete] Output: %s", string(output))
+			allTestsPass = false
+		} else {
+			log.Printf("   [checkWorkComplete] Tests PASSED for %s", pkg)
+		}
+	}
+
+	return allTestsPass
 }

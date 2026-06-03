@@ -422,8 +422,8 @@ func (c *PiConnector) readEvents(stdout, stderr io.ReadCloser, startTime time.Ti
 	// - activityTimeout: timeout if NO OUTPUT at all for this duration
 	// - progressTimeout: timeout if NO PROGRESS EVENTS for this duration (stricter)
 	// - maxDuration: hard limit regardless of activity
-	activityTimeout := 2 * time.Minute // 2 minutes of total silence
-	progressTimeout := 5 * time.Minute // 5 minutes without progress updates
+	activityTimeout := 15 * time.Minute // 15 minutes of total silence
+	progressTimeout := 30 * time.Minute // 30 minutes without progress updates
 	maxDuration := c.timeout
 	if maxDuration == 0 {
 		maxDuration = 30 * time.Minute // 30 minute hard limit

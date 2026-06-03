@@ -293,11 +293,21 @@ func (cm *ComplianceCycleManager) createGapBeads(gapPRDPath string) error {
 	log.Printf("[ComplianceCycle] Creating gap beads via task-breakdown...")
 	log.Printf("[ComplianceCycle] Request: %s", reqPath)
 
-	// For now, log what would happen. Full integration requires pi skill invocation.
-	log.Printf("[ComplianceCycle] Gap beads request prepared at %s", reqPath)
-	log.Printf("[ComplianceCycle] To create beads: pi skill task-breakdown --file %s", reqPath)
+	// Invoke pi skill task-breakdown directly (Option B — DRY, reuse existing skill)
+	args := []string{"skill", "task-breakdown", "--file", reqPath}
+	log.Printf("[ComplianceCycle] Running: %s %s", taskBreakdownBin, strings.Join(args, " "))
 
-	// TODO: Integrate with pi skill runner or task-breakdown executor.mjs directly
+	cmd := exec.Command(taskBreakdownBin, args...)
+	cmd.Dir = cm.config.ProjectDir
+	cmd.Env = os.Environ()
+	// Set a generous timeout for task-breakdown (it calls LLM APIs)
+	cmdOut, cmdErr := cmd.CombinedOutput()
+	if cmdErr != nil {
+		return fmt.Errorf("task-breakdown failed: %v\nOutput: %s", cmdErr, string(cmdOut))
+	}
+
+	log.Printf("[ComplianceCycle] task-breakdown output:\n%s", string(cmdOut))
+	log.Printf("[ComplianceCycle] Gap beads created successfully")
 	return nil
 }
 

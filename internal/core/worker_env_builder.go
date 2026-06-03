@@ -51,11 +51,16 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 		}
 	}
 
-	// Pass API key to worker if configured
-	if b.config != nil && b.config.Agents.Pi.ApiKeyName != "" {
-		if apiKey := os.Getenv(b.config.Agents.Pi.ApiKeyName); apiKey != "" {
-			env = append(env, fmt.Sprintf("%s=%s", b.config.Agents.Pi.ApiKeyName, apiKey))
-		}
+	// Pass API key to worker if configured (with fallback to pi.standard-agent.llm)
+	apiKeyName := b.config.Agents.Pi.ApiKeyName
+	if apiKeyName == "" && b.config.Pi.StandardAgent.LLM.ApiKeyName != "" {
+		apiKeyName = b.config.Pi.StandardAgent.LLM.ApiKeyName
+	}
+	if apiKeyName == "" {
+		apiKeyName = "KIMI_API_KEY"
+	}
+	if apiKey := os.Getenv(apiKeyName); apiKey != "" {
+		env = append(env, fmt.Sprintf("%s=%s", apiKeyName, apiKey))
 	}
 
 	// Add Hindsight configuration
