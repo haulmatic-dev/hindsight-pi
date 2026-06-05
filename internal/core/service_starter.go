@@ -48,8 +48,10 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 			o.projects = append(o.projects, userProjects...)
 			log.Printf("👥 Discovered %d user projects from %d users", len(userProjects), len(multiUserDiscovery.Users()))
 		}
-		// Store user contexts on overseer for later use
+		// Store user contexts on overseer, worker spawner, and lifecycle for per-user git auth
 		o.userContexts = multiUserDiscovery.Users()
+		o.workerSpawner.SetUserContexts(o.userContexts)
+		o.workerLifecycle.SetUserContexts(o.userContexts)
 	}
 
 	// Initialize bead file reader and analyzer

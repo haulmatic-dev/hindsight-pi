@@ -25,6 +25,8 @@ type WorkerLifecycle struct {
 	triggerSchedule func()
 	notifyMCP       func(worker *types.Worker, success bool, exitCode int, duration time.Duration)
 	getMaxRetries   func() int
+	gitAuth         *GitAuth
+	userContexts    map[string]*UserContext
 }
 
 // NewWorkerLifecycle creates a new worker lifecycle manager.
@@ -56,6 +58,16 @@ func NewWorkerLifecycle(
 		notifyMCP:       notifyMCP,
 		getMaxRetries:   getMaxRetries,
 	}
+}
+
+// SetGitAuth sets the git auth manager for per-user commits.
+func (wl *WorkerLifecycle) SetGitAuth(auth *GitAuth) {
+	wl.gitAuth = auth
+}
+
+// SetUserContexts sets the user context map for looking up per-user credentials.
+func (wl *WorkerLifecycle) SetUserContexts(ctxs map[string]*UserContext) {
+	wl.userContexts = ctxs
 }
 
 // Monitor watches a worker process until completion.
@@ -159,6 +171,18 @@ func (wl *WorkerLifecycle) HandleSuccess(worker *types.Worker, duration time.Dur
 	if wl.settledStateSvc != nil {
 		if err := wl.settledStateSvc.TrackBead(worker.BeadID); err != nil {
 			log.Printf("[SettledState] Failed to track bead %s: %v", worker.BeadID, err)
+		}
+	}
+
+	// Per-user git commit/push on success
+	if worker.Username != "" && wl.gitAuth != nil && wl.userContexts != nil {
+		if ctx := wl.userContexts[worker.Username]; ctx != nil {
+			result := wl.gitAuth.CommitAndPush(ctx, worker.ProjectPath, "main", "hydra: complete bead "+worker.BeadID.String())
+			if result.Error != nil {
+				log.Printf("[GitAuth] Failed to commit for %s: %v", worker.Username, result.Error)
+			} else if result.Success {
+				log.Printf("[GitAuth] Committed for %s: %s", worker.Username, result.Hash)
+			}
 		}
 	}
 
