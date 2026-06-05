@@ -14,18 +14,24 @@ import (
 type MultiUserDiscovery struct {
 	users    map[string]*UserContext
 	projects []types.Project
+	HomeDir  string // Base directory to scan (default: /home)
 }
 
 // NewMultiUserDiscovery creates a new multi-user discovery instance.
 func NewMultiUserDiscovery() *MultiUserDiscovery {
 	return &MultiUserDiscovery{
-		users: make(map[string]*UserContext),
+		users:   make(map[string]*UserContext),
+		HomeDir: "/home",
 	}
 }
 
-// Discover scans /home/* for .hydra/config.yaml and loads user configs.
+// Discover scans HomeDir/* for .hydra/config.yaml and loads user configs.
 func (d *MultiUserDiscovery) Discover() error {
-	entries, err := os.ReadDir("/home")
+	base := d.HomeDir
+	if base == "" {
+		base = "/home"
+	}
+	entries, err := os.ReadDir(base)
 	if err != nil {
 		return fmt.Errorf("read /home: %w", err)
 	}
@@ -40,7 +46,7 @@ func (d *MultiUserDiscovery) Discover() error {
 			continue
 		}
 
-		homeDir := filepath.Join("/home", name)
+		homeDir := filepath.Join(base, name)
 		if _, err := os.Stat(filepath.Join(homeDir, ".hydra", "config.yaml")); os.IsNotExist(err) {
 			continue
 		}
