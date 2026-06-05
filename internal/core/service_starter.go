@@ -30,13 +30,27 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 		log.Printf("[Overseer] Pi setup warning: %v", err)
 	}
 
-	// Discover projects
+	// Discover projects from system config
 	projectScanner := NewProjectScanner(o.config)
 	if err := projectScanner.Discover(); err != nil {
 		return &ServiceError{Op: "discover projects", Err: err}
 	}
 	o.projects = projectScanner.Projects()
-	log.Printf("📁 Discovered %d projects", len(o.projects))
+	log.Printf("📁 Discovered %d projects from config", len(o.projects))
+
+	// Discover multi-user projects
+	multiUserDiscovery := NewMultiUserDiscovery()
+	if err := multiUserDiscovery.Discover(); err != nil {
+		log.Printf("[MultiUser] Discovery error: %v", err)
+	} else {
+		userProjects := multiUserDiscovery.Projects()
+		if len(userProjects) > 0 {
+			o.projects = append(o.projects, userProjects...)
+			log.Printf("👥 Discovered %d user projects from %d users", len(userProjects), len(multiUserDiscovery.Users()))
+		}
+		// Store user contexts on overseer for later use
+		o.userContexts = multiUserDiscovery.Users()
+	}
 
 	// Initialize bead file reader and analyzer
 	o.beadFileReader = NewBeadFileReader(o.projects)

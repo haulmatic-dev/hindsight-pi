@@ -69,6 +69,7 @@ type BeadsClient interface {
 type Overseer struct {
 	config          *Config
 	projects        []types.Project
+	userContexts    map[string]*UserContext // Multi-user contexts (username -> context)
 	activeWorkers   map[string]*types.Worker
 	workerMutex     sync.RWMutex
 	stateController *StateController // Runtime state (running, paused, maxWorkers, interval)
