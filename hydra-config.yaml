@@ -3,12 +3,12 @@
 
 overseer:
   bead_discovery_interval: 10s
-  max_workers: 5
+  max_workers: 3
   default_retries: 3
   max_retries: 5
   retry_delay: 30s
-  worker_timeout: 10m
-  handoff_timeout: 6m
+  worker_timeout: 15m
+  handoff_timeout: 10m
   resource_monitoring:
     enabled: true
     max_cpu_percent: 80
@@ -91,11 +91,11 @@ pi:
   standard-agent:
     enabled: true
     llm:
-      provider: minimax
-      model: MiniMax-M2.7
+      provider: kimi-coding
+      model: kimi-for-coding
       thinking_level: medium
       timeout: 10m
-      api_key_name: MINIMAX_API_KEY
+      api_key_name: KIMI_API_KEY
     skills:
       update_interval: 24h
       auto_update: false
@@ -106,9 +106,9 @@ pi:
     timeout: 10m
     max_retries: 3
     llm:
-      provider: minimax
-      model: MiniMax-M2.7
-      api_key_name: MINIMAX_API_KEY
+      provider: kimi-coding
+      model: kimi-for-coding
+      api_key_name: KIMI_API_KEY
     skills:
       update_interval: 24h
       auto_update: false

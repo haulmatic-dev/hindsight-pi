@@ -133,6 +133,9 @@ type Overseer struct {
 	// Epic scanner for periodic epic auto-close
 	epicScanner *EpicScanner // Scans and closes epics when all tasks complete
 
+	// Closed-loop compliance cycle manager
+	complianceCycle *ComplianceCycleManager
+
 	// ValidationService orchestrates TDD, PRD, and end-of-chain validation
 	validationService *ValidationService
 
@@ -356,6 +359,13 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize epic scanner (5 minute interval)
 	o.epicScanner = NewEpicScanner(5*time.Minute, o.beadsClient)
+	// Initialize closed-loop compliance cycle manager
+	o.complianceCycle = NewComplianceCycleManager(o, config.ComplianceCycle)
+	if config.ComplianceCycle.Enabled {
+		log.Printf("[ComplianceCycle] Initialized with max_cycles=%d, poll_interval=%s", config.ComplianceCycle.MaxCycles, config.ComplianceCycle.PollInterval)
+	} else {
+		log.Println("[ComplianceCycle] Disabled")
+	}
 	log.Printf("[EpicScanner] Initialized with 5 minute scan interval")
 
 	return o
@@ -406,6 +416,11 @@ func (o *Overseer) Start(ctx context.Context) error {
 
 	if err := o.serviceStarter.Start(ctx); err != nil {
 		return err
+	}
+
+	// Start closed-loop compliance cycle manager
+	if o.complianceCycle != nil && o.config.ComplianceCycle.Enabled {
+		go o.complianceCycle.Start(ctx)
 	}
 
 	o.stateController.SetRunning(true)

@@ -341,6 +341,27 @@ func (p *Parser) ParseBeadList(output []byte, ctx BeadContext) ([]types.Bead, er
 	return beads, nil
 }
 
+// ParseBeadListPaginated parses paginated JSON output and returns beads plus hasMore flag.
+func (p *Parser) ParseBeadListPaginated(output []byte, ctx BeadContext) ([]types.Bead, bool, error) {
+	var page ListPage
+	if err := json.Unmarshal(output, &page); err != nil {
+		var responses []BeadSummary
+		if err2 := json.Unmarshal(output, &responses); err2 != nil {
+			return nil, false, fmt.Errorf("failed to parse bead list JSON (tried object and array): %w", err)
+		}
+		page.Issues = responses
+	}
+
+	beads := make([]types.Bead, len(page.Issues))
+	for i, resp := range page.Issues {
+		bead := createBaseBead(resp.BeadCore, ctx)
+		bead.Metadata["dependency_count"] = fmt.Sprintf("%d", resp.DependencyCount)
+		bead.Metadata["dependent_count"] = fmt.Sprintf("%d", resp.DependentCount)
+		beads[i] = bead
+	}
+	return beads, page.HasMore, nil
+}
+
 // ParseCreatedBead parses JSON output from 'br create --json' command
 func (p *Parser) ParseCreatedBead(output []byte) (types.BeadID, error) {
 	var resp BeadCore
