@@ -1,0 +1,70 @@
+{
+  "last_updated": "2026-06-05T16:26:30.170142418Z",
+  "skills_count": 0,
+  "skills": [
+    {
+      "name": "angular-testing",
+      "status": "failed"
+    },
+    {
+      "name": "golang-pro",
+      "status": "failed"
+    },
+    {
+      "name": "golang-testing",
+      "status": "failed"
+    },
+    {
+      "name": "golang-patterns",
+      "status": "failed"
+    },
+    {
+      "name": "vitest",
+      "status": "failed"
+    },
+    {
+      "name": "nodejs-backend-patterns",
+      "status": "failed"
+    },
+    {
+      "name": "modern-javascript-patterns",
+      "status": "failed"
+    },
+    {
+      "name": "typescript-advanced-types",
+      "status": "failed"
+    },
+    {
+      "name": "angular-component",
+      "status": "failed"
+    },
+    {
+      "name": "implement-design",
+      "status": "failed"
+    },
+    {
+      "name": "test-driven-development",
+      "status": "failed"
+    },
+    {
+      "name": "systematic-debugging",
+      "status": "failed"
+    },
+    {
+      "name": "code-refactoring",
+      "status": "failed"
+    },
+    {
+      "name": "angular-signals",
+      "status": "failed"
+    },
+    {
+      "name": "lsp-code-analysis",
+      "status": "failed"
+    },
+    {
+      "name": "code-review",
+      "status": "failed"
+    }
+  ]
+}
