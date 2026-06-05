@@ -409,6 +409,18 @@ func (o *Overseer) findProjectPath(bead *types.Bead) string {
 	return o.projectResolver.ResolveProjectPath(bead)
 }
 
+// getUserContextForProject returns the user context for a project path, if any.
+func (o *Overseer) getUserContextForProject(projectPath string) *UserContext {
+	for _, ctx := range o.userContexts {
+		for _, p := range ctx.Config.Projects {
+			if p.Path == projectPath {
+				return ctx
+			}
+		}
+	}
+	return nil
+}
+
 // validateScope validates the scope of changes against configured limits
 func (o *Overseer) validateScope(bundle *types.IntelligenceBundle, targetFiles []string) error {
 	return o.scopeValidator.Validate(bundle, targetFiles)
