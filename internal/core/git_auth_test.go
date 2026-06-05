@@ -42,7 +42,7 @@ func TestGitAuth_CommitAndPush(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
 
 	auth := NewGitAuth()
-	result := auth.CommitAndPush(ctx, dir, "main", "test commit")
+	result := auth.CommitAndPush(ctx, dir, "test commit")
 
 	// Push will fail without a real remote, but commit should succeed
 	if result.Error != nil {
@@ -85,7 +85,7 @@ func TestGitAuth_NoChanges(t *testing.T) {
 	}
 
 	auth := NewGitAuth()
-	result := auth.CommitAndPush(ctx, dir, "main", "no changes")
+	result := auth.CommitAndPush(ctx, dir, "no changes")
 
 	// Should succeed with no error when there are no changes
 	if result.Error != nil {

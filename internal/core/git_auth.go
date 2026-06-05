@@ -24,7 +24,14 @@ type CommitResult struct {
 }
 
 // CommitAndPush stages changes, commits as the user, and pushes with their PAT.
-func (g *GitAuth) CommitAndPush(ctx *UserContext, projectPath, branch, message string) CommitResult {
+// Uses the currently checked-out branch; does not assume any branch name.
+func (g *GitAuth) CommitAndPush(ctx *UserContext, projectPath, message string) CommitResult {
+	// Detect current branch (do not assume "main")
+	branch, err := g.getCurrentBranch(projectPath)
+	if err != nil {
+		return CommitResult{Error: fmt.Errorf("detect branch: %w", err)}
+	}
+
 	// Configure git identity for this repo (does not affect global config)
 	if err := g.gitConfig(projectPath, "user.name", ctx.Config.User.Name); err != nil {
 		return CommitResult{Error: fmt.Errorf("set user.name: %w", err)}
@@ -66,7 +73,7 @@ func (g *GitAuth) CommitAndPush(ctx *UserContext, projectPath, branch, message s
 		return CommitResult{Error: fmt.Errorf("set remote: %w", err)}
 	}
 
-	// Push
+	// Push current branch
 	pushErr := g.gitRun(projectPath, "push", "origin", branch)
 
 	// Restore public remote URL (remove PAT from .git/config)
@@ -129,4 +136,15 @@ func (g *GitAuth) getOriginURL(projectPath string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// getCurrentBranch returns the current checked-out branch name.
+func (g *GitAuth) getCurrentBranch(projectPath string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = projectPath
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }

@@ -174,10 +174,10 @@ func (wl *WorkerLifecycle) HandleSuccess(worker *types.Worker, duration time.Dur
 		}
 	}
 
-	// Per-user git commit/push on success
+	// Per-user git commit/push on success (uses current branch, does not assume "main")
 	if worker.Username != "" && wl.gitAuth != nil && wl.userContexts != nil {
 		if ctx := wl.userContexts[worker.Username]; ctx != nil {
-			result := wl.gitAuth.CommitAndPush(ctx, worker.ProjectPath, "main", "hydra: complete bead "+worker.BeadID.String())
+			result := wl.gitAuth.CommitAndPush(ctx, worker.ProjectPath, "hydra: complete bead "+worker.BeadID.String())
 			if result.Error != nil {
 				log.Printf("[GitAuth] Failed to commit for %s: %v", worker.Username, result.Error)
 			} else if result.Success {
