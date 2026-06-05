@@ -137,9 +137,6 @@ type Overseer struct {
 	// Closed-loop compliance cycle manager
 	complianceCycle *ComplianceCycleManager
 
-	// GitAuth for per-user commit/push
-	gitAuth *GitAuth
-
 	// ValidationService orchestrates TDD, PRD, and end-of-chain validation
 	validationService *ValidationService
 
@@ -282,10 +279,7 @@ func NewOverseer(config *Config) *Overseer {
 		o.getMaxRetries,
 	)
 
-	// Initialize git auth for per-user commits
-	o.gitAuth = NewGitAuth()
-	o.workerLifecycle.SetGitAuth(o.gitAuth)
-
+	
 	// Initialize bead analyzer (projects will be updated after discovery)
 	o.beadAnalyzer = NewBeadAnalyzer(o.projects)
 
