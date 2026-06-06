@@ -11,6 +11,11 @@ import (
 )
 
 // MultiUserDiscovery finds all users with Hydra configs and their projects.
+//
+// NOTE: This scans /home/<user>/.hydra/config.yaml for per-user Hydra config.
+// Pi itself is shared system infrastructure and is NOT discovered per-user.
+// Hydra workers inherit Pi configuration from the central Pi installation
+// (e.g. /opt/pi with symlinked ~/.pi) via environment variables.
 type MultiUserDiscovery struct {
 	users    map[string]*UserContext
 	projects []types.Project

@@ -10,7 +10,11 @@ import (
 )
 
 // UserConfig represents a user's Hydra configuration.
-// Lives at /home/<user>/.hydra/config.yaml
+// Lives at /home/<user>/.hydra/config.yaml.
+//
+// NOTE: Pi is shared system infrastructure (e.g. /opt/pi or ~/opt/pi with a
+// symlinked config folder). It is NOT configured per-user. This file only
+// holds Hydra-specific user identity (git author) and project list.
 type UserConfig struct {
 	User     UserInfo       `yaml:"user"`
 	Git      GitCredentials `yaml:"git"`
