@@ -1,4 +1,8 @@
-# Multi-User Hydra: Admin Guide
+# Hydra Admin Guide
+
+> For DevOps / SRE running Hydra as a system service.
+>
+> 📖 Also see: [User Guide](user-guide.md) — for end-user configuration.
 
 This guide covers running Hydra as a root/system service that discovers and schedules projects for multiple users.
 
