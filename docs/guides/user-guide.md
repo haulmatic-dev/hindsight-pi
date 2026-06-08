@@ -1,4 +1,8 @@
-# Multi-User Hydra: User Guide
+# Hydra User Guide
+
+> For developers using a shared Hydra daemon.
+>
+> 📖 Also see: [Admin Guide](admin-guide.md) — for running the daemon itself.
 
 If your team runs a shared Hydra daemon, you can configure your own projects and git identity without needing admin access.
 

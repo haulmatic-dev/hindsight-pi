@@ -1,5 +1,9 @@
 # Hydra Setup
 
+> 📖 Next: [User Guide](guides/user-guide.md) — configure your projects.
+>
+> 🛠 [Admin Guide](guides/admin-guide.md) — run Hydra as a service.
+
 ## PATH Configuration
 
 Add Hydra's bin directory to your PATH **before** other directories:

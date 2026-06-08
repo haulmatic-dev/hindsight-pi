@@ -8,6 +8,15 @@
 
 Hydra is an intelligent orchestration system that manages ephemeral workers to process software engineering tasks (represented as "beads"). It spawns workers to do specific, atomic tasks. Charon manages dead and zombie processes and guides them to underworld.
 
+## 📚 Documentation Quick Links
+
+| | |
+|---|---|
+| 🚀 **[Quick Start](#-quick-start)** | Build and run in 5 minutes |
+| 👤 **[User Guide](docs/guides/user-guide.md)** | Configure your projects and git identity |
+| 🛠 **[Admin Guide](docs/guides/admin-guide.md)** | Run Hydra as a multi-user daemon |
+| 📖 **[All Docs](docs/README.md)** | Complete documentation index |
+
 ## Our Philosophy
 
 **The Lernaean Approach to Software Development**
@@ -78,6 +87,8 @@ Welcome to the swarm.
 
 ## 🚀 Quick Start
 
+### Single User
+
 ```bash
 # Clone and build
 git clone https://github.com/haulmatic-dev/hydra.git
@@ -104,6 +115,35 @@ EOF
 # Run
 ./bin/hydra -config hydra.yaml
 ```
+
+### Multi-User (Recommended for Teams)
+
+```bash
+# 1. Create your user config
+mkdir -p ~/.hydra
+cat > ~/.hydra/config.yaml << 'EOF'
+user:
+  name: Your Name
+  email: you@example.com
+git:
+  provider: github
+  username: your-username
+  token_file: ~/.hydra/.github-token
+projects:
+  - name: my-project
+    path: ~/projects/my-project
+    type: single
+EOF
+
+echo "ghp_xxxxxxxxxxxxxxxxxxxx" > ~/.hydra/.github-token
+chmod 600 ~/.hydra/.github-token
+
+# 2. Admin starts the daemon (reads /home/*/.hydra/config.yaml)
+sudo ./bin/hydra -config hydra-config.yaml
+```
+
+See [User Guide](docs/guides/user-guide.md) for full config options.
+See [Admin Guide](docs/guides/admin-guide.md) for systemd setup.
 
 ## 📊 System Overview
 
