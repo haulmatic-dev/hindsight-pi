@@ -69,6 +69,7 @@ type BeadsClient interface {
 type Overseer struct {
 	config          *Config
 	projects        []types.Project
+	userContexts    map[string]*UserContext // Multi-user contexts (username -> context)
 	activeWorkers   map[string]*types.Worker
 	workerMutex     sync.RWMutex
 	stateController *StateController // Runtime state (running, paused, maxWorkers, interval)
@@ -278,6 +279,7 @@ func NewOverseer(config *Config) *Overseer {
 		o.getMaxRetries,
 	)
 
+	
 	// Initialize bead analyzer (projects will be updated after discovery)
 	o.beadAnalyzer = NewBeadAnalyzer(o.projects)
 
@@ -294,6 +296,7 @@ func NewOverseer(config *Config) *Overseer {
 		o.beadAnalyzer,
 		o.workerEnvBuilder,
 		o.workerLifecycle,
+		nil, // userContexts set after discovery
 	)
 
 	// Initialize scheduler
@@ -398,6 +401,18 @@ func (o *Overseer) findProjectPath(bead *types.Bead) string {
 		return o.beadAnalyzer.FindProjectPath(bead)
 	}
 	return o.projectResolver.ResolveProjectPath(bead)
+}
+
+// getUserContextForProject returns the user context for a project path, if any.
+func (o *Overseer) getUserContextForProject(projectPath string) *UserContext {
+	for _, ctx := range o.userContexts {
+		for _, p := range ctx.Config.Projects {
+			if p.Path == projectPath {
+				return ctx
+			}
+		}
+	}
+	return nil
 }
 
 // validateScope validates the scope of changes against configured limits

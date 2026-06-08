@@ -28,6 +28,7 @@ type WorkerSpawner struct {
 	beadAnalyzer     *BeadAnalyzer
 	workerEnvBuilder *WorkerEnvBuilder
 	workerLifecycle  *WorkerLifecycle
+	userContexts     map[string]*UserContext // username -> context (for per-user git auth)
 }
 
 // NewWorkerSpawner creates a new worker spawner.
@@ -43,6 +44,7 @@ func NewWorkerSpawner(
 	beadAnalyzer *BeadAnalyzer,
 	workerEnvBuilder *WorkerEnvBuilder,
 	workerLifecycle *WorkerLifecycle,
+	userContexts map[string]*UserContext,
 ) *WorkerSpawner {
 	return &WorkerSpawner{
 		activeWorkers:    activeWorkers,
@@ -56,6 +58,7 @@ func NewWorkerSpawner(
 		beadAnalyzer:     beadAnalyzer,
 		workerEnvBuilder: workerEnvBuilder,
 		workerLifecycle:  workerLifecycle,
+		userContexts:     userContexts,
 	}
 }
 
@@ -230,6 +233,9 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 		}
 	}()
 
+	// Resolve user context from project path
+	username := s.findUserForProject(projectPath)
+
 	worker := &types.Worker{
 		ID:          beadIDStr,
 		BeadID:      bead.ID,
@@ -238,6 +244,7 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 		StartTime:   time.Now(),
 		Status:      "running",
 		ProjectPath: projectPath,
+		Username:    username,
 	}
 
 	if s.workerTracker != nil {
@@ -251,4 +258,24 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 	go s.workerLifecycle.Monitor(worker, cmd)
 
 	return worker, nil
+}
+
+// SetUserContexts sets the user context map for per-user project lookup.
+func (s *WorkerSpawner) SetUserContexts(ctxs map[string]*UserContext) {
+	s.userContexts = ctxs
+}
+
+// findUserForProject returns the username associated with a project path.
+func (s *WorkerSpawner) findUserForProject(projectPath string) string {
+	if s.userContexts == nil {
+		return ""
+	}
+	for username, ctx := range s.userContexts {
+		for _, p := range ctx.Config.Projects {
+			if p.Path == projectPath {
+				return username
+			}
+		}
+	}
+	return ""
 }

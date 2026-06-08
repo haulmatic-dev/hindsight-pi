@@ -252,6 +252,7 @@ type Worker struct {
 	StartTime   time.Time `json:"start_time"`
 	Status      string    `json:"status"`
 	ProjectPath string    `json:"project_path"` // Path to project (for closing beads)
+	Username    string    `json:"username"`     // Hydra user who owns this bead
 }
 
 // LegacyBeadID represents the old BeadID structure for backward compatibility.

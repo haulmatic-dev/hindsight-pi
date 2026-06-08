@@ -36,11 +36,22 @@ func (ps *ProjectScanner) Discover() error {
 				Type: types.RepoType(pc.Type),
 			}
 			if pc.Type == "multi" {
-				for _, rc := range pc.Repos {
-					project.Repos = append(project.Repos, types.Repo{
-						Name: rc.Name,
-						Path: rc.Path,
-					})
+				if len(pc.Repos) > 0 {
+					// Use explicitly listed repos
+					for _, rc := range pc.Repos {
+						project.Repos = append(project.Repos, types.Repo{
+							Name: rc.Name,
+							Path: rc.Path,
+						})
+					}
+				} else {
+					// Auto-discover repos inside project path
+					repos := ps.discoverRepos(pc.Path)
+					if len(repos) > 0 {
+						project.Repos = repos
+					} else {
+						log.Printf("⚠️  Multi project %s has no repos found in %s", pc.Name, pc.Path)
+					}
 				}
 			}
 			ps.projects = append(ps.projects, project)
@@ -124,6 +135,31 @@ func (ps *ProjectScanner) inspect(path, name string) (*types.Project, error) {
 	}
 
 	return nil, nil
+}
+
+// discoverRepos checks subdirectories for .beads/beads.db markers.
+func (ps *ProjectScanner) discoverRepos(projectPath string) []types.Repo {
+	var repos []types.Repo
+
+	entries, err := os.ReadDir(projectPath)
+	if err != nil {
+		return nil
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		subBeadsPath := filepath.Join(projectPath, entry.Name(), ".beads", "beads.db")
+		if _, err := os.Stat(subBeadsPath); err == nil {
+			repos = append(repos, types.Repo{
+				Name: entry.Name(),
+				Path: entry.Name(),
+			})
+		}
+	}
+
+	return repos
 }
 
 // ProjectPath returns the path for a project by name.
