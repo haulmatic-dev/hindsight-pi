@@ -87,6 +87,9 @@ validation:
 # See hydra-config.yaml.example and AGENTS.md for details.
 pi:
   config_dir: /opt/dev-tools/config/pi
+  # Lightweight Pi config for Hydra workers. This copy excludes the
+  # context-mode package so each worker starts ~5-10x faster.
+  worker_config_dir: /opt/dev-tools/config/pi-worker
 
   standard-agent:
     enabled: true

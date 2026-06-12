@@ -12,13 +12,13 @@ import (
 
 // Config represents the Hydra configuration
 type Config struct {
-	Overseer     OverseerConfig     `yaml:"overseer"`
-	Projects     []ProjectConfig    `yaml:"projects"`
-	MCP          MCPConfig          `yaml:"mcp"`
-	API          APIConfig          `yaml:"api"`
-	Intelligence IntelligenceConfig `yaml:"intelligence"`
-	Agents       AgentsConfig       `yaml:"agents"`
-	Pi           PiRootConfig       `yaml:"pi"`
+	Overseer        OverseerConfig        `yaml:"overseer"`
+	Projects        []ProjectConfig       `yaml:"projects"`
+	MCP             MCPConfig             `yaml:"mcp"`
+	API             APIConfig             `yaml:"api"`
+	Intelligence    IntelligenceConfig    `yaml:"intelligence"`
+	Agents          AgentsConfig          `yaml:"agents"`
+	Pi              PiRootConfig          `yaml:"pi"`
 	Validation      ValidationConfig      `yaml:"validation"`
 	ComplianceCycle ComplianceCycleConfig `yaml:"compliance_cycle"`
 }
@@ -42,10 +42,11 @@ type PiConfig struct {
 
 // PiRootConfig contains Pi-specific configuration settings
 type PiRootConfig struct {
-	ConfigDir     string         `yaml:"config_dir"`
-	PiConfigDir   string         `yaml:"pi_config_dir"`
-	Skills        PiSkillsConfig `yaml:"skills"`
-	StandardAgent PiAgentConfig  `yaml:"standard-agent"`
+	ConfigDir       string         `yaml:"config_dir"`
+	PiConfigDir     string         `yaml:"pi_config_dir"`
+	WorkerConfigDir string         `yaml:"worker_config_dir"`
+	Skills          PiSkillsConfig `yaml:"skills"`
+	StandardAgent   PiAgentConfig  `yaml:"standard-agent"`
 }
 
 // PiAgentConfig contains a Pi agent sub-configuration (standard-agent, validation-agent)
@@ -70,13 +71,13 @@ type PiSkillsConfig struct {
 
 // rawConfig is used for YAML parsing to handle the nested projects structure
 type rawConfig struct {
-	Overseer     OverseerConfig     `yaml:"overseer"`
-	Projects     yaml.Node          `yaml:"projects"` // Can be array or object
-	MCP          MCPConfig          `yaml:"mcp"`
-	API          APIConfig          `yaml:"api"`
-	Intelligence IntelligenceConfig `yaml:"intelligence"`
-	Agents       AgentsConfig       `yaml:"agents"`
-	Pi           PiRootConfig       `yaml:"pi"`
+	Overseer        OverseerConfig        `yaml:"overseer"`
+	Projects        yaml.Node             `yaml:"projects"` // Can be array or object
+	MCP             MCPConfig             `yaml:"mcp"`
+	API             APIConfig             `yaml:"api"`
+	Intelligence    IntelligenceConfig    `yaml:"intelligence"`
+	Agents          AgentsConfig          `yaml:"agents"`
+	Pi              PiRootConfig          `yaml:"pi"`
 	Validation      ValidationConfig      `yaml:"validation"`
 	ComplianceCycle ComplianceCycleConfig `yaml:"compliance_cycle"`
 }
@@ -494,6 +495,7 @@ func LoadConfig(path string) (*Config, error) {
 	config.Pi = PiRootConfig{
 		ConfigDir:       raw.Pi.ConfigDir,
 		PiConfigDir:     raw.Pi.PiConfigDir,
+		WorkerConfigDir: raw.Pi.WorkerConfigDir,
 		Skills:          raw.Pi.Skills,
 		StandardAgent:   raw.Pi.StandardAgent,
 	}
@@ -553,6 +555,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 	config.Pi = PiRootConfig{
 		ConfigDir:       raw.Pi.ConfigDir,
 		PiConfigDir:     raw.Pi.PiConfigDir,
+		WorkerConfigDir: raw.Pi.WorkerConfigDir,
 		Skills:          raw.Pi.Skills,
 		StandardAgent:   raw.Pi.StandardAgent,
 	}

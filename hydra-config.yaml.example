@@ -145,6 +145,11 @@ pi:
   # Local fallback: <hydra-repo>/.pi
   config_dir: /opt/dev-tools/config/pi
 
+  # Optional: separate Pi config for Hydra workers. A stripped-down config
+  # (e.g. without context-mode) starts workers ~5-10x faster because each
+  # worker no longer has to initialize the MCP bridge from scratch.
+  # worker_config_dir: /opt/dev-tools/config/pi-worker
+
   # Standard agent settings (used by workers for code generation)
   standard-agent:
     enabled: true
