@@ -149,6 +149,15 @@ func (b *WorkerEnvBuilder) buildPiEnv() []string {
 
 	log.Printf("[Worker] Pi config passed to worker (provider: %s, model: %s)", p.Provider, p.Model)
 
+	// Use worker-specific Pi config directory when configured. This allows
+	// workers to load a stripped-down Pi config (e.g. without context-mode)
+	// for faster startup, while the main Hydra process retains the full
+	// interactive Pi config.
+	piConfigDir := b.config.Pi.ConfigDir
+	if b.config.Pi.WorkerConfigDir != "" {
+		piConfigDir = b.config.Pi.WorkerConfigDir
+	}
+
 	return []string{
 		"HYDRA_PI_ENABLED=true",
 		fmt.Sprintf("HYDRA_PI_PROVIDER=%s", p.Provider),
@@ -156,6 +165,6 @@ func (b *WorkerEnvBuilder) buildPiEnv() []string {
 		fmt.Sprintf("HYDRA_PI_THINKING_LEVEL=%s", p.ThinkingLevel),
 		fmt.Sprintf("HYDRA_PI_TIMEOUT=%s", p.Timeout),
 		fmt.Sprintf("HYDRA_PI_API_KEY_NAME=%s", p.ApiKeyName),
-		fmt.Sprintf("HYDRA_PI_CONFIG_DIR=%s", b.config.Pi.ConfigDir),
+		fmt.Sprintf("HYDRA_PI_CONFIG_DIR=%s", piConfigDir),
 	}
 }

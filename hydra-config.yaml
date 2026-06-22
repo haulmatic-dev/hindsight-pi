@@ -87,15 +87,18 @@ validation:
 # See hydra-config.yaml.example and AGENTS.md for details.
 pi:
   config_dir: /opt/dev-tools/config/pi
+  # Lightweight Pi config for Hydra workers. This copy excludes the
+  # context-mode package so each worker starts ~5-10x faster.
+  worker_config_dir: /opt/dev-tools/config/pi-worker
 
   standard-agent:
     enabled: true
     llm:
-      provider: kimi-coding
-      model: kimi-for-coding
+      provider: minimax
+      model: MiniMax-M3
       thinking_level: medium
       timeout: 10m
-      api_key_name: KIMI_API_KEY
+      api_key_name: MINIMAX_API_KEY
     skills:
       update_interval: 24h
       auto_update: false
@@ -106,9 +109,9 @@ pi:
     timeout: 10m
     max_retries: 3
     llm:
-      provider: kimi-coding
-      model: kimi-for-coding
-      api_key_name: KIMI_API_KEY
+      provider: minimax
+      model: MiniMax-M3
+      api_key_name: MINIMAX_API_KEY
     skills:
       update_interval: 24h
       auto_update: false
