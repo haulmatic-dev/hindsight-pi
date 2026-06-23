@@ -2,12 +2,15 @@ package core
 
 import (
 	"os/exec"
+	"reflect"
+	"sort"
 	"strconv"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/beads"
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // TestCharon_ProcessGroupCleanup tests that Charon properly cleans up
@@ -286,4 +289,100 @@ func TestCharon_OrphanInProgressRecovery(t *testing.T) {
 		t.Errorf("expected orphanBeadGrace=5m, got %v", j.orphanBeadGrace)
 	}
 	_ = j.recoverOrphanInProgressBeads // compile-time check that the method exists
+}
+
+// TestCharon_ClearStaleActiveWorkers verifies that Charon identifies and removes
+// in-memory worker entries with PID 0 (placeholder entries where the connector
+// never recorded a real PID). These entries would otherwise block all new
+// spawns for the same bead with "worker already exists".
+func TestCharon_ClearStaleActiveWorkers(t *testing.T) {
+	j := &Charon{}
+	cleared := j.clearStaleActiveWorkers()
+	if cleared != 0 {
+		t.Errorf("expected 0 when no snapshot is provided, got %d", cleared)
+	}
+
+	var clearedIDs []string
+	j.SetActiveWorkersSnapshot(func() map[string]int {
+		return map[string]int{
+			"bead-stale-1": 0,   // placeholder, should be cleared
+			"bead-stale-2": 0,   // placeholder, should be cleared
+			"bead-running": 1234, // real PID, should NOT be cleared
+		}
+	})
+	j.SetOnStaleActiveWorker(func(beadID string) {
+		clearedIDs = append(clearedIDs, beadID)
+	})
+
+	cleared = j.clearStaleActiveWorkers()
+	if cleared != 2 {
+		t.Errorf("expected 2 cleared, got %d", cleared)
+	}
+	if len(clearedIDs) != 2 {
+		t.Errorf("expected 2 callback invocations, got %d", len(clearedIDs))
+	}
+	sort.Strings(clearedIDs)
+	expected := []string{"bead-stale-1", "bead-stale-2"}
+	if !reflect.DeepEqual(clearedIDs, expected) {
+		t.Errorf("expected cleared IDs %v, got %v", expected, clearedIDs)
+	}
+}
+
+// TestDAG_CloseReadyEpics verifies that the DAG auto-closes epics whose
+// dependencies are closed and whose task children are all closed, in a
+// fixed-point loop. This is the mechanism that prevents organizational
+// epics (e.g. PHASE 0/1/2) from staying open forever once their sub-beads
+// are done. We deliberately ignore epic children so a phase epic with no
+// task children of its own can close without waiting for downstream phase
+// epics to close.
+func TestDAG_CloseReadyEpics(t *testing.T) {
+	dag := NewDAG()
+	// Single epic with one closed task child. The child->epic edge represents
+	// the structural sub-bead relationship.
+	epic := types.Bead{ID: "epic-1", Type: "epic", Status: types.StatusOpen}
+	dep := types.Bead{ID: "dep-1", Type: "task", Status: types.StatusClosed}
+	child := types.Bead{ID: "child-1", Type: "task", Status: types.StatusClosed}
+	for _, b := range []types.Bead{epic, dep, child} {
+		if err := dag.AddNode(b); err != nil {
+			t.Fatalf("AddNode %s: %v", b.ID, err)
+		}
+	}
+	if err := dag.AddEdge("child-1", "epic-1"); err != nil {
+		t.Fatalf("AddEdge child->epic: %v", err)
+	}
+
+	closed := dag.CloseReadyEpics()
+	if len(closed) != 1 || closed[0] != "epic-1" {
+		t.Errorf("expected [epic-1], got %v", closed)
+	}
+	node, _ := dag.GetNode("epic-1")
+	if node.Bead.Status != types.StatusClosed {
+		t.Errorf("expected epic-1 status=closed, got %s", node.Bead.Status)
+	}
+
+	// Now test the multi-level case: epic-A -> epic-B -> child. When child
+	// closes and epic-B's deps are all closed, both epics should close in one
+	// pass — proving that phase epics don't deadlock waiting for downstream
+	// phase epics.
+	dag2 := NewDAG()
+	epicA := types.Bead{ID: "epic-A", Type: "epic", Status: types.StatusOpen}
+	epicB := types.Bead{ID: "epic-B", Type: "epic", Status: types.StatusOpen}
+	childB := types.Bead{ID: "child-B", Type: "task", Status: types.StatusClosed}
+	for _, b := range []types.Bead{epicA, epicB, childB} {
+		if err := dag2.AddNode(b); err != nil {
+			t.Fatalf("AddNode %s: %v", b.ID, err)
+		}
+	}
+	// epic-A depends on epic-B.
+	if err := dag2.AddEdge("epic-A", "epic-B"); err != nil {
+		t.Fatalf("AddEdge epic-A->epic-B: %v", err)
+	}
+	// child-B depends on epic-B.
+	if err := dag2.AddEdge("child-B", "epic-B"); err != nil {
+		t.Fatalf("AddEdge child-B->epic-B: %v", err)
+	}
+	closed = dag2.CloseReadyEpics()
+	if len(closed) != 2 {
+		t.Errorf("expected both epics to close in one pass, got %v", closed)
+	}
 }

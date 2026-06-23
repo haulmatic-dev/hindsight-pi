@@ -18,14 +18,16 @@ import (
 // Uses PID tracking instead of environment variable inspection for reliability
 // Also detects and kills "stuck" workers that have exceeded timeout
 type Charon struct {
-	beadsClient        *beads.Client
-	workerTracker      *WorkerTracker
-	workerTimeout      time.Duration // How long before considering a worker stuck
-	checkInterval      time.Duration
-	orphanBeadGrace    time.Duration // How long an in_progress bead can live without a worker before recovery
-	stopChan           chan struct{}
-	stats              JanitorStats
-	getProjects        func() []types.Project // injected from overseer to enumerate all project paths
+	beadsClient              *beads.Client
+	workerTracker            *WorkerTracker
+	workerTimeout            time.Duration // How long before considering a worker stuck
+	checkInterval            time.Duration
+	orphanBeadGrace          time.Duration // How long an in_progress bead can live without a worker before recovery
+	stopChan                 chan struct{}
+	stats                    JanitorStats
+	getProjects              func() []types.Project
+	activeWorkersSnapshot    func() map[string]int
+	onStaleActiveWorker      func(beadID string)
 }
 
 // JanitorStats tracks cleanup statistics
@@ -62,6 +64,24 @@ func NewCharon(beadsClient *beads.Client, workerTracker *WorkerTracker, workerTi
 // instead of being limited to a single working directory.
 func (j *Charon) SetProjectsProvider(fn func() []types.Project) {
 	j.getProjects = fn
+}
+
+// SetActiveWorkersSnapshot lets the caller inject a function that returns a
+// snapshot of the overseer's in-memory activeWorkers map (keyed by bead ID).
+// Charon uses this to detect and clean up stale placeholder entries — beads
+// whose worker process never recorded a real PID (PID == 0). The persistent
+// worker tracker alone cannot detect this because the entry's status is
+// still "running".
+func (j *Charon) SetActiveWorkersSnapshot(fn func() map[string]int) {
+	j.activeWorkersSnapshot = fn
+}
+
+// SetOnStaleActiveWorker registers a callback that Charon invokes when it
+// removes a stale (PID 0) in-memory worker entry. The callback is responsible
+// for actually deleting the entry from the overseer's activeWorkers map;
+// Charon never touches that map directly because it is owned by the overseer.
+func (j *Charon) SetOnStaleActiveWorker(fn func(beadID string)) {
+	j.onStaleActiveWorker = fn
 }
 
 // Start begins the janitor goroutine
@@ -222,6 +242,16 @@ func (j *Charon) performCleanup() {
 		log.Printf("[Charon] 🔧 Recovered %d orphan in_progress beads (force-closed with --force)", recovered)
 	}
 
+	// Clean up stale in-memory worker entries. The persistent worker tracker
+	// already handles PID-based orphans, but a worker whose process dies before
+	// its PID is recorded (so the tracker has PID 0) leaves a stuck "spawning"
+	// entry in the overseer's activeWorkers map. That entry blocks all new
+	// spawns for that bead with "worker already exists". We use the injected
+	// snapshot to detect PID-0 entries and clear them.
+	if cleared := j.clearStaleActiveWorkers(); cleared > 0 {
+		log.Printf("[Charon] 🧹 Cleared %d stale in-memory worker entries (PID 0 placeholder)", cleared)
+	}
+
 	j.logStats()
 
 	// Cleanup old records periodically (older than 24 hours)
@@ -283,6 +313,46 @@ func (j *Charon) markBeadFailed(beadID string, reason string) {
 		return
 	}
 	log.Printf("[Charon] ✅ Marked bead %s as failed (close succeeded)", beadID)
+}
+
+// clearStaleActiveWorkers removes in-memory active worker entries that are stuck
+// with a placeholder PID (0). These entries block all new spawns for the same
+// bead with "worker already exists" because the persistent worker tracker
+// shows them as status="running" even though no real process is alive.
+//
+// Returns the number of entries cleared.
+func (j *Charon) clearStaleActiveWorkers() int {
+	if j.activeWorkersSnapshot == nil {
+		return 0
+	}
+	snapshot := j.activeWorkersSnapshot()
+	if len(snapshot) == 0 {
+		return 0
+	}
+
+	cleared := 0
+	for beadID, pid := range snapshot {
+		if pid != 0 {
+			continue
+		}
+		// PID 0 with a real entry means the worker process died before its
+		// connector recorded a real PID. Clear it from the persistent tracker
+		// too so a future spawn isn't blocked by "worker already exists".
+		if j.workerTracker != nil {
+			if record, ok := j.workerTracker.GetWorkerByBead(beadID); ok && record.PID == 0 {
+				if err := j.workerTracker.MarkWorkerCompleted(0, -1); err != nil {
+					log.Printf("[Charon] Failed to mark stale worker %s completed: %v", beadID, err)
+				}
+			}
+		}
+		// The actual removal from o.activeWorkers happens via the Overseer's
+		// removeActiveWorker, which Charon invokes via a callback.
+		if j.onStaleActiveWorker != nil {
+			j.onStaleActiveWorker(beadID)
+		}
+		cleared++
+	}
+	return cleared
 }
 
 // collectProjects returns the list of projects to scan for orphan beads. It prefers
