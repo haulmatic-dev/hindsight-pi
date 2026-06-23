@@ -23,11 +23,24 @@ api:
   enabled: true
   port: 8089
 
+agents:
+  enabled: true
+  default_agent: pi
+  pi:
+    enabled: true
+    provider: minimax
+    model: MiniMax-M3
+    timeout: 10m
+    api_key_name: MINIMAX_API_KEY
+
 projects:
   auto_discover: false
   list:
     - name: outreach-workflow
       path: /opt/outreach-workflow
+      type: single
+    - name: srv-file-handler
+      path: /home/buddhi/projects/source-to-pay/srv-file-handler
       type: single
 
 intelligence:

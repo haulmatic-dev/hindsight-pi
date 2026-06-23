@@ -262,6 +262,27 @@ func NewOverseer(config *Config) *Overseer {
 		workerTimeout = config.Overseer.WorkerTimeout
 	}
 	o.orphanJanitor = NewCharon(o.beadsClient.(*beads.Client), o.workerTracker, workerTimeout)
+	o.orphanJanitor.SetProjectsProvider(o.GetProjects)
+	// Inject access to the in-memory activeWorkers map so Charon can clean up
+	// stale placeholder entries (PID 0) that would otherwise block new spawns
+	// for the same bead. The snapshot is taken under the worker mutex by the
+	// callback to avoid racing with concurrent spawns.
+	o.orphanJanitor.SetActiveWorkersSnapshot(func() map[string]int {
+		o.workerMutex.RLock()
+		defer o.workerMutex.RUnlock()
+		snapshot := make(map[string]int, len(o.activeWorkers))
+		for id, w := range o.activeWorkers {
+			if w == nil {
+				continue
+			}
+			snapshot[id] = w.PID
+		}
+		return snapshot
+	})
+	// When Charon detects a stale PID-0 entry, it invokes this callback to
+	// actually delete the entry from the in-memory map (since Charon does not
+	// own the map).
+	o.orphanJanitor.SetOnStaleActiveWorker(o.removeActiveWorker)
 
 	// Initialize worker lifecycle manager
 	o.workerLifecycle = NewWorkerLifecycle(
@@ -487,7 +508,48 @@ func (o *Overseer) buildDAG() error {
 		return err
 	}
 
+	// Auto-close epics whose dependencies AND task children are all done. Without
+	// this step, an epic with all sub-beads closed would stay open forever and
+	// block its downstream dependents (typically the next phase epic). The
+	// close is persisted to the beads store after the DAG build returns so we
+	// don't hold the DAG lock across a br CLI invocation.
+	if closed := o.dag.CloseReadyEpics(); len(closed) > 0 {
+		go o.persistClosedEpics(closed)
+	}
+
 	return nil
+}
+
+// persistClosedEpics writes the auto-close decision for organizational epics
+// back to the beads store. Runs in a goroutine to avoid holding the DAG lock
+// during the br CLI call.
+func (o *Overseer) persistClosedEpics(beadIDs []string) {
+	for _, id := range beadIDs {
+		projectPath, _ := o.findProjectPathForBead(id)
+		if projectPath == "" {
+			log.Printf("[DAG] Could not find project path for epic %s; skipping persistence", id)
+			continue
+		}
+		reason := "epic auto-close: all dependencies and children closed"
+		if err := o.beadsClient.CloseBead(projectPath, "", types.BeadID(id), reason); err != nil {
+			log.Printf("[DAG] Failed to persist close for epic %s: %v", id, err)
+			continue
+		}
+		log.Printf("[DAG] Auto-closed epic %s (all dependencies and children done)", id)
+		o.completed[id] = true
+	}
+}
+
+// findProjectPathForBead returns the project path for a bead ID by matching the
+// bead's project prefix (e.g. "srv-file-handler-xyz" -> project "srv-file-handler").
+// Returns the first matching project's path.
+func (o *Overseer) findProjectPathForBead(beadID string) (string, types.BeadID) {
+	for _, project := range o.GetProjects() {
+		if len(beadID) > len(project.Name) && beadID[:len(project.Name)+1] == project.Name+"-" {
+			return project.Path, types.BeadID(beadID)
+		}
+	}
+	return "", types.BeadID(beadID)
 }
 
 // GetBeadFromFile reads a single bead from issues.jsonl
@@ -763,9 +825,24 @@ func (o *Overseer) GetActiveWorkers() []types.Worker {
 	return workers
 }
 
-// GetProjects returns the list of discovered projects
+// GetProjects returns the list of discovered projects. Falls back to the static
+// config.Projects list when discovery has not yet populated o.projects (e.g.
+// during early startup before projectScanner runs). This guarantees callers like
+// the orphan janitor always see the configured projects even before the
+// serviceStarter has finished its initial scan.
 func (o *Overseer) GetProjects() []types.Project {
-	return o.projects
+	if len(o.projects) > 0 {
+		return o.projects
+	}
+	projects := make([]types.Project, 0, len(o.config.Projects))
+	for _, pc := range o.config.Projects {
+		projects = append(projects, types.Project{
+			Name: pc.Name,
+			Path: pc.Path,
+			Type: types.RepoType(pc.Type),
+		})
+	}
+	return projects
 }
 
 // GetProjectPath returns the project path for a given project name

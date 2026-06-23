@@ -552,6 +552,105 @@ func (d *DAG) GetAllNodes() []*Node {
 	return nodes
 }
 
+// CloseReadyEpics auto-closes all epic nodes whose blocking dependencies are
+// closed AND whose downstream TASK children are all closed. Epics are
+// organizational containers with no real "work", so we never spawn workers
+// for them. Without this step, an epic whose dependencies and task children
+// are all done would stay open forever, blocking its own downstream dependents
+// via the dependency graph.
+//
+// Only TASK children count toward the close check; downstream epic children
+// (e.g. PHASE 1 -> PHASE 2) are ignored. A phase epic with no task children of
+// its own closes as soon as its dependencies are done, and the next phase
+// epic closes on the next pass through this loop. This avoids a deadlock
+// where phase A waits for phase B, and phase B waits for phase A.
+//
+// The method loops to a fixed point: closing one epic can decrement the
+// InDegree of its downstream epic, allowing that next phase to close in the
+// next iteration. Without the loop, only one level of epics would close per
+// pass.
+//
+// Returns the list of closed epic IDs so the caller can persist the "closed"
+// state to the beads store via br close.
+//
+// This must be called after the DAG is built (so all nodes and edges are
+// present) and before the scheduler selects ready beads.
+func (d *DAG) CloseReadyEpics() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var closed []string
+	for {
+		madeProgress := false
+		for _, node := range d.nodes {
+			// Skip non-epics. Real work beads are scheduled by the regular
+			// worker pipeline and closed via br close; we don't touch them.
+			if node.Bead.Type != "epic" {
+				continue
+			}
+			// Only auto-close epics that are still actionable (open/in_progress).
+			// Closed epics are already terminal; failed epics need human review.
+			if node.Bead.Status != types.StatusOpen && node.Bead.Status != types.StatusInProgress {
+				continue
+			}
+			// InDegree == 0 means all blocking dependencies are closed.
+			if node.InDegree != 0 {
+				continue
+			}
+			// All TASK children must be closed before closing an epic. We
+			// deliberately ignore epic children: a phase epic like PHASE 1
+			// shouldn't have to wait for PHASE 2 to be closed before PHASE 1
+			// itself can close. Each phase epic manages its own sub-tree of
+			// task beads, and downstream phase epics are closed by their own
+			// pass through this loop.
+			//
+			// This avoids a deadlock where phase A blocks phase B blocks phase A
+			// (because phase A's "children" include phase B, which is open
+			// while phase A is also open).
+			allTaskChildrenClosed := true
+			for _, childID := range node.OutEdges {
+				child, ok := d.nodes[childID]
+				if !ok {
+					continue
+				}
+				if child.Bead.Type == "epic" {
+					continue // downstream epics close independently
+				}
+				if child.Bead.Status != types.StatusClosed {
+					allTaskChildrenClosed = false
+					break
+				}
+			}
+			if !allTaskChildrenClosed {
+				continue
+			}
+
+			node.Bead.Status = types.StatusClosed
+			closed = append(closed, string(node.Bead.ID))
+			madeProgress = true
+			// Decrement InDegree on downstream dependents so the cascade check
+			// sees them as ready in subsequent iterations. This mirrors what
+			// MarkCompleted does for regular completion, but skips validation
+			// since we only call it for organizational epics (not real work).
+			for _, dependentID := range node.OutEdges {
+				dependent, ok := d.nodes[dependentID]
+				if !ok {
+					continue
+				}
+				if dependent.InDegree > 0 {
+					dependent.InDegree--
+				}
+			}
+		}
+		if !madeProgress {
+			break
+		}
+	}
+	return closed
+}
+
+
+
 // GetNodeCount returns the total number of nodes in the DAG.
 //
 // Returns:
