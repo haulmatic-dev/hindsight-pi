@@ -11,43 +11,57 @@ import (
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/beads"
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // Charon continuously monitors and cleans up orphaned worker processes
 // Uses PID tracking instead of environment variable inspection for reliability
 // Also detects and kills "stuck" workers that have exceeded timeout
 type Charon struct {
-	beadsClient   *beads.Client
-	workerTracker *WorkerTracker
-	workerTimeout time.Duration // How long before considering a worker stuck
-	checkInterval time.Duration
-	stopChan      chan struct{}
-	stats         JanitorStats
+	beadsClient        *beads.Client
+	workerTracker      *WorkerTracker
+	workerTimeout      time.Duration // How long before considering a worker stuck
+	checkInterval      time.Duration
+	orphanBeadGrace    time.Duration // How long an in_progress bead can live without a worker before recovery
+	stopChan           chan struct{}
+	stats              JanitorStats
+	getProjects        func() []types.Project // injected from overseer to enumerate all project paths
 }
 
 // JanitorStats tracks cleanup statistics
 type JanitorStats struct {
-	TotalScans            int
-	OrphansFound          int
-	StuckFound            int
-	ProcessesKilled       int
-	ProcessGroupsCleaned  int
-	OrphanedChildrenFound int
-	LastScanTime          time.Time
-	LastOrphanTime        time.Time
-	LastStuckTime         time.Time
+	TotalScans             int
+	OrphansFound           int
+	StuckFound             int
+	ProcessesKilled        int
+	ProcessGroupsCleaned   int
+	OrphanedChildrenFound  int
+	OrphanInProgressBeads  int
+	OrphanBeadsRecovered   int
+	LastScanTime           time.Time
+	LastOrphanTime         time.Time
+	LastStuckTime          time.Time
+	LastOrphanBeadTime     time.Time
 }
 
 // NewCharon creates a new orphan process janitor with timeout for stuck worker detection
 func NewCharon(beadsClient *beads.Client, workerTracker *WorkerTracker, workerTimeout time.Duration) *Charon {
 	return &Charon{
-		beadsClient:   beadsClient,
-		workerTracker: workerTracker,
-		workerTimeout: workerTimeout,
-		checkInterval: 60 * time.Second, // Check every minute
-		stopChan:      make(chan struct{}),
-		stats:         JanitorStats{},
+		beadsClient:     beadsClient,
+		workerTracker:   workerTracker,
+		workerTimeout:   workerTimeout,
+		checkInterval:   60 * time.Second, // Check every minute
+		orphanBeadGrace: 5 * time.Minute,  // Recover in_progress beads with no live worker after this long
+		stopChan:        make(chan struct{}),
+		stats:           JanitorStats{},
 	}
+}
+
+// SetProjectsProvider lets the caller inject a function that returns the current
+// list of projects so orphan recovery can iterate over every configured project
+// instead of being limited to a single working directory.
+func (j *Charon) SetProjectsProvider(fn func() []types.Project) {
+	j.getProjects = fn
 }
 
 // Start begins the janitor goroutine
@@ -200,6 +214,14 @@ func (j *Charon) performCleanup() {
 		log.Printf("[Charon] ✅ No orphaned or stuck workers found")
 	}
 
+	// Recover orphan in_progress beads: beads marked in_progress but with no live worker.
+	// Without this, a worker crash mid-execution would leave the bead stuck forever,
+	// blocking all downstream beads whose DAG depends on it.
+	recovered := j.recoverOrphanInProgressBeads()
+	if recovered > 0 {
+		log.Printf("[Charon] 🔧 Recovered %d orphan in_progress beads (force-closed with --force)", recovered)
+	}
+
 	j.logStats()
 
 	// Cleanup old records periodically (older than 24 hours)
@@ -208,32 +230,141 @@ func (j *Charon) performCleanup() {
 	}
 }
 
-// getOpenBeads returns a map of open bead IDs
+// getOpenBeads returns a map of open bead IDs across every configured project.
+// Iterating over projects (instead of just ".") lets Charon run from any working
+// directory and still detect orphan beads across the full swarm.
 func (j *Charon) getOpenBeads() (map[string]bool, error) {
 	openBeads := make(map[string]bool)
 
-	// Get beads from the current project
-	beadList, err := j.beadsClient.ListBeads(".", "")
-	if err != nil {
-		return openBeads, fmt.Errorf("failed to list beads: %w", err)
-	}
+	projects := j.collectProjects()
+	var firstErr error
+	for _, project := range projects {
+		beadList, err := j.beadsClient.ListBeads(project.Path, "")
+		if err != nil {
+			log.Printf("[Charon] Failed to list beads for project %s (path: %s): %v", project.Name, project.Path, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to list beads for project %s: %w", project.Name, err)
+			}
+			continue
+		}
 
-	for _, bead := range beadList {
-		// Only consider beads that are not terminal (completed, closed, failed)
-		if !bead.Status.IsTerminal() {
-			openBeads[string(bead.ID)] = true
+		for _, bead := range beadList {
+			// Only consider beads that are not terminal (completed, closed, failed)
+			if !bead.Status.IsTerminal() {
+				openBeads[string(bead.ID)] = true
+			}
 		}
 	}
 
-	return openBeads, nil
+	return openBeads, firstErr
 }
 
 // markBeadFailed marks a bead as failed with a reason
 func (j *Charon) markBeadFailed(beadID string, reason string) {
-	// We can't directly update the bead status through the beads client easily
-	// The bead will naturally fail when the worker is killed and overseer detects it
-	// But we log it for visibility
-	log.Printf("[Charon] Bead %s should be marked as failed (timeout): %s", beadID, reason)
+	// Recover the bead using CloseBead which retries with --force when the bead has
+	// open children. This prevents a stuck worker from leaving a bead stuck in_progress.
+	// We need to look up the project path from the worker tracker.
+	log.Printf("[Charon] Marking bead %s as failed: %s", beadID, reason)
+
+	// Find a worker record for this bead to get its project path.
+	var projectPath string
+	for _, rec := range j.workerTracker.GetRunningWorkerRecords() {
+		if rec.BeadID == beadID {
+			projectPath = rec.ProjectPath
+			break
+		}
+	}
+	if projectPath == "" {
+		projectPath = "."
+	}
+
+	if err := j.beadsClient.CloseBead(projectPath, "", types.BeadID(beadID), reason); err != nil {
+		log.Printf("[Charon] Failed to mark bead %s as failed: %v", beadID, err)
+		return
+	}
+	log.Printf("[Charon] ✅ Marked bead %s as failed (close succeeded)", beadID)
+}
+
+// collectProjects returns the list of projects to scan for orphan beads. It prefers
+// the injected provider (from the overseer) and falls back to scanning the current
+// working directory for backwards compatibility.
+func (j *Charon) collectProjects() []types.Project {
+	if j.getProjects != nil {
+		projects := j.getProjects()
+		if len(projects) > 0 {
+			return projects
+		}
+	}
+	// Fallback: scan "." if no projects were injected.
+	return []types.Project{{Name: "local", Path: "."}}
+}
+
+// recoverOrphanInProgressBeads force-closes beads that are stuck in_progress with no
+// live worker. This happens when a worker crashes mid-execution (e.g. API timeout,
+// OOM, network error) and the closeBead path fails to persist the closed state —
+// typically because br close refuses to close a bead while its children are open.
+//
+// Without this recovery, a single stuck in_progress bead blocks all downstream beads
+// whose DAG depends on it, indefinitely stalling the swarm.
+func (j *Charon) recoverOrphanInProgressBeads() int {
+	if j.orphanBeadGrace <= 0 {
+		return 0
+	}
+
+	// Iterate over every configured project so we recover beads regardless of
+	// hydra's working directory. Without this, running hydra in a directory
+	// without a .beads/ folder would silently skip all projects.
+	projects := j.collectProjects()
+	grace := j.orphanBeadGrace
+
+	liveWorkers := j.workerTracker.GetRunningWorkers()
+	recovered := 0
+
+	for _, project := range projects {
+		beadList, err := j.beadsClient.ListBeads(project.Path, "")
+		if err != nil {
+			log.Printf("[Charon] ❌ Failed to list beads for orphan recovery in project %s (path: %s): %v", project.Name, project.Path, err)
+			continue
+		}
+
+		for _, bead := range beadList {
+			if bead.Status != types.StatusInProgress {
+				continue
+			}
+
+			beadIDStr := string(bead.ID)
+
+			// Check if any live tracked worker exists for this bead
+			hasLive := false
+			for _, trackedBeadID := range liveWorkers {
+				if trackedBeadID == beadIDStr {
+					hasLive = true
+					break
+				}
+			}
+			if hasLive {
+				continue
+			}
+
+			j.stats.OrphanInProgressBeads++
+
+			reason := fmt.Sprintf("orphan: in_progress bead with no live worker (grace %v)", grace)
+			log.Printf("[Charon] 🔧 Recovering orphan in_progress bead %s (project: %s)", beadIDStr, project.Path)
+
+			// Use CloseBead which now retries with --force when the bead has open children.
+			if err := j.beadsClient.CloseBead(project.Path, "", bead.ID, reason); err != nil {
+				log.Printf("[Charon] ❌ Failed to recover orphan bead %s: %v", beadIDStr, err)
+				continue
+			}
+
+			j.stats.OrphanBeadsRecovered++
+			j.stats.LastOrphanBeadTime = time.Now()
+			recovered++
+			log.Printf("[Charon] ✅ Recovered orphan bead %s", beadIDStr)
+		}
+	}
+
+	return recovered
 }
 
 // isProcessRunning checks if a process is still running

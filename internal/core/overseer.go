@@ -262,6 +262,7 @@ func NewOverseer(config *Config) *Overseer {
 		workerTimeout = config.Overseer.WorkerTimeout
 	}
 	o.orphanJanitor = NewCharon(o.beadsClient.(*beads.Client), o.workerTracker, workerTimeout)
+	o.orphanJanitor.SetProjectsProvider(o.GetProjects)
 
 	// Initialize worker lifecycle manager
 	o.workerLifecycle = NewWorkerLifecycle(
@@ -763,9 +764,24 @@ func (o *Overseer) GetActiveWorkers() []types.Worker {
 	return workers
 }
 
-// GetProjects returns the list of discovered projects
+// GetProjects returns the list of discovered projects. Falls back to the static
+// config.Projects list when discovery has not yet populated o.projects (e.g.
+// during early startup before projectScanner runs). This guarantees callers like
+// the orphan janitor always see the configured projects even before the
+// serviceStarter has finished its initial scan.
 func (o *Overseer) GetProjects() []types.Project {
-	return o.projects
+	if len(o.projects) > 0 {
+		return o.projects
+	}
+	projects := make([]types.Project, 0, len(o.config.Projects))
+	for _, pc := range o.config.Projects {
+		projects = append(projects, types.Project{
+			Name: pc.Name,
+			Path: pc.Path,
+			Type: types.RepoType(pc.Type),
+		})
+	}
+	return projects
 }
 
 // GetProjectPath returns the project path for a given project name
