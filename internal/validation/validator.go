@@ -13,9 +13,11 @@ import (
 
 // Validator orchestrates validation checks for bead implementations
 type Validator struct {
-	staticChecker *StaticChecker
-	agentVerifier *AgentVerifier
-	config        ValidationConfig
+	staticChecker       *StaticChecker
+	agentVerifier       *AgentVerifier
+	complianceValidator *ComplianceGateValidator
+	config              ValidationConfig
+	gateBeadsClient     GateBeadClient // optional; set by NewValidatorWithClient for compliance-gate upstream checks
 }
 
 // ValidationConfig contains configuration for the validator
@@ -43,10 +45,56 @@ func DefaultValidationConfig() ValidationConfig {
 // NewValidator creates a new validator with the given configuration
 func NewValidator(config ValidationConfig) *Validator {
 	return &Validator{
-		staticChecker: NewStaticChecker(),
-		agentVerifier: NewAgentVerifier(config.AgentEndpoint, config.Timeout),
-		config:        config,
+		staticChecker:       NewStaticChecker(),
+		agentVerifier:       NewAgentVerifier(config.AgentEndpoint, config.Timeout),
+		complianceValidator: NewComplianceGateValidator(),
+		config:              config,
 	}
+}
+
+// NewValidatorWithClient returns a Validator wired with a beads
+// client. The compliance gate validator reads upstream dependencies
+// via this client. When nil, compliance gate checks skip the
+// upstream-traversal step (other checks still run).
+func NewValidatorWithClient(config ValidationConfig, client GateBeadClient) *Validator {
+	v := NewValidator(config)
+	v.gateBeadsClient = client
+	return v
+}
+
+// runComplianceGateChecks inspects the gate bead's dependencies and
+// returns the list of gaps. When no gateBeadsClient is wired, the
+// dependency traversal is skipped; only the gate's own target_files
+// are checked. The Validate() caller decides what to do with the
+// gaps.
+func (v *Validator) runComplianceGateChecks(ctx context.Context, gate types.Bead, projectPath string) []ComplianceGap {
+	gv := v.complianceValidator
+	if gv == nil {
+		gv = NewComplianceGateValidator()
+	}
+
+	deps := []types.Bead{}
+	if v.gateBeadsClient != nil {
+		for _, depID := range gate.Dependencies {
+			bead, err := v.gateBeadsClient.GetBead(projectPath, "", depID)
+			if err != nil || bead == nil {
+				continue
+			}
+			deps = append(deps, *bead)
+		}
+	}
+
+	gaps, err := gv.ValidateGate(ctx, gate, deps, projectPath)
+	if err != nil {
+		// A failure in the validator itself should not silently pass;
+		// surface it as a gap so the gate stays open.
+		gaps = append(gaps, ComplianceGap{
+			Type:        "validator-error",
+			Description: fmt.Sprintf("compliance gate validator failed: %v", err),
+			AffectedBead: gate.ID.String(),
+		})
+	}
+	return gaps
 }
 
 // ValidationResult represents the outcome of validation checks
@@ -154,6 +202,25 @@ func (v *Validator) Validate(ctx context.Context, bead types.Bead, projectPath s
 		Phase:    "validating",
 		Errors:   make([]ValidationError, 0),
 		Warnings: make([]string, 0),
+	}
+
+	// Phase 0: Compliance-gate specific checks. Runs first so the gate
+	// cannot close while upstream dependencies have stubs or failed
+	// closures. See compliance_gate.go for the rationale; the legacy
+	// behaviour was descriptive text in the bead body, which the
+	// agent regularly skipped.
+	if IsComplianceGate(bead) {
+		gaps := v.runComplianceGateChecks(ctx, bead, projectPath)
+		if len(gaps) > 0 {
+			result.Errors = append(result.Errors, ValidationError{
+				Severity: SeverityCritical,
+				Message:  FormatGaps(gaps),
+				Category: "compliance",
+			})
+			result.Passed = false
+			result.Duration = time.Since(start)
+			return result, nil
+		}
 	}
 
 	// Phase 1: Static Checks (always run)
