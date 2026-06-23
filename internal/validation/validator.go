@@ -94,25 +94,52 @@ func (s ErrorSeverity) String() string {
 	}
 }
 
-// IsEndOfChain determines if this bead is the final implementation bead
+// IsEndOfChain determines if this bead is at a validation point (i.e.,
+// it owns target files that should be checked before closure).
+//
+// Historically this function excluded TDD phase beads (tdd-red,
+// tdd-green, tdd-refactor) on the assumption that the final
+// "implementation" bead would catch issues. In practice this meant
+// GREEN beads — the most likely place to land a stub — bypassed
+// validation entirely. See docs/operations/validation-stub-detection.md
+// for the post-mortem.
+//
+// The new contract: any bead that owns target files (i.e., anything
+// the worker would write code for) is a validation point. The TDD
+// phase determines which specific checks the validator runs (see
+// tddPhaseChecks), but no phase is exempt from at least the static
+// checks (file existence, panic stubs, empty bodies, placeholder
+// comments).
 func IsEndOfChain(bead types.Bead) bool {
-	// Check if it's an implementation bead (not RED/GREEN/REFACTOR phase)
-	hasRed := containsLabel(bead.Labels, "tdd-red")
-	hasGreen := containsLabel(bead.Labels, "tdd-green")
-	hasRefactor := containsLabel(bead.Labels, "tdd-refactor")
-
-	// Implementation beads don't have TDD phase labels
-	isImplementation := !hasRed && !hasGreen && !hasRefactor
-
 	// Must have target files
 	hasTargetFiles := bead.Metadata != nil && bead.Metadata["target_files"] != ""
 
-	// Check if it's a terminal status (being closed)
+	// Check if it's a terminal status (being closed) or actively
+	// being worked on (so the chain can be validated mid-flight).
 	isTerminalStatus := bead.Status.IsTerminal() ||
 		bead.Status == types.StatusOpen ||
 		bead.Status == types.StatusInProgress
 
-	return isImplementation && hasTargetFiles && isTerminalStatus
+	return hasTargetFiles && isTerminalStatus
+}
+
+// TDDPhase returns the TDD phase label associated with a bead, or
+// empty string if the bead is not part of a TDD chain. Used by the
+// validator to decide which phase-specific checks to run.
+func TDDPhase(bead types.Bead) string {
+	for _, l := range bead.Labels {
+		switch l {
+		case "tdd-red":
+			return "red"
+		case "tdd-green":
+			return "green"
+		case "tdd-refactor":
+			return "refactor"
+		case "tdd-syntax":
+			return "syntax"
+		}
+	}
+	return ""
 }
 
 // Validate performs full validation on a bead

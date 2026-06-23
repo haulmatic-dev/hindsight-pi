@@ -360,7 +360,7 @@ func NewOverseer(config *Config) *Overseer {
 	o.piSetupManager = NewPiSetupManager(config)
 
 	// Initialize bead closer
-	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o.validationService)
+	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o.validationService, config)
 
 	// Initialize skill updater initializer
 	o.skillUpdaterInitializer = NewSkillUpdaterInitializer(config, &o.skillUpdater)

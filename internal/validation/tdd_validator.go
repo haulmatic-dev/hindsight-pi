@@ -168,6 +168,23 @@ func (v *TDDValidator) validateGreenBead(bead types.Bead, projectPath string) []
 				Description: fmt.Sprintf("Implementation file is empty: %s", f),
 				Severity:    SeverityError,
 			})
+			continue
+		}
+		// Stub detection beyond "is the file empty?". The static
+		// checker also runs DetectStubs, but we surface the gaps here
+		// as green-bead gaps so the validation service's fix-bead
+		// creation flow picks them up. The check is duplicated
+		// intentionally: a static-check failure should produce a fix
+		// bead regardless of how it was discovered.
+		if strings.HasSuffix(f, ".go") && !strings.HasSuffix(f, "_test.go") {
+			stubs := DetectStubs(f)
+			for _, stub := range stubs {
+				gaps = append(gaps, TDDGap{
+					Type:        "green",
+					Description: fmt.Sprintf("Stub pattern (%s) in %s: %s", stub.Category, stub.Function, stub.Detail),
+					Severity:    SeverityError,
+				})
+			}
 		}
 	}
 
