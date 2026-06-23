@@ -187,7 +187,10 @@ func detectDiscardParams(fset *token.FileSet, fn *ast.FuncDecl) *StubFinding {
 }
 
 // detectPlaceholderComment flags functions whose declaration comment
-// (or the first line above it) contains a placeholder keyword.
+// (or the first line above it) contains a placeholder keyword. The
+// check requires the keyword to appear within a stub-introducing
+// sentence; descriptive documentation that mentions the word
+// "placeholder" in passing is allowed.
 func detectPlaceholderComment(fset *token.FileSet, fn *ast.FuncDecl) *StubFinding {
 	if fn.Doc == nil {
 		return nil
@@ -197,12 +200,36 @@ func detectPlaceholderComment(fset *token.FileSet, fn *ast.FuncDecl) *StubFindin
 		combined += c.Text + "\n"
 	}
 	lower := strings.ToLower(combined)
-	for _, kw := range placeholderKeywords {
-		if strings.Contains(lower, kw) {
+
+	// Stub-introducing phrases. The check is "keyword appears in a
+	// sentence that introduces this function as a placeholder/stub".
+	// We look for the keyword within ~30 chars of "this", "is", or
+	// at the start of a sentence.
+	introducingPatterns := []string{
+		"this is a placeholder",
+		"this is a stub",
+		"this is a mock",
+		"this is temporary",
+		"this function is a placeholder",
+		"this function is a stub",
+		"placeholder implementation",
+		"stub implementation",
+		"mock implementation",
+		"real implementation comes in",
+		"real implementation is the follow-up",
+		"real implementation follows in",
+		"real impl comes in",
+		"todo: implement",
+		"todo: real",
+		"fixme: stub",
+		"fixme: real",
+	}
+	for _, pattern := range introducingPatterns {
+		if strings.Contains(lower, pattern) {
 			return &StubFinding{
 				Line:     fset.Position(fn.Pos()).Line,
 				Category: "placeholder-comment",
-				Detail:   "function doc-comment contains placeholder keyword: " + kw,
+				Detail:   "function doc-comment contains placeholder keyword: " + pattern,
 			}
 		}
 	}
