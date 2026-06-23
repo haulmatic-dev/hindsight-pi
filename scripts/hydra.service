@@ -13,7 +13,8 @@ WorkingDirectory=/opt/hydra
 # Environment
 Environment="HYDRA_CONFIG=/etc/hydra/hydra.yaml"
 Environment="HYDRA_HOME=/opt/hydra"
-Environment="PATH=/usr/local/bin:/usr/bin:/bin:/opt/hydra/bin"
+Environment="PATH=/opt/dev-tools/components/infra/services/beads-rust/beads_rust/target/release:/opt/dev-tools/components/infra/services/beads-viewer/beads_viewer:/usr/local/bin:/usr/bin:/bin:/opt/hydra/bin"
+EnvironmentFile=/etc/hydra/api-keys.env
 Environment="HYDRA_ENVIRONMENT=production"
 
 # Main executable
@@ -28,8 +29,8 @@ SendSIGKILL=yes
 
 # Resource limits
 LimitNOFILE=65536
-LimitNPROC=4096
-LimitAS=2G
+LimitNPROC=8192
+# LimitAS removed: hydra + TLDR + cgo libraries blow past 2GB virtual address space
 
 # Security
 NoNewPrivileges=false
@@ -48,8 +49,9 @@ StandardOutput=append:/var/log/hydra/hydra.log
 StandardError=append:/var/log/hydra/hydra-error.log
 SyslogIdentifier=hydra
 
-# Watchdog
-WatchdogSec=60s
+# Watchdog disabled: hydra binary does not call sd_notify(WATCHDOG=1).
+# Re-enable when the binary supports systemd watchdog notifications.
+# WatchdogSec=60s
 
 [Install]
 WantedBy=multi-user.target
