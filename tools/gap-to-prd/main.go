@@ -35,6 +35,8 @@ type GapReport struct {
 		Category      string   `json:"category"`
 		Severity      string   `json:"severity"`
 		Description   string   `json:"description"`
+		SourceEvidence string  `json:"source_evidence"`
+		GoEvidence     string  `json:"go_evidence"`
 		PRDRef        string   `json:"prd_ref,omitempty"`
 		TargetFiles   []string `json:"target_files,omitempty"`
 		SuggestedBead string   `json:"suggested_bead,omitempty"`
@@ -98,7 +100,7 @@ func generateMiniPRD(report GapReport) string {
 	frNum := 1
 	for category, gaps := range grouped {
 		for _, gap := range gaps {
-			b.WriteString(fmt.Sprintf("### FR-%03d: %s\n\n", frNum, titleCase(gap.Category)))
+			b.WriteString(fmt.Sprintf("### FR-%03d: Fix %s drift in %s\n\n", frNum, gap.Category, primaryTargetFile(gap.TargetFiles)))
 			b.WriteString(fmt.Sprintf("**Type:** %s gap\n\n", category))
 			b.WriteString(fmt.Sprintf("**Severity:** %s\n\n", gap.Severity))
 			b.WriteString(fmt.Sprintf("**Description:**\n%s\n\n", gap.Description))
@@ -116,9 +118,20 @@ func generateMiniPRD(report GapReport) string {
 			}
 
 			b.WriteString("**Acceptance Criteria:**\n")
-			b.WriteString(fmt.Sprintf("- %s\n", gap.SuggestedBead))
+			// Make the AC concrete: agents interpret "Verify X is
+			// intentional" as "do nothing", which closes the bead
+			// without actually changing code. Force a comparison +
+			// change instruction.
+			b.WriteString(fmt.Sprintf("- Source evidence (Java): %s\n", gap.SourceEvidence))
+			b.WriteString(fmt.Sprintf("- Go evidence (current): %s\n", gap.GoEvidence))
+			if gap.Severity == "critical" {
+				b.WriteString(fmt.Sprintf("- REQUIRED: change the Go file so the value matches the source. The previous SuggestedBead was: '%s' — that was not sufficient; agents closed these as 'verified intentional' without making the change.\n", gap.SuggestedBead))
+			} else {
+				b.WriteString(fmt.Sprintf("- Either change the Go file to match the source, OR update the PRD's §4.5.2 Behaviour Inventory to document the intentional divergence. The previous SuggestedBead was: '%s' — on its own that's not enough.\n", gap.SuggestedBead))
+			}
 			b.WriteString("- `go build ./...` exits 0\n")
 			b.WriteString("- `go test ./...` exits 0\n")
+			b.WriteString("- Re-run `tools/verify-source-vs-go --source-language auto --source-ref development --go-source .` and confirm zero gaps of category '" + gap.Category + "'\n")
 			b.WriteString("\n")
 
 			frNum++
@@ -159,6 +172,8 @@ func groupGapsByCategory(gaps []struct {
 	Category      string   `json:"category"`
 	Severity      string   `json:"severity"`
 	Description   string   `json:"description"`
+	SourceEvidence string  `json:"source_evidence"`
+	GoEvidence     string  `json:"go_evidence"`
 	PRDRef        string   `json:"prd_ref,omitempty"`
 	TargetFiles   []string `json:"target_files,omitempty"`
 	SuggestedBead string   `json:"suggested_bead,omitempty"`
@@ -167,6 +182,8 @@ func groupGapsByCategory(gaps []struct {
 	Category      string   `json:"category"`
 	Severity      string   `json:"severity"`
 	Description   string   `json:"description"`
+	SourceEvidence string  `json:"source_evidence"`
+	GoEvidence     string  `json:"go_evidence"`
 	PRDRef        string   `json:"prd_ref,omitempty"`
 	TargetFiles   []string `json:"target_files,omitempty"`
 	SuggestedBead string   `json:"suggested_bead,omitempty"`
@@ -176,6 +193,8 @@ func groupGapsByCategory(gaps []struct {
 		Category      string   `json:"category"`
 		Severity      string   `json:"severity"`
 		Description   string   `json:"description"`
+		SourceEvidence string  `json:"source_evidence"`
+		GoEvidence     string  `json:"go_evidence"`
 		PRDRef        string   `json:"prd_ref,omitempty"`
 		TargetFiles   []string `json:"target_files,omitempty"`
 		SuggestedBead string   `json:"suggested_bead,omitempty"`
@@ -191,6 +210,8 @@ func filterGapsByCategory(gaps []struct {
 	Category      string   `json:"category"`
 	Severity      string   `json:"severity"`
 	Description   string   `json:"description"`
+	SourceEvidence string  `json:"source_evidence"`
+	GoEvidence     string  `json:"go_evidence"`
 	PRDRef        string   `json:"prd_ref,omitempty"`
 	TargetFiles   []string `json:"target_files,omitempty"`
 	SuggestedBead string   `json:"suggested_bead,omitempty"`
@@ -199,6 +220,8 @@ func filterGapsByCategory(gaps []struct {
 	Category      string   `json:"category"`
 	Severity      string   `json:"severity"`
 	Description   string   `json:"description"`
+	SourceEvidence string  `json:"source_evidence"`
+	GoEvidence     string  `json:"go_evidence"`
 	PRDRef        string   `json:"prd_ref,omitempty"`
 	TargetFiles   []string `json:"target_files,omitempty"`
 	SuggestedBead string   `json:"suggested_bead,omitempty"`
@@ -208,6 +231,8 @@ func filterGapsByCategory(gaps []struct {
 		Category      string   `json:"category"`
 		Severity      string   `json:"severity"`
 		Description   string   `json:"description"`
+		SourceEvidence string  `json:"source_evidence"`
+		GoEvidence     string  `json:"go_evidence"`
 		PRDRef        string   `json:"prd_ref,omitempty"`
 		TargetFiles   []string `json:"target_files,omitempty"`
 		SuggestedBead string   `json:"suggested_bead,omitempty"`
@@ -228,4 +253,18 @@ func titleCase(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// primaryTargetFile returns the basename of the first target file,
+// or "(no target file)" when the gap has no TargetFiles. Used in
+// the FR title so the agent can find the file to edit at a glance.
+func primaryTargetFile(targets []string) string {
+	if len(targets) == 0 {
+		return "(no target file)"
+	}
+	base := targets[0]
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	return base
 }
