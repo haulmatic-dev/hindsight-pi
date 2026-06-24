@@ -261,46 +261,29 @@ func (cm *ComplianceCycleManager) runGapToPRD(gapReportPath string) (string, err
 }
 
 // createGapBeads invokes task-breakdown on the gap PRD to create new beads.
+//
+// The task-breakdown skill at config/pi/skills/task-breakdown/cli.mjs
+// accepts a single positional argument (the PRD path), not --file.
+// We invoke the cli.mjs script directly with `node` so we don't have
+// to depend on the `pi skill` wrapper's argument conventions.
 func (cm *ComplianceCycleManager) createGapBeads(gapPRDPath string) error {
-	// Read the gap PRD to get its content
-	prdContent, err := os.ReadFile(gapPRDPath)
-	if err != nil {
-		return fmt.Errorf("read gap PRD: %w", err)
+	cliPath := cm.config.TaskBreakdownPath
+	if cliPath == "" {
+		// Default: use the cli.mjs shipped with the pi-config.
+		cliPath = "/opt/dev-tools/config/pi/skills/task-breakdown/cli.mjs"
 	}
 
-	// Write a temporary request file for task-breakdown
-	reqPath := filepath.Join(cm.config.ProjectDir, "gaps", fmt.Sprintf("task-breakdown-req-%d.json", cm.cycles))
-	req := map[string]interface{}{
-		"prd_content":   string(prdContent),
-		"prd_path":      gapPRDPath,
-		"project_name":  fmt.Sprintf("gap-cycle-%d", cm.cycles),
-		"auto_create":   true,
-		"parent_prd":    cm.config.PRDPath,
-		"cycle":         cm.cycles,
-	}
-	reqJSON, _ := json.MarshalIndent(req, "", "  ")
-	if err := os.WriteFile(reqPath, reqJSON, 0644); err != nil {
-		return fmt.Errorf("write task-breakdown request: %w", err)
-	}
-
-	// Run task-breakdown skill
-	taskBreakdownBin := cm.config.TaskBreakdownPath
-	if taskBreakdownBin == "" {
-		// Default: use pi skill invocation
-		taskBreakdownBin = "pi"
-	}
-
+	// --json makes the runner emit machine-readable output we can
+	// parse if needed. --session-id ensures beads land under a
+	// known name prefix so the cycle's gap-tracking is consistent.
+	sessionID := fmt.Sprintf("gap-cycle-%d", cm.cycles)
+	args := []string{cliPath, gapPRDPath, "--json", "--session-id", sessionID}
 	log.Printf("[ComplianceCycle] Creating gap beads via task-breakdown...")
-	log.Printf("[ComplianceCycle] Request: %s", reqPath)
+	log.Printf("[ComplianceCycle] Running: node %s", strings.Join(args, " "))
 
-	// Invoke pi skill task-breakdown directly (Option B — DRY, reuse existing skill)
-	args := []string{"skill", "task-breakdown", "--file", reqPath}
-	log.Printf("[ComplianceCycle] Running: %s %s", taskBreakdownBin, strings.Join(args, " "))
-
-	cmd := exec.Command(taskBreakdownBin, args...)
+	cmd := exec.Command("node", args...)
 	cmd.Dir = cm.config.ProjectDir
 	cmd.Env = os.Environ()
-	// Set a generous timeout for task-breakdown (it calls LLM APIs)
 	cmdOut, cmdErr := cmd.CombinedOutput()
 	if cmdErr != nil {
 		return fmt.Errorf("task-breakdown failed: %v\nOutput: %s", cmdErr, string(cmdOut))

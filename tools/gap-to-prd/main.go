@@ -98,7 +98,7 @@ func generateMiniPRD(report GapReport) string {
 	frNum := 1
 	for category, gaps := range grouped {
 		for _, gap := range gaps {
-			b.WriteString(fmt.Sprintf("## FR-%03d: %s\n\n", frNum, titleCase(gap.Category)))
+			b.WriteString(fmt.Sprintf("### FR-%03d: %s\n\n", frNum, titleCase(gap.Category)))
 			b.WriteString(fmt.Sprintf("**Type:** %s gap\n\n", category))
 			b.WriteString(fmt.Sprintf("**Severity:** %s\n\n", gap.Severity))
 			b.WriteString(fmt.Sprintf("**Description:**\n%s\n\n", gap.Description))
