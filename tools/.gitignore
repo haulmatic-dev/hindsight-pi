@@ -6,4 +6,4 @@ verify-stubs/verify-stubs
 verify-us-ac/verify-us-ac
 detect-placeholders/detect-placeholders
 detect-phantom-files/detect-phantom-files
-verify-java-vs-go/verify-java-vs-go
+verify-source-vs-go/verify-source-vs-go
