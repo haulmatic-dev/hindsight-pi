@@ -123,6 +123,41 @@ func TestBeadCloser_CloseBlockedOnFailed_Disabled(t *testing.T) {
 	}
 }
 
+func TestBeadCloser_CreateFixBeadWithNilBead(t *testing.T) {
+	// When the bead lookup raced with the daemon lock and returned
+	// nil, the fix-bead creation must still work using the worker
+	// bead ID as the fallback.
+	mockBeads := newMockBeadsClient()
+	cfg := DefaultConfig()
+	cfg.Validation.CloseBlockedOnFailed = true
+	resolver := setupTestProjectResolver(t, "test-bead", t.TempDir())
+
+	closer := NewBeadCloser(
+		mockBeads,
+		nil,
+		resolver,
+		NewValidationService(cfg, NewRetryManager(5*time.Second, 5*time.Minute), mockBeads),
+		cfg,
+	)
+
+	// Pass nil for bead (simulates GetBead returning nil due to
+	// daemon lock); the function must still create a fix bead
+	// using workerBeadID as the source of truth.
+	if err := closer.createFixBeadForFailedClose(nil, "/tmp/test", "", "test-bead-original-id"); err != nil {
+		t.Fatalf("createFixBeadForFailedClose with nil bead: %v", err)
+	}
+	found := false
+	for id := range mockBeads.beads {
+		if id != "test-bead-original-id" {
+			found = true
+			t.Logf("created fix bead: %s", id)
+		}
+	}
+	if !found {
+		t.Errorf("expected a fix bead to be created with workerBeadID, none found")
+	}
+}
+
 func TestBeadCloser_ShouldRunTDDValidation_Label(t *testing.T) {
 	cfg := DefaultConfig()
 	closer := NewBeadCloser(nil, nil, nil, nil, cfg)

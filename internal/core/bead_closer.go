@@ -87,7 +87,7 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool) error {
 	// the old behaviour for fast iteration but defaults to blocking.
 	if c.closeBlockedOnFailed() && reason == "failed" {
 		log.Printf("[closeBead] Bead %s closed as failed with close_blocked_on_failed=true; creating fix bead to keep dependents blocked", worker.BeadID.String())
-		if err := c.createFixBeadForFailedClose(bead, projectPath, repoName); err != nil {
+		if err := c.createFixBeadForFailedClose(bead, projectPath, repoName, worker.BeadID.String()); err != nil {
 			log.Printf("[closeBead] Failed to create fix bead for %s: %v", worker.BeadID.String(), err)
 		}
 	}
@@ -125,21 +125,38 @@ func (c *BeadCloser) closeBlockedOnFailed() bool {
 
 // createFixBeadForFailedClose creates a fix bead that blocks the
 // failed bead's dependents. The fix bead re-runs the failed work.
-func (c *BeadCloser) createFixBeadForFailedClose(bead *types.Bead, projectPath, repoName string) error {
-	if bead == nil {
-		return nil
+//
+// When `bead` is non-nil we read its title + priority for the fix
+// bead's metadata. When it's nil (e.g., the bead lookup raced with
+// the daemon lock and returned an error), we fall back to the
+// worker.BeadID so the fix bead still gets created with a sensible
+// title derived from the ID.
+func (c *BeadCloser) createFixBeadForFailedClose(bead *types.Bead, projectPath, repoName, workerBeadID string) error {
+	var title, priorityBeadID string
+	priority := 1
+	if bead != nil {
+		title = "Fix: " + bead.Title
+		priorityBeadID = bead.ID.String()
+		priority = bead.Priority
+	} else {
+		// Fallback path: bead lookup failed (daemon lock, transient
+		// error, etc.). Synthesize a useful title from the worker
+		// bead ID so the fix bead is still meaningful in the audit
+		// log.
+		title = "Fix: failed-closure bead " + workerBeadID
+		priorityBeadID = workerBeadID
 	}
-	title := "Fix: " + bead.Title
 	description := "Auto-created fix bead because the original closed as `failed`.\n\n" +
-		"Original bead: " + bead.ID.String() + "\n" +
-		"Close reason: failed (worker exited non-zero or hit retry exhaustion)\n\n" +
+		"Original bead: " + priorityBeadID + "\n" +
+		"Close reason: failed (worker exited non-zero or hit retry exhaustion; " +
+		"the original bead may still hold stub implementations)\n\n" +
 		"Re-run the original task and ensure it closes as `completed`."
 	req := types.CreateBeadRequest{
 		Title:        title,
 		Description:  description,
 		Type:         "fix",
-		Priority:     bead.Priority,
-		Dependencies: []types.BeadID{bead.ID},
+		Priority:     priority,
+		Dependencies: []types.BeadID{types.BeadID(priorityBeadID)},
 		Labels:       []string{"auto-fix", "failed-closure"},
 	}
 	_, err := c.beadsClient.CreateBead(projectPath, req)
