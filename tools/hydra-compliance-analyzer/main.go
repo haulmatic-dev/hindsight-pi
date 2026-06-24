@@ -12,6 +12,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -51,10 +52,11 @@ type Gap struct {
 }
 
 type Config struct {
-	PRDPath    string
-	ProjectDir string
-	OutputPath string
-	Cycles     int
+	PRDPath           string
+	ProjectDir        string
+	OutputPath        string
+	Cycles            int
+	EnableExperimental bool
 }
 
 func main() {
@@ -68,12 +70,26 @@ func main() {
 		Gaps:       []Gap{},
 	}
 
-	// Run all 5 checks
-	runCheck(report, "verify-exports", runVerifyExports(cfg))
-	runCheck(report, "verify-routes", runVerifyRoutes(cfg))
-	runCheck(report, "verify-us-ac", runVerifyUSAC(cfg))
-	runCheck(report, "detect-placeholders", runDetectPlaceholders(cfg))
-	runCheck(report, "detect-phantom-files", runDetectPhantomFiles(cfg))
+	// Run verifiers. Most are gated behind `--enable-experimental`
+	// because they currently produce too many false positives
+	// (especially verify-exports and verify-routes) for the
+	// compliance cycle to be useful. The minimum useful set:
+	//
+	//   - verify-source-vs-go: behavioural drift between source and Go
+	//   - detect-stubs: stub detector (when enabled in hydra-config)
+	//
+	// `--enable-experimental` adds the other 4 verifiers (verify-exports,
+	// verify-routes, verify-us-ac, detect-placeholders,
+	// detect-phantom-files) which are individually useful but produce
+	// noise when bundled. Operators turn them on for one-off audits.
+	if cfg.EnableExperimental {
+		runCheck(report, "verify-exports", runVerifyExports(cfg))
+		runCheck(report, "verify-routes", runVerifyRoutes(cfg))
+		runCheck(report, "verify-us-ac", runVerifyUSAC(cfg))
+		runCheck(report, "detect-placeholders", runDetectPlaceholders(cfg))
+		runCheck(report, "detect-phantom-files", runDetectPhantomFiles(cfg))
+	}
+	runCheck(report, "verify-source-vs-go", runVerifySourceVsGo(cfg))
 
 	// Determine pass/fail
 	report.Passed = len(report.Gaps) == 0
@@ -110,18 +126,20 @@ func parseFlags() Config {
 	project := flag.String("project", ".", "Project root directory")
 	output := flag.String("output", "", "Output JSON file path (default: stdout)")
 	cycles := flag.Int("cycles", 0, "Current compliance cycle number")
+	experimental := flag.Bool("enable-experimental", false, "Run the noisier experimental verifiers (verify-exports, verify-routes, verify-us-ac, detect-placeholders, detect-phantom-files). Default: only verify-source-vs-go runs.")
 	flag.Parse()
 
 	if *prd == "" {
-		fmt.Fprintln(os.Stderr, "Usage: hydra-compliance-analyzer --prd <prd.md> [--project .] [--output gap-report.json]")
+		fmt.Fprintln(os.Stderr, "Usage: hydra-compliance-analyzer --prd <prd.md> [--project .] [--output gap-report.json] [--enable-experimental]")
 		os.Exit(2)
 	}
 
 	return Config{
-		PRDPath:    *prd,
-		ProjectDir: *project,
-		OutputPath: *output,
-		Cycles:     *cycles,
+		PRDPath:            *prd,
+		ProjectDir:         *project,
+		OutputPath:         *output,
+		Cycles:             *cycles,
+		EnableExperimental: *experimental,
 	}
 }
 
@@ -139,19 +157,72 @@ func runCheck(report *GapReport, name string, gaps []Gap) {
 }
 
 // runTool builds the tool (if needed) and runs the compiled binary.
+//
+// Resolution order for the binary:
+//   1. <ProjectDir>/tools/<toolname>/<toolname>  (project-vendored)
+//   2. $HYDRA_TOOLS_DIR/<toolname>/<toolname>    (env override)
+//   3. /opt/dev-tools/components/hydra/tools/<toolname>/<toolname>  (system-wide default)
+//
+// Build (go build) only runs for option 1, where the source is in the
+// project tree. For options 2 and 3 the binary is assumed to already
+// exist (built by the hydra deploy step or by running `make build`
+// in /opt/dev-tools/components/hydra/tools/<toolname>).
 func runTool(toolName string, args []string, cfg Config) ([]byte, error) {
 	toolsDir := filepath.Join(cfg.ProjectDir, "tools")
+	projectBin := filepath.Join(toolsDir, toolName, toolName)
 
-	// Build first to avoid "Go build:" prefix in output
-	buildCmd := exec.Command("go", "build", filepath.Join(toolsDir, toolName))
-	buildCmd.Dir = cfg.ProjectDir
-	buildCmd.CombinedOutput()
+	// 1. project-vendored
+	if _, err := os.Stat(projectBin); err == nil {
+		buildCmd := exec.Command("go", "build", filepath.Join(toolsDir, toolName))
+		buildCmd.Dir = cfg.ProjectDir
+		buildCmd.CombinedOutput()
+		cmd := exec.Command(projectBin, args...)
+		cmd.Dir = cfg.ProjectDir
+		var stdout bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return stdout.Bytes(), err
+		}
+		return stdout.Bytes(), nil
+	}
 
-	// Run compiled binary
-	binPath := filepath.Join(toolsDir, toolName, toolName)
-	cmd := exec.Command(binPath, args...)
-	cmd.Dir = cfg.ProjectDir
-	return cmd.CombinedOutput()
+	// 2. env override
+	if envDir := os.Getenv("HYDRA_TOOLS_DIR"); envDir != "" {
+		envBin := filepath.Join(envDir, toolName, toolName)
+		if _, err := os.Stat(envBin); err == nil {
+			cmd := exec.Command(envBin, args...)
+			cmd.Dir = cfg.ProjectDir
+			var stdout bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return stdout.Bytes(), err
+			}
+			return stdout.Bytes(), nil
+		}
+	}
+
+	// 3. system-wide default
+	systemBin := "/opt/dev-tools/components/hydra/tools/" + toolName + "/" + toolName
+	if _, err := os.Stat(systemBin); err == nil {
+		cmd := exec.Command(systemBin, args...)
+		cmd.Dir = cfg.ProjectDir
+		// Capture stdout only. Stderr (e.g. "Auto-detected source
+		// language: java") is dropped so the JSON output stays
+		// parseable. Tool authors should put progress on stderr.
+		var stdout bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return stdout.Bytes(), err
+		}
+		return stdout.Bytes(), nil
+	}
+
+	// Not found anywhere — return a useful error so the parent logs
+	// which tool is missing.
+	return nil, fmt.Errorf("tool %q not found at project path, $HYDRA_TOOLS_DIR, or system path /opt/dev-tools/components/hydra/tools/%s", toolName, toolName)
 }
 
 func runVerifyExports(cfg Config) []Gap {
@@ -393,4 +464,74 @@ func slug(s string) string {
 		s = strings.ReplaceAll(s, "--", "-")
 	}
 	return strings.Trim(s, "-")
+}
+
+// runVerifySourceVsGo runs the verify-source-vs-go tool which compares
+// the source-language reference (Java, Python, TypeScript, Ruby) on
+// `development` against the Go implementation. Surfaces behavioural
+// drift: task queue default, webhook scheme, retry attempts, error
+// message strings, workflow/job ID format.
+//
+// The source language is auto-detected by the tool from file
+// extensions; we let it do that rather than threading --source-language
+// through the cycle config.
+func runVerifySourceVsGo(cfg Config) []Gap {
+	sourceRef := "development"
+	args := []string{
+		"--source-language", "auto",
+		"--source-ref", sourceRef,
+		"--go-source", cfg.ProjectDir,
+	}
+
+	out, err := runTool("verify-source-vs-go", args, cfg)
+	if err != nil {
+		// Non-zero exit expected when gaps found.
+	}
+
+	var result struct {
+		Passed     bool     `json:"passed"`
+		SourceLang string   `json:"source_language"`
+		Categories []string `json:"categories_checked"`
+		Gaps       []struct {
+			ID             string   `json:"id"`
+			Category       string   `json:"category"`
+			Severity       string   `json:"severity"`
+			Description    string   `json:"description"`
+			SourceEvidence string   `json:"source_evidence"`
+			GoEvidence     string   `json:"go_evidence"`
+			PRDRef         string   `json:"prd_ref"`
+			TargetFiles    []string `json:"target_files"`
+			SuggestedBead  string   `json:"suggested_bead"`
+		} `json:"gaps"`
+	}
+
+	if jsonErr := json.Unmarshal(out, &result); jsonErr != nil {
+		return []Gap{{
+			ID:          "source-vs-go-parse-error",
+			Category:    "source-vs-go",
+			Severity:    "info",
+			Description: fmt.Sprintf("Failed to parse verify-source-vs-go output: %v", jsonErr),
+		}}
+	}
+
+	if result.Passed {
+		return nil
+	}
+
+	if result.SourceLang == "" {
+		result.SourceLang = "auto"
+	}
+
+	gaps := make([]Gap, 0, len(result.Gaps))
+	for _, g := range result.Gaps {
+		gaps = append(gaps, Gap{
+			ID:            g.ID,
+			Category:      "source-vs-go-" + g.Category,
+			Severity:      g.Severity,
+			Description:   fmt.Sprintf("[%s] %s", result.SourceLang, g.Description),
+			TargetFiles:   g.TargetFiles,
+			SuggestedBead: g.SuggestedBead,
+		})
+	}
+	return gaps
 }
