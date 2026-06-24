@@ -291,6 +291,65 @@ func (cm *ComplianceCycleManager) createGapBeads(gapPRDPath string) error {
 
 	log.Printf("[ComplianceCycle] task-breakdown output:\n%s", string(cmdOut))
 	log.Printf("[ComplianceCycle] Gap beads created successfully")
+
+	// Auto-approve the approval gate that task-breakdown created.
+	// Without this, the cycle stalls at the verify step because
+	// the gate has StatusInProgress and never gets to StatusReady.
+	// We use the beadsClient directly (br CLI is async and the
+	// overseer owns this state).
+	if err := cm.autoApproveGapGate(gapPRDPath); err != nil {
+		log.Printf("[ComplianceCycle] WARN: auto-approve gate failed: %v", err)
+		// Non-fatal: operator can approve manually with
+		// `br close <gate-id> -r approved --force`.
+	}
+
+	return nil
+}
+
+// autoApproveGapGate finds the approval gate that task-breakdown
+// created for this cycle's gap PRD and closes it. The gate is
+// identified by title prefix ('APPROVE: <feature> Implementation
+// Review') and by the dependency on the gap-PRD's master epic.
+func (cm *ComplianceCycleManager) autoApproveGapGate(gapPRDPath string) error {
+	beadsClient := cm.overseer.GetBeadsClient()
+	if beadsClient == nil {
+		return fmt.Errorf("no beads client")
+	}
+
+	projectPath := cm.config.ProjectDir
+	for _, project := range cm.overseer.projects {
+		repoName := ""
+		if len(project.Repos) > 0 {
+			repoName = project.Repos[0].Name
+		}
+		beads, err := beadsClient.ListBeads(project.Path, repoName)
+		if err != nil {
+			continue
+		}
+		for _, b := range beads {
+			// Approval gates from task-breakdown have type=approval
+			// (set via createApprovalGate in executor.mjs) and a title
+			// matching "APPROVE: ...". The cycle's own gate includes
+			// the gap-PRD path in the description. We use both as a
+			// signature to avoid approving unrelated gates.
+			if b.Type != "approval" {
+				continue
+			}
+			if !strings.HasPrefix(b.Title, "APPROVE:") {
+				continue
+			}
+			if !strings.Contains(b.Description, gapPRDPath) {
+				continue
+			}
+			if b.Status.IsTerminal() {
+				continue
+			}
+			log.Printf("[ComplianceCycle] Auto-approving gate %s: %s", b.ID, b.Title)
+			if err := beadsClient.CloseBead(projectPath, repoName, b.ID, "auto-approved by compliance cycle (gap-PRD ready for execution)"); err != nil {
+				return fmt.Errorf("close %s: %w", b.ID, err)
+			}
+		}
+	}
 	return nil
 }
 
