@@ -131,10 +131,24 @@ func (c *BeadCloser) closeBlockedOnFailed() bool {
 // the daemon lock and returned an error), we fall back to the
 // worker.BeadID so the fix bead still gets created with a sensible
 // title derived from the ID.
+//
+// MaxDepth guards against recursive fix-bead explosion. Without
+// it, a fix bead that itself fails would create another fix bead
+// with title "Fix: Fix: GAP: ..." and so on. We count the existing
+// "Fix: " prefix on the original bead's title and skip creation
+// when it exceeds 2 (i.e., the original gap + 1 retry level).
 func (c *BeadCloser) createFixBeadForFailedClose(bead *types.Bead, projectPath, repoName, workerBeadID string) error {
 	var title, priorityBeadID string
 	priority := 1
 	if bead != nil {
+		// Recursion guard: skip if the original title already has
+		// 3 or more "Fix: " prefixes (i.e., gap → fix → fix → fix
+		// → blocked). Further fix beads would only repeat the
+		// original work; better to surface the original gap bead.
+		if strings.Count(bead.Title, "Fix: ") >= 3 {
+			log.Printf("[BeadCloser] Refusing to create nested fix bead for %s (title has %d 'Fix: ' prefixes); deeper recursion would be noise", bead.ID, strings.Count(bead.Title, "Fix: "))
+			return nil
+		}
 		title = "Fix: " + bead.Title
 		priorityBeadID = bead.ID.String()
 		priority = bead.Priority
