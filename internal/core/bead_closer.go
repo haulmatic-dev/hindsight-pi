@@ -42,7 +42,13 @@ func NewBeadCloser(beadsClient BeadsClient, intelligenceHub *IntelligenceHub, pr
 // dependents. Config flag `validation.close_blocked_on_failed` (default
 // true) gates this. When set, failed closures trigger a fix bead
 // creation flow and the bead's dependents stay blocked on the fix.
-func (c *BeadCloser) Close(worker *types.Worker, success bool) error {
+//
+// Infra-failure guard (2026-06-25): transient infrastructure failures
+// (rate limits, timeouts, daemon locks) do not create fix beads.
+// The bead stays open and the scheduler retries it with exponential
+// backoff up to 1 hour, then hourly thereafter.  Only code-level
+// failures (stubs, build errors, etc.) spawn fix beads.
+func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) error {
 	projectName := worker.BeadID.Project()
 	repoName := worker.BeadID.Repo()
 
@@ -86,9 +92,22 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool) error {
 	// their dependents unblocked. The flag below lets operators keep
 	// the old behaviour for fast iteration but defaults to blocking.
 	if c.closeBlockedOnFailed() && reason == "failed" {
-		log.Printf("[closeBead] Bead %s closed as failed with close_blocked_on_failed=true; creating fix bead to keep dependents blocked", worker.BeadID.String())
-		if err := c.createFixBeadForFailedClose(bead, projectPath, repoName, worker.BeadID.String()); err != nil {
-			log.Printf("[closeBead] Failed to create fix bead for %s: %v", worker.BeadID.String(), err)
+		if isInfrastructureExitCode(exitCode) {
+			// Infrastructure failure: do not create a fix bead.  The bead
+			// will be retried by the scheduler with exponential backoff
+			// up to 1 hour, then hourly.  If retries are exhausted we
+			// add the infra-exhausted label for visibility.
+			log.Printf("[closeBead] Skipping fix bead for %s: infrastructure failure (exit %d)", worker.BeadID.String(), exitCode)
+			if bead != nil && c.beadsClient != nil {
+				if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, worker.BeadID, []string{"infra-exhausted"}); err != nil {
+					log.Printf("[closeBead] Failed to add infra-exhausted label to %s: %v", worker.BeadID.String(), err)
+				}
+			}
+		} else {
+			log.Printf("[closeBead] Bead %s closed as failed with close_blocked_on_failed=true; creating fix bead to keep dependents blocked", worker.BeadID.String())
+			if err := c.createFixBeadForFailedClose(bead, projectPath, repoName, worker.BeadID.String()); err != nil {
+				log.Printf("[closeBead] Failed to create fix bead for %s: %v", worker.BeadID.String(), err)
+			}
 		}
 	}
 

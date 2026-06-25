@@ -306,6 +306,15 @@ func main() {
 		result.Duration = duration
 	}
 
+	// Classify the failure so hydra can distinguish infrastructure
+	// problems (rate limits, timeouts) from code-level problems
+	// (stubs, build errors).  Infrastructure failures do not spawn
+	// fix beads; the scheduler retries them with backoff.
+	if result != nil && !result.Success {
+		result.ExitCode = classifyFailure(result)
+		log.Printf("🔧 Failure classified as exit code %d for bead %s", result.ExitCode, beadID)
+	}
+
 	// Determine status
 	status := "success"
 	exitCode := 0
@@ -1705,6 +1714,52 @@ func closeBeadFromWorker(bead types.Bead, projectPath, repoName, reason string) 
 
 	log.Printf("   Successfully closed bead via br CLI")
 	return nil
+}
+
+// classifyFailure examines the execution result and classifies it into a
+// specific exit code.  This lets hydra distinguish infrastructure failures
+// (rate limits, timeouts, etc.) from code failures (stubs, build errors, etc.)
+// so that fix beads are only created for real work gaps.
+//
+// Exit codes:
+//   0 – success
+//   1 – generic / unknown code failure
+//   2 – rate-limit / API quota exceeded
+//   3 – timeout / deadline exceeded
+//   4 – infrastructure (network, daemon lock, permissions, etc.)
+//   5 – stub / placeholder detected
+func classifyFailure(result *ExecutionResult) int {
+	if result == nil || result.Success {
+		return 0
+	}
+	if result.Error == "" {
+		return 1
+	}
+	err := strings.ToLower(result.Error)
+	switch {
+	case strings.Contains(err, "rate_limit") ||
+		strings.Contains(err, "token plan") ||
+		strings.Contains(err, "429"):
+		return 2
+	case strings.Contains(err, "timeout") ||
+		strings.Contains(err, "deadline exceeded"):
+		return 3
+	case strings.Contains(err, "stub") ||
+		strings.Contains(err, "placeholder") ||
+		strings.Contains(err, "todo") ||
+		strings.Contains(err, "fixme"):
+		return 5
+	case strings.Contains(err, "connection refused") ||
+		strings.Contains(err, "connection reset") ||
+		strings.Contains(err, "i/o error") ||
+		strings.Contains(err, "permission denied") ||
+		strings.Contains(err, "exit status 8") ||
+		strings.Contains(err, "bead get failed") ||
+		strings.Contains(err, "no such host") ||
+		strings.Contains(err, "tls handshake"):
+		return 4
+	}
+	return 1
 }
 
 // checkWorkComplete verifies that a bead's work is actually done by checking:

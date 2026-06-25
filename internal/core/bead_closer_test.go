@@ -48,7 +48,7 @@ func TestBeadCloser_CloseBlockedOnFailed_CreatesFixBead(t *testing.T) {
 	// key. The Project field on the bead itself drives resolution.
 	worker := &types.Worker{BeadID: types.BeadID("test-bead-1")}
 
-	if err := closer.Close(worker, false); err != nil {
+	if err := closer.Close(worker, false, 1); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
 
@@ -113,7 +113,7 @@ func TestBeadCloser_CloseBlockedOnFailed_Disabled(t *testing.T) {
 	)
 
 	worker := &types.Worker{BeadID: types.BeadID("test-bead-2")}
-	if err := closer.Close(worker, false); err != nil {
+	if err := closer.Close(worker, false, 1); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
 

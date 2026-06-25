@@ -173,7 +173,7 @@ func (o *Overseer) monitorAgentSession(worker *types.Worker, connector agents.Ag
 	connector.Cleanup(ctx, session)
 
 	// Close bead
-	o.closeBead(worker, success)
+	o.closeBead(worker, success, 0)
 
 	// Record completion
 	if o.settledStateSvc != nil {

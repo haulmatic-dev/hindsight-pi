@@ -100,7 +100,7 @@ validation:
 
 # Closed-loop compliance cycle. When all beads in a project are
 # closed, hydra runs the verifier tools (hydra-compliance-analyzer
-# plus verify-java-vs-go for migration projects) and creates gap
+# plus verify-source-vs-go for migration projects) and creates gap
 # beads via task-breakdown. Loops until zero gaps or MaxCycles.
 # Per-project overrides via project_configs[i].compliance_cycle.
 compliance_cycle:
@@ -111,7 +111,7 @@ compliance_cycle:
   project_dir: /home/buddhi/projects/source-to-pay/srv-file-handler
   analyzer_path: /opt/dev-tools/components/hydra/tools/hydra-compliance-analyzer/hydra-compliance-analyzer
   gap_to_prd_path: /opt/dev-tools/components/hydra/tools/gap-to-prd/gap-to-prd
-  task_breakdown_path: pi
+  task_breakdown_path: /opt/dev-tools/config/pi/skills/task-breakdown/cli.mjs
 
 # CRITICAL: pi.config_dir must point to a valid Pi config with skills.
 # See hydra-config.yaml.example and AGENTS.md for details.

@@ -21,7 +21,7 @@ type WorkerLifecycle struct {
 	dagMu           *sync.RWMutex
 	completed       map[string]bool
 	removeWorker    func(workerID string)
-	closeBead       func(worker *types.Worker, success bool) error
+	closeBead       func(worker *types.Worker, success bool, exitCode int) error
 	triggerSchedule func()
 	notifyMCP       func(worker *types.Worker, success bool, exitCode int, duration time.Duration)
 	getMaxRetries   func() int
@@ -37,7 +37,7 @@ func NewWorkerLifecycle(
 	dagMu *sync.RWMutex,
 	completed map[string]bool,
 	removeWorker func(workerID string),
-	closeBead func(worker *types.Worker, success bool) error,
+	closeBead func(worker *types.Worker, success bool, exitCode int) error,
 	triggerSchedule func(),
 	notifyMCP func(worker *types.Worker, success bool, exitCode int, duration time.Duration),
 	getMaxRetries func() int,
@@ -96,6 +96,27 @@ func (wl *WorkerLifecycle) Wait(worker *types.Worker, cmd *exec.Cmd) workerCompl
 		wl.HandleFailure(worker, exitCode, duration)
 	}
 
+	// Infrastructure-failure guard: do not close the bead (and therefore do not
+	// create a fix bead) when the worker failed for a transient infra reason
+	// and we still have retries left.  The bead stays in_progress in the beads
+	// store; the scheduler will retry it after the cooldown.
+	if !success && isInfrastructureExitCode(exitCode) {
+		retryCount := wl.retryManager.GetRetryCount(worker.ID)
+		maxRetries := wl.getMaxRetries()
+		if retryCount < maxRetries {
+			log.Printf("[WorkerLifecycle] Infra failure (exit %d) for %s, %d/%d retries left — leaving bead open for retry", exitCode, worker.ID, retryCount, maxRetries)
+			wl.removeWorker(worker.ID)
+			return workerCompletion{
+				worker:   worker,
+				success:  false,
+				exitCode: exitCode,
+				duration: duration,
+			}
+		}
+		// Retries exhausted: fall through to closeBead.  BeadCloser will close
+		// as failed with the infra-exhausted label and will NOT create a fix bead.
+	}
+
 	wl.removeWorker(worker.ID)
 
 	if wl.workerTracker != nil {
@@ -104,7 +125,7 @@ func (wl *WorkerLifecycle) Wait(worker *types.Worker, cmd *exec.Cmd) workerCompl
 		}
 	}
 
-	closeErr := wl.closeBead(worker, success)
+	closeErr := wl.closeBead(worker, success, exitCode)
 
 	return workerCompletion{
 		worker:     worker,
@@ -166,7 +187,12 @@ func (wl *WorkerLifecycle) HandleSuccess(worker *types.Worker, duration time.Dur
 }
 
 func (wl *WorkerLifecycle) HandleFailure(worker *types.Worker, exitCode int, duration time.Duration) {
-	workerErr := fmt.Errorf("worker exited with code %d", exitCode)
+	var workerErr error
+	if isInfrastructureExitCode(exitCode) {
+		workerErr = fmt.Errorf("infrastructure failure (exit %d)", exitCode)
+	} else {
+		workerErr = fmt.Errorf("worker exited with code %d", exitCode)
+	}
 	wl.retryManager.RecordRetry(worker.ID, workerErr)
 
 	retryCount := wl.retryManager.GetRetryCount(worker.ID)
@@ -188,6 +214,13 @@ func (wl *WorkerLifecycle) HandleFailure(worker *types.Worker, exitCode int, dur
 	if err := wl.dag.MarkFailed(worker.ID); err != nil {
 		wl.errorLogger.Error("DAG", "MarkFailed", worker.ID, err, "warn")
 	}
+}
+
+// isInfrastructureExitCode returns true for exit codes that indicate transient
+// infrastructure problems (rate limits, timeouts, network issues, daemon locks)
+// rather than code-level problems.
+func isInfrastructureExitCode(code int) bool {
+	return code == 2 || code == 3 || code == 4
 }
 
 func (wl *WorkerLifecycle) scheduleAfterCompletion(worker *types.Worker, success bool, newlyReady []string) {

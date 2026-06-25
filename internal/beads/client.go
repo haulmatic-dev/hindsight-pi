@@ -358,3 +358,13 @@ func (c *Client) CreateBead(projectPath string, req types.CreateBeadRequest) (ty
 
 	return beadID, nil
 }
+
+// UpdateBeadLabels adds labels to an existing bead using br label add.
+func (c *Client) UpdateBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error {
+	args := []string{"label", "add", string(beadID)}
+	for _, label := range labels {
+		args = append(args, "-l", label)
+	}
+	_, err := c.execInDir(projectPath, "br", args...)
+	return err
+}
