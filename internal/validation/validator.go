@@ -13,9 +13,11 @@ import (
 
 // Validator orchestrates validation checks for bead implementations
 type Validator struct {
-	staticChecker *StaticChecker
-	agentVerifier *AgentVerifier
-	config        ValidationConfig
+	staticChecker       *StaticChecker
+	agentVerifier       *AgentVerifier
+	complianceValidator *ComplianceGateValidator
+	config              ValidationConfig
+	gateBeadsClient     GateBeadClient // optional; set by NewValidatorWithClient for compliance-gate upstream checks
 }
 
 // ValidationConfig contains configuration for the validator
@@ -43,10 +45,56 @@ func DefaultValidationConfig() ValidationConfig {
 // NewValidator creates a new validator with the given configuration
 func NewValidator(config ValidationConfig) *Validator {
 	return &Validator{
-		staticChecker: NewStaticChecker(),
-		agentVerifier: NewAgentVerifier(config.AgentEndpoint, config.Timeout),
-		config:        config,
+		staticChecker:       NewStaticChecker(),
+		agentVerifier:       NewAgentVerifier(config.AgentEndpoint, config.Timeout),
+		complianceValidator: NewComplianceGateValidator(),
+		config:              config,
 	}
+}
+
+// NewValidatorWithClient returns a Validator wired with a beads
+// client. The compliance gate validator reads upstream dependencies
+// via this client. When nil, compliance gate checks skip the
+// upstream-traversal step (other checks still run).
+func NewValidatorWithClient(config ValidationConfig, client GateBeadClient) *Validator {
+	v := NewValidator(config)
+	v.gateBeadsClient = client
+	return v
+}
+
+// runComplianceGateChecks inspects the gate bead's dependencies and
+// returns the list of gaps. When no gateBeadsClient is wired, the
+// dependency traversal is skipped; only the gate's own target_files
+// are checked. The Validate() caller decides what to do with the
+// gaps.
+func (v *Validator) runComplianceGateChecks(ctx context.Context, gate types.Bead, projectPath string) []ComplianceGap {
+	gv := v.complianceValidator
+	if gv == nil {
+		gv = NewComplianceGateValidator()
+	}
+
+	deps := []types.Bead{}
+	if v.gateBeadsClient != nil {
+		for _, depID := range gate.Dependencies {
+			bead, err := v.gateBeadsClient.GetBead(projectPath, "", depID)
+			if err != nil || bead == nil {
+				continue
+			}
+			deps = append(deps, *bead)
+		}
+	}
+
+	gaps, err := gv.ValidateGate(ctx, gate, deps, projectPath)
+	if err != nil {
+		// A failure in the validator itself should not silently pass;
+		// surface it as a gap so the gate stays open.
+		gaps = append(gaps, ComplianceGap{
+			Type:        "validator-error",
+			Description: fmt.Sprintf("compliance gate validator failed: %v", err),
+			AffectedBead: gate.ID.String(),
+		})
+	}
+	return gaps
 }
 
 // ValidationResult represents the outcome of validation checks
@@ -94,25 +142,52 @@ func (s ErrorSeverity) String() string {
 	}
 }
 
-// IsEndOfChain determines if this bead is the final implementation bead
+// IsEndOfChain determines if this bead is at a validation point (i.e.,
+// it owns target files that should be checked before closure).
+//
+// Historically this function excluded TDD phase beads (tdd-red,
+// tdd-green, tdd-refactor) on the assumption that the final
+// "implementation" bead would catch issues. In practice this meant
+// GREEN beads — the most likely place to land a stub — bypassed
+// validation entirely. See docs/operations/validation-stub-detection.md
+// for the post-mortem.
+//
+// The new contract: any bead that owns target files (i.e., anything
+// the worker would write code for) is a validation point. The TDD
+// phase determines which specific checks the validator runs (see
+// tddPhaseChecks), but no phase is exempt from at least the static
+// checks (file existence, panic stubs, empty bodies, placeholder
+// comments).
 func IsEndOfChain(bead types.Bead) bool {
-	// Check if it's an implementation bead (not RED/GREEN/REFACTOR phase)
-	hasRed := containsLabel(bead.Labels, "tdd-red")
-	hasGreen := containsLabel(bead.Labels, "tdd-green")
-	hasRefactor := containsLabel(bead.Labels, "tdd-refactor")
-
-	// Implementation beads don't have TDD phase labels
-	isImplementation := !hasRed && !hasGreen && !hasRefactor
-
 	// Must have target files
 	hasTargetFiles := bead.Metadata != nil && bead.Metadata["target_files"] != ""
 
-	// Check if it's a terminal status (being closed)
+	// Check if it's a terminal status (being closed) or actively
+	// being worked on (so the chain can be validated mid-flight).
 	isTerminalStatus := bead.Status.IsTerminal() ||
 		bead.Status == types.StatusOpen ||
 		bead.Status == types.StatusInProgress
 
-	return isImplementation && hasTargetFiles && isTerminalStatus
+	return hasTargetFiles && isTerminalStatus
+}
+
+// TDDPhase returns the TDD phase label associated with a bead, or
+// empty string if the bead is not part of a TDD chain. Used by the
+// validator to decide which phase-specific checks to run.
+func TDDPhase(bead types.Bead) string {
+	for _, l := range bead.Labels {
+		switch l {
+		case "tdd-red":
+			return "red"
+		case "tdd-green":
+			return "green"
+		case "tdd-refactor":
+			return "refactor"
+		case "tdd-syntax":
+			return "syntax"
+		}
+	}
+	return ""
 }
 
 // Validate performs full validation on a bead
@@ -127,6 +202,25 @@ func (v *Validator) Validate(ctx context.Context, bead types.Bead, projectPath s
 		Phase:    "validating",
 		Errors:   make([]ValidationError, 0),
 		Warnings: make([]string, 0),
+	}
+
+	// Phase 0: Compliance-gate specific checks. Runs first so the gate
+	// cannot close while upstream dependencies have stubs or failed
+	// closures. See compliance_gate.go for the rationale; the legacy
+	// behaviour was descriptive text in the bead body, which the
+	// agent regularly skipped.
+	if IsComplianceGate(bead) {
+		gaps := v.runComplianceGateChecks(ctx, bead, projectPath)
+		if len(gaps) > 0 {
+			result.Errors = append(result.Errors, ValidationError{
+				Severity: SeverityCritical,
+				Message:  FormatGaps(gaps),
+				Category: "compliance",
+			})
+			result.Passed = false
+			result.Duration = time.Since(start)
+			return result, nil
+		}
 	}
 
 	// Phase 1: Static Checks (always run)

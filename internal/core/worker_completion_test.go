@@ -128,7 +128,7 @@ func setupWorkerCompletionTest(t *testing.T) (*Overseer, *enhancedMockBeadsClien
 	}
 	overseer.projects = testProjects
 	overseer.projectResolver = NewProjectResolver(testProjects)
-	overseer.beadCloser = NewBeadCloser(overseer.beadsClient, overseer.intelligenceHub, overseer.projectResolver, overseer.validationService)
+	overseer.beadCloser = NewBeadCloser(overseer.beadsClient, overseer.intelligenceHub, overseer.projectResolver, overseer.validationService, overseer.config)
 
 	// Initialize baseDelay and maxDelay
 	overseer.retryManager.SetBaseDelay(5 * time.Second)
@@ -169,7 +169,7 @@ func TestWorkerCompletion_SuccessfulCompletion(t *testing.T) {
 	overseer.workerMutex.Unlock()
 
 	// Simulate worker completion by directly calling closeBead
-	err := overseer.closeBead(worker, true)
+	err := overseer.closeBead(worker, true, 0)
 
 	if err != nil {
 		t.Fatalf("closeBead failed: %v", err)
@@ -234,7 +234,7 @@ func TestWorkerCompletion_FailedCompletion(t *testing.T) {
 	overseer.workerMutex.Unlock()
 
 	// Simulate failed worker completion
-	err := overseer.closeBead(worker, false)
+	err := overseer.closeBead(worker, false, 1)
 
 	if err != nil {
 		t.Fatalf("closeBead failed: %v", err)
@@ -320,7 +320,7 @@ func TestWorkerCompletion_ProjectPathResolution(t *testing.T) {
 			mockBeads.addBead(bead)
 
 			// Call closeBead
-			err := overseer.closeBead(tt.worker, true)
+			err := overseer.closeBead(tt.worker, true, 0)
 			if err != nil {
 				t.Fatalf("closeBead failed: %v", err)
 			}
@@ -370,7 +370,7 @@ func TestWorkerCompletion_CloseErrorHandling(t *testing.T) {
 	}
 
 	// Attempt to close - should return error
-	err := overseer.closeBead(worker, true)
+	err := overseer.closeBead(worker, true, 0)
 
 	if err == nil {
 		t.Fatal("Expected error when closing bead fails, got nil")
@@ -418,7 +418,7 @@ func TestWorkerCompletion_DependencyErrorDetection(t *testing.T) {
 	}
 
 	// Attempt to close B - should detect dependency error
-	err := overseer.closeBead(workerB, true)
+	err := overseer.closeBead(workerB, true, 0)
 
 	if err == nil {
 		t.Fatal("Expected dependency error, got nil")
@@ -743,7 +743,7 @@ func TestWorkerCompletion_ConcurrentCompletions(t *testing.T) {
 			// Add small delay to increase chance of concurrency issues
 			time.Sleep(time.Duration(index) * 10 * time.Millisecond)
 
-			if err := overseer.closeBead(worker, true); err != nil {
+			if err := overseer.closeBead(worker, true, 0); err != nil {
 				errors <- err
 			}
 		}(i)
@@ -785,7 +785,7 @@ func TestWorkerCompletion_UnknownProject(t *testing.T) {
 	}
 
 	// Attempt to close with unknown project
-	err := overseer.closeBead(worker, true)
+	err := overseer.closeBead(worker, true, 0)
 
 	if err == nil {
 		t.Fatal("Expected error when project not found, got nil")
@@ -821,14 +821,14 @@ func TestWorkerCompletion_MultipleCloseAttempts(t *testing.T) {
 
 	// First attempt - inject temporary error
 	mockBeads.setCloseError("test-project-multi", errors.New("temporary error"))
-	err1 := overseer.closeBead(worker, true)
+	err1 := overseer.closeBead(worker, true, 0)
 	if err1 == nil {
 		t.Fatal("Expected error on first attempt")
 	}
 
 	// Second attempt - success
 	mockBeads.setCloseError("test-project-multi", nil)
-	err2 := overseer.closeBead(worker, true)
+	err2 := overseer.closeBead(worker, true, 0)
 	if err2 != nil {
 		t.Fatalf("Expected success on second attempt, got: %v", err2)
 	}

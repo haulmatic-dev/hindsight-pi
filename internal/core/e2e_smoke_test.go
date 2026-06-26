@@ -153,3 +153,7 @@ func (m *e2eMockBeadsClient) UpdateBeadStatus(projectPath string, beadID types.B
 func (m *e2eMockBeadsClient) CreateBead(projectPath string, req types.CreateBeadRequest) (types.BeadID, error) {
 	return "", nil
 }
+
+func (m *e2eMockBeadsClient) UpdateBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error {
+	return nil
+}

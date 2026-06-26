@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -12,6 +13,7 @@ type beadRetryInfo struct {
 	count     int
 	lastError time.Time
 	lastErr   error
+	isInfra   bool // true when the last failure was an infrastructure problem
 }
 
 // RetryManager encapsulates bead retry and validation-retry tracking.
@@ -50,6 +52,14 @@ func (rm *RetryManager) ShouldRetry(beadID string, maxRetries int) bool {
 	}
 
 	if info.count >= maxRetries {
+		if info.isInfra {
+			// Infra-exhausted: retry every 1 hour regardless of maxRetries.
+			if time.Since(info.lastError) >= time.Hour {
+				return true
+			}
+			log.Printf("[Retry] Bead %s infra-exhausted, %v until next hourly retry", beadID, time.Hour-time.Since(info.lastError))
+			return false
+		}
 		log.Printf("[Retry] Bead %s exhausted all %d retry attempts", beadID, maxRetries)
 		return false
 	}
@@ -79,9 +89,10 @@ func (rm *RetryManager) RecordRetry(beadID string, err error) time.Duration {
 	info.count++
 	info.lastError = time.Now()
 	info.lastErr = err
+	info.isInfra = isInfrastructureError(err)
 
 	backoff := calculateBackoff(info.count, rm.baseDelay, rm.maxDelay)
-	log.Printf("[Retry] Bead %s retry attempt %d recorded: %v", beadID, info.count, err)
+	log.Printf("[Retry] Bead %s retry attempt %d recorded (infra=%v): %v", beadID, info.count, info.isInfra, err)
 	return backoff
 }
 
@@ -178,4 +189,29 @@ func (rm *RetryManager) Snapshot() map[string]int {
 		result[k] = v.count
 	}
 	return result
+}
+
+// isInfrastructureError classifies an error as infrastructure-related when it
+// matches known transient patterns (rate limits, timeouts, network issues,
+// daemon locks, etc.).  Used by RecordRetry to set the isInfra flag so that
+// ShouldRetry can grant hourly retries after normal exhaustion.
+func isInfrastructureError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "infrastructure failure") ||
+		strings.Contains(s, "rate_limit") ||
+		strings.Contains(s, "token plan") ||
+		strings.Contains(s, "429") ||
+		strings.Contains(s, "timeout") ||
+		strings.Contains(s, "deadline exceeded") ||
+		strings.Contains(s, "connection refused") ||
+		strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "i/o error") ||
+		strings.Contains(s, "permission denied") ||
+		strings.Contains(s, "exit status 8") ||
+		strings.Contains(s, "bead get failed") ||
+		strings.Contains(s, "no such host") ||
+		strings.Contains(s, "tls handshake")
 }

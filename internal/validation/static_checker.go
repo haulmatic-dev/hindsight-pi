@@ -83,6 +83,27 @@ func (s *StaticChecker) Validate(ctx context.Context, bead types.Bead, projectPa
 		}
 	}
 
+	// Check 2b: broader stub patterns (empty body, discard params,
+	// placeholder comments). The panic-stub check above misses the
+	// common case where the agent writes `return nil, nil` instead
+	// of `panic("not implemented")`. See stub_detector.go.
+	for _, file := range targetFiles {
+		if strings.HasSuffix(file, ".go") && !strings.HasSuffix(file, "_test.go") {
+			fullPath := filepath.Join(projectPath, file)
+			stubs := DetectStubs(fullPath)
+			for _, stub := range stubs {
+				result.Errors = append(result.Errors, ValidationError{
+					Severity: SeverityCritical,
+					Message:  fmt.Sprintf("Stub pattern (%s) in %s: %s", stub.Category, stub.Function, stub.Detail),
+					File:     file,
+					Line:     stub.Line,
+					Category: "implementation",
+				})
+				result.Passed = false
+			}
+		}
+	}
+
 	// Check 3: Test files exist
 	testFiles := s.findTestFiles(targetFiles)
 	for _, testFile := range testFiles {

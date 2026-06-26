@@ -2,6 +2,9 @@ package validation
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -54,7 +57,7 @@ func TestIsEndOfChain(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "RED phase bead",
+			name: "RED phase bead with target files",
 			bead: types.Bead{
 				ID:     "hydra-test",
 				Title:  "Write tests",
@@ -65,10 +68,10 @@ func TestIsEndOfChain(t *testing.T) {
 					"target_files": "internal/test/file_test.go",
 				},
 			},
-			expected: false,
+			expected: true, // Stub fix: RED now also validates (test files must exist + non-empty)
 		},
 		{
-			name: "GREEN phase bead",
+			name: "GREEN phase bead with target files",
 			bead: types.Bead{
 				ID:     "hydra-test",
 				Title:  "Implement feature",
@@ -79,7 +82,7 @@ func TestIsEndOfChain(t *testing.T) {
 					"target_files": "internal/test/file.go",
 				},
 			},
-			expected: false,
+			expected: true, // Stub fix: GREEN now validates (this is where stubs most often land)
 		},
 		{
 			name: "No target files",
@@ -105,11 +108,65 @@ func TestIsEndOfChain(t *testing.T) {
 	}
 }
 
-func TestCloseBeadWithValidation_SkipsNonImplementationBeads(t *testing.T) {
+func TestTDDPhase(t *testing.T) {
+	tests := []struct {
+		name     string
+		labels   []string
+		expected string
+	}{
+		{name: "no labels", labels: nil, expected: ""},
+		{name: "tdd-red", labels: []string{"tdd-red", "testing"}, expected: "red"},
+		{name: "tdd-green", labels: []string{"tdd-green", "implementation"}, expected: "green"},
+		{name: "tdd-refactor", labels: []string{"tdd-refactor", "cleanup"}, expected: "refactor"},
+		{name: "tdd-syntax", labels: []string{"tdd-syntax", "quality"}, expected: "syntax"},
+		{name: "unrelated labels", labels: []string{"fr", "p1"}, expected: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bead := types.Bead{ID: "x", Labels: tt.labels}
+			if got := TDDPhase(bead); got != tt.expected {
+				t.Errorf("TDDPhase() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestCloseBeadWithValidation_RunsOnTDDPhaseBeads(t *testing.T) {
+	// Stub fix: this test now asserts the inverse of its previous
+	// behaviour. RED/GREEN/REFACTOR/SYNTAX beads ALL go through
+	// validation; they are not exempt because the static check
+	// (file existence + non-empty + no panic stubs) is exactly what
+	// catches a stub.
 	mockClient := NewMockBeadsClient()
 	validator := NewValidator(DefaultValidationConfig())
 
-	// Create a RED phase bead (should skip validation)
+	// Set up a real Go module in a temp dir so compilation/tests
+	// can run. The implementation file has a real body (not a
+	// stub) and the test file asserts something meaningful.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module stubtest\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	realImpl := `package testpkg
+type S struct{}
+func (s *S) DoWork(x int) int { return x + 1 }
+`
+	if err := os.WriteFile(filepath.Join(dir, "test.go"), []byte(realImpl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testImpl := `package testpkg
+import "testing"
+func TestDoWork(t *testing.T) {
+	s := &S{}
+	if got := s.DoWork(2); got != 3 {
+		t.Errorf("DoWork(2) = %d, want 3", got)
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "test_test.go"), []byte(testImpl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	bead := &types.Bead{
 		ID:     "hydra-test-red",
 		Title:  "Write tests",
@@ -122,18 +179,73 @@ func TestCloseBeadWithValidation_SkipsNonImplementationBeads(t *testing.T) {
 	}
 	mockClient.AddBead(bead)
 
-	// Should close without validation error
 	err := CloseBeadWithValidation(
 		mockClient,
 		validator,
-		"/test/project",
+		dir,
 		"test-repo",
 		bead.ID,
 		"completed",
 	)
 
 	if err != nil {
-		t.Errorf("CloseBeadWithValidation() for RED bead should not error, got: %v", err)
+		t.Errorf("CloseBeadWithValidation() for RED bead with real impl should not error, got: %v", err)
+	}
+}
+
+func TestCloseBeadWithValidation_BlocksStubImplementation(t *testing.T) {
+	// The regression we're fixing: the legacy validator let stubs
+	// through. The new validator MUST reject a target file whose
+	// only function body is `return nil, nil` (or `return 0, nil`,
+	// etc.) and report a stub pattern.
+	mockClient := NewMockBeadsClient()
+	validator := NewValidator(DefaultValidationConfig())
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module stubtest\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately stub-like: empty body returning zero values.
+	stubImpl := `package stubtest
+type Activities struct{}
+// GetThing is the production implementation. Real implementation
+// comes in the follow-up bead; today this is a stub.
+func (a *Activities) GetThing(_ /* ctx */ interface{}, id string) (string, error) {
+	_ = id
+	return "", nil
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "stub.go"), []byte(stubImpl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stub_test.go"), []byte("package stubtest\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bead := &types.Bead{
+		ID:      "stub-test",
+		Title:   "GREEN: stub feature",
+		Type:    "implement",
+		Labels:  []string{"tdd-green"},
+		Status:  types.StatusOpen,
+		Metadata: map[string]string{"target_files": "stub.go"},
+	}
+	mockClient.AddBead(bead)
+
+	err := CloseBeadWithValidation(
+		mockClient,
+		validator,
+		dir,
+		"test-repo",
+		bead.ID,
+		"completed",
+	)
+
+	if err == nil {
+		t.Fatal("expected validation to fail on stub implementation; got nil error")
+	}
+	if !strings.Contains(err.Error(), "stub") && !strings.Contains(err.Error(), "Stub") {
+		t.Errorf("expected error message to mention 'stub'; got: %v", err)
 	}
 }
 

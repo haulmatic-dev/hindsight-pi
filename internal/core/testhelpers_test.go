@@ -193,6 +193,17 @@ func (m *mockBeadsClient) CreateBead(projectPath string, req types.CreateBeadReq
 	return beadID, nil
 }
 
+func (m *mockBeadsClient) UpdateBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if bead, exists := m.beads[string(beadID)]; exists {
+		bead.Labels = append(bead.Labels, labels...)
+		m.beads[string(beadID)] = bead
+	}
+	return nil
+}
+
 // mockWorkerSpawner tracks worker spawn calls for testing
 type mockWorkerSpawner struct {
 	mu          sync.RWMutex

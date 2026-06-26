@@ -25,7 +25,7 @@ import (
 const (
 	defaultMaxRetries    = 3
 	defaultBaseDelay     = 5 * time.Second
-	defaultMaxDelay      = 5 * time.Minute
+	defaultMaxDelay      = 1 * time.Hour
 	defaultRetryCooldown = 60 * time.Second // Increased from 10s to prevent retry explosions
 )
 
@@ -63,6 +63,7 @@ type BeadsClient interface {
 	GetReadyBeads(projectName, projectPath, repoName string) ([]types.Bead, error)
 	UpdateBeadStatus(projectPath string, beadID types.BeadID, status types.BeadStatus) error
 	CreateBead(projectPath string, req types.CreateBeadRequest) (types.BeadID, error)
+	UpdateBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error
 }
 
 // Overseer is the main scheduler daemon
@@ -360,7 +361,7 @@ func NewOverseer(config *Config) *Overseer {
 	o.piSetupManager = NewPiSetupManager(config)
 
 	// Initialize bead closer
-	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o.validationService)
+	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o.validationService, config)
 
 	// Initialize skill updater initializer
 	o.skillUpdaterInitializer = NewSkillUpdaterInitializer(config, &o.skillUpdater)
@@ -680,8 +681,8 @@ func (o *Overseer) scheduleAfterCompletion(worker *types.Worker, success bool, n
 // closeBead closes the bead via beadsClient based on worker completion status.
 // It determines the appropriate status reason and handles project path resolution.
 // On successful completion, it queues the repository for TLDR indexing.
-func (o *Overseer) closeBead(worker *types.Worker, success bool) error {
-	return o.beadCloser.Close(worker, success)
+func (o *Overseer) closeBead(worker *types.Worker, success bool, exitCode int) error {
+	return o.beadCloser.Close(worker, success, exitCode)
 }
 
 // resolveRepoPath finds the repository path for a given project and repo.

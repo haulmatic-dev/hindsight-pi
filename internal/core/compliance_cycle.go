@@ -261,46 +261,29 @@ func (cm *ComplianceCycleManager) runGapToPRD(gapReportPath string) (string, err
 }
 
 // createGapBeads invokes task-breakdown on the gap PRD to create new beads.
+//
+// The task-breakdown skill at config/pi/skills/task-breakdown/cli.mjs
+// accepts a single positional argument (the PRD path), not --file.
+// We invoke the cli.mjs script directly with `node` so we don't have
+// to depend on the `pi skill` wrapper's argument conventions.
 func (cm *ComplianceCycleManager) createGapBeads(gapPRDPath string) error {
-	// Read the gap PRD to get its content
-	prdContent, err := os.ReadFile(gapPRDPath)
-	if err != nil {
-		return fmt.Errorf("read gap PRD: %w", err)
+	cliPath := cm.config.TaskBreakdownPath
+	if cliPath == "" {
+		// Default: use the cli.mjs shipped with the pi-config.
+		cliPath = "/opt/dev-tools/config/pi/skills/task-breakdown/cli.mjs"
 	}
 
-	// Write a temporary request file for task-breakdown
-	reqPath := filepath.Join(cm.config.ProjectDir, "gaps", fmt.Sprintf("task-breakdown-req-%d.json", cm.cycles))
-	req := map[string]interface{}{
-		"prd_content":   string(prdContent),
-		"prd_path":      gapPRDPath,
-		"project_name":  fmt.Sprintf("gap-cycle-%d", cm.cycles),
-		"auto_create":   true,
-		"parent_prd":    cm.config.PRDPath,
-		"cycle":         cm.cycles,
-	}
-	reqJSON, _ := json.MarshalIndent(req, "", "  ")
-	if err := os.WriteFile(reqPath, reqJSON, 0644); err != nil {
-		return fmt.Errorf("write task-breakdown request: %w", err)
-	}
-
-	// Run task-breakdown skill
-	taskBreakdownBin := cm.config.TaskBreakdownPath
-	if taskBreakdownBin == "" {
-		// Default: use pi skill invocation
-		taskBreakdownBin = "pi"
-	}
-
+	// --json makes the runner emit machine-readable output we can
+	// parse if needed. --session-id ensures beads land under a
+	// known name prefix so the cycle's gap-tracking is consistent.
+	sessionID := fmt.Sprintf("gap-cycle-%d", cm.cycles)
+	args := []string{cliPath, gapPRDPath, "--json", "--session-id", sessionID}
 	log.Printf("[ComplianceCycle] Creating gap beads via task-breakdown...")
-	log.Printf("[ComplianceCycle] Request: %s", reqPath)
+	log.Printf("[ComplianceCycle] Running: node %s", strings.Join(args, " "))
 
-	// Invoke pi skill task-breakdown directly (Option B — DRY, reuse existing skill)
-	args := []string{"skill", "task-breakdown", "--file", reqPath}
-	log.Printf("[ComplianceCycle] Running: %s %s", taskBreakdownBin, strings.Join(args, " "))
-
-	cmd := exec.Command(taskBreakdownBin, args...)
+	cmd := exec.Command("node", args...)
 	cmd.Dir = cm.config.ProjectDir
 	cmd.Env = os.Environ()
-	// Set a generous timeout for task-breakdown (it calls LLM APIs)
 	cmdOut, cmdErr := cmd.CombinedOutput()
 	if cmdErr != nil {
 		return fmt.Errorf("task-breakdown failed: %v\nOutput: %s", cmdErr, string(cmdOut))
@@ -308,6 +291,65 @@ func (cm *ComplianceCycleManager) createGapBeads(gapPRDPath string) error {
 
 	log.Printf("[ComplianceCycle] task-breakdown output:\n%s", string(cmdOut))
 	log.Printf("[ComplianceCycle] Gap beads created successfully")
+
+	// Auto-approve the approval gate that task-breakdown created.
+	// Without this, the cycle stalls at the verify step because
+	// the gate has StatusInProgress and never gets to StatusReady.
+	// We use the beadsClient directly (br CLI is async and the
+	// overseer owns this state).
+	if err := cm.autoApproveGapGate(gapPRDPath); err != nil {
+		log.Printf("[ComplianceCycle] WARN: auto-approve gate failed: %v", err)
+		// Non-fatal: operator can approve manually with
+		// `br close <gate-id> -r approved --force`.
+	}
+
+	return nil
+}
+
+// autoApproveGapGate finds the approval gate that task-breakdown
+// created for this cycle's gap PRD and closes it. The gate is
+// identified by title prefix ('APPROVE: <feature> Implementation
+// Review') and by the dependency on the gap-PRD's master epic.
+func (cm *ComplianceCycleManager) autoApproveGapGate(gapPRDPath string) error {
+	beadsClient := cm.overseer.GetBeadsClient()
+	if beadsClient == nil {
+		return fmt.Errorf("no beads client")
+	}
+
+	projectPath := cm.config.ProjectDir
+	for _, project := range cm.overseer.projects {
+		repoName := ""
+		if len(project.Repos) > 0 {
+			repoName = project.Repos[0].Name
+		}
+		beads, err := beadsClient.ListBeads(project.Path, repoName)
+		if err != nil {
+			continue
+		}
+		for _, b := range beads {
+			// Approval gates from task-breakdown have type=approval
+			// (set via createApprovalGate in executor.mjs) and a title
+			// matching "APPROVE: ...". The cycle's own gate includes
+			// the gap-PRD path in the description. We use both as a
+			// signature to avoid approving unrelated gates.
+			if b.Type != "approval" {
+				continue
+			}
+			if !strings.HasPrefix(b.Title, "APPROVE:") {
+				continue
+			}
+			if !strings.Contains(b.Description, gapPRDPath) {
+				continue
+			}
+			if b.Status.IsTerminal() {
+				continue
+			}
+			log.Printf("[ComplianceCycle] Auto-approving gate %s: %s", b.ID, b.Title)
+			if err := beadsClient.CloseBead(projectPath, repoName, b.ID, "auto-approved by compliance cycle (gap-PRD ready for execution)"); err != nil {
+				return fmt.Errorf("close %s: %w", b.ID, err)
+			}
+		}
+	}
 	return nil
 }
 

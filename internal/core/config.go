@@ -218,6 +218,21 @@ type ValidationConfig struct {
 	PRDValidationEnabled     bool `yaml:"prd_validation_enabled"`
 	MaxRounds                int  `yaml:"max_rounds"`
 	AgentVerificationEnabled bool `yaml:"agent_verification_enabled"`
+
+	// CloseBlockedOnFailed (default true) gates whether a bead that
+	// closes with `close_reason=failed` (worker exit non-zero, retry
+	// exhaustion) creates an auto-fix bead and keeps dependents
+	// blocked. When false, the legacy behaviour is preserved: failed
+	// closures propagate normally and dependents unblock. The default
+	// is the strict one because the legacy behaviour let 57% of beads
+	// in one audit close as `failed` while their dependents unblocked.
+	CloseBlockedOnFailed bool `yaml:"close_blocked_on_failed"`
+
+	// BlockStubImplementations (default true) rejects bead closures
+	// whose target files contain stub patterns (empty bodies,
+	// placeholder comments, _ = x discards). See
+	// docs/operations/validation-stub-detection.md.
+	BlockStubImplementations bool `yaml:"block_stub_implementations"`
 }
 
 // ResourceMonitoringConfig contains resource monitoring settings
