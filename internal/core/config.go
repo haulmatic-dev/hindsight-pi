@@ -38,6 +38,12 @@ type PiConfig struct {
 	ThinkingLevel string `yaml:"thinking_level"`
 	Timeout       string `yaml:"timeout"`
 	ApiKeyName    string `yaml:"api_key_name"`
+
+	// FallbackProvider/FallbackModel are used when the primary provider's
+	// circuit breaker opens after repeated rate-limit (429) failures.
+	// Empty disables failover.
+	FallbackProvider string `yaml:"fallback_provider"`
+	FallbackModel    string `yaml:"fallback_model"`
 }
 
 // PiRootConfig contains Pi-specific configuration settings
@@ -233,6 +239,14 @@ type ValidationConfig struct {
 	// placeholder comments, _ = x discards). See
 	// docs/operations/validation-stub-detection.md.
 	BlockStubImplementations bool `yaml:"block_stub_implementations"`
+
+	// RequireDiffOnClose (default true) rejects a completed bead close
+	// when the worker left no uncommitted changes on disk for the bead's
+	// target files (or the repo when none are declared). Workers do not
+	// commit their work, so an empty diff means the "agent reported
+	// success but edited nothing" case. Ops can disable this if a
+	// workflow legitimately closes beads without file changes.
+	RequireDiffOnClose bool `yaml:"require_diff_on_close"`
 }
 
 // ResourceMonitoringConfig contains resource monitoring settings
@@ -294,6 +308,7 @@ func DefaultConfig() *Config {
 			PRDValidationEnabled:     true,
 			MaxRounds:                3,
 			AgentVerificationEnabled: true,
+			RequireDiffOnClose:       true,
 		},
 		ComplianceCycle: ComplianceCycleConfig{
 			Enabled:      false,

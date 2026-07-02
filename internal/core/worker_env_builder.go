@@ -11,12 +11,19 @@ import (
 
 // WorkerEnvBuilder builds environment variables for worker processes.
 type WorkerEnvBuilder struct {
-	config *Config
+	config  *Config
+	breaker *ProviderBreaker
 }
 
 // NewWorkerEnvBuilder creates a new worker environment builder.
 func NewWorkerEnvBuilder(config *Config) *WorkerEnvBuilder {
 	return &WorkerEnvBuilder{config: config}
+}
+
+// SetProviderBreaker wires the provider circuit breaker consulted by
+// buildPiEnv for rate-limit failover. Safe to leave unset (no failover).
+func (b *WorkerEnvBuilder) SetProviderBreaker(pb *ProviderBreaker) {
+	b.breaker = pb
 }
 
 // Build creates the environment variable slice for a worker process.
@@ -145,6 +152,18 @@ func (b *WorkerEnvBuilder) buildPiEnv() []string {
 	}
 	if p.ApiKeyName == "" {
 		p.ApiKeyName = "KIMI_API_KEY"
+	}
+
+	// Provider failover: when the primary provider's circuit is open due to
+	// repeated rate-limit (429) failures, use the configured fallback.
+	if b.breaker != nil {
+		if prov, model := b.breaker.Choose(); prov != "" && prov != p.Provider {
+			log.Printf("[Worker] Provider failover: %s -> %s (circuit open)", p.Provider, prov)
+			p.Provider = prov
+			if model != "" {
+				p.Model = model
+			}
+		}
 	}
 
 	log.Printf("[Worker] Pi config passed to worker (provider: %s, model: %s)", p.Provider, p.Model)

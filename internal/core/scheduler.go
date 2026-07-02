@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -51,7 +52,17 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 			log.Printf("[Retry] Bead %s added to retry queue (attempt %d/%d)",
 				beadID, count+1, maxRetries)
 		} else {
-			log.Printf("[Retry] Could not fetch bead %s for retry: %v", beadID, err)
+			var notFound *BeadNotFoundError
+			if errors.As(err, &notFound) {
+				// The bead is no longer in the DAG (completed or removed
+				// elsewhere). Leaving it in the retry map makes this lookup
+				// fail again on every tick and floods the error log, so drop
+				// it from retry tracking instead of re-logging forever.
+				o.retryManager.ClearRetry(beadID)
+				log.Printf("[Retry] Bead %s no longer in DAG; cleared from retry tracking", beadID)
+			} else {
+				log.Printf("[Retry] Could not fetch bead %s for retry: %v", beadID, err)
+			}
 		}
 	}
 

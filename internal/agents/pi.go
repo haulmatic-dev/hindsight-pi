@@ -900,14 +900,19 @@ func (c *PiConnector) enrichPromptWithHindsight(session *AgentSession, prompt st
 		return prompt
 	}
 
-	// Filter by score and limit
+	// Filter by score and limit. The recall API applies min_score
+	// server-side and does not return a per-memory score, so treat a
+	// zero/absent score as already-passed — only drop a memory when it
+	// carries a real score below the threshold.
 	var relevantMemories []hindsight.Memory
 	for _, mem := range resp.Memories {
-		if mem.Score >= minScore || mem.Relevance >= minScore {
-			relevantMemories = append(relevantMemories, mem)
-			if len(relevantMemories) >= limit {
-				break
-			}
+		hasScore := mem.Score > 0 || mem.Relevance > 0
+		if hasScore && mem.Score < minScore && mem.Relevance < minScore {
+			continue
+		}
+		relevantMemories = append(relevantMemories, mem)
+		if len(relevantMemories) >= limit {
+			break
 		}
 	}
 

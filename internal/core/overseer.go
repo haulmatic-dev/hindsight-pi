@@ -152,6 +152,7 @@ type Overseer struct {
 
 	// WorkerEnvBuilder builds environment variables for worker processes
 	workerEnvBuilder *WorkerEnvBuilder
+	providerBreaker  *ProviderBreaker
 
 	// BeadDiscovery finds beads ready to execute from various sources
 	beadDiscovery *BeadDiscovery
@@ -219,8 +220,14 @@ func NewOverseer(config *Config) *Overseer {
 	// Initialize impact analyzer
 	o.impactAnalyzer = NewImpactAnalyzer(o.findProjectPath)
 
-	// Initialize worker environment builder
+	// Initialize worker environment builder + provider failover breaker
+	// (rate-limit on the primary provider -> fallback provider/model).
 	o.workerEnvBuilder = NewWorkerEnvBuilder(config)
+	o.providerBreaker = NewProviderBreaker(
+		config.Agents.Pi.Provider, config.Agents.Pi.Model,
+		config.Agents.Pi.FallbackProvider, config.Agents.Pi.FallbackModel,
+	)
+	o.workerEnvBuilder.SetProviderBreaker(o.providerBreaker)
 
 	o.beadDiscovery = NewBeadDiscovery(o.beadsClient, o.bvClient, o.projects, o.completed, o.dag, &o.dagMu)
 
@@ -300,8 +307,8 @@ func NewOverseer(config *Config) *Overseer {
 		o.sendMCPWorkerCompletion,
 		o.getMaxRetries,
 	)
+	o.workerLifecycle.providerBreaker = o.providerBreaker
 
-	
 	// Initialize bead analyzer (projects will be updated after discovery)
 	o.beadAnalyzer = NewBeadAnalyzer(o.projects)
 

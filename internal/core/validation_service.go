@@ -115,6 +115,35 @@ func (v *ValidationService) RunTDDValidation(refactorBead types.Bead, projectPat
 	return nil
 }
 
+// TDDChainPasses runs TDD-chain validation and reports whether it passed,
+// without the fix-bead side effects of RunTDDValidation. The verified-close
+// gate uses this to block a close when validation fails. It returns
+// (true, nil) — i.e. "do not block" — when TDD validation is disabled, the
+// bead is not a TDD bead, the chain cannot be located, or verification
+// errors; only a definite validation failure returns (false, nil).
+func (v *ValidationService) TDDChainPasses(refactorBead types.Bead, projectPath string) (bool, error) {
+	if !v.config.Validation.Enabled || !v.config.Validation.TDDValidationEnabled {
+		return true, nil
+	}
+
+	redBead, greenBead, err := v.findTDDChainBeads(refactorBead)
+	if err != nil {
+		// Cannot locate the chain — do not hard-block on inability to verify.
+		return true, nil
+	}
+
+	tddValidator := validation.NewTDDValidator(validation.ValidationConfig{
+		Enabled:                  v.config.Validation.Enabled,
+		AgentVerificationEnabled: v.config.Validation.AgentVerificationEnabled,
+	})
+
+	result, err := tddValidator.ValidateTDDChain(redBead, greenBead, refactorBead, projectPath)
+	if err != nil {
+		return true, err
+	}
+	return result.Passed, nil
+}
+
 // RunPRDValidation validates a completed chain against its root PRD and creates fix beads on failure.
 func (v *ValidationService) RunPRDValidation(chainInfo *ChainInfo, projectPath string) error {
 	log.Printf("[PRDValidation] DEBUG START enabled=%v prd=%v maxRounds=%d", v.config.Validation.Enabled, v.config.Validation.PRDValidationEnabled, v.config.Validation.MaxRounds)
