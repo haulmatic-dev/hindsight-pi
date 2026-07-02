@@ -29,6 +29,10 @@ type ComplianceCycleConfig struct {
 	// (the high-IQ "is this gap real or a false positive" judgment). When
 	// empty, the configured agents.pi model is used.
 	AdjudicatorModel string `yaml:"adjudicator_model"`
+
+	// ShipGate is the product-level acceptance gate run before a PRD is
+	// declared shippable (build/boot/e2e). Disabled by default.
+	ShipGate ShipGateConfig `yaml:"ship_gate"`
 }
 
 // ComplianceCycleManager runs the closed-loop compliance cycle.
@@ -140,7 +144,7 @@ func (cm *ComplianceCycleManager) checkAndRunCycle() error {
 
 	if !gapsFound {
 		log.Printf("[ComplianceCycle] === ZERO GAPS. PRD APPROVED ===")
-		cm.notifyApproved()
+		cm.finalizeApproval()
 		return nil
 	}
 
@@ -158,7 +162,7 @@ func (cm *ComplianceCycleManager) checkAndRunCycle() error {
 		return nil
 	} else if survivors == 0 {
 		log.Printf("[ComplianceCycle] === ALL GAPS RULED FALSE-POSITIVE / RESOLVED. PRD APPROVED ===")
-		cm.notifyApproved()
+		cm.finalizeApproval()
 		return nil
 	}
 
