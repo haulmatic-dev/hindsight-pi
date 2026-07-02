@@ -25,6 +25,7 @@ type WorkerLifecycle struct {
 	triggerSchedule func()
 	notifyMCP       func(worker *types.Worker, success bool, exitCode int, duration time.Duration)
 	getMaxRetries   func() int
+	providerBreaker *ProviderBreaker // rate-limit failover; may be nil
 }
 
 // NewWorkerLifecycle creates a new worker lifecycle manager.
@@ -192,6 +193,12 @@ func (wl *WorkerLifecycle) HandleFailure(worker *types.Worker, exitCode int, dur
 		workerErr = fmt.Errorf("infrastructure failure (exit %d)", exitCode)
 	} else {
 		workerErr = fmt.Errorf("worker exited with code %d", exitCode)
+	}
+	// Exit code 2 == rate-limit/429 (classifyFailure). Feed the provider
+	// circuit breaker so repeated 429s fail the next spawns over to the
+	// fallback provider instead of hammering the throttled one.
+	if exitCode == 2 && wl.providerBreaker != nil {
+		wl.providerBreaker.RecordRateLimit()
 	}
 	wl.retryManager.RecordRetry(worker.ID, workerErr)
 

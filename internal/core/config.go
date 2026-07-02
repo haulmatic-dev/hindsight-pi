@@ -38,6 +38,12 @@ type PiConfig struct {
 	ThinkingLevel string `yaml:"thinking_level"`
 	Timeout       string `yaml:"timeout"`
 	ApiKeyName    string `yaml:"api_key_name"`
+
+	// FallbackProvider/FallbackModel are used when the primary provider's
+	// circuit breaker opens after repeated rate-limit (429) failures.
+	// Empty disables failover.
+	FallbackProvider string `yaml:"fallback_provider"`
+	FallbackModel    string `yaml:"fallback_model"`
 }
 
 // PiRootConfig contains Pi-specific configuration settings
