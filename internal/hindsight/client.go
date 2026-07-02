@@ -25,6 +25,7 @@ type Memory struct {
 	ID         string   `json:"id"`
 	Title      string   `json:"title"`
 	Content    string   `json:"content"`
+	Text       string   `json:"text"` // recall API returns the memory body under "text"
 	Type       string   `json:"type"`
 	Agent      string   `json:"agent"`
 	SourcePath string   `json:"source_path,omitempty"`
@@ -64,6 +65,7 @@ type SearchResponse struct {
 	Count        int      `json:"count"`
 	TotalMatches int      `json:"total_matches"`
 	Memories     []Memory `json:"memories"`
+	Results      []Memory `json:"results"` // recall API returns matches under "results"
 }
 
 // HealthStatus represents the health check result for the Hindsight service
@@ -289,6 +291,21 @@ func (c *Client) Search(query, beadType string, limit int) (*SearchResponse, err
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode hindsight response: %w", err)
 	}
+
+	// The recall API returns matches under "results" (not "memories"), puts
+	// the memory body in "text" (not "content"), and does not send a
+	// per-memory score (it applies min_score server-side). Normalize so
+	// downstream consumers that read Memories/Content keep working.
+	if len(result.Memories) == 0 && len(result.Results) > 0 {
+		result.Memories = result.Results
+	}
+	for i := range result.Memories {
+		if result.Memories[i].Content == "" && result.Memories[i].Text != "" {
+			result.Memories[i].Content = result.Memories[i].Text
+		}
+	}
+	result.Count = len(result.Memories)
+	result.Success = true
 
 	return &result, nil
 }
