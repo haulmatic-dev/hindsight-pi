@@ -233,6 +233,14 @@ type ValidationConfig struct {
 	// placeholder comments, _ = x discards). See
 	// docs/operations/validation-stub-detection.md.
 	BlockStubImplementations bool `yaml:"block_stub_implementations"`
+
+	// RequireDiffOnClose (default true) rejects a completed bead close
+	// when the worker left no uncommitted changes on disk for the bead's
+	// target files (or the repo when none are declared). Workers do not
+	// commit their work, so an empty diff means the "agent reported
+	// success but edited nothing" case. Ops can disable this if a
+	// workflow legitimately closes beads without file changes.
+	RequireDiffOnClose bool `yaml:"require_diff_on_close"`
 }
 
 // ResourceMonitoringConfig contains resource monitoring settings
@@ -294,6 +302,7 @@ func DefaultConfig() *Config {
 			PRDValidationEnabled:     true,
 			MaxRounds:                3,
 			AgentVerificationEnabled: true,
+			RequireDiffOnClose:       true,
 		},
 		ComplianceCycle: ComplianceCycleConfig{
 			Enabled:      false,
