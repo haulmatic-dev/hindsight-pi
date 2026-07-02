@@ -24,16 +24,22 @@ type ComplianceCycleConfig struct {
 	TaskBreakdownPath  string        `yaml:"task_breakdown_path"`
 	ProjectDir         string        `yaml:"project_dir"`
 	PRDPath            string        `yaml:"prd_path"`
+
+	// AdjudicatorModel overrides the pi model used for gap adjudication
+	// (the high-IQ "is this gap real or a false positive" judgment). When
+	// empty, the configured agents.pi model is used.
+	AdjudicatorModel string `yaml:"adjudicator_model"`
 }
 
 // ComplianceCycleManager runs the closed-loop compliance cycle.
 // It detects when all beads are closed, runs the analyzer, and creates gap beads if needed.
 type ComplianceCycleManager struct {
-	config      ComplianceCycleConfig
-	overseer    *Overseer
-	cycles      int
-	running     bool
-	stopCh      chan struct{}
+	config        ComplianceCycleConfig
+	overseer      *Overseer
+	cycles        int
+	running       bool
+	stopCh        chan struct{}
+	prevSurviving map[string]bool // fingerprints of last cycle's real gaps (progress-delta)
 }
 
 // NewComplianceCycleManager creates a new compliance cycle manager.
@@ -138,10 +144,28 @@ func (cm *ComplianceCycleManager) checkAndRunCycle() error {
 		return nil
 	}
 
-	log.Printf("[ComplianceCycle] Gaps found. Converting to gap PRD...")
+	// Step 2b: Adjudicate gaps before decomposing them. A high-IQ pass
+	// rules each gap real / false_positive / ambiguous so detector false
+	// positives don't spawn PRD->bead chains that conclude "no change" and
+	// get re-detected every cycle. Only REAL gaps proceed.
+	adjudicatedPath, survivors, halted, err := cm.adjudicateGaps(gapReportPath)
+	if err != nil {
+		log.Printf("[ComplianceCycle] Adjudication failed (%v); falling back to raw gap report", err)
+		adjudicatedPath = gapReportPath
+	} else if halted {
+		log.Printf("[ComplianceCycle] === NO PROGRESS: surviving gaps unchanged from last cycle. Halting, awaiting human. ===")
+		cm.notifyMaxCyclesReached()
+		return nil
+	} else if survivors == 0 {
+		log.Printf("[ComplianceCycle] === ALL GAPS RULED FALSE-POSITIVE / RESOLVED. PRD APPROVED ===")
+		cm.notifyApproved()
+		return nil
+	}
+
+	log.Printf("[ComplianceCycle] %d real gap(s) after adjudication. Converting to gap PRD...", survivors)
 
 	// Step 3: Convert gaps to mini-PRD
-	gapPRDPath, err := cm.runGapToPRD(gapReportPath)
+	gapPRDPath, err := cm.runGapToPRD(adjudicatedPath)
 	if err != nil {
 		return fmt.Errorf("gap-to-prd failed: %w", err)
 	}
