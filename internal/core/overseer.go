@@ -182,7 +182,8 @@ type Overseer struct {
 	piSetupManager *PiSetupManager
 
 	// BeadCloser closes beads based on worker completion
-	beadCloser *BeadCloser
+	beadCloser      *BeadCloser
+	worktreeManager *WorktreeManager // per-chain git isolation; nil = disabled
 }
 
 // NewOverseer creates a new overseer instance
@@ -369,6 +370,16 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize bead closer
 	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o.validationService, config)
+
+	// Per-chain worktree isolation (opt-in via overseer.worktree_isolation).
+	// Wires the manager into spawn (run worker in the chain's worktree) and
+	// close (commit its work); integration happens on chain completion.
+	if config.Overseer.WorktreeIsolation {
+		o.worktreeManager = NewWorktreeManager()
+		o.workerSpawner.SetWorktreeManager(o.worktreeManager, o.chainKeyForBead)
+		o.beadCloser.SetWorktreeManager(o.worktreeManager, o.chainKeyForBead)
+		log.Printf("[Overseer] Worktree isolation ENABLED")
+	}
 
 	// Initialize skill updater initializer
 	o.skillUpdaterInitializer = NewSkillUpdaterInitializer(config, &o.skillUpdater)

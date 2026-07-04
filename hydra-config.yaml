@@ -9,6 +9,11 @@ overseer:
   retry_delay: 30s
   worker_timeout: 15m
   handoff_timeout: 10m
+  # Run each chain in its own git worktree and commit its work on
+  # verified-close, integrating back to the working branch on chain
+  # completion. Concurrent chains can't clobber each other; produces clean
+  # per-bead git history. Off by default (opt-in).
+  worktree_isolation: false
   resource_monitoring:
     enabled: true
     max_cpu_percent: 80

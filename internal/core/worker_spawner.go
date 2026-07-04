@@ -29,6 +29,14 @@ type WorkerSpawner struct {
 	workerEnvBuilder *WorkerEnvBuilder
 	workerLifecycle  *WorkerLifecycle
 	userContexts     map[string]*UserContext // username -> context (for per-user git auth)
+	worktreeManager  *WorktreeManager        // per-chain git isolation; nil = disabled
+	chainKeyFn       func(types.Bead) string // maps a bead to its chain's worktree key
+}
+
+// SetWorktreeManager enables per-chain worktree isolation for spawned workers.
+func (s *WorkerSpawner) SetWorktreeManager(m *WorktreeManager, chainKeyFn func(types.Bead) string) {
+	s.worktreeManager = m
+	s.chainKeyFn = chainKeyFn
 }
 
 // NewWorkerSpawner creates a new worker spawner.
@@ -184,13 +192,26 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 		workerBinary = filepath.Join(os.Getenv("HYDRA_HOME"), "bin", "worker")
 	}
 
+	// Per-chain worktree isolation: point the worker at the chain's dedicated
+	// worktree (via HYDRA_PROJECT_PATH) instead of the shared checkout, when
+	// enabled. The worker reads HYDRA_PROJECT_PATH as its working dir, so we
+	// do not set cmd.Dir (which would break the `go run` fallback path).
+	runDir := projectPath
+	if s.worktreeManager != nil && s.chainKeyFn != nil {
+		if wt, wtErr := s.worktreeManager.EnsureWorktree(projectPath, s.chainKeyFn(bead)); wtErr != nil {
+			log.Printf("[Worktree] setup failed for %s (using shared checkout): %v", bead.ID, wtErr)
+		} else {
+			runDir = wt
+		}
+	}
+
 	var cmd *exec.Cmd
 	if _, err := os.Stat(workerBinary); err == nil {
 		cmd = exec.Command(workerBinary)
 	} else {
 		cmd = exec.Command("go", "run", "cmd/worker/main.go")
 	}
-	cmd.Env = s.workerEnvBuilder.Build(bead, projectPath, string(agentType), retryCount)
+	cmd.Env = s.workerEnvBuilder.Build(bead, runDir, string(agentType), retryCount)
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {

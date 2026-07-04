@@ -18,6 +18,14 @@ type BeadCloser struct {
 	projectResolver   *ProjectResolver
 	validationService *ValidationService
 	config            *Config
+	worktreeManager   *WorktreeManager        // per-chain git isolation; nil = disabled
+	chainKeyFn        func(types.Bead) string // maps a bead to its chain's worktree key
+}
+
+// SetWorktreeManager enables commit-on-close into the bead's chain worktree.
+func (c *BeadCloser) SetWorktreeManager(m *WorktreeManager, chainKeyFn func(types.Bead) string) {
+	c.worktreeManager = m
+	c.chainKeyFn = chainKeyFn
 }
 
 // NewBeadCloser creates a new bead closer.
@@ -126,6 +134,22 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			// Rejected: the bead was reopened (or escalated) inside
 			// verifyBeforeClose. Do not close it.
 			return err
+		}
+	}
+
+	// Commit the chain worktree's changes for this bead before closing, when
+	// worktree isolation is enabled. Committed per bead; integrated back to
+	// the working branch on chain completion.
+	if success && reason == "completed" && c.worktreeManager != nil && c.chainKeyFn != nil && bead != nil {
+		if wt, err := c.worktreeManager.EnsureWorktree(projectPath, c.chainKeyFn(*bead)); err == nil {
+			msg := fmt.Sprintf("bead(%s): %s", bead.ID, bead.Title)
+			if committed, cErr := c.worktreeManager.Commit(wt, msg); cErr != nil {
+				log.Printf("[Worktree] commit failed for %s: %v", bead.ID, cErr)
+			} else if committed {
+				log.Printf("[Worktree] committed %s", bead.ID)
+			}
+		} else {
+			log.Printf("[Worktree] worktree lookup failed for %s: %v", bead.ID, err)
 		}
 	}
 
