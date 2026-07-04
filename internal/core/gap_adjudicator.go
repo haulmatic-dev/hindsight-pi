@@ -1,19 +1,18 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/haulmatic-dev/hydra/internal/agents"
-	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // gapReport mirrors the on-disk schema emitted by hydra-compliance-analyzer.
@@ -152,43 +151,48 @@ func (cm *ComplianceCycleManager) adjudicateGaps(gapReportPath string) (filtered
 }
 
 // adjudicateGap asks a high-IQ model to rule a single gap real vs
-// false-positive via a two-sided prompt. On any failure it returns "real"
-// so a real gap is never silently dropped because the adjudicator broke.
+// false-positive via a two-sided prompt. It invokes pi directly in text mode
+// (prompt on stdin, verdict on stdout) — the same proven path workers use —
+// rather than the RPC connector, which returned not-Success in the daemon
+// context and forced every gap to "real". On any failure it still returns
+// "real" so a genuine gap is never silently dropped when the adjudicator breaks.
 func (cm *ComplianceCycleManager) adjudicateGap(ctx context.Context, g gap) adjudication {
 	core := cm.overseer.config.Agents.Pi
 	model := core.Model
 	if cm.config.AdjudicatorModel != "" {
 		model = cm.config.AdjudicatorModel
 	}
-	piCfg := agents.PiConfig{
-		Provider:      core.Provider,
-		Model:         model,
-		ThinkingLevel: core.ThinkingLevel,
-		Timeout:       core.Timeout,
-		ApiKeyName:    core.ApiKeyName,
-		ConfigDir:     "", // one-shot judgment: no task-breakdown skills
+
+	piPath := os.Getenv("HYDRA_PI_PATH")
+	if piPath == "" {
+		piPath = "pi"
+	}
+	args := []string{"--no-session"}
+	if core.Provider != "" {
+		args = append(args, "--provider", core.Provider)
+	}
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 
-	connector := agents.NewPiConnector(piCfg, nil)
-	bead := types.Bead{
-		ID:          types.BeadID("adjudicate-" + g.ID),
-		Title:       "Adjudicate gap: " + g.ID,
-		Description: g.Description,
-	}
+	c := exec.CommandContext(ctx, piPath, args...)
+	c.Dir = cm.config.ProjectDir
+	c.Env = os.Environ() // inherit the daemon env (provider API keys)
+	c.Stdin = strings.NewReader(buildAdjudicationPrompt(g))
+	var stdout, stderr bytes.Buffer
+	c.Stdout = &stdout
+	c.Stderr = &stderr
 
-	session, err := connector.Start(ctx, bead, agents.AgentOptions{ProjectPath: cm.config.ProjectDir})
-	if err != nil {
-		log.Printf("[Adjudicator] start failed for gap %s: %v — treating as real", g.ID, err)
+	if err := c.Run(); err != nil {
+		tail := strings.TrimSpace(stderr.String())
+		if len(tail) > 200 {
+			tail = tail[len(tail)-200:]
+		}
+		log.Printf("[Adjudicator] pi failed for gap %s: %v — treating as real (stderr: %s)", g.ID, err, tail)
 		return adjudication{Verdict: "real", GapID: g.ID}
 	}
 
-	res, err := connector.Execute(ctx, session, buildAdjudicationPrompt(g))
-	if err != nil || res == nil || !res.Success {
-		log.Printf("[Adjudicator] execute failed for gap %s: %v — treating as real", g.ID, err)
-		return adjudication{Verdict: "real", GapID: g.ID}
-	}
-
-	v := parseAdjudication(res.Output)
+	v := parseAdjudication(stdout.String())
 	v.GapID = g.ID
 	return v
 }
