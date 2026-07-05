@@ -75,6 +75,8 @@ internal/pi/skills-lock.json
 .hydra/
 hydra.pid
 
+# per-chain worktree isolation (sibling dir; defensive)
+.hydra-worktrees/
 # tldr code-intelligence local state
 .tldr/
 

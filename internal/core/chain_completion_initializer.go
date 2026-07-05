@@ -52,6 +52,14 @@ func (i *ChainCompletionInitializer) Initialize() {
 			}
 		}
 
+		// Per-chain worktree isolation: integrate the completed chain's branch
+		// back into the working branch and remove the worktree.
+		if o.worktreeManager != nil && projectPath != "" {
+			if err := o.worktreeManager.IntegrateAndRemove(projectPath, event.ChainInfo.RootBeadID.String()); err != nil {
+				log.Printf("[Worktree] integrate failed for chain %s: %v", event.ChainInfo.RootBeadID, err)
+			}
+		}
+
 		if err := extractor.ExtractPatterns(event); err != nil {
 			log.Printf("[Overseer] Chain pattern extraction failed: %v", err)
 		}
