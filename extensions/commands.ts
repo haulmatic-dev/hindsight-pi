@@ -24,7 +24,7 @@ import { getSessionDocumentId, parseCurrentSessionEntries } from "./session-docu
 import { getHookStats } from "./hooks.js";
 import { HINDSIGHT_META_TYPE, getHindsightMeta, nextMeta } from "./meta.js";
 import { pruneRecallMessagesInSessionFile } from "./prune.js";
-import { deleteQueue, readQueueRecords } from "./queue.js";
+import { coalesceByDocumentId, deleteQueue, readQueueRecords } from "./queue.js";
 
 const mask = (value?: string): string => (value ? `${value.slice(0, 6)}...redacted` : "(none)");
 const parseCsv = (value: string | undefined): string[] => (value ?? "").split(",").map((v) => v.trim()).filter(Boolean);
@@ -731,7 +731,7 @@ export const registerCommands = (pi: ExtensionAPI): void => {
         return;
       }
       try {
-        await handles.client.retainBatch(handles.bankId, records.map((record) => ({
+        await handles.client.retainBatch(handles.bankId, coalesceByDocumentId(records).map((record) => ({
           content: record.content,
           context: record.context,
           tags: record.tags,

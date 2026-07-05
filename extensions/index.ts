@@ -12,7 +12,7 @@ import { sessionRetained, sessionTags } from "./meta.js";
 import { filterHindsightProviderMessages, HINDSIGHT_RECALL_STATUS_TYPE, HINDSIGHT_RETAIN_STATUS_TYPE } from "./provider-filter.js";
 import { createRecallCustomMessage, HINDSIGHT_RECALL_CUSTOM_TYPE } from "./recall-message.js";
 import { deriveRecallQuery, isContinuePrompt } from "./recall-query.js";
-import { appendQueueRecord, deleteQueue, readQueueRecords } from "./queue.js";
+import { appendQueueRecord, coalesceByDocumentId, deleteQueue, readQueueRecords } from "./queue.js";
 import { prepareRetainEntry } from "./retain/prepare.js";
 import { buildAutomaticTags, expandObservationScopes } from "./retain/tags.js";
 import { deriveWorkspaceSessionName } from "./session.js";
@@ -322,7 +322,7 @@ export default function hindsightMemory(pi: ExtensionAPI): void {
     const { records } = readQueueRecords(sessionId, "auto");
     if (records.length === 0) return;
     try {
-      await handles.client.retainBatch(handles.bankId, records.map((record) => ({
+      await handles.client.retainBatch(handles.bankId, coalesceByDocumentId(records).map((record) => ({
         content: record.content,
         context: record.context,
         tags: record.tags,

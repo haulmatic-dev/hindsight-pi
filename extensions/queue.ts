@@ -41,3 +41,32 @@ export const deleteQueue = (sessionId: string, kind: "auto" | "tool" = "auto"): 
 };
 
 export const countQueueRecords = (sessionId: string): number => readQueueRecords(sessionId, "auto").records.length + readQueueRecords(sessionId, "tool").records.length;
+
+// coalesceByDocumentId merges queue records that share a document_id into one
+// record (concatenating content, unioning tags) so a retainBatch call never
+// contains duplicate document_ids — the Hindsight batch API requires each item
+// in a batch to have a unique document_id. Records without a document_id pass
+// through unchanged.
+export const coalesceByDocumentId = (records: QueueRecord[]): QueueRecord[] => {
+  const byDoc = new Map<string, QueueRecord>();
+  const passthrough: QueueRecord[] = [];
+  for (const record of records) {
+    if (!record.document_id) {
+      passthrough.push(record);
+      continue;
+    }
+    const existing = byDoc.get(record.document_id);
+    if (!existing) {
+      byDoc.set(record.document_id, { ...record, tags: record.tags ? [...record.tags] : undefined });
+      continue;
+    }
+    existing.content = `${existing.content}\n\n${record.content}`;
+    if (record.tags && record.tags.length > 0) {
+      existing.tags = Array.from(new Set([...(existing.tags ?? []), ...record.tags]));
+    }
+    if (record.timestamp < existing.timestamp) {
+      existing.timestamp = record.timestamp;
+    }
+  }
+  return [...passthrough, ...byDoc.values()];
+};
