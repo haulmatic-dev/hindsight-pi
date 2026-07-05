@@ -37,6 +37,12 @@ agents:
     model: MiniMax-M3
     timeout: 10m
     api_key_name: MINIMAX_API_KEY
+    # Provider failover: when the primary provider trips the rate-limit
+    # circuit breaker (3x 429 within 10m -> open 15m), workers spawn on
+    # this fallback instead. Requires the fallback provider's API key in
+    # the daemon environment. Leave unset to disable failover.
+    # fallback_provider: kimi-coding-plan
+    # fallback_model: kimi-k2.7-code
 
 projects:
   auto_discover: false
@@ -102,11 +108,21 @@ validation:
   agent_verification_enabled: false
   close_blocked_on_failed: true
   block_stub_implementations: true
+  # Reject a completed bead close when the worker left no uncommitted
+  # changes on disk for the bead's target files (the "claimed done but
+  # edited nothing" case). Fails open when the path is not a git repo or
+  # git errors, so it never blocks a close on an inability to check.
+  require_diff_on_close: true
 
-# Closed-loop compliance cycle. When all beads in a project are
-# closed, hydra runs the verifier tools (hydra-compliance-analyzer
-# plus verify-source-vs-go for migration projects) and creates gap
-# beads via task-breakdown. Loops until zero gaps or MaxCycles.
+# Closed-loop compliance cycle. When all beads in a project are closed,
+# hydra runs the verifier tools (hydra-compliance-analyzer plus
+# verify-source-vs-go for migration projects), ADJUDICATES each gap as
+# real / false_positive / ambiguous before decomposing (only real gaps
+# become beads; false positives are recorded and suppressed on future
+# cycles; ambiguous ones are surfaced for a human), then creates gap
+# beads via task-breakdown. Halts when the surviving-gap set is unchanged
+# from the previous cycle (no progress). Before declaring a PRD shippable
+# it runs the optional ship_gate below. Loops until zero gaps or max_cycles.
 # Per-project overrides via project_configs[i].compliance_cycle.
 compliance_cycle:
   enabled: true
@@ -117,6 +133,19 @@ compliance_cycle:
   analyzer_path: /opt/dev-tools/components/hydra/tools/hydra-compliance-analyzer/hydra-compliance-analyzer
   gap_to_prd_path: /opt/dev-tools/components/hydra/tools/gap-to-prd/gap-to-prd
   task_breakdown_path: /opt/dev-tools/config/pi/skills/task-breakdown/cli.mjs
+  # High-IQ model for gap adjudication. Empty = use the agents.pi model.
+  # adjudicator_model: ""
+  # Product ship-gate: run build/boot/e2e before declaring the PRD
+  # shippable. Disabled by default; failure files a ship-gate fix bead
+  # instead of approving. A build failure short-circuits; boot_cmd +
+  # health_url are optional (boot the product, poll until 2xx, then e2e).
+  # ship_gate:
+  #   enabled: true
+  #   build_cmd: "go build ./..."
+  #   boot_cmd: ""
+  #   health_url: ""
+  #   e2e_cmd: "go test -tags e2e ./..."
+  #   timeout: 10m
 
 # CRITICAL: pi.config_dir must point to a valid Pi config with skills.
 # See hydra-config.yaml.example and AGENTS.md for details.

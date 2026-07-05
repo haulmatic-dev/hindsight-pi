@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -115,8 +116,37 @@ func (c *Client) exec(cmd string, args ...string) ([]byte, error) {
 	return output, nil
 }
 
-// execInDir executes a CLI command in a specific directory
+// brExecMu serializes br invocations. The br daemon (SQLite-backed) returns
+// exit 8 under concurrent access, and the overseer fans out many br calls
+// during DAG builds — serializing removes that self-inflicted contention.
+var brExecMu sync.Mutex
+
+// execInDir runs a CLI command in a directory, serializing br calls and
+// retrying transient daemon-lock failures (exit 8 / "database is locked")
+// with exponential backoff. Non-transient errors return immediately.
 func (c *Client) execInDir(dir string, cmd string, args ...string) ([]byte, error) {
+	if cmd == "br" {
+		brExecMu.Lock()
+		defer brExecMu.Unlock()
+	}
+	const maxAttempts = 4
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		out, err := c.execInDirOnce(dir, cmd, args...)
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+		if !isTransientError(err) {
+			return nil, err
+		}
+		time.Sleep(time.Duration(1<<uint(attempt-1)) * 150 * time.Millisecond)
+	}
+	return nil, lastErr
+}
+
+// execInDirOnce executes a CLI command in a specific directory (single attempt).
+func (c *Client) execInDirOnce(dir string, cmd string, args ...string) ([]byte, error) {
 	// If the executor supports directory-aware execution, use it
 	if execWithDir, ok := c.executor.(interface {
 		ExecuteInDir(dir string, name string, arg ...string) ([]byte, error)
@@ -209,29 +239,15 @@ func (c *Client) UpdateBeadStatus(projectPath string, beadID types.BeadID, statu
 
 // CloseBead marks a bead as completed and verifies the closure
 func (c *Client) CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error {
-	// Retry up to 3 times on transient errors (db locks, daemon conflicts). The br
-	// daemon can occasionally return exit 8 during concurrent writes — retrying
-	// resolves the lock and lets the close succeed.
-	const maxAttempts = 3
-	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		err := c.closeBeadOnce(projectPath, repoName, beadID, reason)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		// Only retry on transient errors (db lock / daemon conflict = exit 8).
-		if !isTransientCloseError(err) {
-			return err
-		}
-		time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
-	}
-	return fmt.Errorf("close failed for bead %s after %d attempts: %w", beadID.String(), maxAttempts, lastErr)
+	// Transient daemon-lock (exit 8) retry is handled centrally in execInDir,
+	// which serializes br calls and retries with backoff. closeBeadOnce keeps
+	// the --force retry-on-open-children logic.
+	return c.closeBeadOnce(projectPath, repoName, beadID, reason)
 }
 
-// isTransientCloseError returns true if the error looks like a transient br daemon
+// isTransientError returns true if the error looks like a transient br daemon
 // issue (database lock) rather than a logical error (bead not found, etc.).
-func isTransientCloseError(err error) bool {
+func isTransientError(err error) bool {
 	if err == nil {
 		return false
 	}
