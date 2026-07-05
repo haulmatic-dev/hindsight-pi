@@ -75,6 +75,9 @@ internal/pi/skills-lock.json
 .hydra/
 hydra.pid
 
+# tldr code-intelligence local state
+.tldr/
+
 # Integration test runtime data
 internal/integration/.hydra/
 
