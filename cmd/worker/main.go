@@ -1221,7 +1221,7 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 
 	// Build skill flags if configDir is set
 	if piConfig.ConfigDir != "" {
-		skillResult, err := pi.BuildSkillFlags(piConfig.ConfigDir)
+		skillResult, err := pi.BuildSkillFlagsForProject(piConfig.ConfigDir, projectPath)
 		if err != nil {
 			log.Printf("[Worker] Warning: failed to build skill flags: %v", err)
 		} else {
@@ -1722,12 +1722,13 @@ func closeBeadFromWorker(bead types.Bead, projectPath, repoName, reason string) 
 // so that fix beads are only created for real work gaps.
 //
 // Exit codes:
-//   0 – success
-//   1 – generic / unknown code failure
-//   2 – rate-limit / API quota exceeded
-//   3 – timeout / deadline exceeded
-//   4 – infrastructure (network, daemon lock, permissions, etc.)
-//   5 – stub / placeholder detected
+//
+//	0 – success
+//	1 – generic / unknown code failure
+//	2 – rate-limit / API quota exceeded
+//	3 – timeout / deadline exceeded
+//	4 – infrastructure (network, daemon lock, permissions, etc.)
+//	5 – stub / placeholder detected
 func classifyFailure(result *ExecutionResult) int {
 	if result == nil || result.Success {
 		return 0
