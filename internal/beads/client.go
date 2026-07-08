@@ -103,6 +103,18 @@ func (c *Client) newContext(projectPath, repoName string) BeadContext {
 	}
 }
 
+// repoCwd resolves the working directory for br commands. For a multi-repo
+// project the .beads workspace lives in the repo subdirectory
+// (projectPath/repoName), not the project root — running br in the parent
+// (which has no .beads) fails. Single-repo callers pass an empty repoName and
+// run in projectPath unchanged, so existing behavior is preserved.
+func repoCwd(projectPath, repoName string) string {
+	if repoName != "" {
+		return filepath.Join(projectPath, repoName)
+	}
+	return projectPath
+}
+
 // exec executes a CLI command and returns the output or a CLIError with full details
 func (c *Client) exec(cmd string, args ...string) ([]byte, error) {
 	output, err := c.executor.Execute(cmd, args...)
@@ -187,7 +199,7 @@ func (c *Client) execJSON(projectPath, repoName, cmd string, args []string, pars
 // GetReadyBeads retrieves beads ready to execute (dependencies satisfied)
 func (c *Client) GetReadyBeads(projectName, projectPath, repoName string) ([]types.Bead, error) {
 	// Use project path as working directory so br commands find the .beads folder
-	output, err := c.execInDir(projectPath, "br", "ready", "--json")
+	output, err := c.execInDir(repoCwd(projectPath, repoName), "br", "ready", "--json")
 	if err != nil {
 		// Debug: log the error details
 		fmt.Printf("[DEBUG] GetReadyBeads ERROR for %s: %v\n", projectPath, err)
@@ -221,7 +233,7 @@ func (c *Client) GetReadyBeads(projectName, projectPath, repoName string) ([]typ
 // GetBead retrieves full details of a bead by its string ID
 func (c *Client) GetBead(projectPath, repoName string, beadID types.BeadID) (*types.Bead, error) {
 	// Must run in project directory to find .beads folder
-	output, err := c.execInDir(projectPath, "br", "show", beadID.String(), "--json")
+	output, err := c.execInDir(repoCwd(projectPath, repoName), "br", "show", beadID.String(), "--json")
 	if err != nil {
 		return nil, err
 	}
@@ -261,7 +273,7 @@ func isTransientError(err error) bool {
 
 // closeBeadOnce performs a single close attempt with --force retry-on-skip logic.
 func (c *Client) closeBeadOnce(projectPath, repoName string, beadID types.BeadID, reason string) error {
-	output, err := c.execInDir(projectPath, "br", "close", beadID.String(), "-r", reason)
+	output, err := c.execInDir(repoCwd(projectPath, repoName), "br", "close", beadID.String(), "-r", reason)
 	outputStr := string(output)
 
 	// Exit 3 means "already closed" or "skipped" — treat as idempotent success
@@ -285,7 +297,7 @@ func (c *Client) closeBeadOnce(projectPath, repoName string, beadID types.BeadID
 	// leaves a bead stuck in_progress with open children would never be recovered.
 	if strings.Contains(outputStr, "Warning: Skipped") || strings.Contains(outputStr, "blocked by") {
 		log.Printf("[CloseBead] Bead %s has open children; retrying close with --force (reason: %s)", beadID.String(), reason)
-		forceOutput, forceErr := c.execInDir(projectPath, "br", "close", beadID.String(), "-r", reason, "--force")
+		forceOutput, forceErr := c.execInDir(repoCwd(projectPath, repoName), "br", "close", beadID.String(), "-r", reason, "--force")
 		if forceErr != nil {
 			return fmt.Errorf("force-close failed for bead %s: %w (original skip: %s)", beadID.String(), forceErr, outputStr)
 		}
@@ -316,7 +328,7 @@ func (c *Client) ListBeads(projectPath, repoName string) ([]types.Bead, error) {
 	ctx := c.newContext(projectPath, repoName)
 
 	for {
-		output, err := c.execInDir(projectPath, "br", "list", "--json", "--limit", fmt.Sprintf("%d", limit), "--offset", fmt.Sprintf("%d", offset))
+		output, err := c.execInDir(repoCwd(projectPath, repoName), "br", "list", "--json", "--limit", fmt.Sprintf("%d", limit), "--offset", fmt.Sprintf("%d", offset))
 		if err != nil {
 			return nil, err
 		}

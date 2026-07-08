@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,32 +30,32 @@ type UserInfo struct {
 
 // GitCredentials configures how Hydra authenticates with Git providers.
 type GitCredentials struct {
-	Provider   string `yaml:"provider"`    // "github" or "gitlab"
-	Username   string `yaml:"username"`
-	TokenFile  string `yaml:"token_file"`  // Path to file containing PAT
-	TokenEnv   string `yaml:"token_env"`   // Env var name (fallback)
-	Token      string `yaml:"token"`       // Inline token (least secure)
+	Provider  string `yaml:"provider"` // "github" or "gitlab"
+	Username  string `yaml:"username"`
+	TokenFile string `yaml:"token_file"` // Path to file containing PAT
+	TokenEnv  string `yaml:"token_env"`  // Env var name (fallback)
+	Token     string `yaml:"token"`      // Inline token (least secure)
 }
 
 // UserProject defines a project to watch for a specific user.
 type UserProject struct {
 	Name         string       `yaml:"name"`
 	Path         string       `yaml:"path"`
-	Type         string       `yaml:"type,omitempty"`         // "single" or "multi"
-	Repos        []RepoConfig `yaml:"repos,omitempty"`        // Explicit repos for multi
-	RepoURL      string       `yaml:"repo_url,omitempty"`     // Remote URL
-	PRDPath      string       `yaml:"prd_path,omitempty"`     // e.g. docs/PRDs/current.md
-	Branch       string       `yaml:"branch,omitempty"`       // Default: main
-	AutoDiscover bool         `yaml:"auto_discover,omitempty"`// Discover repos if type=multi
+	Type         string       `yaml:"type,omitempty"`          // "single" or "multi"
+	Repos        []RepoConfig `yaml:"repos,omitempty"`         // Explicit repos for multi
+	RepoURL      string       `yaml:"repo_url,omitempty"`      // Remote URL
+	PRDPath      string       `yaml:"prd_path,omitempty"`      // e.g. docs/PRDs/current.md
+	Branch       string       `yaml:"branch,omitempty"`        // Default: main
+	AutoDiscover bool         `yaml:"auto_discover,omitempty"` // Discover repos if type=multi
 }
 
 // UserContext holds a loaded user config with resolved paths and tokens.
 type UserContext struct {
-	Config      UserConfig
-	Username    string
-	HomeDir     string
-	HydraDir    string
-	Token       string // Resolved PAT
+	Config   UserConfig
+	Username string
+	HomeDir  string
+	HydraDir string
+	Token    string // Resolved PAT
 }
 
 // LoadUserConfig reads and parses a user's Hydra config.
@@ -76,10 +77,16 @@ func LoadUserConfig(homeDir string) (*UserContext, error) {
 		return nil, fmt.Errorf("parse user config: %w", err)
 	}
 
-	// Resolve token (use homeDir for path expansion, not hydraDir)
+	// Resolve token (use homeDir for path expansion, not hydraDir). A missing
+	// or unreadable git token is NON-FATAL: the user's projects still load for
+	// local work (discovery, analysis, bead execution). Only remote git
+	// operations (push/clone over HTTPS) need the token, and those surface the
+	// failure at use-time. Previously any token-resolve error skipped the
+	// entire user, silently disabling every one of their projects.
 	token, err := resolveToken(cfg.Git, homeDir)
 	if err != nil {
-		return nil, fmt.Errorf("resolve git token: %w", err)
+		log.Printf("[UserConfig] %s: git token unresolved (%v); loading projects for local work without push auth", username, err)
+		token = ""
 	}
 
 	// Expand project paths
