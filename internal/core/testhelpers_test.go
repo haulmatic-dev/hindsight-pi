@@ -12,12 +12,13 @@ import (
 
 // mockBeadsClient is a mock implementation of the beads client for testing
 type mockBeadsClient struct {
-	mu         sync.RWMutex
-	beads      map[string]types.Bead // key: "project/repo-id" or "project-id"
-	listErr    error
-	getErr     error
-	closeErr   error
-	closeCalls []mockCloseCall
+	mu            sync.RWMutex
+	beads         map[string]types.Bead // key: "project/repo-id" or "project-id"
+	listErr       error
+	listErrByPath map[string]error // per-projectPath list error (overrides listErr for that path)
+	getErr        error
+	closeErr      error
+	closeCalls    []mockCloseCall
 }
 
 // mockCloseCall tracks CloseBead invocations for testing
@@ -36,6 +37,9 @@ func newMockBeadsClient() *mockBeadsClient {
 }
 
 func (m *mockBeadsClient) ListBeads(projectPath, repoName string) ([]types.Bead, error) {
+	if err, ok := m.listErrByPath[projectPath]; ok {
+		return nil, err
+	}
 	if m.listErr != nil {
 		return nil, m.listErr
 	}

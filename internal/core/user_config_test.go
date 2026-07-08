@@ -108,9 +108,15 @@ projects: []
 `
 	os.WriteFile(filepath.Join(hydraDir, "config.yaml"), []byte(configYAML), 0644)
 
-	_, err := LoadUserConfig(dir)
-	if err == nil {
-		t.Fatal("expected error for missing token")
+	// A missing git token is non-fatal: the user loads for local work with an
+	// empty token (remote git ops surface the failure at use-time). This
+	// replaces the old hard-fail that silently skipped the entire user.
+	ctx, err := LoadUserConfig(dir)
+	if err != nil {
+		t.Fatalf("expected fail-soft load with no token, got error: %v", err)
+	}
+	if ctx.Token != "" {
+		t.Fatalf("expected empty token, got %q", ctx.Token)
 	}
 }
 

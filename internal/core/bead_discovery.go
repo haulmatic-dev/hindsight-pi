@@ -89,7 +89,11 @@ func (d *BeadDiscovery) findFromBR(activeWorkers map[string]bool) ([]types.Bead,
 	for _, project := range d.projects {
 		beads, err := d.beadsClient.ListBeads(project.Path, "")
 		if err != nil {
-			return nil, fmt.Errorf("failed to list beads for project %s: %w", project.Name, err)
+			// A single project's list failure (e.g. a stale path, a parent dir
+			// with no .beads, or a transient br error) must not abort discovery
+			// for every other project. Skip it this tick and continue.
+			log.Printf("⚠️  [br] list failed for project %s: %v — skipping this project this tick", project.Name, err)
+			continue
 		}
 		allReadyBeads = append(allReadyBeads, beads...)
 	}
@@ -148,7 +152,11 @@ func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead,
 	for _, project := range d.projects {
 		triage, err := d.bvClient.GetTriage(project.Path)
 		if err != nil {
-			return nil, fmt.Errorf("bv triage failed for project %s: %w", project.Name, err)
+			// Per-project isolation: one project's triage failure must not
+			// abort the whole scheduler tick. Skip it and keep scheduling the
+			// rest.
+			log.Printf("⚠️  [BV] triage failed for project %s: %v — skipping this project this tick", project.Name, err)
+			continue
 		}
 
 		log.Printf("[BV] Triage for %s: %d recommendations, %d ready, %d blocked",
@@ -305,7 +313,10 @@ func (d *BeadDiscovery) findFromBVPlan(activeWorkers map[string]bool) ([]types.B
 	for _, project := range d.projects {
 		plan, err := d.bvClient.GetPlan(project.Path)
 		if err != nil {
-			return nil, fmt.Errorf("bv robot-plan failed for project %s: %w", project.Name, err)
+			// Per-project isolation: skip a project whose plan failed rather
+			// than aborting planning for every project this tick.
+			log.Printf("⚠️  [BV-Plan] plan failed for project %s: %v — skipping this project this tick", project.Name, err)
+			continue
 		}
 
 		log.Printf("[BV-Plan] Plan for %s: %d tracks, %d total actionable beads",
@@ -375,7 +386,6 @@ func (d *BeadDiscovery) findFromBVPlan(activeWorkers map[string]bool) ([]types.B
 	log.Printf("📋 [BV-Plan] Found %d ready beads from plan (after filtering)", len(allReadyBeads))
 	return d.filterByDAG(allReadyBeads), nil
 }
-
 
 // filterByDAG intersects candidate beads with the DAG's ready nodes.
 // This prevents duplicate scheduling when external sources (br, bv) return beads

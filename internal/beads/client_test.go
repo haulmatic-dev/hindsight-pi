@@ -24,6 +24,7 @@ type mockExecutor struct {
 		Name string
 		Args []string
 	}
+	dirs []string // directories passed to ExecuteInDir, in call order
 }
 
 // NewMockExecutor creates a new mock executor
@@ -61,6 +62,7 @@ func (m *mockExecutor) Execute(name string, arg ...string) ([]byte, error) {
 
 // ExecuteInDir implements directory-aware execution for mocking execInDir calls
 func (m *mockExecutor) ExecuteInDir(dir string, name string, arg ...string) ([]byte, error) {
+	m.dirs = append(m.dirs, dir)
 	return m.Execute(name, arg...)
 }
 
