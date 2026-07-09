@@ -194,6 +194,10 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 
 	// Prepare environment variables
 	envVars := os.Environ()
+	// Skip Pi's startup network operations (provider-list fetch); use the
+	// local models.json cache. Avoids spurious "Unknown provider" flakes when
+	// Pi processes launch concurrently.
+	envVars = append(envVars, "PI_OFFLINE=1")
 
 	// Set PI_CODING_AGENT_DIR if configDir is set
 	if c.configDir != "" {
