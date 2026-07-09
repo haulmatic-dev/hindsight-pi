@@ -153,9 +153,16 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 		args = append(args, "--model", c.model)
 	}
 
-	// Add skill flags if configDir is set
+	// Get project path from session metadata (used both for skill scoping and
+	// as the command's working directory).
+	projectPath := ""
+	if path, ok := session.metadata["project"].(string); ok {
+		projectPath = path
+	}
+
+	// Add skill flags if configDir is set, scoped to the project's stack.
 	if c.configDir != "" {
-		skillResult, err := pi.BuildSkillFlags(c.configDir)
+		skillResult, err := pi.BuildSkillFlagsForProject(c.configDir, projectPath)
 		if err != nil {
 			log.Printf("[PiConnector] Warning: failed to build skill flags: %v", err)
 		} else {
@@ -169,12 +176,6 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 				log.Printf("[PiConnector] ⚠️ Continuing with available skills (missing: %d)", len(skillResult.Missing))
 			}
 		}
-	}
-
-	// Get project path from session metadata
-	projectPath := ""
-	if path, ok := session.metadata["project"].(string); ok {
-		projectPath = path
 	}
 
 	// Create command with context timeout
