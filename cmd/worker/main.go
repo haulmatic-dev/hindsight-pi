@@ -1299,6 +1299,12 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 	// Prepare environment
 	envVars := os.Environ()
 
+	// Force Pi offline at the launch site: skip its startup provider-list
+	// fetch (which flakes under concurrent worker launches, causing spurious
+	// "Unknown provider") and use the local models.json cache. Set explicitly
+	// here rather than relying on inheritance so it always reaches Pi.
+	envVars = append(envVars, "PI_OFFLINE=1")
+
 	// Set PI_CODING_AGENT_DIR if configDir is set
 	if piConfig.ConfigDir != "" {
 		agentDir := filepath.Join(piConfig.ConfigDir, "agent")
