@@ -1261,8 +1261,13 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 		path = bead.Project
 	}
 
-	// Build base args — default text mode reads prompt from stdin
+	// Build base args — default text mode reads prompt from stdin.
+	// --offline skips Pi's startup provider-list network fetch (which flakes
+	// under concurrent worker launches → spurious "Unknown provider") and uses
+	// the local models.json cache. Passed as a flag (not just env) so it can't
+	// be lost in env propagation.
 	args := []string{
+		"--offline",
 		"--no-session",
 	}
 

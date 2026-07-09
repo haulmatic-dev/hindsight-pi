@@ -139,8 +139,10 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 	// Query Hindsight for context enrichment before execution
 	enhancedPrompt := c.enrichPromptWithHindsight(session, prompt)
 
-	// Build command
+	// Build command. --offline skips Pi's startup provider-list network fetch
+	// (flaky under concurrency) in favor of the local models.json cache.
 	args := []string{
+		"--offline",
 		"--mode", "rpc",
 		"--no-session",
 	}
