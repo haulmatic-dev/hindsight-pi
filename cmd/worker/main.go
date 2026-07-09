@@ -803,6 +803,13 @@ func executeWithRetry(
 	var result *ExecutionResult
 
 	for attempt := 0; attempt <= policy.MaxRetries; attempt++ {
+		if attempt == 0 {
+			// Stagger concurrent workers' Pi cold-starts. Pi resolves its
+			// provider list via a remote fetch on startup; several workers
+			// launching Pi at once trip spurious "Unknown provider" errors.
+			// A small random delay desyncs them.
+			time.Sleep(time.Duration(rand.Intn(2500)) * time.Millisecond)
+		}
 		if attempt > 0 {
 			backoff := calculateBackoff(attempt, policy)
 			log.Printf("⏳ Retry %d/%d: waiting %v before next attempt...", attempt, policy.MaxRetries, backoff)
@@ -819,8 +826,10 @@ func executeWithRetry(
 			hindsightContext = queryHindsightForContext(bead, config, mcpClient)
 		}
 
-		// Execute with Pi agent (sole supported agent)
-		result, lastErr = executeWithPi(bead, config.Pi, mcpClient, projectPath, hindsightContext)
+		// Execute with Pi agent (sole supported agent). Wrapped with a fast
+		// inner retry for transient Pi-startup flakes (provider-list fetch),
+		// which cost no LLM tokens and usually clear within a couple tries.
+		result, lastErr = executePiWithStartupRetry(bead, config.Pi, mcpClient, projectPath, hindsightContext)
 		result.Attempts = attempt + 1
 
 		if lastErr == nil && result.Success {
@@ -905,6 +914,54 @@ func calculateBackoff(attempt int, policy RetryPolicy) time.Duration {
 	}
 
 	return time.Duration(backoff)
+}
+
+// executePiWithStartupRetry wraps executeWithPi with fast, jittered retries for
+// transient Pi *startup* failures. Pi resolves its provider list via a remote
+// fetch on startup; when several workers launch Pi concurrently that fetch
+// flakes and Pi reports a spurious "Unknown provider" for an otherwise-valid
+// provider. These failures happen before any LLM call, so they cost no tokens
+// and are cheap to retry quickly. Non-startup failures (real execution errors,
+// rate limits mid-run) return immediately to the caller's token-aware retry
+// loop.
+func executePiWithStartupRetry(
+	bead types.Bead,
+	piConfig PiConfig,
+	mcpClient *mcp.Client,
+	projectPath string,
+	hindsightContext *agents.ContextEnrichment,
+) (*ExecutionResult, error) {
+	const maxStartupRetries = 6
+	var result *ExecutionResult
+	var err error
+	for i := 0; ; i++ {
+		result, err = executeWithPi(bead, piConfig, mcpClient, projectPath, hindsightContext)
+		if i >= maxStartupRetries || !isTransientStartupFailure(result, err) {
+			return result, err
+		}
+		delay := time.Duration(300+rand.Intn(1500)) * time.Millisecond
+		log.Printf("⏳ Transient Pi startup flake (provider fetch) on inner attempt %d/%d — retrying in %v",
+			i+1, maxStartupRetries, delay)
+		time.Sleep(delay)
+	}
+}
+
+// isTransientStartupFailure reports whether a Pi failure is a no-token startup
+// flake (provider-list fetch) rather than a real error worth surfacing.
+func isTransientStartupFailure(result *ExecutionResult, err error) bool {
+	var sb strings.Builder
+	if err != nil {
+		sb.WriteString(err.Error())
+	}
+	if result != nil {
+		sb.WriteString(" ")
+		sb.WriteString(result.Error)
+		sb.WriteString(" ")
+		sb.WriteString(result.Output)
+	}
+	hay := strings.ToLower(sb.String())
+	return strings.Contains(hay, "unknown provider") ||
+		strings.Contains(hay, "use --list-models")
 }
 
 // executeWithPi executes the Pi agent CLI with activity-based timeout monitoring
