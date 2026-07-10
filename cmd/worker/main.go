@@ -977,8 +977,19 @@ func executeWithPi(
 		AgentType: "pi",
 	}
 
-	// Activity-based timeout: 30 minutes of inactivity
-	activityTimeout := 30 * time.Minute
+	// Activity-based timeout: kill Pi after this long with NO output at all.
+	// A hung/stalled Pi (dead LLM stream, wedged tool call) produces nothing,
+	// while a working Pi streams reasoning/tool output and resets the timer
+	// constantly — so this recycles stuck workers for a fast retry without
+	// touching healthy ones. Lowered from 30m (which let stalls burn up to the
+	// 15m maxTotalRuntime before Charon's blunter kill). Tunable via
+	// HYDRA_WORKER_ACTIVITY_TIMEOUT (e.g. "8m", "15m").
+	activityTimeout := 10 * time.Minute
+	if v := os.Getenv("HYDRA_WORKER_ACTIVITY_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			activityTimeout = d
+		}
+	}
 	activityMonitor := NewActivityMonitor(activityTimeout)
 
 	// Max total runtime: 15 minutes regardless of activity.
