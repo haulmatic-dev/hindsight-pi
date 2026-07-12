@@ -15,6 +15,7 @@ import (
 
 	"github.com/haulmatic-dev/hydra/internal/api"
 	"github.com/haulmatic-dev/hydra/internal/core"
+	"github.com/haulmatic-dev/hydra/internal/logx"
 )
 
 // sourceShellEnv sources environment variables from the user's shell configuration
@@ -123,8 +124,11 @@ func main() {
 	)
 	flag.Parse()
 
+	// Configure leveled logging (HYDRA_LOG_LEVEL: debug|info|warn|error).
+	logx.Init()
 	if *debug {
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
+		logx.SetLevel(logx.LevelDebug)
 	}
 
 	fmt.Println("🐍 Hydra - Agent Swarm Orchestrator")

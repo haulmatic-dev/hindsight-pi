@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/logx"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -201,22 +202,19 @@ func (c *Client) GetReadyBeads(projectName, projectPath, repoName string) ([]typ
 	// Use project path as working directory so br commands find the .beads folder
 	output, err := c.execInDir(repoCwd(projectPath, repoName), "br", "ready", "--json")
 	if err != nil {
-		// Debug: log the error details
-		fmt.Printf("[DEBUG] GetReadyBeads ERROR for %s: %v\n", projectPath, err)
+		logx.Debugf("GetReadyBeads ERROR for %s: %v", projectPath, err)
 		if cliErr, ok := err.(*CLIError); ok {
-			fmt.Printf("[DEBUG] stdout: %s\n", cliErr.Stdout)
-			fmt.Printf("[DEBUG] stderr: %s\n", cliErr.Stderr)
+			logx.Debugf("stdout: %s", cliErr.Stdout)
+			logx.Debugf("stderr: %s", cliErr.Stderr)
 		}
 		return nil, err
 	}
 
-	// Debug: log raw output
 	outputStr := string(output)
-	fmt.Printf("[DEBUG] GetReadyBeads SUCCESS for %s (len=%d): %s\n", projectPath, len(output), outputStr)
+	logx.Debugf("GetReadyBeads SUCCESS for %s (len=%d): %s", projectPath, len(output), outputStr)
 
-	// Check if output is empty or just []
 	if len(outputStr) < 5 || outputStr == "[]" {
-		fmt.Printf("[DEBUG] WARNING: Empty or minimal output for %s\n", projectPath)
+		logx.Debugf("GetReadyBeads empty/minimal output for %s", projectPath)
 	}
 
 	beads, err := c.parser.ParseReadyBeads(output, BeadContext{
@@ -224,8 +222,7 @@ func (c *Client) GetReadyBeads(projectName, projectPath, repoName string) ([]typ
 		Repo:    repoName,
 	})
 
-	// Debug: log parsed results
-	fmt.Printf("[DEBUG] GetReadyBeads parsed %d beads for %s\n", len(beads), projectPath)
+	logx.Debugf("GetReadyBeads parsed %d beads for %s", len(beads), projectPath)
 
 	return beads, err
 }
