@@ -1,12 +1,13 @@
 package core
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"bufio"
 	"strings"
 	"sync"
 	"time"
@@ -241,18 +242,22 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 
 	log.Printf("[Worker] Process started with PID %d for bead %s", cmd.Process.Pid, beadIDStr)
 
+	// Stream worker output to a per-bead file to keep the daemon log lean. The
+	// full firehose (Pi reasoning, tool output, Hindsight recalls) lands in
+	// <HYDRA_HOME>/logs/workers/<bead>-<pid>.log; only notable lines (errors,
+	// failures, rate limits) are also surfaced to the daemon log.
+	workerLog := openWorkerLogFile(beadIDStr, cmd.Process.Pid)
+	var wlMu sync.Mutex
+	var streamWG sync.WaitGroup
+	streamWG.Add(2)
+	go func() { defer streamWG.Done(); streamWorkerOutput(stdoutPipe, beadIDStr, "", workerLog, &wlMu) }()
 	go func() {
-		scanner := bufio.NewScanner(stdoutPipe)
-		for scanner.Scan() {
-			log.Printf("[Worker:%s] %s", beadIDStr, scanner.Text())
-		}
+		defer streamWG.Done()
+		streamWorkerOutput(stderrPipe, beadIDStr, " [stderr]", workerLog, &wlMu)
 	}()
-	go func() {
-		scanner := bufio.NewScanner(stderrPipe)
-		for scanner.Scan() {
-			log.Printf("[Worker:%s] [stderr] %s", beadIDStr, scanner.Text())
-		}
-	}()
+	if workerLog != nil {
+		go func() { streamWG.Wait(); _ = workerLog.Close() }()
+	}
 
 	// Resolve user context from project path
 	username := s.findUserForProject(projectPath)
@@ -299,4 +304,69 @@ func (s *WorkerSpawner) findUserForProject(projectPath string) string {
 		}
 	}
 	return ""
+}
+
+// workerLogDir is the directory holding per-bead worker output logs.
+func workerLogDir() string {
+	base := os.Getenv("HYDRA_HOME")
+	if base == "" {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "logs", "workers")
+}
+
+// openWorkerLogFile opens (creating parent dirs) the per-bead worker output
+// log. Returns nil on failure, in which case callers fall back to streaming
+// every line to the daemon log (previous behavior).
+func openWorkerLogFile(beadID string, pid int) *os.File {
+	dir := workerLogDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("[Worker] could not create worker log dir %s: %v (streaming to daemon log)", dir, err)
+		return nil
+	}
+	name := strings.NewReplacer("/", "-", " ", "-").Replace(beadID)
+	f, err := os.OpenFile(filepath.Join(dir, fmt.Sprintf("%s-%d.log", name, pid)),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		log.Printf("[Worker] could not open worker log for %s: %v (streaming to daemon log)", beadID, err)
+		return nil
+	}
+	return f
+}
+
+// streamWorkerOutput copies a worker pipe line-by-line into its per-bead log
+// file, and additionally surfaces notable lines to the daemon log. When no
+// file is available it falls back to logging every line to the daemon log.
+func streamWorkerOutput(pipe io.Reader, beadID, tag string, f *os.File, mu *sync.Mutex) {
+	scanner := bufio.NewScanner(pipe)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if f != nil {
+			mu.Lock()
+			fmt.Fprintf(f, "%s%s %s\n", time.Now().Format(time.RFC3339), tag, line)
+			mu.Unlock()
+			if isNotableWorkerLine(line) {
+				log.Printf("[Worker:%s]%s %s", beadID, tag, line)
+			}
+		} else {
+			log.Printf("[Worker:%s]%s %s", beadID, tag, line)
+		}
+	}
+}
+
+// isNotableWorkerLine reports whether a worker output line is important enough
+// to also surface to the daemon log (errors, failures, rate limits), so those
+// stay visible without the full per-bead firehose.
+func isNotableWorkerLine(s string) bool {
+	l := strings.ToLower(s)
+	for _, k := range []string{
+		"❌", "panic", "fatal", "error:", "failed", "timed out", "timeout",
+		"exit code", " 401", " 429", "unknown provider", "authentication_error",
+	} {
+		if strings.Contains(l, k) {
+			return true
+		}
+	}
+	return false
 }
