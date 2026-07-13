@@ -13,7 +13,7 @@ import (
 
 // BeadCloser closes beads via beadsClient based on worker completion status.
 type BeadCloser struct {
-	beadsClient      BeadsClient
+	beadsClient       BeadsClient
 	intelligenceHub   *IntelligenceHub
 	projectResolver   *ProjectResolver
 	validationService *ValidationService
@@ -31,7 +31,7 @@ func (c *BeadCloser) SetWorktreeManager(m *WorktreeManager, chainKeyFn func(type
 // NewBeadCloser creates a new bead closer.
 func NewBeadCloser(beadsClient BeadsClient, intelligenceHub *IntelligenceHub, projectResolver *ProjectResolver, validationService *ValidationService, config *Config) *BeadCloser {
 	return &BeadCloser{
-		beadsClient:      beadsClient,
+		beadsClient:       beadsClient,
 		intelligenceHub:   intelligenceHub,
 		projectResolver:   projectResolver,
 		validationService: validationService,
@@ -263,16 +263,36 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 	// 2. Diff gate: workers do not commit their work, so an empty diff on
 	//    the bead's target files (or the whole repo when none are declared)
 	//    means no change was produced.
+	repoPath := c.projectResolver.ResolveRepoPath(bead.Project, repoName, projectPath)
+	if repoPath == "" {
+		repoPath = projectPath
+	}
 	if c.config.Validation.RequireDiffOnClose {
-		repoPath := c.projectResolver.ResolveRepoPath(bead.Project, repoName, projectPath)
-		if repoPath == "" {
-			repoPath = projectPath
-		}
 		changed, err := repoHasChanges(repoPath, beadTargetFiles(bead))
 		if err != nil {
 			log.Printf("[VerifiedClose] diff check error for %s (not blocking): %v", bead.ID, err)
 		} else if !changed {
 			return c.rejectClose(bead, projectPath, repoName, "empty-diff")
+		}
+	}
+
+	// 3. Target-files scope gate: reject closes that changed files outside the
+	//    bead's declared targets (plus a small conventional allowlist).
+	if mode := c.config.Validation.TargetScopeMode(); mode != "off" {
+		targets := beadTargetFiles(bead)
+		if len(targets) > 0 {
+			changed, err := changedFiles(repoPath)
+			if err != nil {
+				log.Printf("[ScopeGate] changed-files error for %s (not blocking): %v", bead.ID, err)
+			} else {
+				violations := scopeViolations(changed, targets)
+				if len(violations) > 0 {
+					if mode == "block" {
+						return c.rejectClose(bead, projectPath, repoName, "off-scope changes: "+strings.Join(violations, ", "))
+					}
+					log.Printf("[ScopeGate] bead %s changed off-scope files: %v", bead.ID, violations)
+				}
+			}
 		}
 	}
 
@@ -333,16 +353,20 @@ func (c *BeadCloser) logCloseEvent(bead *types.Bead, verdict, reason string, att
 }
 
 // beadTargetFiles extracts a bead's declared target files so the diff
-// check can be scoped. It reads Metadata["files"] then a "Files:" line in
-// the description. Returns nil when none are declared (caller then checks
-// the whole repo).
+// check can be scoped. It reads Metadata["files"] then Metadata["target_files"]
+// then a "Files:" line in the description. Returns nil when none are declared
+// (caller then checks the whole repo).
 func beadTargetFiles(bead *types.Bead) []string {
 	if bead == nil {
 		return nil
 	}
 	if bead.Metadata != nil {
-		if v, ok := bead.Metadata["files"]; ok && strings.TrimSpace(v) != "" {
-			return splitFileList(v)
+		// Workers and validators populate different keys; reconcile both
+		// so the close-path gate never misses declared targets.
+		for _, key := range []string{"files", "target_files"} {
+			if v, ok := bead.Metadata[key]; ok && strings.TrimSpace(v) != "" {
+				return splitFileList(v)
+			}
 		}
 	}
 	for _, line := range strings.Split(bead.Description, "\n") {

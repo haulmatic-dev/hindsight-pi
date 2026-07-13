@@ -212,7 +212,7 @@ type OverseerConfig struct {
 	// WorktreeIsolation runs each chain in its own git worktree and commits
 	// its work on verified-close, integrating back to the working branch on
 	// chain completion. Off by default (opt-in).
-	WorktreeIsolation     bool                     `yaml:"worktree_isolation"`
+	WorktreeIsolation bool `yaml:"worktree_isolation"`
 }
 
 type ChainDetectionConfig struct {
@@ -223,11 +223,12 @@ type ChainDetectionConfig struct {
 
 // ValidationConfig contains self-healing validation loop settings
 type ValidationConfig struct {
-	Enabled                  bool `yaml:"enabled"`
-	TDDValidationEnabled     bool `yaml:"tdd_validation_enabled"`
-	PRDValidationEnabled     bool `yaml:"prd_validation_enabled"`
-	MaxRounds                int  `yaml:"max_rounds"`
-	AgentVerificationEnabled bool `yaml:"agent_verification_enabled"`
+	Enabled                  bool   `yaml:"enabled"`
+	TDDValidationEnabled     bool   `yaml:"tdd_validation_enabled"`
+	PRDValidationEnabled     bool   `yaml:"prd_validation_enabled"`
+	MaxRounds                int    `yaml:"max_rounds"`
+	AgentVerificationEnabled bool   `yaml:"agent_verification_enabled"`
+	EnforceTargetScope       string `yaml:"enforce_target_scope"`
 
 	// CloseBlockedOnFailed (default true) gates whether a bead that
 	// closes with `close_reason=failed` (worker exit non-zero, retry
@@ -251,6 +252,20 @@ type ValidationConfig struct {
 	// success but edited nothing" case. Ops can disable this if a
 	// workflow legitimately closes beads without file changes.
 	RequireDiffOnClose bool `yaml:"require_diff_on_close"`
+}
+
+// TargetScopeMode returns the normalized scope gate enforcement mode.
+// Valid values are "off", "warn", and "block" (case-insensitive).
+// Empty or unrecognized values fall back to "warn".
+func (v ValidationConfig) TargetScopeMode() string {
+	switch strings.ToLower(strings.TrimSpace(v.EnforceTargetScope)) {
+	case "off":
+		return "off"
+	case "block":
+		return "block"
+	default:
+		return "warn"
+	}
 }
 
 // ResourceMonitoringConfig contains resource monitoring settings
@@ -312,6 +327,7 @@ func DefaultConfig() *Config {
 			PRDValidationEnabled:     true,
 			MaxRounds:                3,
 			AgentVerificationEnabled: true,
+			EnforceTargetScope:       "warn",
 			RequireDiffOnClose:       true,
 		},
 		ComplianceCycle: ComplianceCycleConfig{
