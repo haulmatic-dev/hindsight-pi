@@ -38,8 +38,8 @@ func TestBuildSkillFlags_ReturnsAllSkills(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	// Assert we have 26 elements (13 skills × 2 for --skill + path)
-	assert.Len(t, result.Flags, 26, "Expected 26 elements (13 skills × 2)")
+	// Assert we have 32 elements (16 skills × 2 for --skill + path)
+	assert.Len(t, result.Flags, 32, "Expected 32 elements (16 skills × 2)")
 
 	// Verify structure: alternating "--skill" and path
 	for i := 0; i < len(result.Flags); i += 2 {
@@ -47,17 +47,20 @@ func TestBuildSkillFlags_ReturnsAllSkills(t *testing.T) {
 		assert.True(t, strings.Contains(result.Flags[i+1], "skills"), "Expected path containing 'skills' at index %d", i+1)
 	}
 
-	// Verify all 13 expected skills are present
+	// Verify all 16 expected skills are present
 	expectedSkills := []string{
 		"angular-component",
 		"angular-signals",
 		"angular-testing",
+		"code-refactoring",
 		"code-review",
 		"golang-patterns",
 		"golang-pro",
 		"golang-testing",
 		"implement-design",
 		"lsp-code-analysis",
+		"modern-javascript-patterns",
+		"nodejs-backend-patterns",
 		"systematic-debugging",
 		"test-driven-development",
 		"typescript-advanced-types",
@@ -78,7 +81,7 @@ func TestBuildSkillFlags_ReturnsAllSkills(t *testing.T) {
 	// With all skills available, should have no missing
 	assert.False(t, result.HasMissingSkills(), "Expected no missing skills when all directories exist")
 	assert.Equal(t, 0, len(result.Missing), "Expected 0 missing skills")
-	assert.Equal(t, 13, len(result.Found), "Expected 13 found skills")
+	assert.Equal(t, 16, len(result.Found), "Expected 16 found skills")
 	assert.False(t, result.HasWarnings(), "Expected no warnings when all skills exist")
 }
 
@@ -152,7 +155,7 @@ func TestBuildSkillFlags_InvalidConfigDir(t *testing.T) {
 
 	// All skills should be reported as missing
 	assert.True(t, result.HasMissingSkills(), "Expected missing skills when directory doesn't exist")
-	assert.Equal(t, 13, len(result.Missing), "Expected all 13 skills to be reported as missing")
+	assert.Equal(t, 16, len(result.Missing), "Expected all 16 skills to be reported as missing")
 
 	// Paths should still be absolute in warnings
 	absPath, _ := filepath.Abs(invalidDir)

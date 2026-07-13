@@ -803,6 +803,13 @@ func executeWithRetry(
 	var result *ExecutionResult
 
 	for attempt := 0; attempt <= policy.MaxRetries; attempt++ {
+		if attempt == 0 {
+			// Stagger concurrent workers' Pi cold-starts. Pi resolves its
+			// provider list via a remote fetch on startup; several workers
+			// launching Pi at once trip spurious "Unknown provider" errors.
+			// A small random delay desyncs them.
+			time.Sleep(time.Duration(rand.Intn(2500)) * time.Millisecond)
+		}
 		if attempt > 0 {
 			backoff := calculateBackoff(attempt, policy)
 			log.Printf("⏳ Retry %d/%d: waiting %v before next attempt...", attempt, policy.MaxRetries, backoff)
@@ -819,8 +826,10 @@ func executeWithRetry(
 			hindsightContext = queryHindsightForContext(bead, config, mcpClient)
 		}
 
-		// Execute with Pi agent (sole supported agent)
-		result, lastErr = executeWithPi(bead, config.Pi, mcpClient, projectPath, hindsightContext)
+		// Execute with Pi agent (sole supported agent). Wrapped with a fast
+		// inner retry for transient Pi-startup flakes (provider-list fetch),
+		// which cost no LLM tokens and usually clear within a couple tries.
+		result, lastErr = executePiWithStartupRetry(bead, config.Pi, mcpClient, projectPath, hindsightContext)
 		result.Attempts = attempt + 1
 
 		if lastErr == nil && result.Success {
@@ -907,6 +916,54 @@ func calculateBackoff(attempt int, policy RetryPolicy) time.Duration {
 	return time.Duration(backoff)
 }
 
+// executePiWithStartupRetry wraps executeWithPi with fast, jittered retries for
+// transient Pi *startup* failures. Pi resolves its provider list via a remote
+// fetch on startup; when several workers launch Pi concurrently that fetch
+// flakes and Pi reports a spurious "Unknown provider" for an otherwise-valid
+// provider. These failures happen before any LLM call, so they cost no tokens
+// and are cheap to retry quickly. Non-startup failures (real execution errors,
+// rate limits mid-run) return immediately to the caller's token-aware retry
+// loop.
+func executePiWithStartupRetry(
+	bead types.Bead,
+	piConfig PiConfig,
+	mcpClient *mcp.Client,
+	projectPath string,
+	hindsightContext *agents.ContextEnrichment,
+) (*ExecutionResult, error) {
+	const maxStartupRetries = 6
+	var result *ExecutionResult
+	var err error
+	for i := 0; ; i++ {
+		result, err = executeWithPi(bead, piConfig, mcpClient, projectPath, hindsightContext)
+		if i >= maxStartupRetries || !isTransientStartupFailure(result, err) {
+			return result, err
+		}
+		delay := time.Duration(300+rand.Intn(1500)) * time.Millisecond
+		log.Printf("⏳ Transient Pi startup flake (provider fetch) on inner attempt %d/%d — retrying in %v",
+			i+1, maxStartupRetries, delay)
+		time.Sleep(delay)
+	}
+}
+
+// isTransientStartupFailure reports whether a Pi failure is a no-token startup
+// flake (provider-list fetch) rather than a real error worth surfacing.
+func isTransientStartupFailure(result *ExecutionResult, err error) bool {
+	var sb strings.Builder
+	if err != nil {
+		sb.WriteString(err.Error())
+	}
+	if result != nil {
+		sb.WriteString(" ")
+		sb.WriteString(result.Error)
+		sb.WriteString(" ")
+		sb.WriteString(result.Output)
+	}
+	hay := strings.ToLower(sb.String())
+	return strings.Contains(hay, "unknown provider") ||
+		strings.Contains(hay, "use --list-models")
+}
+
 // executeWithPi executes the Pi agent CLI with activity-based timeout monitoring
 func executeWithPi(
 	bead types.Bead,
@@ -920,8 +977,19 @@ func executeWithPi(
 		AgentType: "pi",
 	}
 
-	// Activity-based timeout: 30 minutes of inactivity
-	activityTimeout := 30 * time.Minute
+	// Activity-based timeout: kill Pi after this long with NO output at all.
+	// A hung/stalled Pi (dead LLM stream, wedged tool call) produces nothing,
+	// while a working Pi streams reasoning/tool output and resets the timer
+	// constantly — so this recycles stuck workers for a fast retry without
+	// touching healthy ones. Lowered from 30m (which let stalls burn up to the
+	// 15m maxTotalRuntime before Charon's blunter kill). Tunable via
+	// HYDRA_WORKER_ACTIVITY_TIMEOUT (e.g. "8m", "15m").
+	activityTimeout := 10 * time.Minute
+	if v := os.Getenv("HYDRA_WORKER_ACTIVITY_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			activityTimeout = d
+		}
+	}
 	activityMonitor := NewActivityMonitor(activityTimeout)
 
 	// Max total runtime: 15 minutes regardless of activity.
@@ -1204,8 +1272,13 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 		path = bead.Project
 	}
 
-	// Build base args — default text mode reads prompt from stdin
+	// Build base args — default text mode reads prompt from stdin.
+	// --offline skips Pi's startup provider-list network fetch (which flakes
+	// under concurrent worker launches → spurious "Unknown provider") and uses
+	// the local models.json cache. Passed as a flag (not just env) so it can't
+	// be lost in env propagation.
 	args := []string{
+		"--offline",
 		"--no-session",
 	}
 
@@ -1221,7 +1294,7 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 
 	// Build skill flags if configDir is set
 	if piConfig.ConfigDir != "" {
-		skillResult, err := pi.BuildSkillFlags(piConfig.ConfigDir)
+		skillResult, err := pi.BuildSkillFlagsForProject(piConfig.ConfigDir, projectPath)
 		if err != nil {
 			log.Printf("[Worker] Warning: failed to build skill flags: %v", err)
 		} else {
@@ -1241,6 +1314,12 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 
 	// Prepare environment
 	envVars := os.Environ()
+
+	// Force Pi offline at the launch site: skip its startup provider-list
+	// fetch (which flakes under concurrent worker launches, causing spurious
+	// "Unknown provider") and use the local models.json cache. Set explicitly
+	// here rather than relying on inheritance so it always reaches Pi.
+	envVars = append(envVars, "PI_OFFLINE=1")
 
 	// Set PI_CODING_AGENT_DIR if configDir is set
 	if piConfig.ConfigDir != "" {
@@ -1722,12 +1801,13 @@ func closeBeadFromWorker(bead types.Bead, projectPath, repoName, reason string) 
 // so that fix beads are only created for real work gaps.
 //
 // Exit codes:
-//   0 – success
-//   1 – generic / unknown code failure
-//   2 – rate-limit / API quota exceeded
-//   3 – timeout / deadline exceeded
-//   4 – infrastructure (network, daemon lock, permissions, etc.)
-//   5 – stub / placeholder detected
+//
+//	0 – success
+//	1 – generic / unknown code failure
+//	2 – rate-limit / API quota exceeded
+//	3 – timeout / deadline exceeded
+//	4 – infrastructure (network, daemon lock, permissions, etc.)
+//	5 – stub / placeholder detected
 func classifyFailure(result *ExecutionResult) int {
 	if result == nil || result.Success {
 		return 0

@@ -25,10 +25,20 @@ type WorktreeManager struct {
 // NewWorktreeManager creates a worktree manager.
 func NewWorktreeManager() *WorktreeManager { return &WorktreeManager{} }
 
-// worktreeRoot returns the sibling directory that holds a project's worktrees.
+// worktreeRoot returns the directory that holds a project's worktrees. It
+// lives OUTSIDE the target project (so worktrees never pollute the project's
+// git status) AND under a base the hydra daemon owns — not the project's
+// parent dir, which may be owned by another user (e.g. a per-user project
+// under /home/<user>) and therefore not writable by the daemon. Base is
+// $HYDRA_HOME when set, else the system temp dir. The full project path is
+// sanitized into the subdir name to keep worktrees unique across projects.
 func worktreeRoot(projectPath string) string {
+	base := os.Getenv("HYDRA_HOME")
+	if base == "" {
+		base = os.TempDir()
+	}
 	clean := strings.TrimRight(projectPath, string(os.PathSeparator))
-	return filepath.Join(filepath.Dir(clean), ".hydra-worktrees", filepath.Base(clean))
+	return filepath.Join(base, ".hydra-worktrees", sanitizeKey(clean))
 }
 
 func sanitizeKey(key string) string {

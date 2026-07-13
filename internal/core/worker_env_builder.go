@@ -30,6 +30,12 @@ func (b *WorkerEnvBuilder) SetProviderBreaker(pb *ProviderBreaker) {
 func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType string, retryCount int) []string {
 	env := append(os.Environ(),
 		"HYDRA_WORKER=true",
+		// Skip Pi's startup network operations (provider-list fetch). That
+		// fetch flakes when many workers launch Pi concurrently and reports a
+		// spurious "Unknown provider" for a valid provider; offline mode uses
+		// the local models.json cache instead. Verified: 3 concurrent offline
+		// Pi calls all succeed where online mode failed.
+		"PI_OFFLINE=1",
 		fmt.Sprintf("HYDRA_BEAD_ID=%s", bead.ID),
 		fmt.Sprintf("HYDRA_PROJECT=%s", bead.Project),
 		fmt.Sprintf("HYDRA_PROJECT_PATH=%s", projectPath),

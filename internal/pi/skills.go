@@ -12,31 +12,89 @@ import (
 	"time"
 )
 
-// Skill represents a Pi skill to install
+// Skill represents a Pi skill to install.
+//
+// Stacks scopes a skill to the project stacks it applies to (e.g. "go",
+// "node", "ts", "angular", "python"). An empty Stacks means the skill is
+// stack-agnostic (debugging, review, TDD, LSP) and is always included. When a
+// project's stack is known, skills whose Stacks don't intersect it are
+// dropped from the worker prompt — this avoids shipping (say) Angular/vitest
+// skills to a Go worker, cutting prompt size and token cost.
 type Skill struct {
-	Name        string `json:"name"`
-	Repo        string `json:"repo"`
-	Description string `json:"description,omitempty"`
+	Name        string   `json:"name"`
+	Repo        string   `json:"repo"`
+	Description string   `json:"description,omitempty"`
+	Stacks      []string `json:"stacks,omitempty"`
 }
 
 // DefaultSkills contains the 16 required skills to install
 var DefaultSkills = []Skill{
-	{Name: "golang-pro", Repo: "jeffallan/claude-skills/skills/golang-pro", Description: "Go professional development skills"},
-	{Name: "golang-testing", Repo: "affaan-m/everything-claude-code/skills/golang-testing", Description: "Go testing patterns and practices"},
-	{Name: "golang-patterns", Repo: "affaan-m/everything-claude-code/skills/golang-patterns", Description: "Go design patterns"},
-	{Name: "angular-component", Repo: "analogjs/angular-skills/skills/angular-component", Description: "Angular component development"},
-	{Name: "angular-signals", Repo: "analogjs/angular-skills/skills/angular-signals", Description: "Angular signals state management"},
-	{Name: "angular-testing", Repo: "analogjs/angular-skills/skills/angular-testing", Description: "Angular testing strategies"},
-	{Name: "typescript-advanced-types", Repo: "wshobson/agents/plugins/javascript-typescript/skills/typescript-advanced-types", Description: "Advanced TypeScript type patterns"},
-	{Name: "nodejs-backend-patterns", Repo: "wshobson/agents/plugins/javascript-typescript/skills/nodejs-backend-patterns", Description: "Node.js backend patterns"},
-	{Name: "modern-javascript-patterns", Repo: "wshobson/agents/plugins/javascript-typescript/skills/modern-javascript-patterns", Description: "Modern JavaScript patterns"},
-	{Name: "vitest", Repo: "antfu/skills/skills/vitest", Description: "Vitest testing framework"},
-	{Name: "implement-design", Repo: "figma/mcp-server-guide/skills/implement-design", Description: "Design implementation from Figma"},
+	{Name: "golang-pro", Repo: "jeffallan/claude-skills/skills/golang-pro", Description: "Go professional development skills", Stacks: []string{"go"}},
+	{Name: "golang-testing", Repo: "affaan-m/everything-claude-code/skills/golang-testing", Description: "Go testing patterns and practices", Stacks: []string{"go"}},
+	{Name: "golang-patterns", Repo: "affaan-m/everything-claude-code/skills/golang-patterns", Description: "Go design patterns", Stacks: []string{"go"}},
+	{Name: "angular-component", Repo: "analogjs/angular-skills/skills/angular-component", Description: "Angular component development", Stacks: []string{"angular"}},
+	{Name: "angular-signals", Repo: "analogjs/angular-skills/skills/angular-signals", Description: "Angular signals state management", Stacks: []string{"angular"}},
+	{Name: "angular-testing", Repo: "analogjs/angular-skills/skills/angular-testing", Description: "Angular testing strategies", Stacks: []string{"angular"}},
+	{Name: "typescript-advanced-types", Repo: "wshobson/agents/plugins/javascript-typescript/skills/typescript-advanced-types", Description: "Advanced TypeScript type patterns", Stacks: []string{"ts"}},
+	{Name: "nodejs-backend-patterns", Repo: "wshobson/agents/plugins/javascript-typescript/skills/nodejs-backend-patterns", Description: "Node.js backend patterns", Stacks: []string{"node"}},
+	{Name: "modern-javascript-patterns", Repo: "wshobson/agents/plugins/javascript-typescript/skills/modern-javascript-patterns", Description: "Modern JavaScript patterns", Stacks: []string{"js", "node", "ts"}},
+	{Name: "vitest", Repo: "antfu/skills/skills/vitest", Description: "Vitest testing framework", Stacks: []string{"js", "node", "ts", "angular"}},
+	{Name: "implement-design", Repo: "figma/mcp-server-guide/skills/implement-design", Description: "Design implementation from Figma", Stacks: []string{"angular", "ts", "js", "node"}},
 	{Name: "systematic-debugging", Repo: "obra/superpowers/skills/systematic-debugging", Description: "Systematic debugging methodology"},
 	{Name: "test-driven-development", Repo: "obra/superpowers/skills/test-driven-development", Description: "TDD best practices"},
 	{Name: "code-review", Repo: "supercent-io/skills-template/.agent-skills/code-review", Description: "Code review excellence"},
 	{Name: "code-refactoring", Repo: "supercent-io/skills-template/.agent-skills/code-refactoring", Description: "Code refactoring patterns"},
 	{Name: "lsp-code-analysis", Repo: "lsp-client/lsp-skill/skills/lsp-code-analysis", Description: "LSP-based code analysis"},
+}
+
+// DetectStacks inspects a project directory for well-known stack markers and
+// returns the set of stacks present. An empty/unknown project returns an empty
+// set, which callers treat as "don't filter" (include all skills).
+func DetectStacks(projectPath string) map[string]bool {
+	stacks := map[string]bool{}
+	if projectPath == "" {
+		return stacks
+	}
+	exists := func(name string) bool {
+		_, err := os.Stat(filepath.Join(projectPath, name))
+		return err == nil
+	}
+	if exists("go.mod") || exists("go.sum") {
+		stacks["go"] = true
+	}
+	if exists("package.json") {
+		stacks["node"] = true
+		stacks["js"] = true
+	}
+	if exists("tsconfig.json") {
+		stacks["ts"] = true
+	}
+	if exists("angular.json") {
+		stacks["angular"] = true
+		stacks["ts"] = true // Angular projects are TypeScript
+	}
+	if exists("pyproject.toml") || exists("requirements.txt") || exists("setup.py") {
+		stacks["python"] = true
+	}
+	if exists("Cargo.toml") {
+		stacks["rust"] = true
+	}
+	return stacks
+}
+
+// skillEnabledForStacks reports whether a skill should be included given the
+// detected project stacks. Stack-agnostic skills (empty Stacks) are always
+// included; when no stacks were detected the filter is a no-op (include all).
+func skillEnabledForStacks(skill Skill, detected map[string]bool) bool {
+	if len(skill.Stacks) == 0 || len(detected) == 0 {
+		return true
+	}
+	for _, s := range skill.Stacks {
+		if detected[s] {
+			return true
+		}
+	}
+	return false
 }
 
 // SkillsTrackingFile represents the structure of the skills tracking file
@@ -471,21 +529,36 @@ type SkillFlagsResult struct {
 // Skills are sorted alphabetically for reproducible ordering
 // Missing skill directories are logged as warnings but don't cause errors (unless failOnMissing is true)
 func BuildSkillFlags(configDir string) (*SkillFlagsResult, error) {
-	return BuildSkillFlagsWithOptions(configDir, false)
+	return buildSkillFlagsCore(configDir, false, "")
+}
+
+// BuildSkillFlagsForProject builds skill flags scoped to a project's detected
+// stack: skills that don't apply to the project's language(s) are dropped from
+// the worker prompt. When projectPath is empty or its stack can't be detected,
+// it behaves like BuildSkillFlags (include all skills).
+func BuildSkillFlagsForProject(configDir, projectPath string) (*SkillFlagsResult, error) {
+	return buildSkillFlagsCore(configDir, false, projectPath)
 }
 
 // BuildSkillFlagsWithOptions builds skill flags with configurable options
 // failOnMissing: if true, returns an error if any skill directories are missing
 // Uses caching to avoid repeated filesystem operations
 func BuildSkillFlagsWithOptions(configDir string, failOnMissing bool) (*SkillFlagsResult, error) {
+	return buildSkillFlagsCore(configDir, failOnMissing, "")
+}
+
+// buildSkillFlagsCore is the cached core shared by the public builders.
+// projectPath, when non-empty, scopes skills to the project's detected stack.
+func buildSkillFlagsCore(configDir string, failOnMissing bool, projectPath string) (*SkillFlagsResult, error) {
 	// Ensure configDir is absolute for consistent cache keys
 	absConfigDir, err := filepath.Abs(configDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve absolute path for config dir: %w", err)
 	}
 
-	// Create cache key based on config directory and failOnMissing flag
-	cacheKey := fmt.Sprintf("%s:%v", absConfigDir, failOnMissing)
+	// Create cache key based on config directory, failOnMissing flag, and
+	// project path (different stacks yield different skill sets).
+	cacheKey := fmt.Sprintf("%s:%v:%s", absConfigDir, failOnMissing, projectPath)
 
 	// Check cache first
 	skillFlagsCacheMu.RLock()
@@ -508,7 +581,7 @@ func BuildSkillFlagsWithOptions(configDir string, failOnMissing bool) (*SkillFla
 	skillFlagsCacheMiss++
 	skillFlagsCacheMu.Unlock()
 
-	result, err := buildSkillFlagsUncached(absConfigDir, failOnMissing)
+	result, err := buildSkillFlagsUncached(absConfigDir, failOnMissing, projectPath)
 	// Only cache successful results to avoid caching error states
 	if err == nil {
 		skillFlagsCacheMu.Lock()
@@ -572,7 +645,7 @@ func discoverLocalSkills(hydraDir string) []Skill {
 }
 
 // buildSkillFlagsUncached performs the actual skill flag building without caching
-func buildSkillFlagsUncached(absConfigDir string, failOnMissing bool) (*SkillFlagsResult, error) {
+func buildSkillFlagsUncached(absConfigDir string, failOnMissing bool, projectPath string) (*SkillFlagsResult, error) {
 	// Discover local skills from .agents/skills/
 	hydraDir := filepath.Dir(absConfigDir) // configDir is <hydra>/config, so parent is <hydra>
 	localSkills := discoverLocalSkills(hydraDir)
@@ -602,6 +675,31 @@ func buildSkillFlagsUncached(absConfigDir string, failOnMissing bool) (*SkillFla
 	allSkills := make([]Skill, len(DefaultSkills)+len(localSkills))
 	copy(allSkills, DefaultSkills)
 	copy(allSkills[len(DefaultSkills):], localSkills)
+
+	// Stack-scoping: when the project's stack is known, drop skills that don't
+	// apply to it (e.g. Angular/vitest skills on a Go worker). Stack-agnostic
+	// skills and locally-discovered skills (no Stacks) are always kept.
+	if detected := DetectStacks(projectPath); len(detected) > 0 {
+		filtered := allSkills[:0:len(allSkills)]
+		var dropped []string
+		for _, s := range allSkills {
+			if skillEnabledForStacks(s, detected) {
+				filtered = append(filtered, s)
+			} else {
+				dropped = append(dropped, s.Name)
+			}
+		}
+		allSkills = filtered
+		if len(dropped) > 0 {
+			stackList := make([]string, 0, len(detected))
+			for st := range detected {
+				stackList = append(stackList, st)
+			}
+			sort.Strings(stackList)
+			sort.Strings(dropped)
+			log.Printf("[BuildSkillFlags] Stack-scoped to %v: dropped %d off-stack skill(s): %v", stackList, len(dropped), dropped)
+		}
+	}
 
 	result := &SkillFlagsResult{
 		Flags:         make([]string, 0, len(allSkills)*2),
@@ -715,13 +813,13 @@ func buildSkillFlagsUncached(absConfigDir string, failOnMissing bool) (*SkillFla
 	// Log summary
 	if len(result.Missing) > 0 {
 		log.Printf("[BuildSkillFlags] Summary: %d/%d skills available (%d missing)",
-			len(result.Found), len(DefaultSkills), len(result.Missing))
+			len(result.Found), len(allSkills), len(result.Missing))
 		if failOnMissing {
 			return result, fmt.Errorf("%d skill(s) missing and failOnMissing is enabled: %v",
 				len(result.Missing), result.Missing)
 		}
 	} else {
-		log.Printf("[BuildSkillFlags] All %d skills available", len(DefaultSkills))
+		log.Printf("[BuildSkillFlags] All %d skills available", len(allSkills))
 	}
 
 	return result, nil
