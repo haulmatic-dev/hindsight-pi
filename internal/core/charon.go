@@ -134,7 +134,14 @@ func (j *Charon) performCleanup() {
 				active[beadID] = true
 			}
 		}
-		go CleanupStaleWorktrees(24*time.Hour, active)
+		go func() {
+			if j.getProjects != nil {
+				for _, project := range j.getProjects() {
+					ReconcileOrphanedWorktrees(NewWorktreeManager(), project.Path, active)
+				}
+			}
+			CleanupStaleWorktrees(24*time.Hour, active)
+		}()
 	}
 
 	// Get tracked workers from PID database (full records with start times)

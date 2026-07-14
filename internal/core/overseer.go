@@ -83,7 +83,7 @@ type Overseer struct {
 	completed       map[string]bool  // Track completed beads for this session
 	retryManager    *RetryManager    // Retry and validation-retry tracking
 	intelligenceHub *IntelligenceHub // Encapsulates TLDR, GPTCache, Hindsight clients
-	// TODO: Migrate these fields to IntelligenceHub
+	// These clients remain direct fields until IntelligenceHub fully exposes their APIs.
 	tldrClient         *intelligence.TLDRClient        // TLDR client for impact analysis
 	gptCache           *GPTCacheClient                 // GPTCache client for caching
 	hindsightClient    HindsightClient                 // Hindsight client for pre-execution context retrieval
@@ -377,7 +377,7 @@ func NewOverseer(config *Config) *Overseer {
 	if config.Overseer.WorktreeIsolation {
 		o.worktreeManager = NewWorktreeManager()
 		o.workerSpawner.SetWorktreeManager(o.worktreeManager, o.chainKeyForBead)
-		o.beadCloser.SetWorktreeManager(o.worktreeManager, o.chainKeyForBead)
+		o.beadCloser.SetWorktreeManager(o.worktreeManager, o.chainKeyForBead, o.isChainMember)
 		log.Printf("[Overseer] Worktree isolation ENABLED")
 	}
 
@@ -853,6 +853,9 @@ func (o *Overseer) GetProjects() []types.Project {
 	if len(o.projects) > 0 {
 		return o.projects
 	}
+	if o.config == nil {
+		return nil
+	}
 	projects := make([]types.Project, 0, len(o.config.Projects))
 	for _, pc := range o.config.Projects {
 		projects = append(projects, types.Project{
@@ -1147,5 +1150,3 @@ func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead) []string {
 func (o *Overseer) runPiSetup() error {
 	return o.piSetupManager.RunSetup()
 }
-
-

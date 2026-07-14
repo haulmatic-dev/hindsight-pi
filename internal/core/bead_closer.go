@@ -20,12 +20,18 @@ type BeadCloser struct {
 	config            *Config
 	worktreeManager   *WorktreeManager        // per-chain git isolation; nil = disabled
 	chainKeyFn        func(types.Bead) string // maps a bead to its chain's worktree key
+	isChainMember     func(types.BeadID) bool // reports whether a bead belongs to a registered multi-bead chain
 }
 
-// SetWorktreeManager enables commit-on-close into the bead's chain worktree.
-func (c *BeadCloser) SetWorktreeManager(m *WorktreeManager, chainKeyFn func(types.Bead) string) {
+// SetWorktreeManager enables commit-on-close and singleton integrate-on-close
+// into the bead's chain worktree. isChainMember is the source of truth for
+// whether a bead belongs to a registered multi-bead chain; relying on
+// chainKeyFn(bead) == bead.ID is insufficient because a chain root also maps
+// to its own ID.
+func (c *BeadCloser) SetWorktreeManager(m *WorktreeManager, chainKeyFn func(types.Bead) string, isChainMember func(types.BeadID) bool) {
 	c.worktreeManager = m
 	c.chainKeyFn = chainKeyFn
+	c.isChainMember = isChainMember
 }
 
 // NewBeadCloser creates a new bead closer.
@@ -41,15 +47,15 @@ func NewBeadCloser(beadsClient BeadsClient, intelligenceHub *IntelligenceHub, pr
 
 // Close closes the bead via beadsClient based on worker completion status.
 //
-// Stub fix: the previous version only triggered TDD validation when
+// Fix: the previous version only triggered TDD validation when
 // `bead.Type == "refactor"`. In production the task-breakdown runner
 // emits all TDD phase beads with `Type: "task"` and encodes the phase
 // in labels, so the type check was dead code and validation never ran.
 // We now inspect labels (tdd-refactor, tdd-green) and also fire
 // validation when the GREEN bead closes, since that is the most likely
-// place for a stub to land.
+// place for an incomplete implementation to land.
 //
-// Stub fix: when `close_reason=failed` (worker exited non-zero, hit
+// Fix: when `close_reason=failed` (worker exited non-zero, hit
 // retries, etc.) we no longer let the close silently propagate to
 // dependents. Config flag `validation.close_blocked_on_failed` (default
 // true) gates this. When set, failed closures trigger a fix bead
@@ -59,7 +65,7 @@ func NewBeadCloser(beadsClient BeadsClient, intelligenceHub *IntelligenceHub, pr
 // (rate limits, timeouts, daemon locks) do not create fix beads.
 // The bead stays open and the scheduler retries it with exponential
 // backoff up to 1 hour, then hourly thereafter.  Only code-level
-// failures (stubs, build errors, etc.) spawn fix beads.
+// failures (placeholder code, build errors, etc.) spawn fix beads.
 func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) error {
 	projectName := worker.BeadID.Project()
 	repoName := worker.BeadID.Repo()
@@ -92,14 +98,14 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 	// Run TDD validation for TDD-phase beads before closing. The
 	// check now looks at labels rather than `bead.Type` (which the
 	// task-breakdown runner never sets to "refactor"). GREEN beads
-	// are validated too because that is where stubs most often land.
+	// are validated too because that is where incomplete implementations most often land.
 	if success && bead != nil && c.shouldRunTDDValidation(bead) {
 		if err := c.validationService.RunTDDValidation(*bead, projectPath); err != nil {
 			log.Printf("[closeBead] TDD validation error for %s: %v", worker.BeadID.String(), err)
 		}
 	}
 
-	// Stub fix: failed closures normally let the close proceed, which
+	// Fix: failed closures normally let the close proceed, which
 	// meant 57% of beads (69/121 in one audit) closed as `failed` and
 	// their dependents unblocked. The flag below lets operators keep
 	// the old behaviour for fast iteration but defaults to blocking.
@@ -137,16 +143,27 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 		}
 	}
 
-	// Commit the chain worktree's changes for this bead before closing, when
-	// worktree isolation is enabled. Committed per bead; integrated back to
-	// the working branch on chain completion.
-	if success && reason == "completed" && c.worktreeManager != nil && c.chainKeyFn != nil && bead != nil {
-		if wt, err := c.worktreeManager.EnsureWorktree(projectPath, c.chainKeyFn(*bead)); err == nil {
+	// Commit the chain worktree's changes for this bead before closing, and
+	// eagerly integrate singleton worktrees back into the working branch.
+	// Multi-bead chains remain event-driven and are NOT integrated here.
+	if success && reason == "completed" && c.worktreeManager != nil && c.chainKeyFn != nil && c.isChainMember != nil && bead != nil {
+		key := c.chainKeyFn(*bead)
+		if wt, err := c.worktreeManager.EnsureWorktree(projectPath, key); err == nil {
 			msg := fmt.Sprintf("bead(%s): %s", bead.ID, bead.Title)
 			if committed, cErr := c.worktreeManager.Commit(wt, msg); cErr != nil {
 				log.Printf("[Worktree] commit failed for %s: %v", bead.ID, cErr)
 			} else if committed {
 				log.Printf("[Worktree] committed %s", bead.ID)
+			}
+
+			// Singletons (beads that belong to no registered multi-bead chain) have
+			// no chain-completion event to trigger integration, so integrate now.
+			if !c.isChainMember(bead.ID) {
+				if iErr := c.worktreeManager.IntegrateAndRemove(projectPath, key); iErr != nil {
+					log.Printf("[Worktree] integrate failed for %s: %v", bead.ID, iErr)
+				} else {
+					log.Printf("[Worktree] integrated singleton %s", bead.ID)
+				}
 			}
 		} else {
 			log.Printf("[Worktree] worktree lookup failed for %s: %v", bead.ID, err)
@@ -224,7 +241,7 @@ func (c *BeadCloser) createFixBeadForFailedClose(bead *types.Bead, projectPath, 
 	description := "Auto-created fix bead because the original closed as `failed`.\n\n" +
 		"Original bead: " + priorityBeadID + "\n" +
 		"Close reason: failed (worker exited non-zero or hit retry exhaustion; " +
-		"the original bead may still hold stub implementations)\n\n" +
+		"the original bead may still hold placeholder implementations)\n\n" +
 		"Re-run the original task and ensure it closes as `completed`."
 	req := types.CreateBeadRequest{
 		Title:        title,
