@@ -36,3 +36,32 @@ func TestSearch_ParsesResultsAndText(t *testing.T) {
 		t.Fatalf("expected Success=true Count=2, got Success=%v Count=%d", resp.Success, resp.Count)
 	}
 }
+
+// TestSearch_TruncatesToLimit pins client-side limit enforcement. The live
+// recall API ignores the request's "limit" and "min_score" fields entirely
+// (verified: 60+ results returned for limit=2), so without truncation every
+// worker prompt was enriched with the full unbounded result set.
+func TestSearch_TruncatesToLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body := `{"results":[`
+		for i := 0; i < 20; i++ {
+			if i > 0 {
+				body += ","
+			}
+			body += `{"id":"m` + string(rune('a'+i)) + `","text":"memory body"}`
+		}
+		body += `]}`
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL), WithEnabled(true))
+	resp, err := c.Search("anything", "task", 3)
+	if err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	if len(resp.Memories) != 3 || resp.Count != 3 {
+		t.Fatalf("expected truncation to limit=3 (server sent 20), got %d/%d", len(resp.Memories), resp.Count)
+	}
+}

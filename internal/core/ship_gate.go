@@ -118,6 +118,11 @@ func (cm *ComplianceCycleManager) finalizeApproval() {
 	passed, failures := cm.runShipGate()
 	if passed {
 		cm.notifyApproved()
+		// Record the approval durably (memory + sentinel file) so the cycle
+		// stops re-running the analyzer every poll and across restarts.
+		// Never set on the gate-fail path below: a failing product is not
+		// approved.
+		cm.markApproved()
 		return
 	}
 	log.Printf("[ComplianceCycle] SHIP-GATE FAILED (%d issue(s)): product not shippable. Creating fix bead.", len(failures))

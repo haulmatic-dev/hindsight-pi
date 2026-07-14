@@ -16,14 +16,14 @@ import (
 
 // ComplianceCycleConfig configures the closed-loop compliance system.
 type ComplianceCycleConfig struct {
-	Enabled            bool          `yaml:"enabled"`
-	MaxCycles          int           `yaml:"max_cycles"`
-	PollInterval       time.Duration `yaml:"poll_interval"`
-	AnalyzerPath       string        `yaml:"analyzer_path"`
-	GapToPRDPath       string        `yaml:"gap_to_prd_path"`
-	TaskBreakdownPath  string        `yaml:"task_breakdown_path"`
-	ProjectDir         string        `yaml:"project_dir"`
-	PRDPath            string        `yaml:"prd_path"`
+	Enabled           bool          `yaml:"enabled"`
+	MaxCycles         int           `yaml:"max_cycles"`
+	PollInterval      time.Duration `yaml:"poll_interval"`
+	AnalyzerPath      string        `yaml:"analyzer_path"`
+	GapToPRDPath      string        `yaml:"gap_to_prd_path"`
+	TaskBreakdownPath string        `yaml:"task_breakdown_path"`
+	ProjectDir        string        `yaml:"project_dir"`
+	PRDPath           string        `yaml:"prd_path"`
 
 	// AdjudicatorModel overrides the pi model used for gap adjudication
 	// (the high-IQ "is this gap real or a false positive" judgment). When
@@ -42,6 +42,7 @@ type ComplianceCycleManager struct {
 	overseer      *Overseer
 	cycles        int
 	running       bool
+	approved      bool // sticky in-memory approval flag; see isApproved
 	stopCh        chan struct{}
 	prevSurviving map[string]bool // fingerprints of last cycle's real gaps (progress-delta)
 }
@@ -95,8 +96,50 @@ func (cm *ComplianceCycleManager) Stop() {
 	close(cm.stopCh)
 }
 
+// approvalSentinelPath is the on-disk marker that records a PRD approval so
+// it survives daemon restarts.
+func (cm *ComplianceCycleManager) approvalSentinelPath() string {
+	return filepath.Join(cm.config.ProjectDir, ".hydra", "compliance-approved")
+}
+
+// isApproved reports whether this PRD has already been approved, either in
+// this process (in-memory flag) or by a prior run (sentinel file). Once
+// approved, the cycle stops re-running the analyzer every poll — previously
+// it re-ran until max_cycles and then falsely alarmed "manual intervention
+// required". Operator escape hatch: delete the sentinel and restart.
+func (cm *ComplianceCycleManager) isApproved() bool {
+	if cm.approved {
+		return true
+	}
+	if _, err := os.Stat(cm.approvalSentinelPath()); err == nil {
+		cm.approved = true
+		return true
+	}
+	return false
+}
+
+// markApproved records the approval both in memory and on disk. The sentinel
+// write is best-effort: the in-memory flag alone stops the loop for the
+// lifetime of this process.
+func (cm *ComplianceCycleManager) markApproved() {
+	cm.approved = true
+	path := cm.approvalSentinelPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		log.Printf("[ComplianceCycle] approval sentinel dir: %v (in-memory only)", err)
+		return
+	}
+	if err := os.WriteFile(path, []byte(time.Now().Format(time.RFC3339)+"\n"), 0o644); err != nil {
+		log.Printf("[ComplianceCycle] approval sentinel write: %v (in-memory only)", err)
+	}
+}
+
 // checkAndRunCycle checks if all beads are closed and runs a compliance cycle.
 func (cm *ComplianceCycleManager) checkAndRunCycle() error {
+	// Sticky approval: an approved PRD never re-enters the cycle.
+	if cm.isApproved() {
+		return nil
+	}
+
 	// Only run if overseer is running and not paused
 	if !cm.overseer.IsRunning() || cm.overseer.IsPaused() {
 		return nil

@@ -2,11 +2,13 @@ package core
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // WorktreeManager provides per-chain git worktree isolation. Each chain (or
@@ -146,6 +148,89 @@ func (m *WorktreeManager) Remove(projectPath, key string) {
 	}
 	_, _ = gitOut(projectPath, "branch", "-D", m.branchName(key))
 	_, _ = gitOut(projectPath, "worktree", "prune")
+}
+
+// CleanupStaleWorktrees removes per-chain worktrees that are older than
+// maxAge and not owned by an active worker. Live runs accumulate one worktree
+// per bead/chain and nothing removed them (hundreds observed after one run) —
+// integration removes a worktree only when its chain completes cleanly, so
+// failed/abandoned chains leak. Returns the number of worktrees removed.
+//
+// Staleness is judged by the worktree's .git file mtime (set at creation).
+// The source repository (needed for `git worktree prune`) is recovered from
+// the .git file's "gitdir: <src>/.git/worktrees/<name>" pointer.
+func CleanupStaleWorktrees(maxAge time.Duration, activeKeys map[string]bool) int {
+	base := os.Getenv("HYDRA_HOME")
+	if base == "" {
+		base = os.TempDir()
+	}
+	root := filepath.Join(base, ".hydra-worktrees")
+	projects, err := os.ReadDir(root)
+	if err != nil {
+		return 0
+	}
+
+	removed := 0
+	pruneRepos := map[string]bool{}
+	for _, p := range projects {
+		if !p.IsDir() {
+			continue
+		}
+		projDir := filepath.Join(root, p.Name())
+		entries, err := os.ReadDir(projDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() || activeKeys[e.Name()] {
+				continue
+			}
+			wt := filepath.Join(projDir, e.Name())
+			gitFile := filepath.Join(wt, ".git")
+			info, err := os.Stat(gitFile)
+			if err != nil {
+				// Not a worktree (junk/partial dir): remove if the dir itself is old.
+				if di, derr := os.Stat(wt); derr == nil && time.Since(di.ModTime()) > maxAge {
+					_ = os.RemoveAll(wt)
+					removed++
+				}
+				continue
+			}
+			if time.Since(info.ModTime()) <= maxAge {
+				continue
+			}
+			if src := worktreeSourceRepo(gitFile); src != "" {
+				pruneRepos[src] = true
+			}
+			if err := os.RemoveAll(wt); err != nil {
+				log.Printf("[WorktreeGC] remove %s: %v", wt, err)
+				continue
+			}
+			removed++
+		}
+	}
+	for repo := range pruneRepos {
+		_, _ = gitOut(repo, "worktree", "prune")
+	}
+	if removed > 0 {
+		log.Printf("[WorktreeGC] removed %d stale worktree(s) under %s", removed, root)
+	}
+	return removed
+}
+
+// worktreeSourceRepo extracts the source repository path from a worktree's
+// .git pointer file ("gitdir: <src>/.git/worktrees/<name>").
+func worktreeSourceRepo(gitFile string) string {
+	data, err := os.ReadFile(gitFile)
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(data)), "gitdir:"))
+	marker := string(os.PathSeparator) + ".git" + string(os.PathSeparator) + "worktrees" + string(os.PathSeparator)
+	if i := strings.Index(s, marker); i >= 0 {
+		return s[:i]
+	}
+	return ""
 }
 
 // --- helpers ---

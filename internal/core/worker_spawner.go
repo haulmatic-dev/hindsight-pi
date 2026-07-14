@@ -359,6 +359,12 @@ func streamWorkerOutput(pipe io.Reader, beadID, tag string, f *os.File, mu *sync
 // to also surface to the daemon log (errors, failures, rate limits), so those
 // stay visible without the full per-bead firehose.
 func isNotableWorkerLine(s string) bool {
+	// Hindsight memory recall lines quote past failures ("Task X failed
+	// with...") — the recalled TEXT matching failure keywords does not make
+	// the line itself notable.
+	if strings.HasPrefix(strings.TrimSpace(s), "Memory ") {
+		return false
+	}
 	l := strings.ToLower(s)
 	for _, k := range []string{
 		"❌", "panic", "fatal", "error:", "failed", "timed out", "timeout",
