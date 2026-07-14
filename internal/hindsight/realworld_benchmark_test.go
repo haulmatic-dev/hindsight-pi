@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,15 @@ import (
 
 // TestRealWorldHindsightPerformance runs comprehensive real-world benchmarks
 func TestRealWorldHindsightPerformance(t *testing.T) {
+	// Spins up an embedded Hindsight server and drives real traffic — on
+	// machines without the runtime deps it hangs the whole package past the
+	// go-test timeout instead of failing fast. Integration-only.
+	if testing.Short() {
+		t.Skip("integration benchmark: skipped with -short")
+	}
+	if os.Getenv("HYDRA_INTEGRATION_TESTS") == "" {
+		t.Skip("set HYDRA_INTEGRATION_TESTS=1 to run the embedded-server benchmark")
+	}
 	// Start embedded Hindsight server
 	server := hindsight.NewServer(hindsight.ServerConfig{
 		Port:    18888,

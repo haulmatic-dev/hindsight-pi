@@ -293,11 +293,17 @@ func (c *Client) Search(query, beadType string, limit int) (*SearchResponse, err
 	}
 
 	// The recall API returns matches under "results" (not "memories"), puts
-	// the memory body in "text" (not "content"), and does not send a
-	// per-memory score (it applies min_score server-side). Normalize so
-	// downstream consumers that read Memories/Content keep working.
+	// the memory body in "text" (not "content"), and — verified against the
+	// live service — sends NO per-memory score and IGNORES both the "limit"
+	// and "min_score" request fields (a query can return 60+ results
+	// regardless). Results arrive server-ranked, so enforce the caller's
+	// limit here by truncating to the top-k; without this every worker
+	// prompt was enriched with the full unbounded result set.
 	if len(result.Memories) == 0 && len(result.Results) > 0 {
 		result.Memories = result.Results
+	}
+	if limit > 0 && len(result.Memories) > limit {
+		result.Memories = result.Memories[:limit]
 	}
 	for i := range result.Memories {
 		if result.Memories[i].Content == "" && result.Memories[i].Text != "" {

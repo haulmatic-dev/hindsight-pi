@@ -1377,12 +1377,14 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment) 
 		promptParts = append(promptParts, fmt.Sprintf("Files to modify: %v", targetFiles))
 	}
 
-	// Add Hindsight context if available
+	// Add Hindsight context if available. Memories arrive server-ranked and
+	// already truncated to the configured limit; the recall API sends no
+	// per-memory score, so none is shown (a phantom 0.00 was displayed
+	// before). Memory IDs are internal noise — content only.
 	if hindsightContext != nil && len(hindsightContext.Memories) > 0 {
-		promptParts = append(promptParts, "\nRelevant past executions:")
+		promptParts = append(promptParts, "\nRelevant past executions (most relevant first):")
 		for _, mem := range hindsightContext.Memories {
-			promptParts = append(promptParts, fmt.Sprintf("- %s (score: %.2f): %s",
-				mem.ID, mem.Score, truncateString(mem.Content, 200)))
+			promptParts = append(promptParts, "- "+truncateString(mem.Content, 200))
 		}
 	}
 
@@ -1434,10 +1436,10 @@ func queryHindsightForContext(
 			len(enrichment.Memories), enrichment.QueryTime)
 		streamLog(mcpClient, "info", fmt.Sprintf("Retrieved %d relevant memories from Hindsight", len(enrichment.Memories)))
 
-		// Log each memory
+		// Log each memory (rank order; the recall API sends no scores)
 		for i, mem := range enrichment.Memories {
-			log.Printf("   Memory %d: %s (score: %.2f) - %s",
-				i+1, mem.ID, mem.Score, truncateString(mem.Content, 100))
+			log.Printf("   Memory %d: %s - %s",
+				i+1, mem.ID, truncateString(mem.Content, 100))
 		}
 	} else {
 		log.Println("ℹ️ No relevant memories found in Hindsight")

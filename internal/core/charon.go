@@ -18,32 +18,33 @@ import (
 // Uses PID tracking instead of environment variable inspection for reliability
 // Also detects and kills "stuck" workers that have exceeded timeout
 type Charon struct {
-	beadsClient              *beads.Client
-	workerTracker            *WorkerTracker
-	workerTimeout            time.Duration // How long before considering a worker stuck
-	checkInterval            time.Duration
-	orphanBeadGrace          time.Duration // How long an in_progress bead can live without a worker before recovery
-	stopChan                 chan struct{}
-	stats                    JanitorStats
-	getProjects              func() []types.Project
-	activeWorkersSnapshot    func() map[string]int
-	onStaleActiveWorker      func(beadID string)
+	beadsClient           *beads.Client
+	workerTracker         *WorkerTracker
+	workerTimeout         time.Duration // How long before considering a worker stuck
+	checkInterval         time.Duration
+	orphanBeadGrace       time.Duration // How long an in_progress bead can live without a worker before recovery
+	stopChan              chan struct{}
+	stats                 JanitorStats
+	getProjects           func() []types.Project
+	activeWorkersSnapshot func() map[string]int
+	onStaleActiveWorker   func(beadID string)
+	lastWorktreeGC        time.Time // throttles the stale-worktree sweep
 }
 
 // JanitorStats tracks cleanup statistics
 type JanitorStats struct {
-	TotalScans             int
-	OrphansFound           int
-	StuckFound             int
-	ProcessesKilled        int
-	ProcessGroupsCleaned   int
-	OrphanedChildrenFound  int
-	OrphanInProgressBeads  int
-	OrphanBeadsRecovered   int
-	LastScanTime           time.Time
-	LastOrphanTime         time.Time
-	LastStuckTime          time.Time
-	LastOrphanBeadTime     time.Time
+	TotalScans            int
+	OrphansFound          int
+	StuckFound            int
+	ProcessesKilled       int
+	ProcessGroupsCleaned  int
+	OrphanedChildrenFound int
+	OrphanInProgressBeads int
+	OrphanBeadsRecovered  int
+	LastScanTime          time.Time
+	LastOrphanTime        time.Time
+	LastStuckTime         time.Time
+	LastOrphanBeadTime    time.Time
 }
 
 // NewCharon creates a new orphan process janitor with timeout for stuck worker detection
@@ -122,6 +123,19 @@ func (j *Charon) performCleanup() {
 	j.stats.LastScanTime = time.Now()
 
 	log.Printf("[Charon] 🔍 Scanning for orphaned or stuck processes...")
+
+	// Sweep stale worktrees at most hourly: failed/abandoned chains leak one
+	// worktree per bead (integration only removes them on clean completion).
+	if time.Since(j.lastWorktreeGC) > time.Hour {
+		j.lastWorktreeGC = time.Now()
+		active := map[string]bool{}
+		if j.activeWorkersSnapshot != nil {
+			for beadID := range j.activeWorkersSnapshot() {
+				active[beadID] = true
+			}
+		}
+		go CleanupStaleWorktrees(24*time.Hour, active)
+	}
 
 	// Get tracked workers from PID database (full records with start times)
 	trackedWorkers := j.workerTracker.GetRunningWorkerRecords()

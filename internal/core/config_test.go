@@ -539,3 +539,92 @@ pi:
 func containsSubstring(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
+
+func TestValidationConfig_TargetScopeMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		enforce  string
+		wantMode string
+	}{
+		{
+			name:     "default config returns warn",
+			enforce:  DefaultConfig().Validation.EnforceTargetScope,
+			wantMode: "warn",
+		},
+		{
+			name:     "uppercase BLOCK returns block",
+			enforce:  "BLOCK",
+			wantMode: "block",
+		},
+		{
+			name:     "lowercase off returns off",
+			enforce:  "off",
+			wantMode: "off",
+		},
+		{
+			name:     "bogus value falls back to warn",
+			enforce:  "bogus",
+			wantMode: "warn",
+		},
+		{
+			name:     "empty value falls back to warn",
+			enforce:  "",
+			wantMode: "warn",
+		},
+		{
+			name:     "mixed case Block returns block",
+			enforce:  "Block",
+			wantMode: "block",
+		},
+		{
+			name:     "whitespace around value is ignored",
+			enforce:  "  BLOCK  ",
+			wantMode: "block",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ValidationConfig{EnforceTargetScope: tt.enforce}
+			if got := cfg.TargetScopeMode(); got != tt.wantMode {
+				t.Errorf("TargetScopeMode() = %q, want %q", got, tt.wantMode)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_EnforceTargetScope(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "scope_config.yaml")
+
+	configContent := `
+overseer:
+  bead_discovery_interval: 5s
+  max_workers: 5
+
+projects:
+  - name: test-project
+    path: /tmp/test
+    type: single
+
+validation:
+  enforce_target_scope: block
+`
+
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("Failed to write config file: %v", err)
+	}
+
+	config, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if config.Validation.EnforceTargetScope != "block" {
+		t.Errorf("Expected validation.enforce_target_scope='block', got '%s'", config.Validation.EnforceTargetScope)
+	}
+
+	if config.Validation.TargetScopeMode() != "block" {
+		t.Errorf("Expected TargetScopeMode()='block', got '%s'", config.Validation.TargetScopeMode())
+	}
+}
