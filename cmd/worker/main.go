@@ -802,6 +802,15 @@ func executeWithRetry(
 	var lastErr error
 	var result *ExecutionResult
 
+	// Reflexion: each retry's prompt carries the previous attempt's failure so
+	// the agent diagnoses instead of re-running the identical prompt blind
+	// (observed: fix-beads re-implemented the same file 9x divergently, each
+	// attempt knowing nothing of the last). Seeded from HYDRA_PREV_FAILURE so
+	// scheduler-level respawns (new worker process) inherit the prior
+	// worker's failure too.
+	prevFailure := os.Getenv("HYDRA_PREV_FAILURE")
+	var cassBullets []string
+
 	for attempt := 0; attempt <= policy.MaxRetries; attempt++ {
 		if attempt == 0 {
 			// Stagger concurrent workers' Pi cold-starts. Pi resolves its
@@ -820,17 +829,24 @@ func executeWithRetry(
 		log.Printf("🔄 Execution attempt %d/%d", attempt+1, policy.MaxRetries+1)
 		streamLog(mcpClient, "info", fmt.Sprintf("Execution attempt %d/%d", attempt+1, policy.MaxRetries+1))
 
-		// Query Hindsight for context enrichment before execution (only on first attempt)
+		// Query Hindsight + CASS for context enrichment before execution
+		// (only on first attempt; CASS bullets are reused across attempts)
 		var hindsightContext *agents.ContextEnrichment
 		if attempt == 0 {
 			hindsightContext = queryHindsightForContext(bead, config, mcpClient)
+			cassBullets = queryCASSBullets(bead)
 		}
 
 		// Execute with Pi agent (sole supported agent). Wrapped with a fast
 		// inner retry for transient Pi-startup flakes (provider-list fetch),
 		// which cost no LLM tokens and usually clear within a couple tries.
-		result, lastErr = executePiWithStartupRetry(bead, config.Pi, mcpClient, projectPath, hindsightContext)
+		extras := promptExtras{PrevFailure: prevFailure, CassBullets: cassBullets}
+		result, lastErr = executePiWithStartupRetry(bead, config.Pi, mcpClient, projectPath, hindsightContext, extras)
 		result.Attempts = attempt + 1
+
+		if lastErr != nil || (result != nil && !result.Success) {
+			prevFailure = summarizeFailure(result, lastErr)
+		}
 
 		if lastErr == nil && result.Success {
 			log.Printf("✅ Execution succeeded on attempt %d", attempt+1)
@@ -916,6 +932,107 @@ func calculateBackoff(attempt int, policy RetryPolicy) time.Duration {
 	return time.Duration(backoff)
 }
 
+// promptExtras carries per-attempt prompt enrichments: the previous attempt's
+// failure summary (Reflexion) and distilled CASS playbook rules.
+type promptExtras struct {
+	PrevFailure string
+	CassBullets []string
+}
+
+// summarizeFailure distills a failed attempt into a short blob the next
+// attempt's prompt can learn from: exit code plus the tail of the most
+// informative output stream.
+func summarizeFailure(result *ExecutionResult, err error) string {
+	var b strings.Builder
+	if result != nil {
+		fmt.Fprintf(&b, "exit code %d.", result.ExitCode)
+		detail := strings.TrimSpace(result.Error)
+		if detail == "" {
+			detail = strings.TrimSpace(result.Output)
+		}
+		if detail != "" {
+			if len(detail) > 400 {
+				detail = "..." + detail[len(detail)-400:]
+			}
+			b.WriteString(" ")
+			b.WriteString(detail)
+		}
+	}
+	if err != nil {
+		if b.Len() > 0 {
+			b.WriteString(" | ")
+		}
+		msg := err.Error()
+		if len(msg) > 200 {
+			msg = msg[:200]
+		}
+		b.WriteString(msg)
+	}
+	return b.String()
+}
+
+// queryCASSBullets asks the CASS playbook (cm CLI) for distilled rules
+// relevant to the bead and returns up to 3 high-confidence bullet contents.
+// This makes institutional-knowledge injection deterministic instead of
+// hoping the agent chooses to run `cm context` itself. Fails open: no cm
+// binary, timeout, or unparseable output → no bullets.
+func queryCASSBullets(bead types.Bead) []string {
+	if _, err := exec.LookPath("cm"); err != nil {
+		return nil
+	}
+	query := bead.Title
+	if bead.Description != "" {
+		desc := bead.Description
+		if len(desc) > 80 {
+			desc = desc[:80]
+		}
+		query += " " + desc
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "cm", "context", query, "--json").Output()
+	if err != nil {
+		return nil
+	}
+	bullets := parseCASSBullets(out)
+	if len(bullets) > 0 {
+		log.Printf("📚 Injecting %d CASS playbook rule(s) into prompt", len(bullets))
+	}
+	return bullets
+}
+
+// parseCASSBullets extracts the best playbook rules from `cm context --json`
+// output. Real shape (verified live): {"data":{"relevantBullets":[{"content",
+// "finalScore","deprecated",...}]}}. Bullets are pre-ranked; scores start low
+// (~0.4) and mature with feedback, so the gate is a noise floor (0.3), not
+// the 0.7 "high confidence" bar the docs suggest — that bar filtered out
+// every real rule in the live store.
+func parseCASSBullets(out []byte) []string {
+	var doc struct {
+		Data struct {
+			RelevantBullets []struct {
+				Content    string  `json:"content"`
+				FinalScore float64 `json:"finalScore"`
+				Deprecated bool    `json:"deprecated"`
+			} `json:"relevantBullets"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(out, &doc) != nil {
+		return nil
+	}
+	var res []string
+	for _, b := range doc.Data.RelevantBullets {
+		if b.Deprecated || b.FinalScore < 0.3 || strings.TrimSpace(b.Content) == "" {
+			continue
+		}
+		res = append(res, strings.TrimSpace(b.Content))
+		if len(res) == 3 {
+			break
+		}
+	}
+	return res
+}
+
 // executePiWithStartupRetry wraps executeWithPi with fast, jittered retries for
 // transient Pi *startup* failures. Pi resolves its provider list via a remote
 // fetch on startup; when several workers launch Pi concurrently that fetch
@@ -930,12 +1047,13 @@ func executePiWithStartupRetry(
 	mcpClient *mcp.Client,
 	projectPath string,
 	hindsightContext *agents.ContextEnrichment,
+	extras promptExtras,
 ) (*ExecutionResult, error) {
 	const maxStartupRetries = 6
 	var result *ExecutionResult
 	var err error
 	for i := 0; ; i++ {
-		result, err = executeWithPi(bead, piConfig, mcpClient, projectPath, hindsightContext)
+		result, err = executeWithPi(bead, piConfig, mcpClient, projectPath, hindsightContext, extras)
 		if i >= maxStartupRetries || !isTransientStartupFailure(result, err) {
 			return result, err
 		}
@@ -971,6 +1089,7 @@ func executeWithPi(
 	mcpClient *mcp.Client,
 	projectPath string,
 	hindsightContext *agents.ContextEnrichment,
+	extras promptExtras,
 ) (*ExecutionResult, error) {
 	result := &ExecutionResult{
 		Success:   false,
@@ -1030,7 +1149,7 @@ func executeWithPi(
 	}
 
 	// Build the prompt message
-	prompt := buildPiPrompt(bead, hindsightContext)
+	prompt := buildPiPrompt(bead, hindsightContext, extras)
 
 	// Send prompt as plain text via stdin
 	if _, err := stdinPipe.Write([]byte(prompt + "\n")); err != nil {
@@ -1356,7 +1475,7 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 }
 
 // buildPiPrompt builds the prompt message for Pi agent
-func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment) string {
+func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, extras promptExtras) string {
 	var promptParts []string
 
 	// Add bead type and title
@@ -1386,6 +1505,23 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment) 
 		for _, mem := range hindsightContext.Memories {
 			promptParts = append(promptParts, "- "+truncateString(mem.Content, 200))
 		}
+	}
+
+	// Distilled institutional rules, injected deterministically (the agent is
+	// also told to query CASS itself, but that instruction is skippable).
+	if len(extras.CassBullets) > 0 {
+		promptParts = append(promptParts, "\nProven rules from this codebase's playbook — follow them:")
+		for _, b := range extras.CassBullets {
+			promptParts = append(promptParts, "- "+truncateString(b, 300))
+		}
+	}
+
+	// Reflexion: tell the agent what the last attempt did wrong so it
+	// diagnoses instead of repeating the identical approach.
+	if extras.PrevFailure != "" {
+		promptParts = append(promptParts,
+			"\nPREVIOUS ATTEMPT FAILED: "+truncateString(extras.PrevFailure, 600)+
+				"\nDo not repeat the same approach. Diagnose the failure above first, then fix the root cause.")
 	}
 
 	return strings.Join(promptParts, "\n\n")
