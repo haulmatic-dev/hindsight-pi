@@ -28,3 +28,16 @@ func (o *Overseer) chainKeyForBead(bead types.Bead) string {
 	}
 	return bead.ID.String()
 }
+
+// isChainMember reports whether a bead is part of a registered multi-bead chain.
+// This is the correct predicate for deciding whether a bead should be excluded
+// from singleton integrate-on-close: a chain root also maps to its own ID via
+// chainKeyForBead, so an equality check on the key would incorrectly integrate
+// roots before their dependents complete.
+func (o *Overseer) isChainMember(beadID types.BeadID) bool {
+	if o.chainCompletionDetector == nil {
+		return false
+	}
+	_, ok := o.chainCompletionDetector.FindChainByBead(beadID)
+	return ok
+}

@@ -52,6 +52,12 @@ func isAllowed(path string, targetSet map[string]struct{}, targetDirs map[string
 	if base == "go.mod" || base == "go.sum" {
 		return true
 	}
+	// Documentation discipline (AGENTS.md): every change must update the
+	// changelog and affected docs — those updates are always in-scope.
+	if base == "CHANGELOG.md" || path == "CHANGELOG.md" ||
+		path == "docs" || strings.HasPrefix(path, "docs"+string(filepath.Separator)) {
+		return true
+	}
 	if _, ok := targetSet[path]; ok {
 		return true
 	}

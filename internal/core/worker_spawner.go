@@ -214,6 +214,19 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 	}
 	cmd.Env = s.workerEnvBuilder.Build(bead, runDir, string(agentType), retryCount)
 
+	// Reflexion across worker processes: a retry spawn carries the previous
+	// worker's failure so the new attempt's prompt can diagnose it instead of
+	// re-running blind (in-process retries already do this via prompt state).
+	if retryCount > 0 && s.retryManager != nil {
+		if _, lastErr, _, ok := s.retryManager.RetryInfo(beadIDStr); ok && lastErr != nil {
+			msg := lastErr.Error()
+			if len(msg) > 500 {
+				msg = "..." + msg[len(msg)-500:]
+			}
+			cmd.Env = append(cmd.Env, "HYDRA_PREV_FAILURE="+msg)
+		}
+	}
+
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
