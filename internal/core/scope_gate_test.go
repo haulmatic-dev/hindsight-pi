@@ -173,3 +173,18 @@ func TestParseGitStatusPorcelain(t *testing.T) {
 		t.Fatalf("parseGitStatusPorcelain = %v, want %v", got, want)
 	}
 }
+
+// TestScopeViolations_DocsAllowlisted pins the documentation-discipline
+// allowlist: CHANGELOG.md and docs/** updates are mandated by AGENTS.md for
+// every change, so the scope gate must never flag them.
+func TestScopeViolations_DocsAllowlisted(t *testing.T) {
+	targets := []string{"internal/core/a.go"}
+	for _, p := range []string{"CHANGELOG.md", "docs/PRDs/x.md", "docs/guide.md"} {
+		if v := scopeViolations([]string{p}, targets); len(v) != 0 {
+			t.Errorf("%s must be allowlisted, got violation %v", p, v)
+		}
+	}
+	if v := scopeViolations([]string{"docsy/evil.go"}, targets); len(v) != 1 {
+		t.Errorf("docsy/ must NOT match the docs/ allowlist prefix")
+	}
+}

@@ -10,7 +10,7 @@ Every implementation, fix, or refactor MUST follow this 5-step workflow. Skippin
 cm context "<concise description of what you are about to implement>" --json
 ```
 
-- Parse JSON output. Look for bullets with `finalScore >= 0.7`.
+- Parse JSON output. Bullets arrive pre-ranked under `data.relevantBullets`; healthy young rules score around `0.4`, so treat `finalScore >= 0.3` as signal — a `0.7` bar filters out nearly every real rule. Skip `deprecated` bullets.
 - Read `content` field for proven patterns and anti-patterns.
 - **If an anti-pattern matches your current approach, STOP and follow the documented fix.**
 
@@ -281,3 +281,24 @@ ls -la /tmp/hydra-e2e-test/url-shortener/
 # main.go        — implementation written by Pi
 # main_test.go   — tests written by Pi
 ```
+
+## Documentation & Changelog Discipline (Mandatory)
+
+Every change that lands — whether authored by a human, Claude, or a Hydra
+worker — MUST update the paper trail in the same commit/PR:
+
+1. **`CHANGELOG.md`** — add an entry under `## [Unreleased]` in the matching
+   section (`Added` / `Fixed` / `Changed` / `Documentation`). One or two
+   lines: what changed and why it matters to an operator. Hydra-authored
+   changes note it: `*Authored by a Hydra dogfood run.*`
+2. **Affected docs** — if the change alters behavior described anywhere in
+   `docs/` or this file (config knobs, workflows, log formats, commands),
+   update that description in the same change. A config knob without a doc
+   line does not exist.
+3. **PRD-driven work** — a bead's changelog entry is part of DONE. The
+   Target-Files scope gate allowlists `CHANGELOG.md` and `docs/**` so these
+   updates are never counted as off-scope.
+
+Rule of thumb: if an operator reading only `CHANGELOG.md` since the last
+release would be surprised by the system's behavior, the entry is missing or
+too vague.
