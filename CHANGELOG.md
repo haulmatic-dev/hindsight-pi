@@ -17,6 +17,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   `targetlessWarningPaths` for better readability and testability.
 
 ### Added
+- Per-phase worker doctrine: RED/GREEN/REFACTOR beads and fix beads now get
+  phase-specific working discipline injected into their prompts (fix beads
+  follow a strict reproduce→isolate→verify→fix→prove root-cause protocol);
+  universal engineering doctrine (evidence-over-narration, smallest-change,
+  fail-open vs fail-closed, honest completion) added to AGENTS.md.
 - Benchmarks for `tools/hydra-eval` artifact parsers (`ParseCloseEvents`, `ParseBeadsJSONL`, `CountMarker`, `ParseDaemonLog`). *Authored by a Hydra dogfood run.*
 - RED-phase unit tests for `tools/hydra-eval` artifact parsers (`ParseCloseEvents`, `ParseBeadsJSONL`, `CountMarker`). *Authored by a Hydra dogfood run.*
 - Target-less scope warning on verified close: implementation beads (e.g.
