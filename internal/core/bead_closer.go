@@ -3,9 +3,6 @@ package core
 import (
 	"fmt"
 	"log"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -277,43 +274,67 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 		}
 	}
 
-	// 2. Diff gate: workers do not commit their work, so an empty diff on
-	//    the bead's target files (or the whole repo when none are declared)
-	//    means no change was produced.
+	// 2. Diff gate + 3. Target-files scope gate. Both gates need the list of
+	//    changed files, so compute it once. Failing to read the working tree
+	//    is logged and treated as "changed" (fail open) for the diff gate.
 	repoPath := c.projectResolver.ResolveRepoPath(bead.Project, repoName, projectPath)
 	if repoPath == "" {
 		repoPath = projectPath
 	}
-	if c.config.Validation.RequireDiffOnClose {
-		changed, err := repoHasChanges(repoPath, beadTargetFiles(bead))
-		if err != nil {
-			log.Printf("[VerifiedClose] diff check error for %s (not blocking): %v", bead.ID, err)
-		} else if !changed {
-			return c.rejectClose(bead, projectPath, repoName, "empty-diff")
+
+	targets := beadTargetFiles(bead)
+	needDiff := c.config.Validation.RequireDiffOnClose
+	needScope := c.config.Validation.TargetScopeMode() != "off"
+
+	var changed []string
+	var changedErr error
+	if needDiff || needScope {
+		changed, changedErr = changedFiles(repoPath)
+		if changedErr != nil {
+			log.Printf("[VerifiedClose] diff check error for %s (not blocking): %v", bead.ID, changedErr)
 		}
 	}
 
-	// 3. Target-files scope gate: reject closes that changed files outside the
-	//    bead's declared targets (plus a small conventional allowlist).
-	if mode := c.config.Validation.TargetScopeMode(); mode != "off" {
-		targets := beadTargetFiles(bead)
-		if len(targets) > 0 {
-			changed, err := changedFiles(repoPath)
-			if err != nil {
-				log.Printf("[ScopeGate] changed-files error for %s (not blocking): %v", bead.ID, err)
-			} else {
-				violations := scopeViolations(changed, targets)
-				if len(violations) > 0 {
-					if mode == "block" {
-						return c.rejectClose(bead, projectPath, repoName, "off-scope changes: "+strings.Join(violations, ", "))
-					}
-					log.Printf("[ScopeGate] bead %s changed off-scope files: %v", bead.ID, violations)
-				}
-			}
+	if needDiff && !hasTargetChanges(changed, targets) {
+		return c.rejectClose(bead, projectPath, repoName, "empty-diff")
+	}
+
+	if needScope {
+		mode := c.config.Validation.TargetScopeMode()
+		if err := c.checkTargetScope(bead, projectPath, repoName, changed, targets, mode); err != nil {
+			return err
 		}
 	}
 
 	c.logCloseEvent(bead, "accepted", "verified", 0)
+	return nil
+}
+
+// checkTargetScope handles the target-files scope gate and the target-less
+// warning. It returns a non-nil error only when the configured mode is "block"
+// and an off-scope change is found. Target-less implementation beads that edit
+// non-allowlisted paths are warned but never rejected.
+func (c *BeadCloser) checkTargetScope(bead *types.Bead, projectPath, repoName string, changed, targets []string, mode string) error {
+	if len(targets) > 0 {
+		violations := scopeViolations(changed, targets)
+		if len(violations) == 0 {
+			return nil
+		}
+		if mode == "block" {
+			return c.rejectClose(bead, projectPath, repoName, "off-scope changes: "+strings.Join(violations, ", "))
+		}
+		log.Printf("[ScopeGate] bead %s changed off-scope files: %v", bead.ID, violations)
+		return nil
+	}
+
+	if !beadTypeShouldDeclareTargets(bead.Type) {
+		return nil
+	}
+
+	paths := targetlessWarningPaths(changed)
+	if len(paths) > 0 {
+		log.Printf("[ScopeGate] bead %s declared no Target Files but changed non-allowlisted paths: %v", bead.ID, paths)
+	}
 	return nil
 }
 
@@ -406,29 +427,4 @@ func splitFileList(s string) []string {
 		}
 	}
 	return out
-}
-
-// repoHasChanges reports whether the git working tree at repoPath has
-// uncommitted changes (scoped to files when provided). It fails open —
-// returning true — when the path is unknown, not a git repo, or git
-// errors, so it never blocks a close on an inability to check.
-func repoHasChanges(repoPath string, files []string) (bool, error) {
-	if repoPath == "" {
-		return true, nil
-	}
-	if _, err := os.Stat(filepath.Join(repoPath, ".git")); err != nil {
-		return true, nil
-	}
-	args := []string{"status", "--porcelain", "--untracked-files=all"}
-	if len(files) > 0 {
-		args = append(args, "--")
-		args = append(args, files...)
-	}
-	cmd := exec.Command("git", args...)
-	cmd.Dir = repoPath
-	out, err := cmd.Output()
-	if err != nil {
-		return true, fmt.Errorf("git status in %s: %w", repoPath, err)
-	}
-	return strings.TrimSpace(string(out)) != "", nil
 }
