@@ -17,6 +17,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   `targetlessWarningPaths` for better readability and testability.
 
 ### Added
+- `eval/run.sh`: one-command scored dogfood run — clone, seed, approve,
+  watch to completion, score with hydra-eval scoped to the run's start
+  timestamp.
 - Per-phase worker doctrine: RED/GREEN/REFACTOR beads and fix beads now get
   phase-specific working discipline injected into their prompts (fix beads
   follow a strict reproduce→isolate→verify→fix→prove root-cause protocol);
