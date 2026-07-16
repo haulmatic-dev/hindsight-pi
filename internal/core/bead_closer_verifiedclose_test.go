@@ -1,6 +1,8 @@
 package core
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,46 +31,6 @@ func TestBeadTargetFiles(t *testing.T) {
 				t.Fatalf("want %d files, got %d (%v)", tc.want, len(got), got)
 			}
 		})
-	}
-}
-
-func TestRepoHasChanges(t *testing.T) {
-	// Non-git directory: fail open (true) so a close is never blocked on
-	// inability to check.
-	if ch, _ := repoHasChanges(t.TempDir(), nil); !ch {
-		t.Fatalf("non-git dir should fail open to true")
-	}
-
-	repo := t.TempDir()
-	git := func(args ...string) {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	git("init")
-
-	// Clean working tree -> no changes.
-	if ch, err := repoHasChanges(repo, nil); err != nil || ch {
-		t.Fatalf("clean repo: want (false,nil), got (%v,%v)", ch, err)
-	}
-
-	// Untracked file -> changes.
-	if err := os.WriteFile(filepath.Join(repo, "x.go"), []byte("package x\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if ch, err := repoHasChanges(repo, nil); err != nil || !ch {
-		t.Fatalf("dirty repo: want (true,nil), got (%v,%v)", ch, err)
-	}
-
-	// Scoped to an unrelated path -> no changes.
-	if ch, _ := repoHasChanges(repo, []string{"other.go"}); ch {
-		t.Fatalf("scoped to unrelated file should report no changes")
-	}
-	// Scoped to the changed path -> changes.
-	if ch, _ := repoHasChanges(repo, []string{"x.go"}); !ch {
-		t.Fatalf("scoped to changed file should report changes")
 	}
 }
 
@@ -210,5 +172,97 @@ func modifyFile(t *testing.T, repo, path, content string) {
 	}
 	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// captureLogOutput redirects the default log output to a buffer for the
+// duration of the test and returns the captured bytes.
+func captureLogOutput(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	old := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(old)
+		log.SetFlags(oldFlags)
+	}()
+	fn()
+	return buf.String()
+}
+
+func TestVerifyBeforeClose_TargetLessImplementationWarns(t *testing.T) {
+	repo, closer, bead := setupScopeGateTest(t, "block")
+	bead.Metadata = nil
+	bead.Description = "no targets declared"
+	bead.Type = "fr"
+	modifyFile(t, repo, "internal/core/x.go", "package x\n// modified\n")
+
+	logs := captureLogOutput(t, func() {
+		if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
+			t.Fatalf("target-less warning must not reject close: %v", err)
+		}
+	})
+
+	if !strings.Contains(logs, "declared no Target Files") {
+		t.Fatalf("expected log containing 'declared no Target Files', got:\n%s", logs)
+	}
+	if !strings.Contains(logs, "internal/core/x.go") {
+		t.Fatalf("expected log containing 'internal/core/x.go', got:\n%s", logs)
+	}
+}
+
+func TestVerifyBeforeClose_TargetLessEpicNoWarning(t *testing.T) {
+	repo, closer, bead := setupScopeGateTest(t, "block")
+	bead.Metadata = nil
+	bead.Description = "no targets declared"
+	bead.Type = "epic"
+	modifyFile(t, repo, "internal/core/x.go", "package x\n// modified\n")
+
+	logs := captureLogOutput(t, func() {
+		if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
+			t.Fatalf("target-less epic must not reject close: %v", err)
+		}
+	})
+
+	if strings.Contains(logs, "declared no Target Files") {
+		t.Fatalf("epic should not emit target-less warning, got:\n%s", logs)
+	}
+}
+
+func TestVerifyBeforeClose_TargetLessAllowlistedOnlyNoWarning(t *testing.T) {
+	repo, closer, bead := setupScopeGateTest(t, "block")
+	bead.Metadata = nil
+	bead.Description = "no targets declared"
+	bead.Type = "implement"
+	modifyFile(t, repo, "CHANGELOG.md", "# Changelog\n## Added\n")
+	modifyFile(t, repo, "docs/PRDs/x.md", "# PRD\n")
+
+	logs := captureLogOutput(t, func() {
+		if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
+			t.Fatalf("target-less allowlisted-only must not reject close: %v", err)
+		}
+	})
+
+	if strings.Contains(logs, "declared no Target Files") {
+		t.Fatalf("allowlisted-only changes should not emit target-less warning, got:\n%s", logs)
+	}
+}
+
+func TestVerifyBeforeClose_DeclaredTargetsUnaffected(t *testing.T) {
+	repo, closer, bead := setupScopeGateTest(t, "block")
+	// bead already has declared targets from setupScopeGateTest.
+	modifyFile(t, repo, "x/a.go", "package x\n// modified\n")
+	modifyFile(t, repo, "y/b.go", "package y\n// modified\n")
+
+	logs := captureLogOutput(t, func() {
+		if err := closer.verifyBeforeClose(bead, repo, ""); err == nil {
+			t.Fatal("expected rejection for off-scope changes with declared targets")
+		}
+	})
+
+	if strings.Contains(logs, "declared no Target Files") {
+		t.Fatalf("declared-target bead should not emit target-less warning, got:\n%s", logs)
 	}
 }

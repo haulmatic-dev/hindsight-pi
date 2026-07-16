@@ -7,6 +7,33 @@ import (
 	"strings"
 )
 
+// beadTypeShouldDeclareTargets reports whether a bead type is expected to
+// declare Target Files because it writes code. It returns false for
+// structural/aggregate types (epics, gates, verification, integration) that
+// legitimately touch many or no files.
+func beadTypeShouldDeclareTargets(beadType string) bool {
+	switch strings.ToLower(strings.TrimSpace(beadType)) {
+	case "fr", "fix", "implement", "green", "refactor", "task", "us-heavy":
+		return true
+	default:
+		return false
+	}
+}
+
+// isAllowlistedPath reports whether a changed path is in the standard
+// documentation/dependency allowlist. These paths are always considered
+// in-scope and should not trigger target-less warnings.
+func isAllowlistedPath(path string) bool {
+	base := filepath.Base(path)
+	if base == "go.mod" || base == "go.sum" || base == "CHANGELOG.md" {
+		return true
+	}
+	if path == "docs" || strings.HasPrefix(path, "docs"+string(filepath.Separator)) {
+		return true
+	}
+	return false
+}
+
 // scopeViolations returns, in input order, every path in changed that is not
 // allowed by the given target paths. A path is allowed when any of the
 // following is true:
@@ -15,26 +42,11 @@ import (
 //     target;
 //   - its base name is go.mod or go.sum.
 func scopeViolations(changed []string, targets []string) []string {
-	if len(targets) == 0 {
-		// No targets means no scope limit; every change is allowed.
-		return nil
-	}
-	if len(changed) == 0 {
+	if len(targets) == 0 || len(changed) == 0 {
 		return nil
 	}
 
-	targetSet := make(map[string]struct{}, len(targets))
-	targetDirs := make(map[string]struct{}, len(targets))
-
-	for _, t := range targets {
-		t = stripSymbol(t)
-		t = filepath.Clean(t)
-		if t == "" || t == "." {
-			continue
-		}
-		targetSet[t] = struct{}{}
-		targetDirs[filepath.Dir(t)] = struct{}{}
-	}
+	targetSet, targetDirs := buildTargetSets(targets)
 
 	var violations []string
 	for _, c := range changed {
@@ -48,14 +60,7 @@ func scopeViolations(changed []string, targets []string) []string {
 
 // isAllowed reports whether a cleaned path is in-scope for the given targets.
 func isAllowed(path string, targetSet map[string]struct{}, targetDirs map[string]struct{}) bool {
-	base := filepath.Base(path)
-	if base == "go.mod" || base == "go.sum" {
-		return true
-	}
-	// Documentation discipline (AGENTS.md): every change must update the
-	// changelog and affected docs — those updates are always in-scope.
-	if base == "CHANGELOG.md" || path == "CHANGELOG.md" ||
-		path == "docs" || strings.HasPrefix(path, "docs"+string(filepath.Separator)) {
+	if isAllowlistedPath(path) {
 		return true
 	}
 	if _, ok := targetSet[path]; ok {
@@ -69,6 +74,25 @@ func isAllowed(path string, targetSet map[string]struct{}, targetDirs map[string
 	return false
 }
 
+// buildTargetSets builds the cleaned target path set and the set of directories
+// that contain targets. Reusing the same construction keeps scopeViolations
+// and hasTargetChanges consistent and avoids duplicated cleaning logic.
+func buildTargetSets(targets []string) (map[string]struct{}, map[string]struct{}) {
+	targetSet := make(map[string]struct{}, len(targets))
+	targetDirs := make(map[string]struct{}, len(targets))
+
+	for _, t := range targets {
+		t = stripSymbol(t)
+		t = filepath.Clean(t)
+		if t == "" || t == "." {
+			continue
+		}
+		targetSet[t] = struct{}{}
+		targetDirs[filepath.Dir(t)] = struct{}{}
+	}
+	return targetSet, targetDirs
+}
+
 // stripSymbol removes a trailing ":symbol" suffix from a target path, so
 // targets like "internal/core/foo.go:Bar()" are compared on the file path only.
 func stripSymbol(target string) string {
@@ -76,6 +100,42 @@ func stripSymbol(target string) string {
 		return target[:i]
 	}
 	return target
+}
+
+// targetlessWarningPaths returns the changed paths that should be warned about
+// when a bead has no declared Target Files. Allowlisted paths are filtered out
+// so documentation/dependency edits stay noise-free.
+func targetlessWarningPaths(changed []string) []string {
+	var warnings []string
+	for _, c := range changed {
+		clean := filepath.Clean(c)
+		if !isAllowlistedPath(clean) {
+			warnings = append(warnings, c)
+		}
+	}
+	return warnings
+}
+
+// hasTargetChanges reports whether any changed path satisfies the diff gate.
+// When targets is empty, any non-empty changed slice satisfies it. When targets
+// is non-empty, a path satisfies it only if it exactly matches a cleaned target
+// (symbol suffixes are stripped). A nil changed slice means the diff could not
+// be determined and is treated as changed (fail open).
+func hasTargetChanges(changed, targets []string) bool {
+	if changed == nil {
+		return true
+	}
+	if len(targets) == 0 {
+		return len(changed) > 0
+	}
+	targetSet, _ := buildTargetSets(targets)
+	for _, c := range changed {
+		clean := filepath.Clean(c)
+		if _, ok := targetSet[clean]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // changedFiles returns the repo-relative paths of all uncommitted changes in

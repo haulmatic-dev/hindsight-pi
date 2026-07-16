@@ -8,6 +8,38 @@ import (
 	"testing"
 )
 
+// TestBeadTypeShouldDeclareTargets pins the implementation-bead classifier
+// used by the target-less scope warning.
+func TestBeadTypeShouldDeclareTargets(t *testing.T) {
+	cases := []struct {
+		beadType string
+		want     bool
+	}{
+		{"fr", true},
+		{"fix", true},
+		{"implement", true},
+		{"green", true},
+		{"refactor", true},
+		{"task", true},
+		{"us-heavy", true},
+		{"REFACTOR", true},
+		{"  Implement ", true},
+		{"epic", false},
+		{"approval", false},
+		{"discovery", false},
+		{"us-light", false},
+		{"us-integration", false},
+		{"nfr-config", false},
+		{"nfr-verification", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := beadTypeShouldDeclareTargets(tc.beadType); got != tc.want {
+			t.Errorf("beadTypeShouldDeclareTargets(%q) = %v, want %v", tc.beadType, got, tc.want)
+		}
+	}
+}
+
 func TestScopeViolations(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -186,5 +218,73 @@ func TestScopeViolations_DocsAllowlisted(t *testing.T) {
 	}
 	if v := scopeViolations([]string{"docsy/evil.go"}, targets); len(v) != 1 {
 		t.Errorf("docsy/ must NOT match the docs/ allowlist prefix")
+	}
+}
+
+func TestHasTargetChanges(t *testing.T) {
+	// Diff unknown: fail open.
+	if !hasTargetChanges(nil, nil) {
+		t.Fatalf("nil changed slice should fail open to true")
+	}
+
+	// No targets, no changes -> no diff.
+	if hasTargetChanges([]string{}, nil) {
+		t.Fatalf("empty changes with no targets should report no diff")
+	}
+
+	// No targets, any change -> diff.
+	if !hasTargetChanges([]string{"x.go"}, nil) {
+		t.Fatalf("any change with no targets should report diff")
+	}
+
+	// Targets declared, no matching change -> no diff.
+	if hasTargetChanges([]string{"x.go"}, []string{"other.go"}) {
+		t.Fatalf("change to unrelated file should not satisfy target diff")
+	}
+
+	// Targets declared, matching change -> diff.
+	if !hasTargetChanges([]string{"x.go"}, []string{"x.go"}) {
+		t.Fatalf("change to target file should satisfy target diff")
+	}
+
+	// Symbol suffix is stripped before matching.
+	if !hasTargetChanges([]string{"x.go"}, []string{"x.go:DoThing()"}) {
+		t.Fatalf("symbol suffix should be stripped before matching")
+	}
+
+	// Cleaned paths match even when input has redundant segments.
+	if !hasTargetChanges([]string{"internal/core/../core/x.go"}, []string{"internal/core/x.go"}) {
+		t.Fatalf("redundant segments should be cleaned before matching")
+	}
+}
+
+func BenchmarkScopeViolations(b *testing.B) {
+	changed := []string{
+		"internal/core/a.go",
+		"internal/core/b.go",
+		"internal/core/a_test.go",
+		"internal/other/c.go",
+		"CHANGELOG.md",
+		"docs/PRDs/x.md",
+		"go.mod",
+		"go.sum",
+	}
+	targets := []string{"internal/core/a.go"}
+	for i := 0; i < b.N; i++ {
+		_ = scopeViolations(changed, targets)
+	}
+}
+
+func BenchmarkTargetlessWarningPaths(b *testing.B) {
+	changed := []string{
+		"internal/core/a.go",
+		"internal/core/b.go",
+		"CHANGELOG.md",
+		"docs/PRDs/x.md",
+		"go.mod",
+		"go.sum",
+	}
+	for i := 0; i < b.N; i++ {
+		_ = targetlessWarningPaths(changed)
 	}
 }

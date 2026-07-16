@@ -7,7 +7,20 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Changed
+- Refactored the verified-close target-less warning: `changedFiles` is now
+  computed once for both the diff gate and the scope gate (removing one
+  `git status` call), the target-set construction is shared via
+  `buildTargetSets`, and the warning logic is extracted into
+  `targetlessWarningPaths` for better readability and testability.
+
 ### Added
+- Target-less scope warning on verified close: implementation beads (e.g.
+  `fr`, `fix`, `implement`) that declare no Target Files now log the
+  non-allowlisted files they changed, while non-implementation beads (e.g.
+  `epic`, `approval`, `nfr-*`) remain exempt. Warn-only, never rejects the
+  close; allowlisted paths (`CHANGELOG.md`, `docs/**`, `go.mod`, `go.sum`)
+  are filtered out. *Authored by a Hydra dogfood run.*
 - Target-Files scope gate on verified close: worker changes outside a bead's
   declared Target Files are warned about or rejected
   (`validation.enforce_target_scope: off|warn|block`, default `warn`).
