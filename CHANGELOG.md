@@ -55,6 +55,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   Target Files from the target clone.
 
 ### Fixed
+- Anti-consultant guard: implementation beads' prompts carry a DELIVERABLE
+  CONTRACT (edits must exist on disk; plans are rejected as empty diffs) —
+  doctrine-tuned workers had begun honestly delivering plans instead of code.
 - Eval metrics accuracy: accepted `[CloseEvent]` lines now carry the real
   validation-attempt count instead of a hardcoded `0` (one-shot-rate was
   degenerate), and `hydra-eval --since <time>` scopes all daemon-log parsing

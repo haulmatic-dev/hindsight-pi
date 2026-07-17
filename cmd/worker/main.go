@@ -1488,6 +1488,7 @@ func phaseGuidance(bead types.Bead) string {
 			"- Do NOT implement the feature in this task."
 	case strings.HasPrefix(title, "GREEN:"):
 		return "GREEN-phase discipline:\n" +
+			"- You are the implementer: EDIT the target files now. Ending this task with only a plan or analysis is a failure — the close gate rejects tasks that changed nothing.\n" +
 			"- Implement the MINIMUM that makes the failing tests pass. No speculative abstractions, no extra options, no gold-plating.\n" +
 			"- Run the tests and quote the passing output.\n" +
 			"- If a test itself looks wrong, say so explicitly in your summary instead of contorting the implementation to satisfy it."
@@ -1527,6 +1528,16 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 	// discipline that phase actually needs, instead of one generic prompt.
 	if g := phaseGuidance(bead); g != "" {
 		promptParts = append(promptParts, g)
+	}
+
+	// Anti-consultant guard: implementation-type beads must produce file
+	// edits. Observed failure mode (2026-07-17): doctrine-tuned workers
+	// honestly delivered PLANS with "NOT VERIFIED" labels and zero changes —
+	// every close was then rejected as empty-diff. State the contract.
+	switch strings.ToLower(strings.TrimSpace(bead.Type)) {
+	case "fr", "fix", "implement", "green", "refactor", "task", "us-heavy":
+		promptParts = append(promptParts,
+			"DELIVERABLE CONTRACT: this task is complete only when the required file edits exist on disk and verification commands ran. A plan or analysis without edits will be rejected as an empty diff.")
 	}
 
 	// Add target files if available
