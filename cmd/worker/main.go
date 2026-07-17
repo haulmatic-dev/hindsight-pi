@@ -1475,6 +1475,39 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 }
 
 // buildPiPrompt builds the prompt message for Pi agent
+// phaseGuidance returns phase-specific working doctrine for a bead, keyed on
+// the TDD-phase title prefix task-breakdown emits (RED:/GREEN:/REFACTOR:) and
+// on fix-type beads. Empty for phases with no special discipline.
+func phaseGuidance(bead types.Bead) string {
+	title := strings.ToUpper(strings.TrimSpace(bead.Title))
+	switch {
+	case strings.HasPrefix(title, "RED:"):
+		return "RED-phase discipline:\n" +
+			"- Write tests that pin BEHAVIOR from the acceptance criteria, never implementation details.\n" +
+			"- Run the tests and verify each fails for the RIGHT reason — the missing feature — not a compile error or typo. Quote the failure output.\n" +
+			"- Do NOT implement the feature in this task."
+	case strings.HasPrefix(title, "GREEN:"):
+		return "GREEN-phase discipline:\n" +
+			"- Implement the MINIMUM that makes the failing tests pass. No speculative abstractions, no extra options, no gold-plating.\n" +
+			"- Run the tests and quote the passing output.\n" +
+			"- If a test itself looks wrong, say so explicitly in your summary instead of contorting the implementation to satisfy it."
+	case strings.HasPrefix(title, "REFACTOR:"):
+		return "REFACTOR-phase discipline:\n" +
+			"- Behavior must not change. Run the tests BEFORE and AFTER your change; quote both outputs.\n" +
+			"- Improve names, structure, and duplication only.\n" +
+			"- If you find a real bug, do NOT fix it here: record it with `cm add` and finish the refactor unchanged."
+	case strings.HasPrefix(title, "FIX:") || strings.EqualFold(bead.Type, "fix"):
+		return "FIX discipline — root-cause protocol, follow strictly:\n" +
+			"1. REPRODUCE: run the failing command/test first; capture the exact error text.\n" +
+			"2. ISOLATE: form ONE hypothesis; design the smallest experiment that can disprove it (a single command, a tiny probe). Do not fix anything yet.\n" +
+			"3. VERIFY the hypothesis with that experiment. Wrong? Form the next hypothesis from the new evidence — never stack two unverified guesses.\n" +
+			"4. FIX the proven root cause, not the symptom. Silencing an error, skipping a test, or widening a timeout is a symptom fix — reject it unless the evidence shows it IS the root cause.\n" +
+			"5. PROVE: re-run the originally failing command and quote its passing output.\n" +
+			"Any prior-failure text in this prompt is evidence for step 1 — read it first."
+	}
+	return ""
+}
+
 func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, extras promptExtras) string {
 	var promptParts []string
 
@@ -1488,6 +1521,12 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 	// Add description
 	if bead.Description != "" {
 		promptParts = append(promptParts, bead.Description)
+	}
+
+	// Per-phase working doctrine: each TDD phase (and fix beads) gets the
+	// discipline that phase actually needs, instead of one generic prompt.
+	if g := phaseGuidance(bead); g != "" {
+		promptParts = append(promptParts, g)
 	}
 
 	// Add target files if available

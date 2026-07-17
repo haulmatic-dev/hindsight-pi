@@ -8,6 +8,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Changed
+- Further optimized `tools/hydra-eval`: artifact-parsing now uses a single shared `forEachLine` helper, marker/payload extraction is generalized via `payloadAfter`, and `main` parses the daemon log once with `ParseDaemonLog` instead of four separate passes. *Authored by a Hydra dogfood run.*
+- Refactored `tools/hydra-eval/parse.go`: artifact-parsing loops are now driven by a shared `scanLines` helper, marker/payload operations use `bytes` instead of `strings` to avoid per-line allocations, and the three public parsers (`ParseCloseEvents`, `ParseBeadsJSONL`, `CountMarker`) share a single scanner setup. *Authored by a Hydra dogfood run.*
 - Refactored the verified-close target-less warning: `changedFiles` is now
   computed once for both the diff gate and the scope gate (removing one
   `git status` call), the target-set construction is shared via
@@ -15,6 +17,16 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   `targetlessWarningPaths` for better readability and testability.
 
 ### Added
+- `eval/run.sh`: one-command scored dogfood run — clone, seed, approve,
+  watch to completion, score with hydra-eval scoped to the run's start
+  timestamp.
+- Per-phase worker doctrine: RED/GREEN/REFACTOR beads and fix beads now get
+  phase-specific working discipline injected into their prompts (fix beads
+  follow a strict reproduce→isolate→verify→fix→prove root-cause protocol);
+  universal engineering doctrine (evidence-over-narration, smallest-change,
+  fail-open vs fail-closed, honest completion) added to AGENTS.md.
+- Benchmarks for `tools/hydra-eval` artifact parsers (`ParseCloseEvents`, `ParseBeadsJSONL`, `CountMarker`, `ParseDaemonLog`). *Authored by a Hydra dogfood run.*
+- RED-phase unit tests for `tools/hydra-eval` artifact parsers (`ParseCloseEvents`, `ParseBeadsJSONL`, `CountMarker`). *Authored by a Hydra dogfood run.*
 - Target-less scope warning on verified close: implementation beads (e.g.
   `fr`, `fix`, `implement`) that declare no Target Files now log the
   non-allowlisted files they changed, while non-implementation beads (e.g.

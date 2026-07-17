@@ -302,3 +302,14 @@ worker — MUST update the paper trail in the same commit/PR:
 Rule of thumb: if an operator reading only `CHANGELOG.md` since the last
 release would be surprised by the system's behavior, the entry is missing or
 too vague.
+
+## Engineering Doctrine (Mandatory)
+
+Universal rules for every agent working in this repo — human, Claude, or Hydra worker. Phase-specific versions are injected into worker prompts automatically (`phaseGuidance` in `cmd/worker/main.go`).
+
+1. **Evidence over narration.** Never claim a command succeeded without running it in this task and quoting its actual output. Label claims **VERIFIED** (you ran it, output shown) or **ASSUMED** (you did not). An ASSUMED "tests pass" is a defect.
+2. **Smallest change that wins.** Touch only files your task requires. Unrelated bug or improvement spotted? Do NOT fix it inline — record it (`cm add "..." --category ...`) and move on. Drive-by edits invalidate your diff.
+3. **Fail-open vs fail-closed.** Checks that might be broken themselves (network, optional tooling, telemetry) fail **open**: log and continue. Product gates (tests, build, acceptance criteria, scope) fail **closed**: block. Never invert these.
+4. **Exact errors.** Quote error messages verbatim, never paraphrased — the exact string is the next agent's search key.
+5. **Honest completion.** Anything not done or not verified is reported as **NOT DONE** / **NOT VERIFIED** in the final summary. A false "done" costs ten times a true "blocked".
+6. **Root cause, not symptom.** Silencing an error, skipping a test, or widening a timeout is a symptom fix; it is acceptable only when evidence shows it IS the root cause.
