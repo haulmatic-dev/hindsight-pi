@@ -71,6 +71,33 @@ func (b *ProviderBreaker) Choose() (string, string) {
 	return b.chooseLocked()
 }
 
+// Override returns the provider/model to use when a specific provider has
+// already been selected (e.g. by phase routing). If the selected provider's
+// circuit is open, it falls back to the configured fallback provider/model;
+// otherwise it returns the selected pair unchanged. This keeps breaker
+// failover from reverting phase-routed providers in normal operation.
+func (b *ProviderBreaker) Override(provider, model string) (string, string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if provider == "" {
+		return b.chooseLocked()
+	}
+
+	if !b.isOpenLocked(provider) {
+		return provider, model
+	}
+
+	if b.fallbackProvider != "" && !b.isOpenLocked(b.fallbackProvider) {
+		log.Printf("[ProviderBreaker] provider %s circuit open — failing over to %s", provider, b.fallbackProvider)
+		return b.fallbackProvider, b.fallbackModel
+	}
+
+	// Both selected and fallback are open (or no fallback): return the
+	// selected provider/model unchanged so the caller keeps its choice.
+	return provider, model
+}
+
 // RecordRateLimit records a rate-limit failure against the currently-active
 // provider and opens its circuit once the threshold is reached within the
 // window. No-op when no fallback is configured (nowhere to fail over to).

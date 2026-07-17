@@ -189,3 +189,14 @@ agents:
     model: kimi-for-coding
     timeout: 10m
     api_key_name: KIMI_API_KEY
+
+    # Optional per-phase model routing. Each TDD phase (red, green,
+    # refactor, syntax, discovery, fix) can be routed to a different
+    # provider/model. An entry may set only `model` to keep the primary
+    # provider. When unset, all phases use the primary provider/model.
+    # phase_models:
+    #   red:
+    #     provider: kimi-coding
+    #     model: kimi-coding-128k
+    #   green:
+    #     model: kimi-for-coding

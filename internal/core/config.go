@@ -30,6 +30,12 @@ type AgentsConfig struct {
 	Pi           PiConfig `yaml:"pi"`
 }
 
+// PhaseModel is a per-phase provider/model override for Pi workers.
+type PhaseModel struct {
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"`
+}
+
 // PiConfig contains Pi coding agent settings
 type PiConfig struct {
 	Enabled       bool   `yaml:"enabled"`
@@ -44,6 +50,29 @@ type PiConfig struct {
 	// Empty disables failover.
 	FallbackProvider string `yaml:"fallback_provider"`
 	FallbackModel    string `yaml:"fallback_model"`
+
+	// PhaseModels maps a phase key (e.g. red, green, refactor) to an optional
+	// provider/model override. Partial overrides are allowed: a non-empty
+	// Provider or Model replaces the corresponding primary field, while empty
+	// fields fall back to the primary.
+	PhaseModels map[string]PhaseModel `yaml:"phase_models"`
+}
+
+// ModelForPhase returns the provider and model for a phase, falling back to
+// the primary provider/model when the phase has no override or the override
+// field is empty. Phase lookup is case-insensitive.
+func (p PiConfig) ModelForPhase(phase string) (string, string) {
+	prov, model := p.Provider, p.Model
+	key := strings.ToLower(strings.TrimSpace(phase))
+	if override, ok := p.PhaseModels[key]; ok {
+		if override.Provider != "" {
+			prov = override.Provider
+		}
+		if override.Model != "" {
+			model = override.Model
+		}
+	}
+	return prov, model
 }
 
 // PiRootConfig contains Pi-specific configuration settings
@@ -654,6 +683,15 @@ func (c *Config) Clone() *Config {
 	if c.Projects != nil {
 		cloned.Projects = make([]ProjectConfig, len(c.Projects))
 		copy(cloned.Projects, c.Projects)
+	}
+
+	// Deep copy Agents.Pi.PhaseModels map so mutations of the returned
+	// config do not affect the cached config.
+	if c.Agents.Pi.PhaseModels != nil {
+		cloned.Agents.Pi.PhaseModels = make(map[string]PhaseModel, len(c.Agents.Pi.PhaseModels))
+		for k, v := range c.Agents.Pi.PhaseModels {
+			cloned.Agents.Pi.PhaseModels[k] = v
+		}
 	}
 
 	return cloned

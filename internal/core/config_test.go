@@ -536,6 +536,69 @@ pi:
 }
 
 // Helper function
+func TestPiConfig_ModelForPhase(t *testing.T) {
+	tests := []struct {
+		name      string
+		cfg       PiConfig
+		phase     string
+		wantProv  string
+		wantModel string
+	}{
+		{
+			name:      "nil map falls back to primary",
+			cfg:       PiConfig{Provider: "pp", Model: "pm"},
+			phase:     "red",
+			wantProv:  "pp",
+			wantModel: "pm",
+		},
+		{
+			name:      "case-insensitive phase lookup",
+			cfg:       PiConfig{Provider: "pp", Model: "pm", PhaseModels: map[string]PhaseModel{"red": {Provider: "p1", Model: "m1"}}},
+			phase:     "RED",
+			wantProv:  "p1",
+			wantModel: "m1",
+		},
+		{
+			name:      "model-only override keeps primary provider",
+			cfg:       PiConfig{Provider: "pp", Model: "pm", PhaseModels: map[string]PhaseModel{"green": {Model: "m2"}}},
+			phase:     "green",
+			wantProv:  "pp",
+			wantModel: "m2",
+		},
+		{
+			name:      "unknown phase falls back to primary",
+			cfg:       PiConfig{Provider: "pp", Model: "pm", PhaseModels: map[string]PhaseModel{"red": {Provider: "p1", Model: "m1"}}},
+			phase:     "epic",
+			wantProv:  "pp",
+			wantModel: "pm",
+		},
+		{
+			name:      "empty phase returns primary unchanged",
+			cfg:       PiConfig{Provider: "pp", Model: "pm", PhaseModels: map[string]PhaseModel{"red": {Provider: "p1", Model: "m1"}}},
+			phase:     "  ",
+			wantProv:  "pp",
+			wantModel: "pm",
+		},
+		{
+			name:      "empty phase model entry does not override primary",
+			cfg:       PiConfig{Provider: "pp", Model: "pm", PhaseModels: map[string]PhaseModel{"red": {}}},
+			phase:     "red",
+			wantProv:  "pp",
+			wantModel: "pm",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotProv, gotModel := tt.cfg.ModelForPhase(tt.phase)
+			if gotProv != tt.wantProv || gotModel != tt.wantModel {
+				t.Errorf("ModelForPhase(%q) = (%q, %q), want (%q, %q)",
+					tt.phase, gotProv, gotModel, tt.wantProv, tt.wantModel)
+			}
+		})
+	}
+}
+
 func containsSubstring(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
@@ -626,5 +689,103 @@ validation:
 
 	if config.Validation.TargetScopeMode() != "block" {
 		t.Errorf("Expected TargetScopeMode()='block', got '%s'", config.Validation.TargetScopeMode())
+	}
+}
+
+func TestLoadConfig_PhaseModels(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "phase_models_config.yaml")
+
+	configContent := `
+overseer:
+  bead_discovery_interval: 5s
+  max_workers: 5
+
+projects:
+  - name: test-project
+    path: /tmp/test
+    type: single
+
+agents:
+  pi:
+    provider: pp
+    model: pm
+    phase_models:
+      red:
+        provider: p1
+        model: m1
+      green:
+        model: m2
+`
+
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("Failed to write config file: %v", err)
+	}
+
+	config, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if config.Agents.Pi.PhaseModels == nil {
+		t.Fatal("Expected PhaseModels to be parsed, got nil")
+	}
+
+	red, ok := config.Agents.Pi.PhaseModels["red"]
+	if !ok {
+		t.Fatal("Expected PhaseModels['red'] to exist")
+	}
+	if red.Provider != "p1" {
+		t.Errorf("Expected PhaseModels['red'].Provider='p1', got %q", red.Provider)
+	}
+	if red.Model != "m1" {
+		t.Errorf("Expected PhaseModels['red'].Model='m1', got %q", red.Model)
+	}
+
+	green, ok := config.Agents.Pi.PhaseModels["green"]
+	if !ok {
+		t.Fatal("Expected PhaseModels['green'] to exist")
+	}
+	if green.Provider != "" {
+		t.Errorf("Expected PhaseModels['green'].Provider='', got %q", green.Provider)
+	}
+	if green.Model != "m2" {
+		t.Errorf("Expected PhaseModels['green'].Model='m2', got %q", green.Model)
+	}
+
+	// Verify primary fields are preserved
+	if config.Agents.Pi.Provider != "pp" {
+		t.Errorf("Expected primary provider='pp', got %q", config.Agents.Pi.Provider)
+	}
+	if config.Agents.Pi.Model != "pm" {
+		t.Errorf("Expected primary model='pm', got %q", config.Agents.Pi.Model)
+	}
+
+	// Verify ModelForPhase behavior on the loaded config
+	prov, model := config.Agents.Pi.ModelForPhase("red")
+	if prov != "p1" || model != "m1" {
+		t.Errorf("ModelForPhase('red') = (%q, %q), want (p1, m1)", prov, model)
+	}
+	prov, model = config.Agents.Pi.ModelForPhase("green")
+	if prov != "pp" || model != "m2" {
+		t.Errorf("ModelForPhase('green') = (%q, %q), want (pp, m2)", prov, model)
+	}
+}
+
+func TestConfig_Clone_PhaseModelsDeepCopy(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Agents.Pi.PhaseModels = map[string]PhaseModel{
+		"red": {Provider: "p1", Model: "m1"},
+	}
+
+	cloned := cfg.Clone()
+	if cloned == nil {
+		t.Fatal("Clone returned nil")
+	}
+
+	// Mutate the clone's map and verify the original is unaffected.
+	cloned.Agents.Pi.PhaseModels["red"] = PhaseModel{Provider: "p2", Model: "m2"}
+	if cfg.Agents.Pi.PhaseModels["red"].Provider != "p1" {
+		t.Errorf("Original PhaseModels was mutated after clone modification: got %q", cfg.Agents.Pi.PhaseModels["red"].Provider)
 	}
 }
