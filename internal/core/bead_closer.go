@@ -306,7 +306,7 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 		}
 	}
 
-	c.logCloseEvent(bead, "accepted", "verified", 0)
+	c.logCloseEvent(bead, "accepted", "verified", c.validationRetryCount(bead))
 	return nil
 }
 
@@ -349,25 +349,22 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		maxRounds = c.config.Validation.MaxRounds
 	}
 
-	rounds := 0
-	if c.validationService != nil && c.validationService.retryManager != nil {
-		rounds = c.validationService.retryManager.GetValidationRetryCount(beadID)
-	}
+	currentAttempts := c.validationRetryCount(bead)
 
-	if rounds >= maxRounds {
+	if currentAttempts >= maxRounds {
 		// Stop the reject/reopen loop; flag for a human instead of spinning.
-		c.logCloseEvent(bead, "escalated", reason, rounds)
-		log.Printf("[VerifiedClose] Bead %s rejected %d/%d times (%s); escalating to human", beadID, rounds, maxRounds, reason)
+		c.logCloseEvent(bead, "escalated", reason, currentAttempts)
+		log.Printf("[VerifiedClose] Bead %s rejected %d/%d times (%s); escalating to human", beadID, currentAttempts, maxRounds, reason)
 		if c.beadsClient != nil {
 			if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"needs-human", "verified-close-escalated"}); err != nil {
 				log.Printf("[VerifiedClose] Failed to label %s for escalation: %v", beadID, err)
 			}
 		}
-		return fmt.Errorf("verified-close: bead %s escalated after %d rejections (%s)", beadID, rounds, reason)
+		return fmt.Errorf("verified-close: bead %s escalated after %d rejections (%s)", beadID, currentAttempts, reason)
 	}
 
-	c.logCloseEvent(bead, "rejected", reason, rounds+1)
-	log.Printf("[VerifiedClose] Bead %s rejected (%s), round %d/%d — reopening", beadID, reason, rounds+1, maxRounds)
+	c.logCloseEvent(bead, "rejected", reason, currentAttempts+1)
+	log.Printf("[VerifiedClose] Bead %s rejected (%s), round %d/%d — reopening", beadID, reason, currentAttempts+1, maxRounds)
 	if c.validationService != nil && c.validationService.retryManager != nil {
 		c.validationService.retryManager.IncrementValidationRetry(beadID)
 	}
@@ -388,6 +385,17 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 func (c *BeadCloser) logCloseEvent(bead *types.Bead, verdict, reason string, attempt int) {
 	log.Printf("[CloseEvent] {\"bead_id\":%q,\"verdict\":%q,\"reason\":%q,\"attempt\":%d}",
 		string(bead.ID), verdict, reason, attempt)
+}
+
+// validationRetryCount returns the validation retry count for a bead,
+// or 0 when the validation service or its retry manager is nil. It keeps
+// CloseEvent attempt values consistent across accepted, rejected, and
+// escalated paths.
+func (c *BeadCloser) validationRetryCount(bead *types.Bead) int {
+	if c.validationService == nil || c.validationService.retryManager == nil {
+		return 0
+	}
+	return c.validationService.retryManager.GetValidationRetryCount(string(bead.ID))
 }
 
 // beadTargetFiles extracts a bead's declared target files so the diff

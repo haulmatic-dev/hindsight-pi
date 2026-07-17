@@ -4,19 +4,29 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"time"
 )
 
 const maxLineSize = 1024 * 1024 // 1 MiB
+
+const logTimeLayout = "2006/01/02 15:04:05"
+
+var sinceLayouts = []string{
+	"2006/01/02 15:04:05",
+	"2006/01/02",
+}
 
 var closeEventMarker = []byte("[CloseEvent] ")
 
 // CloseEvent represents a parsed [CloseEvent] line from the daemon log.
 type CloseEvent struct {
-	BeadID  string `json:"bead_id"`
-	Verdict string `json:"verdict"`
-	Reason  string `json:"reason"`
-	Attempt int    `json:"attempt"`
+	BeadID  string    `json:"bead_id"`
+	Verdict string    `json:"verdict"`
+	Reason  string    `json:"reason"`
+	Attempt int       `json:"attempt"`
+	Time    time.Time `json:"-"`
 }
 
 // BeadRecord represents one line from a beads JSONL export.
@@ -57,16 +67,30 @@ func CountMarker(r io.Reader, marker string) int {
 
 // ParseDaemonLog parses a daemon log in a single pass, returning close
 // events and the count of each requested marker in the order the markers
-// are supplied.
+// are supplied. It does not apply any time-based filtering.
 func ParseDaemonLog(r io.Reader, markers []string) (events []CloseEvent, counts []int) {
+	return ParseDaemonLogSince(r, markers, time.Time{})
+}
+
+// ParseDaemonLogSince parses a daemon log in a single pass, applying a
+// --since timestamp filter before extracting close events and counting
+// markers. A zero since value disables filtering.
+func ParseDaemonLogSince(r io.Reader, markers []string, since time.Time) (events []CloseEvent, counts []int) {
 	markerBytes := make([][]byte, len(markers))
 	for i, m := range markers {
 		markerBytes[i] = []byte(m)
 	}
 	counts = make([]int, len(markers))
 
+	f := newSinceFilter(since)
 	scanLines(r, func(line []byte) {
+		if !f.allow(line) {
+			return
+		}
 		if ev, ok := parseCloseEvent(line); ok {
+			if t, ok := ParseLogTime(line); ok {
+				ev.Time = t
+			}
 			events = append(events, ev)
 		}
 		for i, m := range markerBytes {
@@ -137,6 +161,82 @@ func newScanner(r io.Reader) *bufio.Scanner {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, maxLineSize), maxLineSize)
 	return scanner
+}
+
+// ParseLogTime parses the 19-character "YYYY/MM/DD HH:MM:SS" prefix from a
+// daemon log line and returns the corresponding time. It returns false when
+// the line is too short, the prefix is not followed by a space or end of
+// line, or the prefix does not match the expected layout.
+func ParseLogTime(line []byte) (time.Time, bool) {
+	if len(line) < len(logTimeLayout) {
+		return time.Time{}, false
+	}
+	if len(line) > len(logTimeLayout) && line[len(logTimeLayout)] != ' ' {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(logTimeLayout, string(line[:len(logTimeLayout)]))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// ParseSince parses a user-supplied --since value. It accepts both the full
+// "2006/01/02 15:04:05" layout and the date-only "2006/01/02" layout,
+// which is interpreted as midnight UTC.
+func ParseSince(s string) (time.Time, error) {
+	for _, layout := range sinceLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid --since value %q: accepted layouts are %q and %q", s, sinceLayouts[0], sinceLayouts[1])
+}
+
+// FilterSince returns the lines from lines that are either timestamped at or
+// after since, or untimestamped continuation lines that appear after the
+// first kept timestamped line. When since is the zero time, the input slice
+// is returned unchanged.
+func FilterSince(lines [][]byte, since time.Time) [][]byte {
+	if since.IsZero() {
+		return lines
+	}
+	f := newSinceFilter(since)
+	out := make([][]byte, 0, len(lines))
+	for _, line := range lines {
+		if f.allow(line) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// sinceFilter tracks whether subsequent log lines should be included based on
+// the --since threshold and the timestamp/continuation semantics of the
+// daemon log.
+type sinceFilter struct {
+	since time.Time
+	keep  bool
+}
+
+// newSinceFilter returns a filter that includes all lines when since is the
+// zero time.
+func newSinceFilter(since time.Time) sinceFilter {
+	return sinceFilter{since: since}
+}
+
+// allow reports whether line should be included. Timestamped lines update
+// the keep state; untimestamped lines are included only if the previous
+// timestamped line was kept.
+func (f *sinceFilter) allow(line []byte) bool {
+	if f.since.IsZero() {
+		return true
+	}
+	if t, ok := ParseLogTime(line); ok {
+		f.keep = !t.Before(f.since)
+		return f.keep
+	}
+	return f.keep
 }
 
 // payloadAfter returns the portion of line following the last occurrence of
