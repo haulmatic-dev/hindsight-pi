@@ -6,17 +6,29 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 )
 
 func main() {
 	beadsPath := flag.String("beads-jsonl", "", "Path to beads JSONL file")
 	daemonLogPath := flag.String("daemon-log", "", "Path to daemon log file")
+	sinceRaw := flag.String("since", "", "Only include daemon log entries on or after this time (layouts: 2006/01/02 15:04:05, 2006/01/02)")
 	outPath := flag.String("out", "hydra-eval.json", "Output JSON file path")
 	flag.Parse()
 
 	if *beadsPath == "" {
-		fmt.Fprintln(os.Stderr, "Usage: hydra-eval --beads-jsonl <file> [--daemon-log <file>] [--out <file>]")
+		fmt.Fprintln(os.Stderr, "Usage: hydra-eval --beads-jsonl <file> [--daemon-log <file>] [--since <time>] [--out <file>]")
 		os.Exit(1)
+	}
+
+	var since time.Time
+	if *sinceRaw != "" {
+		var err error
+		since, err = ParseSince(*sinceRaw)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	}
 
 	beadsFile, err := os.Open(*beadsPath)
@@ -41,7 +53,7 @@ func main() {
 				"closed as failed",
 			}
 			var counts []int
-			events, counts = ParseDaemonLog(bytes.NewReader(logData), markers)
+			events, counts = ParseDaemonLogSince(bytes.NewReader(logData), markers, since)
 			stuckKills = counts[0]
 			scopeWarnings = counts[1]
 			failedCloses = counts[2]

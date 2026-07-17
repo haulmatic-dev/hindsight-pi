@@ -55,6 +55,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   Target Files from the target clone.
 
 ### Fixed
+- Eval metrics accuracy: accepted `[CloseEvent]` lines now carry the real
+  validation-attempt count instead of a hardcoded `0` (one-shot-rate was
+  degenerate), and `hydra-eval --since <time>` scopes all daemon-log parsing
+  to the current run instead of everything since log rotation.
+  *Authored by a Hydra dogfood run.*
 - Sticky compliance approval: an approved PRD no longer re-runs the analyzer
   every poll until max_cycles (`.hydra/compliance-approved` sentinel,
   restart-durable).

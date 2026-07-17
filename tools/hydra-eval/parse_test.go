@@ -4,6 +4,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -105,4 +106,141 @@ func TestArtifactParsers_BuildAndVet(t *testing.T) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go vet ./tools/hydra-eval/... failed: %v\n%s", err, string(output))
 	}
+}
+
+func TestParseLogTime_ValidTimestamp(t *testing.T) {
+	input := []byte("2026/07/17 10:00:00 [CloseEvent] {} extra")
+	tm, ok := ParseLogTime(input)
+
+	require.True(t, ok)
+	assert.Equal(t, 2026, tm.Year())
+	assert.Equal(t, time.July, tm.Month())
+	assert.Equal(t, 17, tm.Day())
+	assert.Equal(t, 10, tm.Hour())
+	assert.Equal(t, 0, tm.Minute())
+	assert.Equal(t, 0, tm.Second())
+}
+
+func TestParseLogTime_ExactLength(t *testing.T) {
+	input := []byte("2026/07/17 10:00:00")
+	tm, ok := ParseLogTime(input)
+
+	require.True(t, ok)
+	assert.Equal(t, 17, tm.Day())
+}
+
+func TestParseLogTime_InvalidSeparator(t *testing.T) {
+	input := []byte("2026/07/17 10:00:00X not a log line")
+	_, ok := ParseLogTime(input)
+
+	assert.False(t, ok)
+}
+
+func TestParseLogTime_TooShort(t *testing.T) {
+	input := []byte("2026/07/17 10:00:0")
+	_, ok := ParseLogTime(input)
+
+	assert.False(t, ok)
+}
+
+func TestParseLogTime_NonDatePrefix(t *testing.T) {
+	input := []byte("not a timestamp [CloseEvent] {}")
+	_, ok := ParseLogTime(input)
+
+	assert.False(t, ok)
+}
+
+func TestParseSince_FullLayout(t *testing.T) {
+	tm, err := ParseSince("2026/07/17 10:00:00")
+
+	require.NoError(t, err)
+	assert.Equal(t, time.Date(2026, time.July, 17, 10, 0, 0, 0, time.UTC), tm)
+}
+
+func TestParseSince_DateOnlyLayout(t *testing.T) {
+	tm, err := ParseSince("2026/07/17")
+
+	require.NoError(t, err)
+	assert.Equal(t, time.Date(2026, time.July, 17, 0, 0, 0, 0, time.UTC), tm)
+}
+
+func TestParseSince_InvalidMentionsLayouts(t *testing.T) {
+	_, err := ParseSince("garbage")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "2006/01/02 15:04:05")
+	assert.Contains(t, err.Error(), "2006/01/02")
+}
+
+func TestFilterSince_KeepsTimestampedAtOrAfterSince(t *testing.T) {
+	since := time.Date(2026, time.July, 17, 10, 0, 0, 0, time.UTC)
+	lines := [][]byte{
+		[]byte("2026/07/17 09:00:00 early"),
+		[]byte("2026/07/17 10:00:00 exact"),
+		[]byte("2026/07/17 11:00:00 late"),
+	}
+
+	filtered := FilterSince(lines, since)
+
+	require.Len(t, filtered, 2)
+	assert.Equal(t, "2026/07/17 10:00:00 exact", string(filtered[0]))
+	assert.Equal(t, "2026/07/17 11:00:00 late", string(filtered[1]))
+}
+
+func TestFilterSince_KeepsContinuationLinesAfterFirstKeptTimestamp(t *testing.T) {
+	since := time.Date(2026, time.July, 17, 10, 0, 0, 0, time.UTC)
+	lines := [][]byte{
+		[]byte("2026/07/17 09:00:00 early"),
+		[]byte("continuation of early"),
+		[]byte("2026/07/17 10:00:00 exact"),
+		[]byte("continuation of exact"),
+		[]byte("another continuation"),
+	}
+
+	filtered := FilterSince(lines, since)
+
+	require.Len(t, filtered, 3)
+	assert.Equal(t, "2026/07/17 10:00:00 exact", string(filtered[0]))
+	assert.Equal(t, "continuation of exact", string(filtered[1]))
+	assert.Equal(t, "another continuation", string(filtered[2]))
+}
+
+func TestFilterSince_ZeroSinceReturnsUnchanged(t *testing.T) {
+	lines := [][]byte{
+		[]byte("2026/07/17 09:00:00 early"),
+		[]byte("2026/07/17 11:00:00 late"),
+	}
+
+	filtered := FilterSince(lines, time.Time{})
+
+	assert.Equal(t, lines, filtered)
+}
+
+func TestParseDaemonLogSince_FiltersEventsAndMarkers(t *testing.T) {
+	since := time.Date(2026, time.July, 17, 10, 0, 0, 0, time.UTC)
+	input := `2026/07/17 09:00:00 [CloseEvent] {"bead_id":"b1","verdict":"accepted","reason":"verified","attempt":0}
+2026/07/17 09:30:00 STUCK WORKER DETECTED on worker 1
+2026/07/17 11:00:00 [CloseEvent] {"bead_id":"b2","verdict":"accepted","reason":"verified","attempt":0}
+2026/07/17 11:30:00 STUCK WORKER DETECTED on worker 2
+`
+	markers := []string{"STUCK WORKER DETECTED"}
+
+	events, counts := ParseDaemonLogSince(strings.NewReader(input), markers, since)
+
+	require.Len(t, events, 1)
+	assert.Equal(t, "b2", events[0].BeadID)
+	assert.Equal(t, time.Date(2026, time.July, 17, 11, 0, 0, 0, time.UTC), events[0].Time)
+	assert.Equal(t, 1, counts[0])
+}
+
+func TestParseDaemonLogSince_ZeroSinceDisablesFiltering(t *testing.T) {
+	input := `2026/07/17 09:00:00 [CloseEvent] {"bead_id":"b1","verdict":"accepted","reason":"verified","attempt":0}
+2026/07/17 11:00:00 [CloseEvent] {"bead_id":"b2","verdict":"accepted","reason":"verified","attempt":0}
+`
+	markers := []string{"STUCK WORKER DETECTED"}
+
+	events, counts := ParseDaemonLogSince(strings.NewReader(input), markers, time.Time{})
+
+	require.Len(t, events, 2)
+	assert.Equal(t, 0, counts[0])
 }
