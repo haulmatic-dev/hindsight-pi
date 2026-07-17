@@ -37,11 +37,16 @@ git config --global --add safe.directory "$TARGET" 2>/dev/null || true
 
 echo "== seed =="
 sudo -u hydra bash -lc "cd $TARGET && br init >/dev/null 2>&1 && \
-  timeout 180 node /opt/dev-tools/config/pi/skills/task-breakdown/cli.mjs '$PRD' --json --session-id eval-run 2>&1 | grep -oE 'totalTasks.:[0-9]+' | tail -1"
+  timeout 180 node /opt/dev-tools/config/pi/skills/task-breakdown/cli.mjs '$PRD' --json --session-id eval-run-$(date +%s) 2>&1 | grep -oE 'totalTasks.:[0-9]+' | tail -1"
 
-GATE=$(sudo -u hydra bash -lc "cd $TARGET && br list 2>/dev/null | grep 'APPROVE:' | grep -oE 'hydra-dogfood-[a-z0-9]+' | head -1")
-[ -n "$GATE" ] || { echo "no approval gate found" >&2; exit 1; }
-sudo -u hydra bash -lc "cd $TARGET && br close $GATE -r 'approved: eval run' --force" >/dev/null
+GATE=""
+for i in 1 2 3 4 5; do
+  GATE=$(sudo -u hydra bash -lc "cd $TARGET && br list --all 2>/dev/null" | grep "APPROVE:" | grep -oE "hydra-dogfood-[a-z0-9]+" | head -1)
+  [ -n "$GATE" ] && break
+  sleep 5
+done
+[ -n "$GATE" ] || { echo "no approval gate found after retries" >&2; exit 1; }
+sudo -u hydra bash -lc "cd $TARGET && br close $GATE -r approved-eval-run --force" >/dev/null 2>&1 || true
 echo "gate $GATE approved"
 
 START_TS=$(date -u "+%Y/%m/%d %H:%M:%S")
