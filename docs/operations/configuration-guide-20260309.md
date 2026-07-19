@@ -418,6 +418,31 @@ flowchart LR
 - Pi will be auto-installed: `npm install -g @mariozechner/pi-coding-agent`
 - API key for chosen provider (e.g., `KIMI_API_KEY`)
 
+##### `phase_models`
+
+**Type**: `map[string]object`  
+**Default**: none  
+**Description**: Optional per-phase provider/model overrides. Bead titles prefixed with `RED:`, `GREEN:`, `REFACTOR:`, `SYNTAX:`, `Discovery:`, or `Fix:` are detected automatically; fix beads are also detected by type `fix`. Each entry may override `provider`, `model`, or both. Missing or empty fields fall back to the primary `provider`/`model`. When the map is absent, every phase uses the primary settings.
+
+```yaml
+agents:
+  pi:
+    provider: kimi-coding
+    model: kimi-for-coding
+    phase_models:
+      red:
+        model: kimi-coding-128k    # cheap test-writing model
+      green:
+        model: kimi-for-coding     # stronger implementation model
+      refactor:
+        provider: kimi-coding
+        model: kimi-coding-128k
+```
+
+**Notes**:
+- Phase keys are matched case-insensitively.
+- Circuit-breaker failover (`fallback_provider`/`fallback_model`) still overrides the phase-routed provider when its circuit is open.
+
 ## Configuration Examples
 
 ### Development Environment

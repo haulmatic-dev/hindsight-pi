@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Changed
+- Refactored `PiConfig.ModelForPhase` to remove the duplicated primary provider/model return path and simplify the override logic. *Authored by a Hydra dogfood run.*
 - Further optimized `tools/hydra-eval`: artifact-parsing now uses a single shared `forEachLine` helper, marker/payload extraction is generalized via `payloadAfter`, and `main` parses the daemon log once with `ParseDaemonLog` instead of four separate passes. *Authored by a Hydra dogfood run.*
 - Refactored `tools/hydra-eval/parse.go`: artifact-parsing loops are now driven by a shared `scanLines` helper, marker/payload operations use `bytes` instead of `strings` to avoid per-line allocations, and the three public parsers (`ParseCloseEvents`, `ParseBeadsJSONL`, `CountMarker`) share a single scanner setup. *Authored by a Hydra dogfood run.*
 - Refactored the verified-close target-less warning: `changedFiles` is now
@@ -17,6 +18,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   `targetlessWarningPaths` for better readability and testability.
 
 ### Added
+- Per-phase model config: `agents.pi.phase_models` maps TDD phases (`red`, `green`, `refactor`, etc.) to optional provider/model overrides, with case-insensitive lookup, partial (model-only) overrides, and a deep-copied config cache. `PiConfig.ModelForPhase` resolves the effective provider/model for a phase. *Authored by a Hydra dogfood run.*
 - `eval/run.sh`: one-command scored dogfood run — clone, seed, approve,
   watch to completion, score with hydra-eval scoped to the run's start
   timestamp.
@@ -85,6 +87,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   (PR #47).
 
 ### Documentation
+- Discovery report for FR-001 Phase-Model Config: `docs/discovery/FR-001-phase-model-config.md` documents requirements analysis, derived data model, ambiguity resolutions, and verification results. *Authored by a Hydra dogfood run.*
+- Documented `agents.pi.phase_models` in `hydra-config.yaml.example` and `docs/operations/configuration-guide-20260309.md` with per-phase provider/model override examples and circuit-breaker precedence notes. *Authored by a Hydra dogfood run.*
 - `docs/hydra-analysis-20260712iv.md`: improvement master plan (phases,
   work orders, eval harness definition).
 - Dogfood PRDs: sticky approval, Target-Files scope gate, worktree

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -90,9 +91,34 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 	}
 
 	// Add Pi configuration
-	env = append(env, b.buildPiEnv()...)
+	env = append(env, b.buildPiEnv(bead)...)
 
 	return env
+}
+
+// beadPhase derives a TDD phase key from the bead's title or type.
+// It returns one of "red", "green", "refactor", "syntax", "discovery",
+// "fix", or empty string when the phase cannot be determined.
+func beadPhase(bead types.Bead) string {
+	title := strings.ToUpper(strings.TrimSpace(bead.Title))
+	switch {
+	case strings.HasPrefix(title, "RED:"):
+		return "red"
+	case strings.HasPrefix(title, "GREEN:"):
+		return "green"
+	case strings.HasPrefix(title, "REFACTOR:"):
+		return "refactor"
+	case strings.HasPrefix(title, "SYNTAX:"):
+		return "syntax"
+	case strings.HasPrefix(title, "DISCOVERY:"):
+		return "discovery"
+	case strings.HasPrefix(title, "FIX:"):
+		return "fix"
+	case strings.EqualFold(bead.Type, "fix"):
+		return "fix"
+	default:
+		return ""
+	}
 }
 
 // BuildForContextEnrichment builds a minimal environment for context-enriched workers.
@@ -116,18 +142,32 @@ func (b *WorkerEnvBuilder) BuildForContextEnrichment(bead types.Bead) []string {
 		)
 	}
 
-	env = append(env, b.buildPiEnv()...)
+	env = append(env, b.buildPiEnv(bead)...)
 
 	return env
 }
 
-func (b *WorkerEnvBuilder) buildPiEnv() []string {
+func (b *WorkerEnvBuilder) buildPiEnv(bead types.Bead) []string {
 	if b.config == nil {
 		return nil
 	}
 
 	p := b.config.Agents.Pi
 	std := b.config.Pi.StandardAgent.LLM
+
+	// Phase routing: apply a per-phase provider/model override before any
+	// standard-agent fallbacks or hard defaults. The breaker is evaluated
+	// last so it can still override a phase-routed provider when its circuit
+	// is open.
+	phase := beadPhase(bead)
+	if phase != "" {
+		provider, model := p.ModelForPhase(phase)
+		if provider != p.Provider || model != p.Model {
+			log.Printf("[Worker] Phase routing: %s -> %s/%s", phase, provider, model)
+		}
+		p.Provider = provider
+		p.Model = model
+	}
 
 	if p.Provider == "" && std.Provider != "" {
 		p.Provider = std.Provider
@@ -160,10 +200,10 @@ func (b *WorkerEnvBuilder) buildPiEnv() []string {
 		p.ApiKeyName = "KIMI_API_KEY"
 	}
 
-	// Provider failover: when the primary provider's circuit is open due to
+	// Provider failover: when the selected provider's circuit is open due to
 	// repeated rate-limit (429) failures, use the configured fallback.
 	if b.breaker != nil {
-		if prov, model := b.breaker.Choose(); prov != "" && prov != p.Provider {
+		if prov, model := b.breaker.Override(p.Provider, p.Model); prov != "" && prov != p.Provider {
 			log.Printf("[Worker] Provider failover: %s -> %s (circuit open)", p.Provider, prov)
 			p.Provider = prov
 			if model != "" {
