@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# hydra-onboard <username> — grant the hydra daemon durable read access to a
+# user's ~/.hydra config, without exposing the rest of their home.
+#
+# Fixes the multi-user discovery permission class once per user:
+#   - u:hydra:--x on the home dir  → hydra can TRAVERSE (not list) the home
+#   - u:hydra:rX  on ~/.hydra      → hydra can read the current config/token
+#   - DEFAULT acl on ~/.hydra      → survives config rewrites (new inodes inherit)
+#
+# Idempotent. Must run as root (setfacl on another user's home). Verifies the
+# hydra user can actually read the config before reporting success.
+set -euo pipefail
+
+HYDRA_USER="${HYDRA_DAEMON_USER:-hydra}"
+
+usage() { echo "usage: hydra-onboard <username>" >&2; exit 2; }
+
+[ $# -eq 1 ] || usage
+USER_NAME="$1"
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "hydra-onboard: must run as root (setfacl on /home/$USER_NAME)" >&2
+  exit 2
+fi
+
+HOME_DIR="$(getent passwd "$USER_NAME" | cut -d: -f6)"
+[ -n "$HOME_DIR" ] || { echo "hydra-onboard: unknown user: $USER_NAME" >&2; exit 2; }
+
+HYDRA_DIR="$HOME_DIR/.hydra"
+CONFIG="$HYDRA_DIR/config.yaml"
+
+if [ ! -f "$CONFIG" ]; then
+  echo "hydra-onboard: no $CONFIG — nothing to onboard (user has no hydra config yet)" >&2
+  exit 1
+fi
+
+id "$HYDRA_USER" >/dev/null 2>&1 || { echo "hydra-onboard: no such daemon user: $HYDRA_USER" >&2; exit 2; }
+
+# Traverse-only on the home directory (NOT read/list).
+setfacl -m "u:${HYDRA_USER}:--x" "$HOME_DIR"
+# Read current .hydra contents (config + token files).
+setfacl -R  -m "u:${HYDRA_USER}:rX" "$HYDRA_DIR"
+# Default ACL: future files written into .hydra stay hydra-readable across rewrites.
+setfacl -dR -m "u:${HYDRA_USER}:rX" "$HYDRA_DIR"
+
+# Verify the daemon user can actually read the config now.
+if sudo -u "$HYDRA_USER" test -r "$CONFIG"; then
+  echo "hydra-onboard: $USER_NAME OK — $HYDRA_USER can read $CONFIG"
+else
+  echo "hydra-onboard: $USER_NAME FAILED — $HYDRA_USER still cannot read $CONFIG" >&2
+  exit 1
+fi

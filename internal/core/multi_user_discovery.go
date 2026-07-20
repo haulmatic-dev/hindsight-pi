@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -19,7 +20,8 @@ import (
 type MultiUserDiscovery struct {
 	users    map[string]*UserContext
 	projects []types.Project
-	HomeDir  string // Base directory to scan (default: /home)
+	blocked  []string // users whose config exists but is unreadable by the daemon
+	HomeDir  string   // Base directory to scan (default: /home)
 }
 
 // NewMultiUserDiscovery creates a new multi-user discovery instance.
@@ -41,6 +43,11 @@ func (d *MultiUserDiscovery) Discover() error {
 		return fmt.Errorf("read /home: %w", err)
 	}
 
+	// blocked collects users who have a config the daemon cannot read (almost
+	// always a home-dir traverse-permission problem) so the skip is surfaced
+	// loudly with a remediation, instead of a silent one-line log.
+	var blocked []string
+
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -52,13 +59,31 @@ func (d *MultiUserDiscovery) Discover() error {
 		}
 
 		homeDir := filepath.Join(base, name)
-		if _, err := os.Stat(filepath.Join(homeDir, ".hydra", "config.yaml")); os.IsNotExist(err) {
+		configPath := filepath.Join(homeDir, ".hydra", "config.yaml")
+		if _, err := os.Stat(configPath); err != nil {
+			if os.IsNotExist(err) {
+				continue // user simply has no hydra config — not a problem
+			}
+			// A non-not-exist stat error (typically EACCES: the home dir is not
+			// traversable by the daemon) means a config may well exist but is
+			// unreachable. Surface it — this is the recurring onboarding gap.
+			if errors.Is(err, os.ErrPermission) {
+				log.Printf("[MultiUserDiscovery] BLOCKED %s: cannot reach %s (%v) — run: hydra-onboard %s", name, configPath, err, name)
+				blocked = append(blocked, name)
+			} else {
+				log.Printf("[MultiUserDiscovery] Skip %s: stat %s: %v", name, configPath, err)
+			}
 			continue
 		}
 
 		ctx, err := LoadUserConfig(homeDir)
 		if err != nil {
-			log.Printf("[MultiUserDiscovery] Skip %s: %v", name, err)
+			if errors.Is(err, os.ErrPermission) {
+				log.Printf("[MultiUserDiscovery] BLOCKED %s: cannot read config (%v) — run: hydra-onboard %s", name, err, name)
+				blocked = append(blocked, name)
+			} else {
+				log.Printf("[MultiUserDiscovery] Skip %s: %v", name, err)
+			}
 			continue
 		}
 
@@ -73,9 +98,17 @@ func (d *MultiUserDiscovery) Discover() error {
 		}
 	}
 
-	log.Printf("[MultiUserDiscovery] Total users: %d, total projects: %d", len(d.users), len(d.projects))
+	d.blocked = blocked
+	if len(blocked) > 0 {
+		log.Printf("[MultiUserDiscovery] ⚠️  %d user(s) SKIPPED (config unreadable by daemon): %s — fix with: hydra-onboard <user> (or wait for the onboard sweep)", len(blocked), strings.Join(blocked, ", "))
+	}
+	log.Printf("[MultiUserDiscovery] Summary: %d users found, %d blocked, %d total projects", len(d.users), len(blocked), len(d.projects))
 	return nil
 }
+
+// Blocked returns usernames whose config exists but is unreadable by the daemon
+// (traverse/permission gap). Exposed for status reporting.
+func (d *MultiUserDiscovery) Blocked() []string { return d.blocked }
 
 // Users returns all discovered user contexts.
 func (d *MultiUserDiscovery) Users() map[string]*UserContext {
