@@ -43,10 +43,14 @@ func (d *MultiUserDiscovery) Discover() error {
 		return fmt.Errorf("read /home: %w", err)
 	}
 
-	// blocked collects users who have a config the daemon cannot read (almost
-	// always a home-dir traverse-permission problem) so the skip is surfaced
-	// loudly with a remediation, instead of a silent one-line log.
+	// blocked collects users whose config is CONFIRMED present but unreadable
+	// (stat succeeds, read fails) — an unambiguous onboarding gap surfaced
+	// loudly with a remediation. unreachable counts homes the daemon cannot
+	// even traverse: that is indistinguishable from an ordinary non-Hydra user
+	// with a locked-down (0700) home and no config, so it is only counted, not
+	// blamed on a specific user.
 	var blocked []string
+	var unreachable int
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -64,12 +68,13 @@ func (d *MultiUserDiscovery) Discover() error {
 			if os.IsNotExist(err) {
 				continue // user simply has no hydra config — not a problem
 			}
-			// A non-not-exist stat error (typically EACCES: the home dir is not
-			// traversable by the daemon) means a config may well exist but is
-			// unreachable. Surface it — this is the recurring onboarding gap.
+			// EACCES on stat: the home is not traversable by the daemon. This
+			// is indistinguishable from an ordinary non-Hydra user with a
+			// locked-down home and no config, so count it quietly rather than
+			// naming the user with a bogus remediation. The root-run onboard
+			// sweep is the authority that can actually traverse and decide.
 			if errors.Is(err, os.ErrPermission) {
-				log.Printf("[MultiUserDiscovery] BLOCKED %s: cannot reach %s (%v) — run: hydra-onboard %s", name, configPath, err, name)
-				blocked = append(blocked, name)
+				unreachable++
 			} else {
 				log.Printf("[MultiUserDiscovery] Skip %s: stat %s: %v", name, configPath, err)
 			}
@@ -100,9 +105,12 @@ func (d *MultiUserDiscovery) Discover() error {
 
 	d.blocked = blocked
 	if len(blocked) > 0 {
-		log.Printf("[MultiUserDiscovery] ⚠️  %d user(s) SKIPPED (config unreadable by daemon): %s — fix with: hydra-onboard <user> (or wait for the onboard sweep)", len(blocked), strings.Join(blocked, ", "))
+		log.Printf("[MultiUserDiscovery] ⚠️  %d user(s) SKIPPED (config present but unreadable by daemon): %s — fix with: hydra-onboard <user> (or wait for the onboard sweep)", len(blocked), strings.Join(blocked, ", "))
 	}
-	log.Printf("[MultiUserDiscovery] Summary: %d users found, %d blocked, %d total projects", len(d.users), len(blocked), len(d.projects))
+	if unreachable > 0 {
+		log.Printf("[MultiUserDiscovery] %d home dir(s) not traversable by the daemon (no reachable config; ordinary if they are non-Hydra users). The onboard sweep will pick up any that are Hydra users.", unreachable)
+	}
+	log.Printf("[MultiUserDiscovery] Summary: %d users found, %d blocked, %d unreachable homes, %d total projects", len(d.users), len(blocked), unreachable, len(d.projects))
 	return nil
 }
 

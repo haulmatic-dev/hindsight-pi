@@ -44,6 +44,21 @@ func TestDiscover_BlockedOnUnreadableConfig(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(badCfg, 0o644) })
 
+	// Unreachable user: home not traversable by the daemon (simulated by a
+	// 0000 .hydra dir). Indistinguishable from a non-Hydra locked home, so it
+	// must NOT be reported as blocked (no false remediation).
+	lockDir := filepath.Join(base, "lockeduser", ".hydra")
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lockDir, "config.yaml"), []byte("projects: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lockDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lockDir, 0o755) })
+
 	d := NewMultiUserDiscovery()
 	d.HomeDir = base
 	if err := d.Discover(); err != nil {
@@ -55,9 +70,19 @@ func TestDiscover_BlockedOnUnreadableConfig(t *testing.T) {
 	}
 	blocked := d.Blocked()
 	if len(blocked) != 1 || blocked[0] != "baduser" {
-		t.Errorf("expected blocked == [baduser], got %v", blocked)
+		t.Errorf("expected blocked == [baduser] (confirmed present+unreadable only), got %v", blocked)
 	}
 	if _, ok := d.Users()["baduser"]; ok {
 		t.Error("baduser must not be in Users() when its config is unreadable")
+	}
+	// lockeduser is unreachable (stat EACCES) — must be neither discovered nor
+	// blamed as blocked.
+	for _, b := range blocked {
+		if b == "lockeduser" {
+			t.Error("lockeduser (unreachable home) must NOT be reported as blocked — that is the false-positive we are guarding against")
+		}
+	}
+	if _, ok := d.Users()["lockeduser"]; ok {
+		t.Error("lockeduser must not be discovered")
 	}
 }
