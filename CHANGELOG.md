@@ -7,6 +7,12 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- `.claude/skills/create-prd`: symlinked to the canonical `create-prd` skill in
+  `dev-tools/config/pi/skills/create-prd` (pi-agent-config repo), so Claude
+  Code and the pi agent share one PRD-authoring skill instead of two drifting
+  copies. See pi-agent-config CHANGELOG for the doctrine content.
+
 ### Changed
 - Refactored `PiConfig.ModelForPhase` to remove the duplicated primary provider/model return path and simplify the override logic. *Authored by a Hydra dogfood run.*
 - Further optimized `tools/hydra-eval`: artifact-parsing now uses a single shared `forEachLine` helper, marker/payload extraction is generalized via `payloadAfter`, and `main` parses the daemon log once with `ParseDaemonLog` instead of four separate passes. *Authored by a Hydra dogfood run.*
