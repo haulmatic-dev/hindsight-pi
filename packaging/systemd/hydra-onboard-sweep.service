@@ -1,0 +1,9 @@
+[Unit]
+Description=Hydra multi-user onboard sweep (grant daemon read access to ~/.hydra configs)
+Documentation=https://github.com/haulmatic-dev/hydra
+
+[Service]
+Type=oneshot
+# Runs as root: setfacl on user home dirs requires it. The script grants the
+# hydra daemon traverse-only on homes and read on ~/.hydra — nothing broader.
+ExecStart=/opt/dev-tools/components/hydra/packaging/hydra-onboard-sweep

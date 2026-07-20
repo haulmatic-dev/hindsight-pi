@@ -18,6 +18,17 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   `targetlessWarningPaths` for better readability and testability.
 
 ### Added
+- Multi-user onboarding tooling (`packaging/`): `hydra-onboard <user>` grants
+  the daemon durable, minimal access to a user's `~/.hydra` (traverse-only ACL
+  on the home dir + read + **default** ACL on `.hydra` so it survives config
+  rewrites); `hydra-onboard-sweep` + a systemd timer apply it across all homes
+  every 15 min so new users are picked up hands-free. Fixes the recurring
+  home-dir-traverse permission gap that silently skipped users (e.g. a real
+  user blocked from 2026-07-06 until 2026-07-20).
+- Multi-user discovery diagnostics: a config that exists but is unreadable by
+  the daemon is now recorded as BLOCKED with an actionable remediation
+  (`run: hydra-onboard <user>`) and a startup summary, instead of a silent
+  one-line skip; `MultiUserDiscovery.Blocked()` exposes the list for status.
 - Per-phase model config: `agents.pi.phase_models` maps TDD phases (`red`, `green`, `refactor`, etc.) to optional provider/model overrides, with case-insensitive lookup, partial (model-only) overrides, and a deep-copied config cache. `PiConfig.ModelForPhase` resolves the effective provider/model for a phase. *Authored by a Hydra dogfood run.*
 - `eval/run.sh`: one-command scored dogfood run — clone, seed, approve,
   watch to completion, score with hydra-eval scoped to the run's start

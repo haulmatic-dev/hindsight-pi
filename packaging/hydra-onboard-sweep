@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# hydra-onboard-sweep — scan all home dirs and onboard any user whose ~/.hydra
+# config the hydra daemon cannot yet read. Idempotent; safe to run repeatedly.
+# Driven by hydra-onboard-sweep.timer (root, ~every 15m). Makes new users
+# hands-off: drop a ~/.hydra/config.yaml, and within one sweep the daemon can
+# read it — no admin action.
+set -uo pipefail
+
+HYDRA_USER="${HYDRA_DAEMON_USER:-hydra}"
+HOME_BASE="${HYDRA_HOME_BASE:-/home}"
+ONBOARD="$(dirname "$0")/hydra-onboard"
+[ -x "$ONBOARD" ] || ONBOARD="hydra-onboard"
+
+onboarded=0 skipped=0 failed=0
+for cfg in "$HOME_BASE"/*/.hydra/config.yaml; do
+  [ -e "$cfg" ] || continue                      # no matches → glob stays literal
+  user_home="${cfg%/.hydra/config.yaml}"
+  user_name="$(basename "$user_home")"
+  if sudo -u "$HYDRA_USER" test -r "$cfg" 2>/dev/null; then
+    skipped=$((skipped+1))                        # already readable, nothing to do
+    continue
+  fi
+  if "$ONBOARD" "$user_name" >/dev/null 2>&1; then
+    echo "[sweep] onboarded $user_name"
+    onboarded=$((onboarded+1))
+  else
+    echo "[sweep] FAILED to onboard $user_name" >&2
+    failed=$((failed+1))
+  fi
+done
+
+echo "[sweep] done: onboarded=$onboarded already-ok=$skipped failed=$failed"

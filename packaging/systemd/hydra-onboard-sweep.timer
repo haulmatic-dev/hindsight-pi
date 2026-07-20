@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the Hydra onboard sweep every 15 minutes
+Documentation=https://github.com/haulmatic-dev/hydra
+
+[Timer]
+# Run shortly after boot, then every 15 minutes. New users get read access
+# within one interval with no admin action.
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
