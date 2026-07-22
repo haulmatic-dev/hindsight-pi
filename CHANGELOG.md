@@ -91,6 +91,14 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   Target Files from the target clone.
 
 ### Fixed
+- Verified-close gate now inspects the bead's **worktree**, not the shared
+  checkout, when worktree isolation is active. The diff + scope gates read
+  `ResolveRepoPath` (the main checkout, which stays clean until a chain
+  integrates), so every worktree-isolated bead whose worker wrote to its
+  worktree was falsely rejected as `empty-diff` and cycled through retries.
+  Root-caused live: worker wrote `activity_log.go` into its worktree, gate
+  saw the clean checkout, rejected it 21×. Now uses
+  `WorktreeManager.ExistingWorktree` (non-creating) to check the real tree.
 - Anti-consultant guard: implementation beads' prompts carry a DELIVERABLE
   CONTRACT (edits must exist on disk; plans are rejected as empty diffs) —
   doctrine-tuned workers had begun honestly delivering plans instead of code.

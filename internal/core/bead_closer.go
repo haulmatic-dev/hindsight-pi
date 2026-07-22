@@ -281,6 +281,17 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 	if repoPath == "" {
 		repoPath = projectPath
 	}
+	// When worktree isolation is active the worker wrote to the chain's
+	// worktree, NOT the shared checkout (which stays clean until the chain
+	// integrates). Inspect the worktree so the gate sees the real changes;
+	// checking repoPath here rejected every worktree-isolated bead as
+	// "empty-diff" even though the worker did its job. Fall back to repoPath
+	// when there is no worktree (isolation disabled, or not yet created).
+	if c.worktreeManager != nil && c.chainKeyFn != nil {
+		if wt, ok := c.worktreeManager.ExistingWorktree(projectPath, c.chainKeyFn(*bead)); ok {
+			repoPath = wt
+		}
+	}
 
 	targets := beadTargetFiles(bead)
 	needDiff := c.config.Validation.RequireDiffOnClose

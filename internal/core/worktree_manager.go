@@ -53,6 +53,16 @@ func (m *WorktreeManager) worktreePath(projectPath, key string) string {
 	return filepath.Join(worktreeRoot(projectPath), sanitizeKey(key))
 }
 
+// ExistingWorktree returns the worktree path for a chain key WITHOUT creating
+// it, and whether it currently exists as a git worktree. Used by the
+// verified-close diff/scope gates so they inspect the tree the worker actually
+// wrote to (the worktree), not the shared checkout (which is clean until the
+// chain integrates).
+func (m *WorktreeManager) ExistingWorktree(projectPath, key string) (string, bool) {
+	wtPath := m.worktreePath(projectPath, key)
+	return wtPath, isGitWorktree(wtPath)
+}
+
 // WorkingBranch returns the project checkout's current branch name.
 func (m *WorktreeManager) WorkingBranch(projectPath string) (string, error) {
 	out, err := gitOut(projectPath, "rev-parse", "--abbrev-ref", "HEAD")

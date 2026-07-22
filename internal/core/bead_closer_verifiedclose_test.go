@@ -98,6 +98,58 @@ func TestVerifyBeforeClose_ChangedFilesErrorFailsOpen(t *testing.T) {
 	}
 }
 
+// TestVerifyBeforeClose_ChecksWorktreeNotCheckout is the regression for the
+// empty-diff false-rejection bug: with worktree isolation active the worker
+// writes to the chain's worktree, not the shared checkout. The gate must
+// inspect the worktree — checking the (clean) checkout rejected correct work
+// as "empty-diff".
+func TestVerifyBeforeClose_ChecksWorktreeNotCheckout(t *testing.T) {
+	repo := initGitRepo(t)
+	writeAndCommit(t, repo, "internal/core/seed.go", "package core\n")
+
+	wm := NewWorktreeManager()
+	bead := &types.Bead{
+		ID:       "wt-bead-1",
+		Title:    "GREEN: Implement activity log",
+		Project:  "test-project",
+		Metadata: map[string]string{"files": "internal/core/activity_log.go"},
+	}
+	key := string(bead.ID)
+
+	// Create the chain's worktree and write the target file INTO it (as a
+	// worker would), leaving the shared checkout clean.
+	wt, err := wm.EnsureWorktree(repo, key)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	full := filepath.Join(wt, "internal/core/activity_log.go")
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte("package core\n// activity log\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Validation.Enabled = true
+	cfg.Validation.RequireDiffOnClose = true
+	cfg.Validation.EnforceTargetScope = "block"
+	resolver := NewProjectResolver([]types.Project{
+		{Name: "test-project", Path: repo, Type: types.RepoTypeSingle},
+	})
+	closer := NewBeadCloser(newMockBeadsClient(), nil, resolver, nil, cfg)
+	closer.SetWorktreeManager(wm,
+		func(b types.Bead) string { return string(b.ID) },
+		func(id types.BeadID) bool { return false },
+	)
+
+	// The change lives only in the worktree; the checkout is clean. The gate
+	// must find it there and accept.
+	if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
+		t.Fatalf("worktree-isolated bead with the target file written to its worktree must NOT be rejected: %v", err)
+	}
+}
+
 func setupScopeGateTest(t *testing.T, mode string) (string, *BeadCloser, *types.Bead) {
 	t.Helper()
 	repo := initGitRepo(t)
