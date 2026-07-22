@@ -8,6 +8,18 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- `hydra-onboard` now also grants the daemon **write** access (`u:hydra:rwX` +
+  default ACL) to every project path declared in a user's `~/.hydra/config.yaml`,
+  not just read on `~/.hydra`. Without this the daemon could discover a
+  per-user project but not build, commit, or integrate into it (its home-owned
+  project dir was not daemon-writable). Verifies a write test per project.
+- `hydra-onboard-sweep` now re-onboards **every** user each cycle (onboard is
+  idempotent) instead of skipping users whose config is already readable. The
+  old skip missed projects added — or project dirs created — after a user's
+  first onboard, so their write ACLs were never granted. Now adding a project
+  (or cloning its dir later) is picked up within one sweep with no special
+  command. Non-account home dirs (fixtures, stray/`-`-prefixed names) are
+  skipped cleanly, not reported as failures.
 - `.claude/skills/create-prd`: symlinked to the canonical `create-prd` skill in
   `dev-tools/config/pi/skills/create-prd` (pi-agent-config repo), so Claude
   Code and the pi agent share one PRD-authoring skill instead of two drifting
