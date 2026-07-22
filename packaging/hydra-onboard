@@ -20,13 +20,16 @@ usage() { echo "usage: hydra-onboard <username>" >&2; exit 2; }
 
 [ $# -eq 1 ] || usage
 USER_NAME="$1"
+case "$USER_NAME" in -*|"") echo "hydra-onboard: invalid username: $USER_NAME" >&2; exit 2 ;; esac
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "hydra-onboard: must run as root (setfacl on /home/$USER_NAME)" >&2
   exit 2
 fi
 
-HOME_DIR="$(getent passwd "$USER_NAME" | cut -d: -f6)"
+# `|| true` so a not-found getent does not trip `set -e` before the clean
+# unknown-user handler below (some /home dirs are fixtures with no passwd entry).
+HOME_DIR="$(getent passwd "$USER_NAME" | cut -d: -f6 || true)"
 [ -n "$HOME_DIR" ] || { echo "hydra-onboard: unknown user: $USER_NAME" >&2; exit 2; }
 
 HYDRA_DIR="$HOME_DIR/.hydra"

@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# hydra-onboard-sweep — scan all home dirs and onboard any user whose ~/.hydra
-# config the hydra daemon cannot yet read. Idempotent; safe to run repeatedly.
-# Driven by hydra-onboard-sweep.timer (root, ~every 15m). Makes new users
-# hands-off: drop a ~/.hydra/config.yaml, and within one sweep the daemon can
-# read it — no admin action.
+# hydra-onboard-sweep — (re)onboard every user that has a ~/.hydra/config.yaml.
+# Driven by hydra-onboard-sweep.timer (root, ~every 15m). Makes onboarding fully
+# hands-off: drop a config, add a project, clone a project dir later — within
+# one sweep the daemon can read the config and read/write every project dir,
+# with no special commands.
+#
+# hydra-onboard is idempotent and cheap (setfacl), so we run it for EVERY user
+# every cycle rather than skipping "already readable" ones. Skipping on config
+# readability alone missed newly-added projects and project dirs that were
+# created after the first onboard (their write ACLs were never granted).
 set -uo pipefail
 
-HYDRA_USER="${HYDRA_DAEMON_USER:-hydra}"
 HOME_BASE="${HYDRA_HOME_BASE:-/home}"
 ONBOARD="$(dirname "$0")/hydra-onboard"
 [ -x "$ONBOARD" ] || ONBOARD="hydra-onboard"
@@ -16,12 +20,19 @@ for cfg in "$HOME_BASE"/*/.hydra/config.yaml; do
   [ -e "$cfg" ] || continue                      # no matches → glob stays literal
   user_home="${cfg%/.hydra/config.yaml}"
   user_name="$(basename "$user_home")"
-  if sudo -u "$HYDRA_USER" test -r "$cfg" 2>/dev/null; then
-    skipped=$((skipped+1))                        # already readable, nothing to do
+  # Skip stray/garbage home dirs whose name is not a valid username (e.g. a
+  # leading dash like "--help" from a mistyped command — also avoids option
+  # injection into getent/setfacl).
+  case "$user_name" in -*|"") skipped=$((skipped+1)); continue ;; esac
+  # Skip /home entries that are not real accounts (test fixtures, stray dirs) —
+  # nothing to onboard, and not a failure.
+  if ! getent passwd "$user_name" >/dev/null 2>&1; then
+    skipped=$((skipped+1))
     continue
   fi
+  # Idempotently (re)grant config-read + per-project read/write. Picks up any
+  # newly-added project or newly-created project dir each cycle.
   if "$ONBOARD" "$user_name" >/dev/null 2>&1; then
-    echo "[sweep] onboarded $user_name"
     onboarded=$((onboarded+1))
   else
     echo "[sweep] FAILED to onboard $user_name" >&2
@@ -29,4 +40,4 @@ for cfg in "$HOME_BASE"/*/.hydra/config.yaml; do
   fi
 done
 
-echo "[sweep] done: onboarded=$onboarded already-ok=$skipped failed=$failed"
+echo "[sweep] done: onboarded=$onboarded skipped=$skipped failed=$failed"
