@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
-# hydra-onboard <username> — grant the hydra daemon durable read access to a
-# user's ~/.hydra config, without exposing the rest of their home.
+# hydra-onboard <username> — grant the hydra daemon durable access to a user's
+# Hydra config and project directories, without exposing the rest of their home.
 #
-# Fixes the multi-user discovery permission class once per user:
-#   - u:hydra:--x on the home dir  → hydra can TRAVERSE (not list) the home
-#   - u:hydra:rX  on ~/.hydra      → hydra can read the current config/token
-#   - DEFAULT acl on ~/.hydra      → survives config rewrites (new inodes inherit)
+# Fixes the multi-user permission class once per user:
+#   - u:hydra:--x on the home dir       → hydra can TRAVERSE (not list) the home
+#   - u:hydra:rX  on ~/.hydra           → hydra can read the config/token
+#   - DEFAULT acl on ~/.hydra           → survives config rewrites (new inodes inherit)
+#   - u:hydra:rwX + DEFAULT on each     → hydra can BUILD, commit, integrate,
+#     project path in the config          and write <repo>/.hydra/activity.log;
+#                                          default acl keeps new files writable
 #
 # Idempotent. Must run as root (setfacl on another user's home). Verifies the
-# hydra user can actually read the config before reporting success.
+# hydra user can read the config AND write each project dir before success.
 set -euo pipefail
 
 HYDRA_USER="${HYDRA_DAEMON_USER:-hydra}"
@@ -50,3 +53,54 @@ else
   echo "hydra-onboard: $USER_NAME FAILED — $HYDRA_USER still cannot read $CONFIG" >&2
   exit 1
 fi
+
+# --- Project directories: hydra needs WRITE to build/commit/integrate and to
+# write <repo>/.hydra/activity.log. Grant rwX + a default ACL on every project
+# path declared in the user's config. Paths are read from the `path:` lines
+# under `projects:`; a leading ~ or $HOME is expanded to the user's home.
+grant_project() {
+  local raw="$1" path
+  path="${raw/#\~/$HOME_DIR}"
+  path="${path/#\$HOME/$HOME_DIR}"
+  case "$path" in
+    /*) ;;                       # absolute — use as-is
+    *)  path="$HOME_DIR/$path" ;; # relative — resolve against the user's home
+  esac
+  if [ ! -d "$path" ]; then
+    echo "hydra-onboard: $USER_NAME — project path not found (skipped): $path" >&2
+    return 0
+  fi
+  setfacl -R  -m "u:${HYDRA_USER}:rwX" "$path"
+  setfacl -dR -m "u:${HYDRA_USER}:rwX" "$path"
+  if sudo -u "$HYDRA_USER" test -w "$path"; then
+    echo "hydra-onboard: $USER_NAME OK — $HYDRA_USER can write $path"
+  else
+    echo "hydra-onboard: $USER_NAME FAILED — $HYDRA_USER still cannot write $path" >&2
+    return 1
+  fi
+}
+
+# Extract project paths: the `path:` values that appear after the `projects:`
+# key. `sudo -u` the read so we go through the ACL we just granted.
+rc=0
+in_projects=0
+while IFS= read -r line; do
+  case "$line" in
+    projects:*) in_projects=1; continue ;;
+  esac
+  if [ "$in_projects" = 1 ]; then
+    # A new top-level key (no leading space) ends the projects block.
+    case "$line" in
+      [![:space:]]*) in_projects=0; continue ;;
+    esac
+    case "$line" in
+      *path:*)
+        p="${line#*path:}"
+        p="$(echo "$p" | sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
+        [ -n "$p" ] && { grant_project "$p" || rc=1; }
+        ;;
+    esac
+  fi
+done < <(sudo -u "$HYDRA_USER" cat "$CONFIG")
+
+exit $rc
