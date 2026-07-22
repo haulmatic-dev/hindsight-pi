@@ -20,6 +20,16 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   (or cloning its dir later) is picked up within one sweep with no special
   command. Non-account home dirs (fixtures, stray/`-`-prefixed names) are
   skipped cleanly, not reported as failures.
+- Publishable & observable output: worker commits now use a readable
+  conventional-commit message derived from the bead (`BuildCommitMessage`:
+  feat/fix/refactor/test/chore from phase or type, PRD/bead trailers) instead
+  of `bead(id): title`; singleton beads optionally **push** their working
+  branch after integrate (`output.push`/`output.remote`, fail-open and silent
+  on protected/rejected/auth); and every repo gets a curated
+  `.hydra/activity.log` (`AppendActivity`, auto-adds `.hydra/` to `.gitignore`).
+  Foundation (commit_message/git_push/activity_log/config) built by a Hydra
+  dogfood run; close-path wiring + activity-log tests finished by hand after
+  the wiring beads failed in the run.
 - `.claude/skills/create-prd`: symlinked to the canonical `create-prd` skill in
   `dev-tools/config/pi/skills/create-prd` (pi-agent-config repo), so Claude
   Code and the pi agent share one PRD-authoring skill instead of two drifting
