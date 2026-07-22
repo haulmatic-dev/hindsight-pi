@@ -129,6 +129,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   (PR #47).
 
 ### Documentation
+- `docs/roadmap/self-improvement-loop.md`: phased roadmap for Hydra's
+  self-observation/diagnosis/fix loop (Observer → Proposer → Actor) with
+  safety invariants and dogfooding plan.
 - Discovery report for FR-001 Phase-Model Config: `docs/discovery/FR-001-phase-model-config.md` documents requirements analysis, derived data model, ambiguity resolutions, and verification results. *Authored by a Hydra dogfood run.*
 - Documented `agents.pi.phase_models` in `hydra-config.yaml.example` and `docs/operations/configuration-guide-20260309.md` with per-phase provider/model override examples and circuit-breaker precedence notes. *Authored by a Hydra dogfood run.*
 - `docs/hydra-analysis-20260712iv.md`: improvement master plan (phases,
