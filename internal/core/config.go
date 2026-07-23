@@ -19,6 +19,7 @@ type Config struct {
 	Intelligence    IntelligenceConfig    `yaml:"intelligence"`
 	Agents          AgentsConfig          `yaml:"agents"`
 	Pi              PiRootConfig          `yaml:"pi"`
+	Output          OutputConfig          `yaml:"output"`
 	Validation      ValidationConfig      `yaml:"validation"`
 	ComplianceCycle ComplianceCycleConfig `yaml:"compliance_cycle"`
 }
@@ -104,6 +105,32 @@ type PiSkillsConfig struct {
 	AutoUpdate     bool   `yaml:"auto_update"`
 }
 
+// OutputConfig controls publishable output behaviour for a repository.
+type OutputConfig struct {
+	Push   bool   `yaml:"push"`
+	Remote string `yaml:"remote"`
+}
+
+// OutputPushEnabled reports whether the output/push feature is enabled.
+func (c *Config) OutputPushEnabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.Output.Push
+}
+
+// OutputPushRemote returns the configured push remote. When push is enabled
+// but no remote is configured, it defaults to "origin".
+func (c *Config) OutputPushRemote() string {
+	if c == nil || !c.Output.Push {
+		return ""
+	}
+	if c.Output.Remote == "" {
+		return "origin"
+	}
+	return c.Output.Remote
+}
+
 // rawConfig is used for YAML parsing to handle the nested projects structure
 type rawConfig struct {
 	Overseer        OverseerConfig        `yaml:"overseer"`
@@ -113,6 +140,7 @@ type rawConfig struct {
 	Intelligence    IntelligenceConfig    `yaml:"intelligence"`
 	Agents          AgentsConfig          `yaml:"agents"`
 	Pi              PiRootConfig          `yaml:"pi"`
+	Output          OutputConfig          `yaml:"output"`
 	Validation      ValidationConfig      `yaml:"validation"`
 	ComplianceCycle ComplianceCycleConfig `yaml:"compliance_cycle"`
 }
@@ -578,6 +606,7 @@ func LoadConfig(path string) (*Config, error) {
 		Skills:          raw.Pi.Skills,
 		StandardAgent:   raw.Pi.StandardAgent,
 	}
+	config.Output = raw.Output
 	// Handle projects field - can be:
 	// 1. An array of ProjectConfig (direct list)
 	// 2. An object with 'auto_discover' and 'list' fields
@@ -638,6 +667,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 		Skills:          raw.Pi.Skills,
 		StandardAgent:   raw.Pi.StandardAgent,
 	}
+	config.Output = raw.Output
 	// Handle projects field
 	if !isZeroNode(raw.Projects) {
 		if raw.Projects.Kind == yaml.SequenceNode {
@@ -677,6 +707,7 @@ func (c *Config) Clone() *Config {
 		Intelligence: c.Intelligence,
 		Agents:       c.Agents,
 		Pi:           c.Pi,
+		Output:       c.Output,
 	}
 
 	// Deep copy Projects slice

@@ -146,11 +146,14 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 	if success && reason == "completed" && c.worktreeManager != nil && c.chainKeyFn != nil && c.isChainMember != nil && bead != nil {
 		key := c.chainKeyFn(*bead)
 		if wt, err := c.worktreeManager.EnsureWorktree(projectPath, key); err == nil {
-			msg := fmt.Sprintf("bead(%s): %s", bead.ID, bead.Title)
+			// Readable, conventional-commit message derived from the bead
+			// (type/title/description/PRD) instead of the bare "bead(id): title".
+			msg := BuildCommitMessage(*bead)
 			if committed, cErr := c.worktreeManager.Commit(wt, msg); cErr != nil {
 				log.Printf("[Worktree] commit failed for %s: %v", bead.ID, cErr)
 			} else if committed {
 				log.Printf("[Worktree] committed %s", bead.ID)
+				AppendActivity(projectPath, string(bead.ID), "committed")
 			}
 
 			// Singletons (beads that belong to no registered multi-bead chain) have
@@ -160,6 +163,8 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 					log.Printf("[Worktree] integrate failed for %s: %v", bead.ID, iErr)
 				} else {
 					log.Printf("[Worktree] integrated singleton %s", bead.ID)
+					AppendActivity(projectPath, string(bead.ID), "integrated")
+					c.publishAfterIntegrate(projectPath, bead)
 				}
 			}
 		} else {
@@ -258,6 +263,30 @@ func (c *BeadCloser) createFixBeadForFailedClose(bead *types.Bead, projectPath, 
 // verifiedCloseEnabled reports whether the verified-close gate is active.
 func (c *BeadCloser) verifiedCloseEnabled() bool {
 	return c.config != nil && c.config.Validation.Enabled
+}
+
+// publishAfterIntegrate pushes the working branch to the configured remote
+// after a singleton bead integrates, when output push is enabled. Fail-open
+// and SILENT: a push that is rejected (protected branch), unauthenticated, or
+// otherwise fails is recorded in the per-repo activity log and never affects
+// the close outcome. No-op when push is disabled or no worktree manager.
+func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead) {
+	if c.config == nil || !c.config.OutputPushEnabled() || c.worktreeManager == nil {
+		return
+	}
+	branch, err := c.worktreeManager.WorkingBranch(projectPath)
+	if err != nil || branch == "" {
+		AppendActivity(projectPath, string(bead.ID), "push skipped: no branch")
+		return
+	}
+	remote := c.config.OutputPushRemote()
+	if pushed, reason := PushBranch(projectPath, remote, branch); pushed {
+		log.Printf("[Output] pushed %s to %s/%s", bead.ID, remote, branch)
+		AppendActivity(projectPath, string(bead.ID), "pushed")
+	} else {
+		log.Printf("[Output] push skipped for %s: %s", bead.ID, reason)
+		AppendActivity(projectPath, string(bead.ID), "push skipped: "+reason)
+	}
 }
 
 // verifyBeforeClose runs the verified-close checks for a completed bead.
