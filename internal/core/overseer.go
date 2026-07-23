@@ -498,7 +498,36 @@ func (o *Overseer) Start(ctx context.Context) error {
 
 // tick performs one iteration of the scheduling loop.
 func (o *Overseer) tick() error {
-	return o.scheduler.Tick()
+	err := o.scheduler.Tick()
+	// After scheduling, publish each project's working branch to its remote
+	// (opt-in via output.push). This consolidates completed worktree commits
+	// onto the working branch and pushes with the project owner's PAT, so by
+	// the end of a run every repo's branch is on the remote for the developer
+	// to pull/build locally. Fail-open: never affects the scheduling result.
+	o.publishProjects()
+	return err
+}
+
+// publishProjects reconciles + pushes each project's working branch when
+// output push is enabled. Push authenticates with the project owner's token
+// (per-user PAT); projects without a resolvable user context fall back to a
+// plain origin push. Only branches ahead of their remote are pushed.
+func (o *Overseer) publishProjects() {
+	if o.config == nil || !o.config.OutputPushEnabled() || o.worktreeManager == nil {
+		return
+	}
+	// Worktree keys owned by live workers must not be reconciled mid-flight.
+	active := make(map[string]bool, len(o.activeWorkers))
+	for beadID := range o.activeWorkers {
+		active[beadID] = true
+	}
+	for _, project := range o.projects {
+		token := ""
+		if uc := o.getUserContextForProject(project.Path); uc != nil {
+			token = uc.Token
+		}
+		PublishRepo(o.worktreeManager, project.Path, token, active)
+	}
 }
 
 // getRetryEligibleBeads returns beads that are eligible for retry

@@ -8,6 +8,15 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- Per-user PAT branch publishing: at each scheduling tick (opt-in via
+  `output.push`), Hydra reconciles every project's completed worktree commits
+  onto its working branch and pushes it to origin **authenticated with the
+  project owner's personal access token** (`PushBranchWithToken` builds a
+  one-shot `x-access-token:<pat>@host` URL — never persisted, token redacted
+  from logs). Only branches ahead of their remote are pushed. Net effect: by
+  the end of a run, every repo's working branch (with the per-bead
+  micro-commits, `--no-ff`-preserved) is on the remote for a developer to pull
+  and build locally. Fail-open — never affects scheduling.
 - `hydra-onboard` now also grants the daemon **write** access (`u:hydra:rwX` +
   default ACL) to every project path declared in a user's `~/.hydra/config.yaml`,
   not just read on `~/.hydra`. Without this the daemon could discover a

@@ -160,3 +160,46 @@ func git(t *testing.T, dir string, args ...string) string {
 	}
 	return string(out)
 }
+
+func TestAuthenticatedURL(t *testing.T) {
+	cases := []struct{ name, origin, token, want string }{
+		{"ssh", "git@github.com:org/repo.git", "TOK", "https://x-access-token:TOK@github.com/org/repo.git"},
+		{"https", "https://github.com/org/repo.git", "TOK", "https://x-access-token:TOK@github.com/org/repo.git"},
+		{"https with userinfo", "https://old:cred@github.com/org/repo.git", "TOK", "https://x-access-token:TOK@github.com/org/repo.git"},
+		{"gitlab nested", "git@gitlab.com:g/s/repo.git", "TOK", "https://x-access-token:TOK@gitlab.com/g/s/repo.git"},
+		{"empty token", "git@github.com:org/repo.git", "", ""},
+		{"empty origin", "", "TOK", ""},
+		{"unknown scheme", "ftp://x/y", "TOK", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := authenticatedURL(c.origin, c.token); got != c.want {
+				t.Errorf("authenticatedURL(%q,%q) = %q, want %q", c.origin, c.token, got, c.want)
+			}
+		})
+	}
+}
+
+func TestRedactToken(t *testing.T) {
+	if got := redactToken("fatal: auth for ghp_SECRET failed", "ghp_SECRET"); strings.Contains(got, "ghp_SECRET") {
+		t.Errorf("token not redacted: %q", got)
+	}
+	if got := redactToken("no token here", ""); got != "no token here" {
+		t.Errorf("empty token should passthrough, got %q", got)
+	}
+}
+
+func TestPushBranchWithToken_EmptyBranchNotConfigured(t *testing.T) {
+	if ok, reason := PushBranchWithToken(t.TempDir(), "", "TOK"); ok || reason != "not configured" {
+		t.Errorf("empty branch: got (%v,%q), want (false,\"not configured\")", ok, reason)
+	}
+}
+
+func TestPushBranchWithToken_NoRemote(t *testing.T) {
+	repo := t.TempDir()
+	// git init so it's a repo but has no origin remote
+	exec.Command("git", "-C", repo, "init").Run()
+	if ok, reason := PushBranchWithToken(repo, "main", "TOK"); ok || reason != "no remote" {
+		t.Errorf("no origin: got (%v,%q), want (false,\"no remote\")", ok, reason)
+	}
+}
