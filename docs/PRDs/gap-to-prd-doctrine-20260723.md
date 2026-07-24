@@ -127,3 +127,6 @@ Rework `generateMiniPRD` in `tools/gap-to-prd/main.go` (behavior-preserving othe
 
 ### Historical Patterns
 - The evidence-forcing AC text (`REQUIRED: change the Go file…`) was added because agents closed gap beads as "verified intentional" without changes (comment at `main.go:120-124`); it must survive this rework.
+
+---
+*Adversarial review: 2 rounds — ultraplan authoring pass + independent grounding audit (Claude, 2026-07-24), 4/4 lenses approved. All three cited defects verified in code at HEAD: bullet-list Target Files (main.go:113-117 vs analyzer.mjs same-line regex), nondeterministic map iteration (main.go:101), positional Aggregates bug (main.go:149-151).*

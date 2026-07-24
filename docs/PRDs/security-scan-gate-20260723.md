@@ -54,6 +54,7 @@ New standalone tool following the conventions of the sibling tools (`tools/gap-t
 - The gap description for that finding does not contain the substring `AKIAABCDEFGHIJKLMNOP` (secret redaction)
 - With both stub scanners emitting zero findings and exiting 0, the tool exits 0 and output JSON has `passed: true`, `gaps: []`
 - With an empty PATH (no scanners resolvable), the tool exits 0, output JSON has `passed: true` and `scanners` contains entries with `available: false` for both `gitleaks` and `govulncheck`
+- With `--output` omitted (stdout mode — the mode FR-002's analyzer wiring consumes), the full JSON report is printed to stdout and nothing else is: stdout parses as JSON with a `passed` field (log lines go to stderr only)
 - With a govulncheck stub emitting a finding for OSV `GO-2024-0001` in module `example.com/dep` (and a `go.mod` present in the fixture project), the output contains one gap with `severity` equal to `"warning"` and `target_files` equal to `["go.mod"]`
 - `go build ./...` (in `tools/security-scan`) exits 0
 - `go test ./...` (in `tools/security-scan`) exits 0
@@ -155,3 +156,6 @@ In `tools/hydra-compliance-analyzer/main.go`: (1) add `func runSecurityScan(cfg 
 
 ### Historical Patterns
 - The experimental verifiers were demoted behind a flag for false-positive noise (`main.go:73-84`); gitleaks/govulncheck are precise enough for always-on, and the adjudicator is the second line of defense.
+
+---
+*Adversarial review: 2 rounds — ultraplan authoring pass + independent grounding audit (Claude, 2026-07-24), 4/4 lenses approved. Round-2 finding fixed: FR-001 lacked an AC for the no-`--output` stdout mode FR-002 consumes (a `--output`-only implementation would have passed FR-001 yet broken FR-002); stdout-mode AC added.*

@@ -252,3 +252,6 @@ CLI: `hydra-observer --log <daemon-log> [--since <RFC3339>] [--metrics <hydra-ev
 
 ### Historical Patterns
 - Roadmap Phase 1 and its exit signal: `docs/roadmap/self-improvement-loop.md:34-47`. Evidence incidents: BLOCKED-homes cry-wolf and the empty-diff gate bug (`CHANGELOG.md:117-122`).
+
+---
+*Adversarial review: 2 rounds — ultraplan authoring pass + independent grounding audit (Claude, 2026-07-24), 4/4 lenses approved. All 7 signature markers verified against live call sites at HEAD. Ops note (out of PRD scope): the tool exits 1 when new entries are written — the systemd timer wrapper must treat exit 1 as success-with-findings, not unit failure.*
