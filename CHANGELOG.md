@@ -148,6 +148,10 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   (PR #47).
 
 ### Documentation
+- `docs/architecture/system-loop.md`: process-flow map of Hydra's three
+  nested control loops (build / learning / meta) with a loop-closure audit —
+  automated vs planned vs human-by-design edges marked, plus the known
+  verdict-feedback leak and measured compounding evidence.
 - `docs/roadmap/self-improvement-loop.md`: phased roadmap for Hydra's
   self-observation/diagnosis/fix loop (Observer → Proposer → Actor) with
   safety invariants and dogfooding plan.
