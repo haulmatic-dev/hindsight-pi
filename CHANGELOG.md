@@ -110,6 +110,13 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   Target Files from the target clone.
 
 ### Fixed
+- `tools/gap-to-prd` now emits compiler-contract-compliant mini-PRDs:
+  same-line `Target Files` (the old bullet list was unparseable by
+  task-breakdown, silently producing targetless gap beads), `Type`/`Priority`
+  (P0 for critical)/`Test Command`/`Build Command` per FR, deterministic FR
+  ordering with correct `Aggregates` references, and a NEEDS-HUMAN-TRIAGE
+  section for targetless gaps. Golden-file test embeds the parser's regexes.
+  *Authored by a Hydra dogfood run.*
 - Verified-close gate now inspects the bead's **worktree**, not the shared
   checkout, when worktree isolation is active. The diff + scope gates read
   `ResolveRepoPath` (the main checkout, which stays clean until a chain
