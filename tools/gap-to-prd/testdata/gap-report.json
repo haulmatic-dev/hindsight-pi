@@ -1,0 +1,59 @@
+{
+  "passed": false,
+  "prd_path": "docs/PRDs/url-shortener.md",
+  "project_dir": "/tmp/hydra-e2e-test/url-shortener",
+  "cycles": 1,
+  "checks": [
+    {
+      "name": "Behaviour Inventory",
+      "passed": false,
+      "details": "1 behaviour gap found"
+    },
+    {
+      "name": "Route Coverage",
+      "passed": false,
+      "details": "1 route gap found"
+    },
+    {
+      "name": "AC Coverage",
+      "passed": false,
+      "details": "1 AC gap without target files"
+    }
+  ],
+  "gaps": [
+    {
+      "id": "G1",
+      "category": "behavior",
+      "severity": "critical",
+      "description": "Handler response code does not match PRD behaviour inventory.",
+      "source_evidence": "PRD §4.5.2 specifies HTTP 201 for POST /shorten",
+      "go_evidence": "Current handler returns HTTP 200 for POST /shorten",
+      "prd_ref": "PRD §4.5.2",
+      "target_files": ["internal/core/foo.go"],
+      "suggested_bead": "Fix status code in shorten handler"
+    },
+    {
+      "id": "R1",
+      "category": "route",
+      "severity": "warning",
+      "description": "Missing health check route /healthz.",
+      "source_evidence": "PRD §3.1 lists /healthz as a required route",
+      "go_evidence": "No handler registered for /healthz",
+      "prd_ref": "PRD §3.1",
+      "target_files": ["server.go"],
+      "suggested_bead": "Register /healthz route"
+    },
+    {
+      "id": "A1",
+      "category": "ac",
+      "severity": "info",
+      "description": "No automated test covers the rate-limit AC.",
+      "source_evidence": "PRD §5.2 requires per-IP rate limiting",
+      "go_evidence": "No rate-limit tests found",
+      "prd_ref": "PRD §5.2",
+      "target_files": [],
+      "suggested_bead": "Add rate-limit acceptance test"
+    }
+  ],
+  "summary": "3 gap(s) found: 1 critical behavior, 1 warning route, 1 info AC"
+}

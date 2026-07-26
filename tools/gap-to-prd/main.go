@@ -5,6 +5,7 @@
 //	go run tools/gap-to-prd --input gap-report.json --output gaps/gap-prd.md
 //
 // Exit codes:
+//
 //	0 - converted successfully
 //	1 - input file not found or invalid
 //	2 - configuration error
@@ -15,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -30,18 +32,21 @@ type GapReport struct {
 		Passed  bool   `json:"passed"`
 		Details string `json:"details,omitempty"`
 	} `json:"checks"`
-	Gaps []struct {
-		ID            string   `json:"id"`
-		Category      string   `json:"category"`
-		Severity      string   `json:"severity"`
-		Description   string   `json:"description"`
-		SourceEvidence string  `json:"source_evidence"`
-		GoEvidence     string  `json:"go_evidence"`
-		PRDRef        string   `json:"prd_ref,omitempty"`
-		TargetFiles   []string `json:"target_files,omitempty"`
-		SuggestedBead string   `json:"suggested_bead,omitempty"`
-	} `json:"gaps"`
+	Gaps    []Gap  `json:"gaps"`
 	Summary string `json:"summary"`
+}
+
+// Gap represents a single compliance gap.
+type Gap struct {
+	ID             string   `json:"id"`
+	Category       string   `json:"category"`
+	Severity       string   `json:"severity"`
+	Description    string   `json:"description"`
+	SourceEvidence string   `json:"source_evidence"`
+	GoEvidence     string   `json:"go_evidence"`
+	PRDRef         string   `json:"prd_ref,omitempty"`
+	TargetFiles    []string `json:"target_files,omitempty"`
+	SuggestedBead  string   `json:"suggested_bead,omitempty"`
 }
 
 func main() {
@@ -93,67 +98,41 @@ func generateMiniPRD(report GapReport) string {
 	b.WriteString(fmt.Sprintf("**Cycle:** %d\n\n", report.Cycles))
 	b.WriteString(fmt.Sprintf("**Summary:** %s\n\n", report.Summary))
 
-	// Group gaps by category
-	grouped := groupGapsByCategory(report.Gaps)
+	// Partition gaps into those with target files (become FRs) and targetless (triage).
+	var targetGaps, targetlessGaps []Gap
+	for _, g := range report.Gaps {
+		if len(g.TargetFiles) > 0 {
+			targetGaps = append(targetGaps, g)
+		} else {
+			targetlessGaps = append(targetlessGaps, g)
+		}
+	}
 
-	// Generate FRs
+	// Group target gaps by category deterministically.
+	grouped := groupGapsByCategory(targetGaps)
+
+	// Emit FRs with deterministic numbering and remember the number for each gap.
 	frNum := 1
-	for category, gaps := range grouped {
+	frByGapID := make(map[string]int)
+	for _, category := range sortedKeys(grouped) {
+		gaps := grouped[category]
+		sort.Slice(gaps, func(i, j int) bool { return gaps[i].ID < gaps[j].ID })
 		for _, gap := range gaps {
-			b.WriteString(fmt.Sprintf("### FR-%03d: Fix %s drift in %s\n\n", frNum, gap.Category, primaryTargetFile(gap.TargetFiles)))
-			b.WriteString(fmt.Sprintf("**Type:** %s gap\n\n", category))
-			b.WriteString(fmt.Sprintf("**Severity:** %s\n\n", gap.Severity))
-			b.WriteString(fmt.Sprintf("**Description:**\n%s\n\n", gap.Description))
-
-			if gap.PRDRef != "" {
-				b.WriteString(fmt.Sprintf("**PRD Reference:** %s\n\n", gap.PRDRef))
-			}
-
-			if len(gap.TargetFiles) > 0 {
-				b.WriteString("**Target Files:**\n")
-				for _, f := range gap.TargetFiles {
-					b.WriteString(fmt.Sprintf("- `%s`\n", f))
-				}
-				b.WriteString("\n")
-			}
-
-			b.WriteString("**Acceptance Criteria:**\n")
-			// Make the AC concrete: agents interpret "Verify X is
-			// intentional" as "do nothing", which closes the bead
-			// without actually changing code. Force a comparison +
-			// change instruction.
-			b.WriteString(fmt.Sprintf("- Source evidence (Java): %s\n", gap.SourceEvidence))
-			b.WriteString(fmt.Sprintf("- Go evidence (current): %s\n", gap.GoEvidence))
-			if gap.Severity == "critical" {
-				b.WriteString(fmt.Sprintf("- REQUIRED: change the Go file so the value matches the source. The previous SuggestedBead was: '%s' — that was not sufficient; agents closed these as 'verified intentional' without making the change.\n", gap.SuggestedBead))
-			} else {
-				b.WriteString(fmt.Sprintf("- Either change the Go file to match the source, OR update the PRD's §4.5.2 Behaviour Inventory to document the intentional divergence. The previous SuggestedBead was: '%s' — on its own that's not enough.\n", gap.SuggestedBead))
-			}
-			b.WriteString("- `go build ./...` exits 0\n")
-			b.WriteString("- `go test ./...` exits 0\n")
-			b.WriteString("- Re-run `tools/verify-source-vs-go --source-language auto --source-ref development --go-source .` and confirm zero gaps of category '" + gap.Category + "'\n")
-			b.WriteString("\n")
-
+			frByGapID[gap.ID] = frNum
+			emitFR(&b, frNum, category, gap)
 			frNum++
 		}
 	}
 
-	// Generate US if there are route or AC gaps
-	routeOrACGaps := filterGapsByCategory(report.Gaps, "route", "ac")
+	// Generate US if there are route or AC gaps that have target files.
+	routeOrACGaps := filterGapsByCategory(targetGaps, "route", "ac")
 	if len(routeOrACGaps) > 0 {
-		b.WriteString("## US-001: Integration — Fix Missing Routes and ACs\n\n")
-		b.WriteString("**As a** system\n")
-		b.WriteString("**I want** all PRD routes wired and acceptance criteria tested\n")
-		b.WriteString("**So that** the system is fully compliant\n\n")
-		b.WriteString("**Aggregates:**\n")
-		for i := range routeOrACGaps {
-			b.WriteString(fmt.Sprintf("- FR-%03d\n", i+1))
-		}
-		b.WriteString("\n**Acceptance Criteria:**\n")
-		for _, gap := range routeOrACGaps {
-			b.WriteString(fmt.Sprintf("- %s\n", gap.SuggestedBead))
-		}
-		b.WriteString("\n")
+		emitUS(&b, routeOrACGaps, frByGapID)
+	}
+
+	// Triage section for gaps without target files.
+	if len(targetlessGaps) > 0 {
+		emitTriage(&b, targetlessGaps)
 	}
 
 	// Compliance gate
@@ -167,76 +146,72 @@ func generateMiniPRD(report GapReport) string {
 	return b.String()
 }
 
-func groupGapsByCategory(gaps []struct {
-	ID            string   `json:"id"`
-	Category      string   `json:"category"`
-	Severity      string   `json:"severity"`
-	Description   string   `json:"description"`
-	SourceEvidence string  `json:"source_evidence"`
-	GoEvidence     string  `json:"go_evidence"`
-	PRDRef        string   `json:"prd_ref,omitempty"`
-	TargetFiles   []string `json:"target_files,omitempty"`
-	SuggestedBead string   `json:"suggested_bead,omitempty"`
-}) map[string][]struct {
-	ID            string   `json:"id"`
-	Category      string   `json:"category"`
-	Severity      string   `json:"severity"`
-	Description   string   `json:"description"`
-	SourceEvidence string  `json:"source_evidence"`
-	GoEvidence     string  `json:"go_evidence"`
-	PRDRef        string   `json:"prd_ref,omitempty"`
-	TargetFiles   []string `json:"target_files,omitempty"`
-	SuggestedBead string   `json:"suggested_bead,omitempty"`
-} {
-	grouped := make(map[string][]struct {
-		ID            string   `json:"id"`
-		Category      string   `json:"category"`
-		Severity      string   `json:"severity"`
-		Description   string   `json:"description"`
-		SourceEvidence string  `json:"source_evidence"`
-		GoEvidence     string  `json:"go_evidence"`
-		PRDRef        string   `json:"prd_ref,omitempty"`
-		TargetFiles   []string `json:"target_files,omitempty"`
-		SuggestedBead string   `json:"suggested_bead,omitempty"`
-	})
+func emitFR(b *strings.Builder, frNum int, category string, gap Gap) {
+	b.WriteString(fmt.Sprintf("### FR-%03d: Fix %s drift in %s\n\n", frNum, gap.Category, primaryTargetFile(gap.TargetFiles)))
+	b.WriteString("**Type:** fr\n\n")
+	b.WriteString(fmt.Sprintf("**Priority:** %s\n\n", priorityForSeverity(gap.Severity)))
+	b.WriteString(fmt.Sprintf("**Description:**\n%s\n\n", gap.Description))
+
+	if gap.PRDRef != "" {
+		b.WriteString(fmt.Sprintf("**PRD Reference:** %s\n\n", gap.PRDRef))
+	}
+
+	b.WriteString(fmt.Sprintf("**Target Files:** %s\n\n", inlineTargetFiles(gap.TargetFiles)))
+	b.WriteString("**Test Command:** `go test ./...`\n\n")
+	b.WriteString("**Build Command:** `go build ./...`\n\n")
+
+	b.WriteString("**Acceptance Criteria:**\n")
+	// Make the AC concrete: agents interpret "Verify X is
+	// intentional" as "do nothing", which closes the bead
+	// without actually changing code. Force a comparison +
+	// change instruction.
+	b.WriteString(fmt.Sprintf("- Source evidence (Java): %s\n", gap.SourceEvidence))
+	b.WriteString(fmt.Sprintf("- Go evidence (current): %s\n", gap.GoEvidence))
+	if gap.Severity == "critical" {
+		b.WriteString(fmt.Sprintf("- REQUIRED: change the Go file so the value matches the source. The previous SuggestedBead was: '%s' — that was not sufficient; agents closed these as 'verified intentional' without making the change.\n", gap.SuggestedBead))
+	} else {
+		b.WriteString(fmt.Sprintf("- Either change the Go file to match the source, OR update the PRD's §4.5.2 Behaviour Inventory to document the intentional divergence. The previous SuggestedBead was: '%s' — on its own that's not enough.\n", gap.SuggestedBead))
+	}
+	b.WriteString("- `go build ./...` exits 0\n")
+	b.WriteString("- `go test ./...` exits 0\n")
+	b.WriteString("- Re-run `tools/verify-source-vs-go --source-language auto --source-ref development --go-source .` and confirm zero gaps of category '" + gap.Category + "'\n")
+	b.WriteString("\n")
+}
+
+func emitUS(b *strings.Builder, gaps []Gap, frByGapID map[string]int) {
+	b.WriteString("## US-001: Integration — Fix Missing Routes and ACs\n\n")
+	b.WriteString("**As a** system\n")
+	b.WriteString("**I want** all PRD routes wired and acceptance criteria tested\n")
+	b.WriteString("**So that** the system is fully compliant\n\n")
+	b.WriteString("**Aggregates:**\n")
+	for _, gap := range gaps {
+		b.WriteString(fmt.Sprintf("- FR-%03d\n", frByGapID[gap.ID]))
+	}
+	b.WriteString("\n**Acceptance Criteria:**\n")
+	for _, gap := range gaps {
+		b.WriteString(fmt.Sprintf("- %s\n", gap.SuggestedBead))
+	}
+	b.WriteString("\n")
+}
+
+func emitTriage(b *strings.Builder, gaps []Gap) {
+	b.WriteString("## NEEDS HUMAN TRIAGE: Gaps Without Target Files\n\n")
+	for _, gap := range gaps {
+		b.WriteString(fmt.Sprintf("- **%s** (%s): %s\n", gap.ID, gap.Category, gap.Description))
+	}
+	b.WriteString("\n")
+}
+
+func groupGapsByCategory(gaps []Gap) map[string][]Gap {
+	grouped := make(map[string][]Gap)
 	for _, g := range gaps {
 		grouped[g.Category] = append(grouped[g.Category], g)
 	}
 	return grouped
 }
 
-func filterGapsByCategory(gaps []struct {
-	ID            string   `json:"id"`
-	Category      string   `json:"category"`
-	Severity      string   `json:"severity"`
-	Description   string   `json:"description"`
-	SourceEvidence string  `json:"source_evidence"`
-	GoEvidence     string  `json:"go_evidence"`
-	PRDRef        string   `json:"prd_ref,omitempty"`
-	TargetFiles   []string `json:"target_files,omitempty"`
-	SuggestedBead string   `json:"suggested_bead,omitempty"`
-}, categories ...string) []struct {
-	ID            string   `json:"id"`
-	Category      string   `json:"category"`
-	Severity      string   `json:"severity"`
-	Description   string   `json:"description"`
-	SourceEvidence string  `json:"source_evidence"`
-	GoEvidence     string  `json:"go_evidence"`
-	PRDRef        string   `json:"prd_ref,omitempty"`
-	TargetFiles   []string `json:"target_files,omitempty"`
-	SuggestedBead string   `json:"suggested_bead,omitempty"`
-} {
-	var result []struct {
-		ID            string   `json:"id"`
-		Category      string   `json:"category"`
-		Severity      string   `json:"severity"`
-		Description   string   `json:"description"`
-		SourceEvidence string  `json:"source_evidence"`
-		GoEvidence     string  `json:"go_evidence"`
-		PRDRef        string   `json:"prd_ref,omitempty"`
-		TargetFiles   []string `json:"target_files,omitempty"`
-		SuggestedBead string   `json:"suggested_bead,omitempty"`
-	}
+func filterGapsByCategory(gaps []Gap, categories ...string) []Gap {
+	var result []Gap
 	for _, g := range gaps {
 		for _, c := range categories {
 			if g.Category == c {
@@ -248,11 +223,36 @@ func filterGapsByCategory(gaps []struct {
 	return result
 }
 
-func titleCase(s string) string {
-	if s == "" {
-		return s
+func sortedKeys(m map[string][]Gap) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
 	}
-	return strings.ToUpper(s[:1]) + s[1:]
+	sort.Strings(keys)
+	return keys
+}
+
+func priorityForSeverity(severity string) string {
+	if severity == "critical" {
+		return "P0"
+	}
+	return "P1"
+}
+
+func inlineTargetFiles(targets []string) string {
+	seen := make(map[string]bool)
+	var unique []string
+	for _, t := range targets {
+		if !seen[t] {
+			seen[t] = true
+			unique = append(unique, t)
+		}
+	}
+	parts := make([]string, len(unique))
+	for i, f := range unique {
+		parts[i] = fmt.Sprintf("`%s`", f)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // primaryTargetFile returns the basename of the first target file,
