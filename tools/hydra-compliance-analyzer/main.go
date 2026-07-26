@@ -6,6 +6,7 @@
 //	go run tools/hydra-compliance-analyzer --prd docs/PRDs/feature.md --project . --output gap-report.json
 //
 // Exit codes:
+//
 //	0 - zero gaps (fully compliant)
 //	1 - gaps found (see output JSON)
 //	2 - configuration error
@@ -14,6 +15,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -51,11 +53,12 @@ type Gap struct {
 	SuggestedBead string   `json:"suggested_bead,omitempty"`
 }
 
+// Config holds the parsed command-line flags for hydra-compliance-analyzer.
 type Config struct {
-	PRDPath           string
-	ProjectDir        string
-	OutputPath        string
-	Cycles            int
+	PRDPath            string
+	ProjectDir         string
+	OutputPath         string
+	Cycles             int
 	EnableExperimental bool
 }
 
@@ -90,6 +93,7 @@ func main() {
 		runCheck(report, "detect-phantom-files", runDetectPhantomFiles(cfg))
 	}
 	runCheck(report, "verify-source-vs-go", runVerifySourceVsGo(cfg))
+	runCheck(report, "security-scan", runSecurityScan(cfg))
 
 	// Determine pass/fail
 	report.Passed = len(report.Gaps) == 0
@@ -156,12 +160,16 @@ func runCheck(report *GapReport, name string, gaps []Gap) {
 	report.Gaps = append(report.Gaps, gaps...)
 }
 
+// errToolNotFound is returned by runTool when a tool binary cannot be
+// resolved through any of the supported lookup paths.
+var errToolNotFound = errors.New("tool not found")
+
 // runTool builds the tool (if needed) and runs the compiled binary.
 //
 // Resolution order for the binary:
-//   1. <ProjectDir>/tools/<toolname>/<toolname>  (project-vendored)
-//   2. $HYDRA_TOOLS_DIR/<toolname>/<toolname>    (env override)
-//   3. /opt/dev-tools/components/hydra/tools/<toolname>/<toolname>  (system-wide default)
+//  1. <ProjectDir>/tools/<toolname>/<toolname>  (project-vendored)
+//  2. $HYDRA_TOOLS_DIR/<toolname>/<toolname>    (env override)
+//  3. /opt/dev-tools/components/hydra/tools/<toolname>/<toolname>  (system-wide default)
 //
 // Build (go build) only runs for option 1, where the source is in the
 // project tree. For options 2 and 3 the binary is assumed to already
@@ -222,7 +230,7 @@ func runTool(toolName string, args []string, cfg Config) ([]byte, error) {
 
 	// Not found anywhere — return a useful error so the parent logs
 	// which tool is missing.
-	return nil, fmt.Errorf("tool %q not found at project path, $HYDRA_TOOLS_DIR, or system path /opt/dev-tools/components/hydra/tools/%s", toolName, toolName)
+	return nil, fmt.Errorf("%w: tool %q not found at project path, $HYDRA_TOOLS_DIR, or system path /opt/dev-tools/components/hydra/tools/%s", errToolNotFound, toolName, toolName)
 }
 
 func runVerifyExports(cfg Config) []Gap {
@@ -449,6 +457,48 @@ func runDetectPhantomFiles(cfg Config) []Gap {
 		})
 	}
 	return gaps
+}
+
+// runSecurityScan runs the security-scan tool over the project.
+//
+// It is always-on (not gated behind --enable-experimental) because the
+// deterministic scanners it wraps produce low-noise, high-value findings.
+// If the security-scan binary cannot be resolved, the check is fail-open:
+// it logs the reason to stderr and returns nil so the cycle is not blocked
+// on boxes where the tool has not been deployed.
+func runSecurityScan(cfg Config) []Gap {
+	out, err := runTool("security-scan", []string{"--project", cfg.ProjectDir}, cfg)
+	if errors.Is(err, errToolNotFound) {
+		fmt.Fprintf(os.Stderr, "security-scan not available: %v\n", err)
+		return nil
+	}
+	if err != nil {
+		// Non-zero exit is expected when gaps are found.
+	}
+
+	var result struct {
+		Passed   bool `json:"passed"`
+		Scanners []struct {
+			Name      string `json:"name"`
+			Available bool   `json:"available"`
+		} `json:"scanners"`
+		Gaps []Gap `json:"gaps"`
+	}
+
+	if jsonErr := json.Unmarshal(out, &result); jsonErr != nil {
+		return []Gap{{
+			ID:          "security-scan-parse-error",
+			Category:    "security",
+			Severity:    "warning",
+			Description: fmt.Sprintf("Failed to parse security-scan output: %v", jsonErr),
+		}}
+	}
+
+	if result.Passed {
+		return nil
+	}
+
+	return result.Gaps
 }
 
 // Helpers

@@ -85,3 +85,4 @@ internal/integration/.hydra/
 
 .gograph/
 .pi/
+tools/security-scan/security-scan
