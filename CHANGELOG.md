@@ -8,6 +8,12 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- Security scan gate: `tools/security-scan` wraps gitleaks + govulncheck and
+  emits analyzer-schema gaps (secret values redacted, fail-open when scanners
+  are missing); wired into `hydra-compliance-analyzer` as an always-on
+  `security-scan` check, so security findings flow through the adjudicator →
+  gap-to-prd → beads pipeline and block PRD approval until fixed.
+  *Authored by a Hydra dogfood run.*
 - Per-user PAT branch publishing: at each scheduling tick (opt-in via
   `output.push`), Hydra reconciles every project's completed worktree commits
   onto its working branch and pushes it to origin **authenticated with the
