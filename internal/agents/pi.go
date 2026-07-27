@@ -51,6 +51,7 @@ type PiConnector struct {
 	configDir     string
 	logger        *log.Logger
 	executor      Executor
+	autoConfirm   bool
 
 	// Installation check with TTL-based caching
 	mu               sync.RWMutex
@@ -73,6 +74,109 @@ type PiConfig struct {
 	Timeout       string `yaml:"timeout"`
 	ApiKeyName    string `yaml:"api_key_name"`
 	ConfigDir     string `yaml:"config_dir"`
+
+	// AutoConfirm, when true, answers confirm UI asks with confirmed:true.
+	// Default false keeps the deny-by-default policy for unattended runs.
+	AutoConfirm bool `yaml:"auto_confirm"`
+}
+
+// SessionStats holds token counts reported by a get_session_stats response.
+type SessionStats struct {
+	Input     int `json:"input"`
+	Output    int `json:"output"`
+	CacheRead int `json:"cacheRead"`
+	Total     int `json:"total"`
+}
+
+// UIRequestNeedsReply reports whether an extension_ui_request method blocks on a
+// client response. select, confirm, input and editor are asks; notify, setStatus,
+// setWidget, setTitle and set_editor_text are fire-and-forget notifications that
+// must NOT be answered.
+func UIRequestNeedsReply(method string) bool {
+	switch method {
+	case "select", "confirm", "input", "editor":
+		return true
+	default:
+		return false
+	}
+}
+
+// UIResponseFor builds the JSON reply for a blocking extension_ui_request.
+// It returns ok == false for notification methods that must never be answered.
+// confirm replies carry a confirmed boolean; all other asks are cancelled.
+func UIResponseFor(id, method string, autoConfirm bool) ([]byte, bool) {
+	if !UIRequestNeedsReply(method) {
+		return nil, false
+	}
+	resp := map[string]interface{}{"type": "extension_ui_response", "id": id}
+	switch method {
+	case "confirm":
+		resp["confirmed"] = autoConfirm
+	default: // select, input, editor
+		resp["cancelled"] = true
+	}
+	b, _ := json.Marshal(resp)
+	return b, true
+}
+
+// parseSessionStats parses the data.tokens object from a get_session_stats response.
+func parseSessionStats(line []byte) (SessionStats, error) {
+	var envelope struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(line, &envelope); err != nil {
+		return SessionStats{}, err
+	}
+	tokensRaw, ok := envelope.Data["tokens"]
+	if !ok {
+		return SessionStats{}, fmt.Errorf("get_session_stats response missing data.tokens")
+	}
+	var stats SessionStats
+	if err := json.Unmarshal(tokensRaw, &stats); err != nil {
+		return SessionStats{}, err
+	}
+	return stats, nil
+}
+
+// SessionStats sends a get_session_stats command to a running Pi session and parses
+// the token counts from the matching response event.
+func (c *PiConnector) SessionStats(ctx context.Context, session *AgentSession) (SessionStats, error) {
+	stdin, ok := session.metadata["stdin"].(io.WriteCloser)
+	if !ok {
+		return SessionStats{}, fmt.Errorf("session stdin not available")
+	}
+	stdout, ok := session.metadata["stdout"].(io.ReadCloser)
+	if !ok {
+		return SessionStats{}, fmt.Errorf("session stdout not available")
+	}
+
+	if err := c.sendJSON(stdin, map[string]interface{}{"type": "get_session_stats"}); err != nil {
+		return SessionStats{}, fmt.Errorf("send get_session_stats: %w", err)
+	}
+
+	reader := bufio.NewReader(stdout)
+	for {
+		select {
+		case <-ctx.Done():
+			return SessionStats{}, ctx.Err()
+		default:
+		}
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return SessionStats{}, fmt.Errorf("read get_session_stats response: %w", err)
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var ev map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue
+		}
+		if ev["type"] == "response" && ev["command"] == "get_session_stats" {
+			return parseSessionStats([]byte(line))
+		}
+	}
 }
 
 // NewPiConnector creates a new Pi connector with the given configuration
@@ -97,6 +201,7 @@ func NewPiConnector(config PiConfig, logger *log.Logger) *PiConnector {
 		configDir:     config.ConfigDir,
 		logger:        logger,
 		executor:      &DefaultExecutor{},
+		autoConfirm:   config.AutoConfirm,
 	}
 }
 
@@ -308,6 +413,10 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 		pidCallback(session.PID)
 	}
 
+	// Store the process pipes in the session so SessionStats can reuse them.
+	session.metadata["stdin"] = stdin
+	session.metadata["stdout"] = stdout
+
 	// Send prompt command
 	promptCmd := map[string]interface{}{
 		"type":    "prompt",
@@ -327,16 +436,13 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 		}, nil
 	}
 
-	// Close stdin to signal end of input
-	stdin.Close()
-
 	// Create channels for coordination
 	doneChan := make(chan *AgentResult)
 	exitChan := make(chan error)
 
 	// Start goroutine to read events
 	go func() {
-		result := c.readEvents(stdout, stderr, startTime)
+		result := c.readEvents(stdin, stdout, stderr, startTime)
 		doneChan <- result
 	}()
 
@@ -412,7 +518,14 @@ func (c *PiConnector) sendJSON(w io.WriteCloser, cmd map[string]interface{}) err
 }
 
 // readEvents reads JSONL events from stdout/stderr until agent_end or timeout
-func (c *PiConnector) readEvents(stdout, stderr io.ReadCloser, startTime time.Time) *AgentResult {
+func (c *PiConnector) readEvents(stdin io.WriteCloser, stdout, stderr io.ReadCloser, startTime time.Time) *AgentResult {
+	// Close stdin when event reading is done so the pi process can exit cleanly.
+	defer func() {
+		if stdin != nil {
+			_ = stdin.Close()
+		}
+	}()
+
 	result := &AgentResult{
 		Success:  true,
 		ExitCode: 0,
@@ -503,12 +616,29 @@ func (c *PiConnector) readEvents(stdout, stderr io.ReadCloser, startTime time.Ti
 			continue
 		}
 
+		// Any decoded event is a sign of life, not just text deltas.
+		lastProgressActivity = time.Now()
+
 		// Check event type
 		eventType, _ := event["type"].(string)
 
 		switch eventType {
 		case "agent_start":
 			log.Printf("[PiConnector] Agent started processing")
+
+		case "extension_ui_request":
+			method, _ := event["method"].(string)
+			id, _ := event["id"].(string)
+			if UIRequestNeedsReply(method) {
+				if reply, ok := UIResponseFor(id, method, c.autoConfirm); ok {
+					if _, err := fmt.Fprintf(stdin, "%s\n", reply); err != nil {
+						log.Printf("[PiConnector] Failed to send UI reply: %v", err)
+					}
+				}
+				log.Printf("[PiConnector] answered blocking UI ask %q", method)
+			} else {
+				log.Printf("[PiConnector] ignored extension_ui_request notification %q", method)
+			}
 
 		case "agent_end":
 			log.Printf("[PiConnector] Agent completed")
@@ -533,9 +663,6 @@ func (c *PiConnector) readEvents(stdout, stderr io.ReadCloser, startTime time.Ti
 			goto done
 
 		case "message_update":
-			// Reset progress activity timer - Pi is actively working
-			lastProgressActivity = time.Now()
-
 			// Extract text deltas
 			if assistantEvent, ok := event["assistantMessageEvent"].(map[string]interface{}); ok {
 				if eventType, ok := assistantEvent["type"].(string); ok && eventType == "text_delta" {

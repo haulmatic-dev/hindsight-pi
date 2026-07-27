@@ -8,6 +8,15 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- Pi connector can speak pi's rpc JSONL protocol (`agents.pi.mode: rpc`,
+  default text). This is Phase 0: the connector answers `extension_ui_request`
+  asks — previously ignored entirely, which is why every rpc attempt hung once
+  `@aliou/pi-guardrails` asked a `confirm` — denies by default unless
+  `rpc_auto_confirm` is set, refreshes the activity deadline on *every* event
+  rather than assistant text only, and parses `get_session_stats` so token
+  counts become measurable per run. `hydra --rpc-selftest "<prompt>"` exercises
+  one real turn end-to-end without the daemon.
+  *Authored by a Hydra dogfood run (run G), verified by its compliance gate.*
 - `tools/pi-rpc`: standalone client for `pi --mode rpc`, isolated from the
   daemon, proving what rpc mode offers before any hydra change. Verified live:
   pi's extensions **do** initialise in rpc mode and rtk rewrites commands
