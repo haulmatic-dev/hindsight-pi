@@ -42,7 +42,7 @@ func NewTLDRIndexer(maxConcurrent, retryAttempts int, retryDelay time.Duration, 
 		retryDelay = 5 * time.Second
 	}
 	if tldrPath == "" {
-		tldrPath = "hydra-llm-tldr"
+		tldrPath = "llm-tldr"
 	}
 
 	return &TLDRIndexer{

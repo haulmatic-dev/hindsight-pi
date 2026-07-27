@@ -17,7 +17,7 @@ cm context "<concise description of what you are about to implement>" --json
 ### Step 2: Search Codebase with TLDR
 
 ```bash
-hydra-llm-tldr search "<what you need to implement>" . --max 10
+llm-tldr search "<what you need to implement>" . --max 10
 ```
 
 - Use results to find existing code patterns before writing new code.
@@ -26,7 +26,7 @@ hydra-llm-tldr search "<what you need to implement>" . --max 10
 ### Step 3: Analyze Impact (For Modifications)
 
 ```bash
-hydra-llm-tldr impact <file-path> --depth 2
+llm-tldr impact <file-path> --depth 2
 ```
 
 - Required when modifying existing files.

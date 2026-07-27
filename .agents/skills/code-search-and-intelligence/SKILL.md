@@ -1,6 +1,6 @@
 ---
 name: code-search-and-intelligence
-description: Query institutional knowledge with Hindsight and search code semantically with hydra-llm-tldr. This skill provides actionable commands that MUST be executed before implementing any code. Run these commands first to discover patterns, avoid anti-patterns, and understand the codebase.
+description: Query institutional knowledge with Hindsight and search code semantically with llm-tldr. This skill provides actionable commands that MUST be executed before implementing any code. Run these commands first to discover patterns, avoid anti-patterns, and understand the codebase.
 ---
 
 # Code Search and Intelligence
@@ -8,7 +8,7 @@ description: Query institutional knowledge with Hindsight and search code semant
 This skill provides **two intelligence commands** that you MUST run before implementing:
 
 1. **hindsight** → query institutional knowledge
-2. **hydra-llm-tldr** → search code semantically
+2. **llm-tldr** → search code semantically
 
 ## ⚠️  CRITICAL: Run These Commands FIRST
 
@@ -33,14 +33,14 @@ hindsight search "implement user authentication with JWT tokens" --limit 5
 ### Step 2: Search Code Semantically (MANDATORY for implementation)
 
 ```bash
-hydra-llm-tldr search "<what you need to implement>"
+llm-tldr search "<what you need to implement>"
 ```
 
 **Run this SECOND to find existing code before writing new code.**
 
 **Example:**
 ```bash
-hydra-llm-tldr search "authentication middleware implementation"
+llm-tldr search "authentication middleware implementation"
 ```
 
 ### Step 3: Analyze Impact (MANDATORY for modifications)
@@ -48,12 +48,12 @@ hydra-llm-tldr search "authentication middleware implementation"
 If modifying existing code:
 
 ```bash
-hydra-llm-tldr impact <file-path> --depth 2
+llm-tldr impact <file-path> --depth 2
 ```
 
 **Example:**
 ```bash
-hydra-llm-tldr impact internal/auth/handler.go --depth 2
+llm-tldr impact internal/auth/handler.go --depth 2
 ```
 
 ## Why This Matters
@@ -77,10 +77,10 @@ hindsight search "debug memory leak in worker pool" --limit 5
 ### Good TLDR Search Queries
 ```bash
 # ✅ Describe behavior, not keywords
-hydra-llm-tldr search "validates JWT tokens"
+llm-tldr search "validates JWT tokens"
 
 # ✅ Be specific but not too narrow
-hydra-llm-tldr search "database transaction rollback handling"
+llm-tldr search "database transaction rollback handling"
 ```
 
 ## Available Commands Reference
@@ -106,22 +106,22 @@ hindsight context --bead-id <bead-id> --limit 5
 - 0.4-0.6 - Weakly relevant (may not apply)
 - <0.4 - Not relevant (ignore)
 
-### hydra-llm-tldr - Semantic Code Search
+### llm-tldr - Semantic Code Search
 
 Find code by what it does, not what it's named.
 
 ```bash
 # Search by behavior description
-hydra-llm-tldr search "<behavior description>"
+llm-tldr search "<behavior description>"
 
 # Search with limit
-hydra-llm-tldr search "<description>" --limit 5
+llm-tldr search "<description>" --limit 5
 
 # Search in specific directory
-hydra-llm-tldr search "<description>" --path <directory>
+llm-tldr search "<description>" --path <directory>
 
 # Analyze impact before changing
-hydra-llm-tldr impact <file> --depth 2
+llm-tldr impact <file> --depth 2
 ```
 
 ## Complete Workflow Example
@@ -133,10 +133,10 @@ hydra-llm-tldr impact <file> --depth 2
 hindsight search "implement user authentication with JWT" --limit 5
 
 # 2. Search for existing authentication code
-hydra-llm-tldr search "JWT authentication middleware"
+llm-tldr search "JWT authentication middleware"
 
 # 3. If modifying existing auth code, check impact
-hydra-llm-tldr impact internal/auth/middleware.js --depth 2
+llm-tldr impact internal/auth/middleware.js --depth 2
 
 # 4. Now implement with full context
 ```
@@ -161,8 +161,8 @@ hydra-llm-tldr impact internal/auth/middleware.js --depth 2
 hindsight search "<your task>" --limit 5
 
 # For implementation tasks
-hydra-llm-tldr search "<what to implement>"
+llm-tldr search "<what to implement>"
 
 # For modifications
-hydra-llm-tldr impact <file> --depth 2
+llm-tldr impact <file> --depth 2
 ```
