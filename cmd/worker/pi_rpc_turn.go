@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -43,6 +44,12 @@ type rpcTurn struct {
 	text       strings.Builder
 	uiAnswered int
 	stats      *piagents.SessionStats
+
+	// notifications counts fire-and-forget extension_ui_request methods by name.
+	// These are the only trace an extension leaves in the event stream — rtk
+	// reports its command rewrites this way — so without tallying them there is
+	// no way to tell from a worker log whether the extensions loaded at all.
+	notifications map[string]int
 
 	finishOnce sync.Once
 }
@@ -83,7 +90,14 @@ func (t *rpcTurn) handleLine(line string, stdin io.Writer) bool {
 		id, _ := event["id"].(string)
 		if !piagents.UIRequestNeedsReply(method) {
 			// Notifications (notify, setStatus, setWidget, …) must never be
-			// answered; replying to one desynchronises the stream.
+			// answered; replying to one desynchronises the stream. Count them so
+			// extension activity is at least observable.
+			t.mu.Lock()
+			if t.notifications == nil {
+				t.notifications = make(map[string]int)
+			}
+			t.notifications[method]++
+			t.mu.Unlock()
 			return false
 		}
 		reply, ok := piagents.UIResponseFor(id, method, t.autoConfirm)
@@ -234,4 +248,25 @@ func (t *rpcTurn) Stats() *piagents.SessionStats {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.stats
+}
+
+// Notifications returns a stable "method=count" summary of the fire-and-forget
+// UI notifications seen this turn, or "" when none arrived. An empty result is
+// itself a finding: it means no extension announced anything.
+func (t *rpcTurn) Notifications() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.notifications) == 0 {
+		return ""
+	}
+	methods := make([]string, 0, len(t.notifications))
+	for m := range t.notifications {
+		methods = append(methods, m)
+	}
+	sort.Strings(methods)
+	parts := make([]string, 0, len(methods))
+	for _, m := range methods {
+		parts = append(parts, fmt.Sprintf("%s=%d", m, t.notifications[m]))
+	}
+	return strings.Join(parts, " ")
 }

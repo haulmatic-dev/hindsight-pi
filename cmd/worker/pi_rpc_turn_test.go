@@ -199,6 +199,29 @@ func TestRPCTurn_NotificationsAreNotAnswered(t *testing.T) {
 	}
 }
 
+// TestRPCTurn_TalliesNotifications: notifications are the only trace an
+// extension leaves in the event stream (rtk announces its command rewrites this
+// way), so they are counted even though they are never answered. Without this,
+// a worker log cannot distinguish "extensions loaded and did work" from
+// "extensions never loaded" — which is exactly the question a text-vs-rpc
+// comparison has to answer.
+func TestRPCTurn_TalliesNotifications(t *testing.T) {
+	turn := newRPCTurn(false)
+	if got := turn.Notifications(); got != "" {
+		t.Errorf("a turn with no notifications must report \"\", got %q", got)
+	}
+	for _, m := range []string{"notify", "setStatus", "notify", "setWidget", "notify"} {
+		turn.handleLine(`{"type":"extension_ui_request","id":"x","method":"`+m+`"}`, nil)
+	}
+	// Sorted by method name for stable log output.
+	if got, want := turn.Notifications(), "notify=3 setStatus=1 setWidget=1"; got != want {
+		t.Errorf("Notifications() = %q, want %q", got, want)
+	}
+	if turn.UIAnswered() != 0 {
+		t.Errorf("notifications must not count as answered asks, got %d", turn.UIAnswered())
+	}
+}
+
 func TestRPCTurn_AccumulatesAssistantText(t *testing.T) {
 	turn := newRPCTurn(false)
 	turn.handleLine(`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Hello, "}}`, nil)

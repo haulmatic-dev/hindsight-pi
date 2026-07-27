@@ -1372,6 +1372,11 @@ monitorLoop:
 			log.Printf("📊 rpc session tokens: input=%d output=%d cacheRead=%d total=%d",
 				s.Input, s.Output, s.CacheRead, s.Total)
 		}
+		if n := turn.Notifications(); n != "" {
+			log.Printf("[Worker:rpc] extension UI notifications: %s", n)
+		} else {
+			log.Printf("[Worker:rpc] no extension UI notifications — extensions may not have loaded")
+		}
 		if turn.UIAnswered() > 0 {
 			log.Printf("[Worker:rpc] answered %d blocking UI ask(s) during this turn", turn.UIAnswered())
 		}
