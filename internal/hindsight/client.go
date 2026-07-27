@@ -44,18 +44,32 @@ type Memory struct {
 
 // SearchRequest represents a request to search Hindsight memories.
 // Supports cross-project queries with project filtering and bank attribution.
+// SearchRequest is the recall request body.
+//
+// IMPORTANT: the fields here must match what the Hindsight recall endpoint
+// actually accepts. Verified against the live API's OpenAPI schema
+// (v0.6.2, /v1/default/banks/{bank_id}/memories/recall), the accepted
+// properties are: query, types, budget, max_tokens, trace, query_timestamp,
+// include, tags, tags_match, tag_groups.
+//
+// This struct previously sent `limit`, `min_score`, `days_back` and `bank_id`
+// in the body — none of which exist in the schema, so they were silently
+// dropped. The effect was that every recall returned the ENTIRE bank (measured:
+// 49 memories, ~80KB) and the client kept the first N with no quality
+// filtering at all, while `min_score: 0.7` sat in the config implying a filter
+// that never ran. `max_tokens` is the API's real knob and is a better fit than
+// a count: it bounds the prompt cost directly. Measured effect on the live API:
+// 80,517 B (limit/min_score) -> 15,736 B (max_tokens=800).
 type SearchRequest struct {
-	Query      string   `json:"query"`
-	Type       string   `json:"type,omitempty"`
-	Limit      int      `json:"limit"`
-	MinScore   float64  `json:"min_score"`
-	AgentTypes []string `json:"agent_types,omitempty"`
-	DaysBack   int      `json:"days_back,omitempty"`
+	Query string `json:"query"`
 
-	// Cross-project memory bank fields
-	BankID          string   `json:"bank_id"`                    // Target memory bank (always "coding-brain")
-	Projects        []string `json:"projects,omitempty"`         // Filter by specific projects (empty = all)
-	ExcludeProjects []string `json:"exclude_projects,omitempty"` // Projects to exclude from results
+	// MaxTokens bounds the size of the recalled context. This is the API's
+	// supported way to limit results; a count-based limit is not.
+	MaxTokens int `json:"max_tokens,omitempty"`
+
+	// Types optionally narrows which memory kinds are recalled (API field
+	// name is plural "types", not "type").
+	Types []string `json:"types,omitempty"`
 }
 
 // SearchResponse represents the response from Hindsight search
@@ -155,7 +169,7 @@ type Client struct {
 	httpClient        *http.Client
 	timeout           time.Duration
 	defaultLimit      int
-	minScore          float64
+	maxTokens         int
 	enabled           bool
 	lastHealthCheck   time.Time
 	healthCheckResult bool
@@ -187,10 +201,14 @@ func WithDefaultLimit(limit int) ClientOption {
 	}
 }
 
-// WithMinScore sets the minimum relevance score threshold
-func WithMinScore(score float64) ClientOption {
+// WithMaxTokens bounds the recalled context by token budget. This replaces the
+// former WithMinScore: the recall API has no min_score field, so that setting
+// was silently discarded (see SearchRequest).
+func WithMaxTokens(maxTokens int) ClientOption {
 	return func(c *Client) {
-		c.minScore = score
+		if maxTokens > 0 {
+			c.maxTokens = maxTokens
+		}
 	}
 }
 
@@ -207,7 +225,7 @@ func NewClient(opts ...ClientOption) *Client {
 		baseURL:      "http://127.0.0.1:5000",
 		timeout:      2 * time.Second,
 		defaultLimit: 5,
-		minScore:     0.75,
+		maxTokens:    800,
 		enabled:      true,
 		httpClient:   &http.Client{Timeout: 2 * time.Second},
 	}
@@ -225,7 +243,7 @@ func (c *Client) IsEnabled() bool {
 }
 
 // Search searches Hindsight for memories matching the query
-// Returns top N memories with relevance >= minScore
+// Returns memories within the configured token budget.
 func (c *Client) Search(query, beadType string, limit int) (*SearchResponse, error) {
 	if !c.IsEnabled() {
 		return &SearchResponse{
@@ -249,13 +267,15 @@ func (c *Client) Search(query, beadType string, limit int) (*SearchResponse, err
 		limit = c.defaultLimit
 	}
 
+	// Bound the recall by token budget — the API's supported control. The old
+	// count/score fields were silently ignored, so every call pulled the whole
+	// bank and the client threw most of it away.
 	reqBody := SearchRequest{
-		Query:    query,
-		Type:     beadType,
-		Limit:    limit,
-		MinScore: c.minScore,
-		DaysBack: 30,     // Search last 30 days by default
-		BankID:   BankID, // Always use the shared "coding-brain" memory bank
+		Query:     query,
+		MaxTokens: c.maxTokens,
+	}
+	if beadType != "" {
+		reqBody.Types = []string{beadType}
 	}
 
 	jsonBody, err := json.Marshal(reqBody)

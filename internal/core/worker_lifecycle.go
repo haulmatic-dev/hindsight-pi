@@ -197,6 +197,10 @@ func (wl *WorkerLifecycle) HandleFailure(worker *types.Worker, exitCode int, dur
 	// Exit code 2 == rate-limit/429 (classifyFailure). Feed the provider
 	// circuit breaker so repeated 429s fail the next spawns over to the
 	// fallback provider instead of hammering the throttled one.
+	if exitCode == 6 && wl.providerBreaker != nil {
+		// Quota exhausted: pause the whole fleet, do not try to fail over.
+		wl.providerBreaker.RecordQuotaExhausted()
+	}
 	if exitCode == 2 && wl.providerBreaker != nil {
 		wl.providerBreaker.RecordRateLimit()
 	}
@@ -227,7 +231,9 @@ func (wl *WorkerLifecycle) HandleFailure(worker *types.Worker, exitCode int, dur
 // infrastructure problems (rate limits, timeouts, network issues, daemon locks)
 // rather than code-level problems.
 func isInfrastructureExitCode(code int) bool {
-	return code == 2 || code == 3 || code == 4
+	// 6 = quota exhausted: infrastructure, never a code defect, so it must not
+	// spawn a fix bead.
+	return code == 2 || code == 3 || code == 4 || code == 6
 }
 
 func (wl *WorkerLifecycle) scheduleAfterCompletion(worker *types.Worker, success bool, newlyReady []string) {
@@ -243,7 +249,6 @@ func (wl *WorkerLifecycle) scheduleAfterCompletion(worker *types.Worker, success
 		wl.triggerSchedule()
 	}
 }
-
 
 func isDependencyError(err error) bool {
 	if err == nil {

@@ -1,0 +1,6 @@
+# Append-only changelog: every PR adds entries to the same two blocks
+# (### Added / ### Fixed), so a plain 3-way merge conflicts on almost every
+# concurrent change — it did on three consecutive PRs, each needing a manual
+# rebase that resolved to "keep both sides" anyway. `union` makes git do that
+# automatically instead of stopping the merge.
+CHANGELOG.md merge=union

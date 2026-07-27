@@ -56,11 +56,11 @@ type PiConfig struct {
 
 // HindsightClientConfig contains configuration for the Hindsight client
 type HindsightClientConfig struct {
-	Enabled  bool
-	BaseURL  string
-	Timeout  time.Duration
-	Limit    int
-	MinScore float64
+	Enabled   bool
+	BaseURL   string
+	Timeout   time.Duration
+	Limit     int
+	MaxTokens int
 }
 
 // HindsightContext represents context passed from the overseer about related
@@ -539,15 +539,13 @@ func parseHindsightClientConfig() HindsightClientConfig {
 	}
 
 	// Parse min score
-	scoreStr := os.Getenv("HYDRA_HISTORIESIGHT_MIN_SCORE")
-	if scoreStr != "" {
-		if f, err := strconv.ParseFloat(scoreStr, 64); err == nil {
-			cfg.MinScore = f
-		} else {
-			cfg.MinScore = 0.7
+	// Token budget for recall. HYDRA_HISTORIESIGHT_MAX_TOKENS supersedes the old
+	// MIN_SCORE variable, which mapped to a field the recall API never accepted.
+	cfg.MaxTokens = 800
+	if v := os.Getenv("HYDRA_HISTORIESIGHT_MAX_TOKENS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.MaxTokens = n
 		}
-	} else {
-		cfg.MinScore = 0.7
 	}
 
 	return cfg
@@ -1637,7 +1635,7 @@ func queryHindsightForContext(
 		hindsight.WithBaseURL(config.HindsightClient.BaseURL),
 		hindsight.WithTimeout(config.HindsightClient.Timeout),
 		hindsight.WithDefaultLimit(config.HindsightClient.Limit),
-		hindsight.WithMinScore(config.HindsightClient.MinScore),
+		hindsight.WithMaxTokens(config.HindsightClient.MaxTokens),
 		hindsight.WithEnabled(true),
 	)
 
@@ -1701,11 +1699,11 @@ func recordExecutionResult(
 			hindsight.WithBaseURL(config.HindsightClient.BaseURL),
 			hindsight.WithTimeout(config.HindsightClient.Timeout),
 			hindsight.WithDefaultLimit(config.HindsightClient.Limit),
-			hindsight.WithMinScore(config.HindsightClient.MinScore),
+			hindsight.WithMaxTokens(config.HindsightClient.MaxTokens),
 			hindsight.WithEnabled(true),
 		)
-		log.Printf("[Hindsight] Client initialized (baseURL: %s, limit: %d, minScore: %.2f)",
-			config.HindsightClient.BaseURL, config.HindsightClient.Limit, config.HindsightClient.MinScore)
+		log.Printf("[Hindsight] Client initialized (baseURL: %s, limit: %d, maxTokens: %d)",
+			config.HindsightClient.BaseURL, config.HindsightClient.Limit, config.HindsightClient.MaxTokens)
 	} else {
 		log.Println("ℹ️ Hindsight not enabled, skipping result recording")
 		return
@@ -1764,7 +1762,7 @@ func recordExecutionResultSync(
 		hindsight.WithBaseURL(config.HindsightClient.BaseURL),
 		hindsight.WithTimeout(config.HindsightClient.Timeout),
 		hindsight.WithDefaultLimit(config.HindsightClient.Limit),
-		hindsight.WithMinScore(config.HindsightClient.MinScore),
+		hindsight.WithMaxTokens(config.HindsightClient.MaxTokens),
 		hindsight.WithEnabled(true),
 	)
 	log.Printf("[Hindsight] Client initialized for sync retention (baseURL: %s)", config.HindsightClient.BaseURL)
@@ -2035,6 +2033,7 @@ func closeBeadFromWorker(bead types.Bead, projectPath, repoName, reason string) 
 //	3 – timeout / deadline exceeded
 //	4 – infrastructure (network, daemon lock, permissions, etc.)
 //	5 – stub / placeholder detected
+//	6 – quota / billing limit exhausted (long cooldown, not a failover)
 func classifyFailure(result *ExecutionResult) int {
 	if result == nil || result.Success {
 		return 0
@@ -2044,10 +2043,14 @@ func classifyFailure(result *ExecutionResult) int {
 	}
 	err := strings.ToLower(result.Error)
 	switch {
+	// Quota/billing exhaustion gets its own code so the daemon can apply a long
+	// cooldown instead of a rate-limit failover: a 429 clears in seconds, a
+	// billing limit clears when the cycle rolls over.
+	case isQuotaError(err):
+		return 6
 	case strings.Contains(err, "rate_limit") ||
 		strings.Contains(err, "token plan") ||
-		strings.Contains(err, "429") ||
-		isQuotaError(err):
+		strings.Contains(err, "429"):
 		return 2
 	case strings.Contains(err, "timeout") ||
 		strings.Contains(err, "deadline exceeded"):

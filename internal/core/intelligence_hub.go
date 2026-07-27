@@ -69,7 +69,7 @@ func (h *IntelligenceHub) Initialize() {
 			hindsight.WithBaseURL(h.config.Hindsight.BaseURL),
 			hindsight.WithTimeout(h.config.Hindsight.Timeout),
 			hindsight.WithDefaultLimit(h.config.Hindsight.Limit),
-			hindsight.WithMinScore(h.config.Hindsight.MinScore),
+			hindsight.WithMaxTokens(h.config.Hindsight.MaxTokens),
 			hindsight.WithEnabled(true),
 		)
 		log.Printf("[IntelligenceHub] Hindsight client initialized (baseURL: %s)", h.config.Hindsight.BaseURL)
@@ -78,7 +78,7 @@ func (h *IntelligenceHub) Initialize() {
 		os.Setenv("HYDRA_HISTORIESIGHT_BASE_URL", h.config.Hindsight.BaseURL)
 		os.Setenv("HYDRA_HISTORIESIGHT_TIMEOUT", h.config.Hindsight.Timeout.String())
 		os.Setenv("HYDRA_HISTORIESIGHT_LIMIT", fmt.Sprintf("%d", h.config.Hindsight.Limit))
-		os.Setenv("HYDRA_HISTORIESIGHT_MIN_SCORE", fmt.Sprintf("%.2f", h.config.Hindsight.MinScore))
+		os.Setenv("HYDRA_HISTORIESIGHT_MAX_TOKENS", fmt.Sprintf("%d", h.config.Hindsight.MaxTokens))
 
 		h.batchRetentionSvc = services.NewBatchRetentionService(h.hindsightClient)
 		log.Printf("[IntelligenceHub] Batch retention service initialized")
