@@ -249,11 +249,17 @@ type GPTCacheConfig struct {
 
 // HindsightConfig contains Hindsight memory service settings
 type HindsightConfig struct {
-	Enabled  bool          `yaml:"enabled"`
-	BaseURL  string        `yaml:"base_url"`
-	Timeout  time.Duration `yaml:"timeout"`
-	Limit    int           `yaml:"limit"`
-	MinScore float64       `yaml:"min_score"`
+	Enabled bool          `yaml:"enabled"`
+	BaseURL string        `yaml:"base_url"`
+	Timeout time.Duration `yaml:"timeout"`
+	Limit   int           `yaml:"limit"`
+
+	// MaxTokens bounds the recalled context by token budget. This replaces the
+	// former min_score, which the recall API does not accept and therefore
+	// silently ignored — every recall returned the whole bank (~80KB) and the
+	// client discarded most of it unfiltered. Measured: max_tokens=800 cuts the
+	// recall response from ~80KB to ~16KB.
+	MaxTokens int `yaml:"max_tokens"`
 }
 
 // OverseerConfig contains overseer-specific settings
@@ -426,11 +432,11 @@ func DefaultConfig() *Config {
 				ServerURL: "http://127.0.0.1:8788",
 			},
 			Hindsight: HindsightConfig{
-				Enabled:  true,
-				BaseURL:  "http://127.0.0.1:8000",
-				Timeout:  10 * time.Second,
-				Limit:    5,
-				MinScore: 0.7,
+				Enabled:   true,
+				BaseURL:   "http://127.0.0.1:8000",
+				Timeout:   10 * time.Second,
+				Limit:     5,
+				MaxTokens: 800,
 			},
 			SettledState: DefaultSettledStateConfig(),
 			Patterns: PatternConfig{

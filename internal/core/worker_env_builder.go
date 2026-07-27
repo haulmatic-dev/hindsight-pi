@@ -85,7 +85,7 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 			fmt.Sprintf("HYDRA_HISTORIESIGHT_BASE_URL=%s", h.BaseURL),
 			fmt.Sprintf("HYDRA_HISTORIESIGHT_TIMEOUT=%s", h.Timeout),
 			fmt.Sprintf("HYDRA_HISTORIESIGHT_LIMIT=%d", h.Limit),
-			fmt.Sprintf("HYDRA_HISTORIESIGHT_MIN_SCORE=%.2f", h.MinScore),
+			fmt.Sprintf("HYDRA_HISTORIESIGHT_MAX_TOKENS=%d", h.MaxTokens),
 		)
 		log.Printf("[Worker] Hindsight config passed to worker (baseURL: %s)", h.BaseURL)
 	}
@@ -138,7 +138,7 @@ func (b *WorkerEnvBuilder) BuildForContextEnrichment(bead types.Bead) []string {
 			fmt.Sprintf("HYDRA_HISTORIESIGHT_BASE_URL=%s", h.BaseURL),
 			fmt.Sprintf("HYDRA_HISTORIESIGHT_TIMEOUT=%s", h.Timeout),
 			fmt.Sprintf("HYDRA_HISTORIESIGHT_LIMIT=%d", h.Limit),
-			fmt.Sprintf("HYDRA_HISTORIESIGHT_MIN_SCORE=%.2f", h.MinScore),
+			fmt.Sprintf("HYDRA_HISTORIESIGHT_MAX_TOKENS=%d", h.MaxTokens),
 		)
 	}
 

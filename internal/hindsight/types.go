@@ -25,8 +25,9 @@ type HindsightConfig struct {
 	// DefaultLimit for search results
 	DefaultLimit int `yaml:"default_limit"`
 
-	// MinScore is the minimum relevance threshold
-	MinScore float64 `yaml:"min_score"`
+	// MaxTokens bounds recalled context by token budget (the recall API's real
+	// control; min_score was never a supported field).
+	MaxTokens int `yaml:"max_tokens"`
 }
 
 // ExecutionMemory represents a structured record of a bead's execution outcome.
