@@ -163,6 +163,18 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   Target Files from the target clone.
 
 ### Fixed
+- Hindsight recall was sending parameters the API does not accept. The client
+  posted `limit`, `min_score`, `days_back` and `bank_id`, but the recall
+  endpoint's schema (v0.6.2) accepts only `query`, `types`, `budget`,
+  `max_tokens`, `trace`, `query_timestamp`, `include`, `tags`, `tags_match`,
+  `tag_groups` — so all four were silently dropped. Every recall therefore
+  returned the **entire** memory bank (measured: 49 memories, ~80KB) and the
+  client kept the first few with **no quality filtering**, while
+  `min_score: 0.7` sat in the config implying a filter that never ran. The
+  request now uses `max_tokens` (the API's real size control), configurable via
+  `intelligence.hindsight.max_tokens` and `HYDRA_HISTORIESIGHT_MAX_TOKENS`,
+  default 800. Measured against the live API: **80,517 B → 15,736 B per
+  recall**. A test pins the request body so the phantom fields cannot return.
 - The prd-lint **preflight was missing from the repository**: PR #72 shipped
   `tools/prd-lint` but not the `cli.mjs` wiring that invokes it, so a fresh
   clone or deploy silently had no PRD gate. Cause: the staging command
