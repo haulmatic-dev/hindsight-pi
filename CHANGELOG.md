@@ -172,6 +172,17 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   Target Files from the target clone.
 
 ### Fixed
+- Hindsight recall no longer filters by bead type, which had silently switched
+  off the recall half of the learning loop. Hindsight's `types` are memory kinds
+  (`experience`, `observation`, `world`); bead types (`compliance`, TDD phases)
+  match none of them. The old code sent the bead type under the singular key
+  `type`, which the API does not accept, so it was dropped and recall stayed
+  unfiltered — correcting the key to `types` in this same branch activated a
+  filter that had never actually run. Measured on the live bank: no filter → 12
+  results, `types:["compliance"]` → 0. Every worker after the mid-run deploy went
+  from `Retrieved 5 relevant memories` to `No relevant memories found`, with no
+  error logged anywhere. Caught by comparing pre/post-deploy worker logs, not by
+  a test — so there is now a test asserting the request carries no `types` key.
 - Quota exhaustion now pauses the fleet instead of hammering the provider.
   Three compounding defects: (1) `RecordRateLimit` only opened a circuit when a
   fallback was configured; (2) an open circuit merely changed provider

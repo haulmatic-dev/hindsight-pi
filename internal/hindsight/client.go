@@ -69,6 +69,12 @@ type SearchRequest struct {
 
 	// Types optionally narrows which memory kinds are recalled (API field
 	// name is plural "types", not "type").
+	//
+	// The only valid values are Hindsight's own memory kinds — measured against
+	// the live bank: "experience", "observation", "world". These are NOT bead
+	// types. Passing a bead type ("compliance", "GREEN", "REFACTOR", …) matches
+	// zero memories and silently empties every recall; see the regression note
+	// on Search. Leave unset unless you are filtering by a value from that list.
 	Types []string `json:"types,omitempty"`
 }
 
@@ -270,12 +276,21 @@ func (c *Client) Search(query, beadType string, limit int) (*SearchResponse, err
 	// Bound the recall by token budget — the API's supported control. The old
 	// count/score fields were silently ignored, so every call pulled the whole
 	// bank and the client threw most of it away.
+	//
+	// beadType is deliberately NOT sent as a types filter. It reads like the
+	// obvious use for the field and it is wrong: Hindsight's types are memory
+	// kinds ("experience", "observation", "world"), not bead types. Sending the
+	// bead type matched nothing, and because the previous code sent the field
+	// under the wrong name ("type"), the API ignored it and no one noticed —
+	// fixing the name activated a filter that had never actually run. Measured
+	// on the live bank: no filter -> 12 results; types:["compliance"] -> 0.
+	// Deployed mid-run 2026-07-27, every worker went from "Retrieved 5 relevant
+	// memories" to "No relevant memories found" — the recall half of the
+	// learning loop, silently off. beadType still shapes the query text in
+	// SearchByBead, which is where it belongs.
 	reqBody := SearchRequest{
 		Query:     query,
 		MaxTokens: c.maxTokens,
-	}
-	if beadType != "" {
-		reqBody.Types = []string{beadType}
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
