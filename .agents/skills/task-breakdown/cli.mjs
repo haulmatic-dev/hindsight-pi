@@ -3,22 +3,29 @@
 /**
  * CLI Wrapper for TaskBreakdownRunner
  *
- * Usage: node cli.mjs <prd-path> [--json] [--session-id <id>]
+ * Usage: node cli.mjs <prd-path> [--json] [--session-id <id>] [--no-lint]
  * Example: node cli.mjs docs/PRD/calculator.md
  * Example: node cli.mjs docs/PRD/calculator.md --json
  * Example: node cli.mjs docs/PRD/calculator.md --json --session-id my-session
  */
 
-import path from 'path';
+import path from 'node:path';
+import { runPreflight } from './preflight.mjs';
 import { TaskBreakdownRunner } from './runner.mjs';
 
-// Parse command line arguments
+/**
+ * Parse command line arguments into an options object.
+ *
+ * @param {string[]} argv - Raw process.argv array.
+ * @returns {{prdPath: string|null, json: boolean, sessionId: string|null, noLint: boolean}} Parsed options.
+ */
 function parseArgs(argv) {
   const args = argv.slice(2);
   const options = {
     prdPath: null,
     json: false,
     sessionId: null,
+    noLint: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -26,6 +33,8 @@ function parseArgs(argv) {
 
     if (arg === '--json') {
       options.json = true;
+    } else if (arg === '--no-lint') {
+      options.noLint = true;
     } else if (arg === '--session-id') {
       options.sessionId = args[++i];
     } else if (!arg.startsWith('--') && !options.prdPath) {
@@ -36,7 +45,12 @@ function parseArgs(argv) {
   return options;
 }
 
-// Validate required arguments
+/**
+ * Validate that the parsed CLI options contain a PRD path.
+ *
+ * @param {{prdPath: string|null}} options - Parsed CLI options.
+ * @returns {{valid: boolean, message?: string}} Validation result.
+ */
 function validateArgs(options) {
   if (!options.prdPath) {
     return { valid: false, message: 'PRD file path is required' };
@@ -44,7 +58,12 @@ function validateArgs(options) {
   return { valid: true };
 }
 
-// Generate session ID if not provided
+/**
+ * Return the provided session ID or generate a new one based on the current timestamp.
+ *
+ * @param {string|null} providedId - Session ID supplied by the user, if any.
+ * @returns {string} Session ID to use.
+ */
 function getSessionId(providedId) {
   if (providedId) {
     return providedId;
@@ -52,26 +71,61 @@ function getSessionId(providedId) {
   return `cli-${Date.now()}`;
 }
 
-// Main execution
+/**
+ * Emit a structured event in JSON mode.
+ *
+ * @param {Object} options - Parsed CLI options.
+ * @param {string} type - Event type.
+ * @param {Object} [extra] - Additional event fields.
+ */
+function emitEvent(options, type, extra = {}) {
+  if (options.json) {
+    console.log(JSON.stringify({ type, timestamp: Date.now(), ...extra }));
+  }
+}
+
+/**
+ * Report the outcome of the prd-lint preflight.
+ *
+ * @param {Object} options - Parsed CLI options.
+ * @param {import('./preflight.mjs').PreflightResult} preflight
+ */
+function reportPreflightOutcome(options, preflight) {
+  if (preflight.status === 'passed') {
+    emitEvent(options, 'lint:passed');
+    return;
+  }
+
+  if (preflight.status === 'skipped') {
+    const extra = preflight.output ? { warning: preflight.reason } : {};
+    emitEvent(options, 'lint:skipped', extra);
+
+    if (!options.json) {
+      console.log(`${preflight.reason} — skipping preflight`);
+    }
+  }
+}
+
+/**
+ * Main CLI entry point: parse arguments, run preflight, and execute the runner.
+ *
+ * @returns {Promise<void>}
+ */
 async function main() {
   const options = parseArgs(process.argv);
   const validation = validateArgs(options);
 
   if (!validation.valid) {
     if (options.json) {
-      console.log(
-        JSON.stringify({
-          type: 'error',
-          timestamp: Date.now(),
-          error: validation.message,
-          code: 'MISSING_ARGUMENT',
-        }),
-      );
+      emitEvent(options, 'error', {
+        code: 'MISSING_ARGUMENT',
+        error: validation.message,
+      });
     } else {
       console.error('❌ Error:', validation.message);
       console.error('');
       console.error(
-        'Usage: node cli.mjs <prd-path> [--json] [--session-id <id>]',
+        'Usage: node cli.mjs <prd-path> [--json] [--session-id <id>] [--no-lint]',
       );
       console.error('Example: node cli.mjs docs/PRD/calculator.md');
       console.error('Example: node cli.mjs docs/PRD/calculator.md --json');
@@ -80,6 +134,31 @@ async function main() {
   }
 
   const absolutePath = path.resolve(options.prdPath);
+
+  // Run prd-lint preflight before constructing the runner.
+  const preflight = runPreflight({
+    prdPath: absolutePath,
+    noLint: options.noLint,
+  });
+
+  if (preflight.status === 'failed') {
+    if (options.json) {
+      emitEvent(options, 'error', {
+        code: 'PRD_LINT_FAILED',
+        error: preflight.output,
+      });
+    } else {
+      console.error('❌ PRD lint failed');
+      console.error(preflight.output);
+    }
+    process.exit(1);
+  }
+
+  // Report fail-open outcomes (and clean passes in JSON mode).
+  if (!options.noLint) {
+    reportPreflightOutcome(options, preflight);
+  }
+
   const sessionId = getSessionId(options.sessionId);
 
   const runner = new TaskBreakdownRunner({
@@ -258,15 +337,11 @@ async function main() {
     exitCode = 1;
 
     if (options.json) {
-      console.log(
-        JSON.stringify({
-          type: 'error',
-          timestamp: Date.now(),
-          error: error.message,
-          stack: error.stack,
-          code: 'RUNNER_ERROR',
-        }),
-      );
+      emitEvent(options, 'error', {
+        code: 'RUNNER_ERROR',
+        error: error.message,
+        stack: error.stack,
+      });
     } else {
       console.error('\n❌ Task Breakdown Failed!');
       console.error('Error:', error.message);

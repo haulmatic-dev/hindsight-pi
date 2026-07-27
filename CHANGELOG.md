@@ -159,6 +159,19 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   Target Files from the target clone.
 
 ### Fixed
+- The prd-lint **preflight was missing from the repository**: PR #72 shipped
+  `tools/prd-lint` but not the `cli.mjs` wiring that invokes it, so a fresh
+  clone or deploy silently had no PRD gate. Cause: the staging command
+  addressed the skill through `pi-config/skills/…`, which is a **symlink** to
+  `.agents/skills/`, and `git add` refuses paths "beyond a symbolic link" —
+  the fatal error was swallowed by a `2>/dev/null`, so the omission looked
+  like success. Now committed via the real path, with `preflight.mjs` and its
+  test suite.
+- `tools/hydra-compliance-analyzer/main_test.go` (the analyzer-wiring test from
+  the security-scan PRD) built `security-scan` by package path from the repo
+  root, but that tool is its own module — the test panicked with "main module
+  does not contain package". It now builds from inside the module directory
+  with an absolute output path.
 - Quota exhaustion is now classified as **infrastructure**, not a code
   failure. Kimi returns an exhausted billing quota as HTTP 403 with a
   `permission_error`/`access_terminated_error` payload, which the existing
