@@ -37,6 +37,8 @@ type Hit struct {
 //   - escalation: internal/core/bead_closer.go:397
 //   - worker-timeout: internal/core/agent_worker.go:139
 //   - max-cycles: internal/core/compliance_cycle.go:168
+//   - orphan-recovery: internal/core/charon.go
+//   - quota-exhausted: br / API 403 usage-limit responses
 func DefaultSignatures() []Signature {
 	return []Signature{
 		{Key: "empty-diff", Marker: "(empty-diff)", Severity: "critical", Threshold: 3},
@@ -46,6 +48,8 @@ func DefaultSignatures() []Signature {
 		{Key: "escalation", Marker: "escalating to human", Severity: "warning", Threshold: 1},
 		{Key: "worker-timeout", Marker: "exceeded timeout", Severity: "warning", Threshold: 3},
 		{Key: "max-cycles", Marker: "MAX CYCLES", Severity: "warning", Threshold: 1},
+		{Key: "orphan-recovery", Marker: "reopened orphan bead", Severity: "warning", Threshold: 3},
+		{Key: "quota-exhausted", Marker: "usage limit", Severity: "critical", Threshold: 1},
 	}
 }
 

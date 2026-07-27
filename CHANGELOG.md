@@ -18,6 +18,10 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   `cycle_model`) all work. Includes the protocol lesson that model failures
   hide inside the message (`stopReason: "error"`), so an envelope-only client
   reports an expired key as a passing turn.
+- Observer signatures for `orphan-recovery` (threshold 3 — one recovery is
+  hygiene, a burst means workers are dying) and `quota-exhausted` (threshold 1),
+  so both classes surface within one polling interval.
+  *Authored by a Hydra dogfood run.*
 - Gap adjudication can now be routed to a stronger model at maximum reasoning
   effort (`compliance_cycle.adjudicator_thinking`, alongside the existing
   `adjudicator_model`). Adjudication is the one high-consequence, low-volume
@@ -172,6 +176,18 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   root, but that tool is its own module — the test panicked with "main module
   does not contain package". It now builds from inside the module directory
   with an absolute output path.
+- Orphan bead recovery, three defects in one path: it ran **after** the
+  cleanup cycle's `len(trackedWorkers) == 0` early return, so it was
+  unreachable in exactly the situation it exists for (a 65-minute dead stall in
+  dogfood run D, beads reopened by hand); its documented 5-minute grace was
+  read into a log string but never compared against anything; and it
+  force-**closed** incomplete work with `--force`, marking undone beads done and
+  unblocking dependents — the failure class the verified-close gate exists to
+  prevent. Recovery now runs before the early return, skips beads younger than
+  the grace (and beads with no `UpdatedAt`, rather than acting blind), and
+  **reopens** via `UpdateBeadStatus(StatusOpen)` — the same path
+  `rejectClose` uses — so the scheduler re-attempts the work.
+  *Authored by a Hydra dogfood run.*
 - Quota exhaustion is now classified as **infrastructure**, not a code
   failure. Kimi returns an exhausted billing quota as HTTP 403 with a
   `permission_error`/`access_terminated_error` payload, which the existing
