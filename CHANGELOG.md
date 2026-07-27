@@ -8,6 +8,32 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- Pi rpc mode is now actually wired to the worker execution path. `agents.pi.mode`
+  previously existed, parsed, and had a tested `RPCEnabled()` accessor while
+  changing nothing: beads run in a separate `hydra-worker` process that
+  hand-builds its own `pi --offline --no-session` command, so the daemon's mode
+  never reached the process that spawns Pi (and `spawnWorkerViaAgent`, the only
+  in-daemon caller of the rpc connector, is dead code). `buildPiEnv` now forwards
+  `HYDRA_PI_MODE` / `HYDRA_PI_RPC_AUTO_CONFIRM`, and the worker drives the rpc
+  protocol: keeps stdin open (UI-ask replies travel back over it — closing it is
+  what made earlier attempts hang), reads the verdict from the event stream
+  rather than the exit code (the worker kills Pi itself after `agent_end`, since
+  Pi waits for another prompt instead of exiting), treats an `agent_end` carrying
+  `stopReason: error` as a failure, and logs per-bead token counts from
+  `get_session_stats`. Text mode is untouched and remains the default.
+  Verified end-to-end on the VPS: `--mode rpc` in the argv, `agent_end` reached,
+  file actually written by the model, worker exit 0.
+- **Measured, and it does not yet pay off.** Same bead, three configs:
+  rpc with the worker config dir → 10,194 tokens / 18.0s / **no extensions
+  loaded**; rpc without it → 61,711 tokens / 87.8s / extensions **loaded**
+  (`notify=3 setStatus=4 setWidget=1`); text mode → 14.7s. The premise for rpc
+  was that rtk/context-mode/caveman cut tokens; loading them cost **6x more
+  tokens and ~5x more wall-clock** on this task. Cause of the split: setting
+  `HYDRA_PI_CONFIG_DIR` makes the worker export `PI_CODING_AGENT_DIR`, and with
+  that set `pi list` reports "No packages installed" — so today a worker can have
+  its skill flags **or** its extensions, not both. Do not enable
+  `agents.pi.mode: rpc` expecting savings until that is resolved and measured on
+  real beads.
 - Pi connector can speak pi's rpc JSONL protocol (`agents.pi.mode: rpc`,
   default text). This is Phase 0: the connector answers `extension_ui_request`
   asks — previously ignored entirely, which is why every rpc attempt hung once
