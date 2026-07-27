@@ -87,3 +87,5 @@ internal/integration/.hydra/
 .pi/
 tools/security-scan/security-scan
 tools/prd-lint/prd-lint
+tools/pi-rpc/pi-rpc
+tools/pi-rpc/pi-rpc-linux

@@ -8,6 +8,16 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- `tools/pi-rpc`: standalone client for `pi --mode rpc`, isolated from the
+  daemon, proving what rpc mode offers before any hydra change. Verified live:
+  pi's extensions **do** initialise in rpc mode and rtk rewrites commands
+  (`RTK rewrite: git status --short -> rtk git status --short`) — whereas the
+  piped text mode hydra uses initialises none of them; and the session-control
+  commands (`get_state`, `get_session_stats` with real token counts,
+  `get_last_assistant_text`, `get_available_models`, plus `abort`, `follow_up`,
+  `cycle_model`) all work. Includes the protocol lesson that model failures
+  hide inside the message (`stopReason: "error"`), so an envelope-only client
+  reports an expired key as a passing turn.
 - Gap adjudication can now be routed to a stronger model at maximum reasoning
   effort (`compliance_cycle.adjudicator_thinking`, alongside the existing
   `adjudicator_model`). Adjudication is the one high-consequence, low-volume
