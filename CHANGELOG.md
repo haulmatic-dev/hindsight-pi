@@ -8,6 +8,14 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- `tools/hydra-observer` (self-improvement roadmap Phase 1, deterministic
+  core): scans the daemon log for known failure signatures (empty-diff storms,
+  stuck workers, panics, blocked users, escalations, timeouts, max-cycles),
+  compares hydra-eval metrics against a stored baseline (one-shot-rate drops,
+  zero-accept runs), and writes fingerprint-deduplicated ranked backlog
+  entries. Observation only — no production mutation. Exit-signal verified:
+  replaying the 2026-07-22 empty-diff incident produces one critical backlog
+  entry; re-runs produce zero duplicates. *Authored by a Hydra dogfood run.*
 - Security scan gate: `tools/security-scan` wraps gitleaks + govulncheck and
   emits analyzer-schema gaps (secret values redacted, fail-open when scanners
   are missing); wired into `hydra-compliance-analyzer` as an always-on

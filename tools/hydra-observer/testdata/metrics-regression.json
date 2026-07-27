@@ -1,0 +1,15 @@
+{
+  "total_beads": 10,
+  "closed_beads": 5,
+  "verified_accepts": 5,
+  "failed_closes": 1,
+  "one_shot_accepts": 2,
+  "one_shot_rate": 0.5,
+  "stuck_worker_kills": 0,
+  "scope_warnings": 0,
+  "wall_clock_seconds": 100,
+  "beads_by_type": {
+    "implement": 5,
+    "test": 5
+  }
+}
