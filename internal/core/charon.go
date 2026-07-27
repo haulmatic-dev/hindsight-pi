@@ -148,6 +148,14 @@ func (j *Charon) performCleanup() {
 	trackedWorkers := j.workerTracker.GetRunningWorkerRecords()
 	log.Printf("[Charon] 📊 Found %d tracked Hydra workers in database", len(trackedWorkers))
 
+	// Recover orphan in_progress beads BEFORE the no-tracked-workers early return.
+	// A worker crash mid-execution leaves beads in_progress with no live worker
+	// and no tracked PID; the only way to unblock the swarm is to reopen them.
+	recovered := j.recoverOrphanInProgressBeads()
+	if recovered > 0 {
+		log.Printf("[Charon] 🔧 Recovered %d orphan in_progress beads (reopened orphan bead for retry)", recovered)
+	}
+
 	if len(trackedWorkers) == 0 {
 		log.Printf("[Charon] ✅ No tracked workers to check")
 		return
@@ -253,14 +261,6 @@ func (j *Charon) performCleanup() {
 		log.Printf("[Charon] 🧹 Cleanup complete: killed %d processes (orphans + stuck)", killCount)
 	} else {
 		log.Printf("[Charon] ✅ No orphaned or stuck workers found")
-	}
-
-	// Recover orphan in_progress beads: beads marked in_progress but with no live worker.
-	// Without this, a worker crash mid-execution would leave the bead stuck forever,
-	// blocking all downstream beads whose DAG depends on it.
-	recovered := j.recoverOrphanInProgressBeads()
-	if recovered > 0 {
-		log.Printf("[Charon] 🔧 Recovered %d orphan in_progress beads (force-closed with --force)", recovered)
 	}
 
 	// Clean up stale in-memory worker entries. The persistent worker tracker
@@ -392,8 +392,9 @@ func (j *Charon) collectProjects() []types.Project {
 
 // recoverOrphanInProgressBeads force-closes beads that are stuck in_progress with no
 // live worker. This happens when a worker crashes mid-execution (e.g. API timeout,
-// OOM, network error) and the closeBead path fails to persist the closed state —
-// typically because br close refuses to close a bead while its children are open.
+// OOM, network error) and the update-status path is the safe way to put it
+// back on the scheduler: reopening the bead keeps dependents blocked until the
+// work is actually redone, whereas closing would mark incomplete work as done.
 //
 // Without this recovery, a single stuck in_progress bead blocks all downstream beads
 // whose DAG depends on it, indefinitely stalling the swarm.
@@ -439,19 +440,31 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 
 			j.stats.OrphanInProgressBeads++
 
-			reason := fmt.Sprintf("orphan: in_progress bead with no live worker (grace %v)", grace)
+			// Fail-closed on the destructive decision: without a usable timestamp we
+			// cannot know whether the bead is older than the grace period, so we
+			// must not race a worker that has spawned but not yet registered.
+			if bead.UpdatedAt.IsZero() {
+				log.Printf("[Charon] ⚠️  Skipping orphan recovery for bead %s: no UpdatedAt timestamp", beadIDStr)
+				continue
+			}
+			if age := time.Since(bead.UpdatedAt); age < grace {
+				log.Printf("[Charon] ⏳ Bead %s is only %v old, within %v grace period; leaving in_progress", beadIDStr, age, grace)
+				continue
+			}
+
 			log.Printf("[Charon] 🔧 Recovering orphan in_progress bead %s (project: %s)", beadIDStr, project.Path)
 
-			// Use CloseBead which now retries with --force when the bead has open children.
-			if err := j.beadsClient.CloseBead(project.Path, "", bead.ID, reason); err != nil {
-				log.Printf("[Charon] ❌ Failed to recover orphan bead %s: %v", beadIDStr, err)
+			// Reopen the bead so the scheduler retries it. Never close here: closing
+			// would mark incomplete work as done and falsely unblock dependents.
+			if err := j.beadsClient.UpdateBeadStatus(project.Path, bead.ID, types.StatusOpen); err != nil {
+				log.Printf("[Charon] ❌ Failed to reopen orphan bead %s: %v", beadIDStr, err)
 				continue
 			}
 
 			j.stats.OrphanBeadsRecovered++
 			j.stats.LastOrphanBeadTime = time.Now()
 			recovered++
-			log.Printf("[Charon] ✅ Recovered orphan bead %s", beadIDStr)
+			log.Printf("[Charon] ✅ reopened orphan bead %s for retry", beadIDStr)
 		}
 	}
 

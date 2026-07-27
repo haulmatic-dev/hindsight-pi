@@ -99,6 +99,13 @@ flowchart TD
 | Middle (learning) | ✅ closed | CASS rules + Hindsight memories + Reflexion persist across runs | none | leak to fix: feed gate/adjudicator verdicts into CASS/Hindsight |
 | Outer (meta) | ✅ topology closed; cadence human | every merged improvement changes the daemon that runs the next loop | detect/diagnose · PRD authoring · merge+deploy | Observer (PRD exists) → Proposer (roadmap) → merge stays human; deploy gains canary+rollback (roadmap Phase 3) |
 
+**Resilience note (2026-07-27):** a daemon restart used to orphan in-flight
+beads permanently — Charon's recovery was unreachable whenever no workers were
+tracked, which is precisely when orphans exist. That is fixed: recovery now
+runs every cleanup cycle and **reopens** orphaned beads (it previously
+force-closed them, silently unblocking dependents on unfinished work). A
+mid-run restart is therefore survivable, and worth testing deliberately.
+
 **Verdict:** the system is a closed compounding loop at the topology level —
 each loop's output verifiably feeds a later iteration's input. Cadence of the
 outer loop is currently human-limited at three links; the Observer and
