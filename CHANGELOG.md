@@ -163,6 +163,19 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   Target Files from the target clone.
 
 ### Fixed
+- Quota exhaustion now pauses the fleet instead of hammering the provider.
+  Three compounding defects: (1) `RecordRateLimit` only opened a circuit when a
+  fallback was configured; (2) an open circuit merely changed provider
+  *selection* — `chooseLocked` ends with "nothing better to offer than the
+  primary", so it never gated spawning; (3) the deployed config sets
+  `fallback_provider` equal to the primary, making failover a no-op by
+  construction. Net effect observed 2026-07-27: the fleet spawned 2-3
+  workers/minute for hours against a dead quota, each spawn a full prompt build
+  plus a rejected call. Quota now classifies as its own exit code (6, still
+  infrastructure so no fix beads), opens the circuit on the FIRST occurrence,
+  and the scheduler consults `ProviderBreaker.ShouldPause()` before spawning —
+  a 30-minute cooldown, because a billing limit clears on cycle rollover, not
+  in seconds like a 429.
 - Hindsight recall was sending parameters the API does not accept. The client
   posted `limit`, `min_score`, `days_back` and `bank_id`, but the recall
   endpoint's schema (v0.6.2) accepts only `query`, `types`, `budget`,

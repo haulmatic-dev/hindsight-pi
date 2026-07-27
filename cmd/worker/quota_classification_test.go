@@ -38,14 +38,15 @@ func TestIsQuotaError(t *testing.T) {
 	}
 }
 
-// Quota exhaustion must classify as exit code 2 (infrastructure), which the
-// daemon's isInfrastructureExitCode recognises so it does NOT create a fix
-// bead. Exit 1 is what caused the fix-bead cascade.
-func TestClassifyFailure_QuotaIsInfrastructure(t *testing.T) {
+// Quota exhaustion classifies as exit code 6: infrastructure (so it never
+// spawns a fix bead) and distinct from 2/rate-limit, so the daemon can apply a
+// long cooldown instead of a pointless provider failover. A 429 clears in
+// seconds; a billing limit clears on cycle rollover.
+func TestClassifyFailure_QuotaIsItsOwnInfraCode(t *testing.T) {
 	for _, payload := range []string{kimiQuota403, kimiQuota403Alt} {
 		got := classifyFailure(&ExecutionResult{Success: false, Error: payload})
-		if got != 2 {
-			t.Errorf("classifyFailure(quota) = %d, want 2 (infrastructure); payload: %.60s", got, payload)
+		if got != 6 {
+			t.Errorf("classifyFailure(quota) = %d, want 6 (quota cooldown); payload: %.60s", got, payload)
 		}
 	}
 }

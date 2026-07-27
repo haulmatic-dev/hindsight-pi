@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -115,6 +116,17 @@ func (s *Scheduler) Tick() error {
 	if availableSlots <= 0 {
 		log.Printf("📊 All worker slots filled (%d/%d), skipping bead discovery", activeCount, maxWorkers)
 		return nil
+	}
+
+	// Provider cooldown: when the active provider's circuit is open and there is
+	// no distinct fallback to use, spawning only produces rejected API calls.
+	// Without this gate an exhausted quota kept the fleet spawning 2-3
+	// workers/minute for hours (observed 2026-07-27).
+	if o.providerBreaker != nil {
+		if paused, remaining := o.providerBreaker.ShouldPause(); paused {
+			log.Printf("⏸️  Provider cooldown active — skipping spawns for %s", remaining.Round(time.Second))
+			return nil
+		}
 	}
 
 	// Build/refresh DAG from all beads
@@ -255,7 +267,6 @@ func (s *Scheduler) Tick() error {
 
 	return nil
 }
-
 
 // TriggerImmediateSchedule spawns workers for ready beads without waiting for next poll.
 func (s *Scheduler) TriggerImmediateSchedule() {

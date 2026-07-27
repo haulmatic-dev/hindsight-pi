@@ -98,6 +98,66 @@ func (b *ProviderBreaker) Override(provider, model string) (string, string) {
 	return provider, model
 }
 
+// quotaCooldown is how long to stop spawning after the provider reports an
+// exhausted billing quota. Unlike a 429 — which clears in seconds — a quota
+// limit clears when the billing cycle rolls over, so retrying sooner is
+// guaranteed waste. Observed 2026-07-27: with no cooldown the fleet kept
+// spawning 2-3 workers/minute for hours against a dead quota, each spawn a
+// full prompt build plus a rejected API call.
+const quotaCooldown = 30 * time.Minute
+
+// RecordQuotaExhausted opens the active provider's circuit for a long cooldown
+// after a billing-quota rejection (HTTP 403 "usage limit").
+//
+// Deliberately different from RecordRateLimit in two ways: it opens on the
+// FIRST occurrence (a quota rejection is unambiguous — there is nothing to
+// distinguish from noise), and it opens even when no distinct fallback exists,
+// because the remedy for exhausted quota is waiting, not switching provider.
+func (b *ProviderBreaker) RecordQuotaExhausted() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	prov, _ := b.chooseLocked()
+	if prov == "" {
+		return
+	}
+	if !b.isOpenLocked(prov) {
+		log.Printf("[ProviderBreaker] quota exhausted on %s — pausing spawns for %s", prov, quotaCooldown)
+	}
+	b.openUntil[prov] = time.Now().Add(quotaCooldown)
+}
+
+// ShouldPause reports whether the scheduler should stop spawning workers
+// entirely, and for how long.
+//
+// This is the gate the breaker previously lacked. Choose/Override only ever
+// SELECT a provider; when every candidate's circuit is open they fall back to
+// returning the primary anyway ("nothing better to offer"), so an open circuit
+// changed nothing and the fleet kept hammering a provider that was rejecting
+// every call. Worse, the deployed config sets fallback_provider equal to the
+// primary, making failover a no-op by construction.
+func (b *ProviderBreaker) ShouldPause() (bool, time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.primaryProvider == "" {
+		return false, 0
+	}
+	// A distinct, usable fallback means work can still proceed.
+	if b.fallbackProvider != "" && b.fallbackProvider != b.primaryProvider &&
+		!b.isOpenLocked(b.fallbackProvider) {
+		return false, 0
+	}
+	until, ok := b.openUntil[b.primaryProvider]
+	if !ok {
+		return false, 0
+	}
+	if remaining := time.Until(until); remaining > 0 {
+		return true, remaining
+	}
+	return false, 0
+}
+
 // RecordRateLimit records a rate-limit failure against the currently-active
 // provider and opens its circuit once the threshold is reached within the
 // window. No-op when no fallback is configured (nowhere to fail over to).
