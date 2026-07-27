@@ -156,6 +156,36 @@ func (cm *ComplianceCycleManager) adjudicateGaps(gapReportPath string) (filtered
 // rather than the RPC connector, which returned not-Success in the daemon
 // context and forced every gap to "real". On any failure it still returns
 // "real" so a genuine gap is never silently dropped when the adjudicator breaks.
+// normalizeThinking canonicalises a configured reasoning-effort value. A
+// disabled level is NEVER emitted: the Kimi endpoint silently reroutes K3 and
+// K2.7 requests to the older K2.6 model when thinking is turned off (verified
+// against the official model docs, 2026-07-27), so asking for "none" would
+// quietly downgrade the model instead of saving anything. "low" is the
+// weakest level Hydra will send.
+func normalizeThinking(level string) string {
+	l := strings.ToLower(strings.TrimSpace(level))
+	if l == "none" || l == "off" || l == "disabled" {
+		return "low"
+	}
+	return l
+}
+
+// adjudicatorArgs builds the pi argv for an adjudication call. Extracted so the
+// model/thinking overrides are testable without spawning pi.
+func adjudicatorArgs(provider, model, thinking string) []string {
+	args := []string{"--no-session"}
+	if provider != "" {
+		args = append(args, "--provider", provider)
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if t := normalizeThinking(thinking); t != "" {
+		args = append(args, "--thinking-level", t)
+	}
+	return args
+}
+
 func (cm *ComplianceCycleManager) adjudicateGap(ctx context.Context, g gap) adjudication {
 	core := cm.overseer.config.Agents.Pi
 	model := core.Model
@@ -167,13 +197,7 @@ func (cm *ComplianceCycleManager) adjudicateGap(ctx context.Context, g gap) adju
 	if piPath == "" {
 		piPath = "pi"
 	}
-	args := []string{"--no-session"}
-	if core.Provider != "" {
-		args = append(args, "--provider", core.Provider)
-	}
-	if model != "" {
-		args = append(args, "--model", model)
-	}
+	args := adjudicatorArgs(core.Provider, model, cm.config.AdjudicatorThinking)
 
 	c := exec.CommandContext(ctx, piPath, args...)
 	c.Dir = cm.config.ProjectDir

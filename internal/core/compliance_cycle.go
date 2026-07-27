@@ -30,6 +30,15 @@ type ComplianceCycleConfig struct {
 	// empty, the configured agents.pi model is used.
 	AdjudicatorModel string `yaml:"adjudicator_model"`
 
+	// AdjudicatorThinking overrides the reasoning effort for the adjudication
+	// call. Valid values: "low", "high", "max" (the endpoint maps "medium" to
+	// "high"); empty inherits the agent default. Adjudication is the one
+	// high-consequence, low-volume judgment in the loop — a wrong verdict
+	// either drops a real defect or spawns a wasted bead chain — so it is the
+	// place where paying for maximum reasoning effort is justified, unlike the
+	// high-volume build phases.
+	AdjudicatorThinking string `yaml:"adjudicator_thinking"`
+
 	// ShipGate is the product-level acceptance gate run before a PRD is
 	// declared shippable (build/boot/e2e). Disabled by default.
 	ShipGate ShipGateConfig `yaml:"ship_gate"`

@@ -880,6 +880,38 @@ func executeWithRetry(
 	return result, fmt.Errorf("execution failed after %d attempts", result.Attempts)
 }
 
+// quotaErrorMarkers identify an exhausted API quota, billing limit, or
+// terminated access — infrastructure conditions that no code change and no
+// retry can fix. The generic rate-limit markers ("429", "rate_limit") do NOT
+// match these: Kimi returns quota exhaustion as HTTP 403 with a
+// permission_error / access_terminated_error payload (observed live
+// 2026-07-27, where it was misclassified as a code failure and spawned 36
+// useless fix beads, each retried 4x — a feedback loop that burned more of
+// the very quota that was already exhausted).
+var quotaErrorMarkers = []string{
+	"usage limit",
+	"billing cycle",
+	"quota",
+	"permission_error",
+	"access_terminated",
+	"insufficient_quota",
+	"upgrade your plan",
+}
+
+// isQuotaError reports whether the error text indicates an exhausted quota or
+// billing limit. Callers treat it as infrastructure: never retried inside the
+// worker (every attempt is another rejected call) and never turned into a fix
+// bead (the scheduler retries the bead with backoff instead).
+func isQuotaError(errStr string) bool {
+	s := strings.ToLower(errStr)
+	for _, m := range quotaErrorMarkers {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // shouldRetry determines if an error should be retried
 func shouldRetry(err error, attempt int, policy RetryPolicy) bool {
 	// Don't retry if we've exhausted all retries
@@ -888,6 +920,13 @@ func shouldRetry(err error, attempt int, policy RetryPolicy) bool {
 	}
 
 	if err == nil {
+		return false
+	}
+
+	// Quota/billing exhaustion: retrying only produces more rejected calls
+	// against an already-exhausted quota. Fail fast and let the scheduler
+	// back the bead off instead.
+	if isQuotaError(err.Error()) {
 		return false
 	}
 
@@ -2007,7 +2046,8 @@ func classifyFailure(result *ExecutionResult) int {
 	switch {
 	case strings.Contains(err, "rate_limit") ||
 		strings.Contains(err, "token plan") ||
-		strings.Contains(err, "429"):
+		strings.Contains(err, "429") ||
+		isQuotaError(err):
 		return 2
 	case strings.Contains(err, "timeout") ||
 		strings.Contains(err, "deadline exceeded"):
