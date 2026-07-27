@@ -45,16 +45,16 @@ Find existing code related to your task:
 
 ```bash
 # Search by task description
-hydra-llm-tldr search "<what you're implementing>" --limit 10
+llm-tldr search "<what you're implementing>" --limit 10
 
 # Search by functionality keywords
-hydra-llm-tldr search "<key functionality>"
+llm-tldr search "<key functionality>"
 ```
 
 **Example:**
 ```bash
-hydra-llm-tldr search "server lifecycle management" --limit 10
-hydra-llm-tldr search "embedded python process"
+llm-tldr search "server lifecycle management" --limit 10
+llm-tldr search "embedded python process"
 ```
 
 ### Step 3: Analyze Impact (Before Modifying)
@@ -62,12 +62,12 @@ hydra-llm-tldr search "embedded python process"
 If modifying existing files, check what depends on them:
 
 ```bash
-hydra-llm-tldr impact <file-path> --depth 2
+llm-tldr impact <file-path> --depth 2
 ```
 
 **Example:**
 ```bash
-hydra-llm-tldr impact cmd/hydra/main.go --depth 2
+llm-tldr impact cmd/hydra/main.go --depth 2
 ```
 
 ### Step 4: Document Your Findings
@@ -118,10 +118,10 @@ Document discovered files in your implementation summary:
 hindsight search "<task>" --limit 5
 
 # 3. Search code
-hydra-llm-tldr search "<query>" --limit 10
+llm-tldr search "<query>" --limit 10
 
 # 4. Check impact
-hydra-llm-tldr impact <file> --depth 2
+llm-tldr impact <file> --depth 2
 
 # 5. Save findings
 br note add <bead-id> "Files: ..."

@@ -208,6 +208,15 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   `intelligence.hindsight.max_tokens` and `HYDRA_HISTORIESIGHT_MAX_TOKENS`,
   default 800. Measured against the live API: **80,517 B → 15,736 B per
   recall**. A test pins the request body so the phantom fields cannot return.
+- The intelligence stack told every agent to run a binary that does not exist.
+  `AGENTS.md` and the `code-discovery` / `code-search-and-intelligence` skills
+  referenced `hydra-llm-tldr` (27 occurrences); the real binary is `llm-tldr`
+  (`/usr/local/bin/llm-tldr`, on the daemon user's PATH). `TLDRIndexer` had the
+  same wrong name as its fallback when no path is configured — and production
+  config sets no path, so the default was always used. Observed in a run G
+  worker: "`hydra-llm-tldr search` / `impact` failed with `EACCES` / function not
+  found; I relied on `grep`", i.e. the agent silently degraded to a worse tool
+  after burning turns on a command that could never work.
 - The prd-lint **preflight was missing from the repository**: PR #72 shipped
   `tools/prd-lint` but not the `cli.mjs` wiring that invokes it, so a fresh
   clone or deploy silently had no PRD gate. Cause: the staging command
