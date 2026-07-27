@@ -236,6 +236,13 @@ func TestPerformCleanup_RecoversOrphanWithZeroTrackedWorkers(t *testing.T) {
 	beadID := "test-orphan-cleanup"
 	charon, exec := setupOrphanCharon(t, beadListJSON(beadID, time.Now().Add(-10*time.Minute)), 5*time.Minute)
 
+	// Suppress the hourly worktree sweep: performCleanup launches it in a
+	// goroutine that outlives the call and keeps writing under the project
+	// path, which races t.TempDir()'s cleanup ("directory not empty" — this
+	// test failed ~25% of runs before this line). Pretending the sweep just
+	// ran keeps the test deterministic without weakening what it asserts.
+	charon.lastWorktreeGC = time.Now()
+
 	var buf bytes.Buffer
 	oldOutput := log.Writer()
 	oldFlags := log.Flags()
