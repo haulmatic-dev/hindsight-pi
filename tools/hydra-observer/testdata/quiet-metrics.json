@@ -1,0 +1,12 @@
+{
+  "total_beads": 0,
+  "closed_beads": 0,
+  "verified_accepts": 0,
+  "failed_closes": 0,
+  "one_shot_accepts": 0,
+  "one_shot_rate": 0,
+  "stuck_worker_kills": 0,
+  "scope_warnings": 0,
+  "wall_clock_seconds": 0,
+  "beads_by_type": {}
+}
