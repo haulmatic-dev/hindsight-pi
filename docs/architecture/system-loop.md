@@ -66,6 +66,32 @@ which gaps were false positives) are not fed back into CASS/Hindsight — only
 worker-level patterns are. The richest judgment data in the system currently
 evaporates.
 
+**This loop fails silently, and that is its most dangerous property.** On
+2026-07-27 a one-line change to Hindsight recall switched the entire read path
+off for every worker, and nothing in the system noticed. The recall API returned
+HTTP 200 with an empty result set, so workers logged the routine `No relevant
+memories found` and carried on with no prior experience. Beads still closed,
+gates still passed, metrics still looked healthy — the run simply stopped
+compounding. It was caught only by comparing worker logs either side of the
+deploy: every worker before it logged `Retrieved 5 relevant memories`, every
+worker after logged none.
+
+Two structural lessons for anyone touching this loop:
+
+1. **An empty recall is indistinguishable from a working recall** unless someone
+   compares across runs. There is no gate on "did the worker actually receive
+   memories," the way `RequireDiffOnClose` gates real code changes. Until there
+   is, a recall regression can survive indefinitely.
+2. **Correcting a wrong parameter name is not a safe rename.** The old code sent
+   the bead type as `type`, which the API ignored; renaming it to the real
+   `types` turned an inert parameter into an enforced filter, and bead types
+   match none of Hindsight's memory kinds (`experience`, `observation`, `world`).
+   The behaviour depended on being ignored.
+
+Recall latency is 3.4–4.0s measured against the live service, so any client
+built without an explicit timeout above that fails 100% of the time — also
+silently. The default is now 10s for that reason.
+
 ---
 
 ## 3. Outer loop — Meta (self-improvement; the loop that builds Hydra)

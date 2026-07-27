@@ -97,3 +97,40 @@ func TestSearchRequest_SendsOnlyAcceptedFields(t *testing.T) {
 		}
 	}
 }
+
+// TestSearch_DoesNotFilterByBeadType pins the fix for a regression this package
+// caused in production. Hindsight's "types" are memory kinds — measured on the
+// live bank: experience, observation, world — not bead types. The client used to
+// send the bead type under the singular key "type", which the API does not
+// accept, so it was dropped and recall stayed unfiltered. Correcting the key to
+// "types" activated a filter that had never run: bead types match zero memories,
+// so recall returned nothing. Deployed mid-run 2026-07-27, every worker flipped
+// from "Retrieved 5 relevant memories" to "No relevant memories found", turning
+// the recall half of the learning loop off without a single error in the logs.
+//
+// A "types" key must therefore be absent unless a caller explicitly sets one of
+// Hindsight's own kinds. The bead type belongs in the query text, not the filter.
+func TestSearch_DoesNotFilterByBeadType(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"id":"m1","text":"a relevant memory"}]}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL), WithEnabled(true), WithMaxTokens(800))
+	resp, err := c.Search("close the compliance gate", "compliance", 5)
+	if err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+
+	if v, present := body["types"]; present {
+		t.Errorf("request must not send a types filter derived from the bead type "+
+			"(got types=%v); bead types match zero memories and empty every recall", v)
+	}
+	// The recall must still return what the server sent.
+	if len(resp.Memories) != 1 {
+		t.Errorf("expected 1 memory recalled, got %d", len(resp.Memories))
+	}
+}
