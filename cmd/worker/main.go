@@ -1581,12 +1581,13 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 	// here rather than relying on inheritance so it always reaches Pi.
 	envVars = append(envVars, "PI_OFFLINE=1")
 
-	// Set PI_CODING_AGENT_DIR if configDir is set
+	// Set PI_CODING_AGENT_DIR if configDir is set. resolvePiAgentDir picks the
+	// directory that actually holds the package set rather than blindly appending
+	// "agent" — appending it on the VPS layout pointed Pi at an empty directory,
+	// so every worker ran with no extensions loaded at all.
 	if piConfig.ConfigDir != "" {
-		agentDir := filepath.Join(piConfig.ConfigDir, "agent")
-		absAgentDir, err := filepath.Abs(agentDir)
-		if err == nil {
-			envVars = append(envVars, fmt.Sprintf("PI_CODING_AGENT_DIR=%s", absAgentDir))
+		if agentDir := resolvePiAgentDir(piConfig.ConfigDir); agentDir != "" {
+			envVars = append(envVars, fmt.Sprintf("PI_CODING_AGENT_DIR=%s", agentDir))
 		}
 	}
 

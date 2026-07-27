@@ -198,6 +198,21 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   Target Files from the target clone.
 
 ### Fixed
+- **Workers ran with zero Pi extensions, in both protocol modes.** The worker
+  exported `PI_CODING_AGENT_DIR=<config_dir>/agent`, but on the deployed layout
+  the package set lives in `<config_dir>` itself
+  (`pi-worker/settings.json` + `pi-worker/npm/node_modules`, 239 packages);
+  `<config_dir>/agent` holds neither. Verified on the box with the same binary and
+  only that variable changed: `<cfg>/agent` -> `pi list` reports "No packages
+  installed", `<cfg>` -> 13 packages including `pi-rtk-optimizer@0.9.0`,
+  `caveman-milk-pi`, `context-mode`, `@aliou/pi-guardrails`. So no rtk command
+  rewriting, no context-mode, no caveman, no guardrails — for every bead Hydra has
+  ever run. It also explains why rtk's own savings counter on that host had not
+  moved since 06-26 despite workers making nearly all the tool calls.
+  `resolvePiAgentDir` now probes for the directory that actually holds the package
+  set, preferring `<cfg>/agent` so the developer-machine layout
+  (`~/.pi/agent/...`) is unchanged, and falling back to the historical value when
+  neither looks like a package root.
 - Hindsight recall no longer filters by bead type, which had silently switched
   off the recall half of the learning loop. Hindsight's `types` are memory kinds
   (`experience`, `observation`, `world`); bead types (`compliance`, TDD phases)
