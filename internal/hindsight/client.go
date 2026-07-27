@@ -225,15 +225,24 @@ func WithEnabled(enabled bool) ClientOption {
 	}
 }
 
+// defaultTimeout must exceed real recall latency or every caller that does not
+// pass WithTimeout fails 100% of the time, silently — Search returns an error,
+// the callers treat "no memories" as a normal empty result, and nothing logs a
+// problem. Measured against the live service (bank hydra, max_tokens=800): 3.43s,
+// 4.01s, 3.73s, 3.43s. The former 2s default sat below all four. Production
+// config overrides this with 10s; the default now matches so a caller that
+// forgets the option degrades to slow rather than to always-empty.
+const defaultTimeout = 10 * time.Second
+
 // NewClient creates a new Hindsight client with the specified options
 func NewClient(opts ...ClientOption) *Client {
 	client := &Client{
 		baseURL:      "http://127.0.0.1:5000",
-		timeout:      2 * time.Second,
+		timeout:      defaultTimeout,
 		defaultLimit: 5,
 		maxTokens:    800,
 		enabled:      true,
-		httpClient:   &http.Client{Timeout: 2 * time.Second},
+		httpClient:   &http.Client{Timeout: defaultTimeout},
 	}
 
 	for _, opt := range opts {
