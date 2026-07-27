@@ -52,6 +52,25 @@ type PiConfig struct {
 	Timeout       time.Duration
 	APIKeyName    string
 	ConfigDir     string
+
+	// Mode selects the Pi protocol: "rpc" for JSONL rpc mode, anything else
+	// (including empty) for the piped text mode. Set from HYDRA_PI_MODE, which
+	// the daemon derives from agents.pi.mode.
+	Mode string
+
+	// RPCAutoConfirm answers rpc `confirm` UI asks with confirmed:true. Default
+	// false denies them — a worker running unreviewed commands because the
+	// connector auto-approved is a worse failure than a stalled bead.
+	RPCAutoConfirm bool
+}
+
+// RPCEnabled reports whether this worker should drive Pi over the rpc JSONL
+// protocol. Only the exact, case-insensitive value "rpc" enables it, so a typo
+// falls back to the text mode that works rather than the one under test. Mirrors
+// core.PiConfig.RPCEnabled deliberately: the two ends of the env hand-off must
+// agree on what counts as "rpc".
+func (c PiConfig) RPCEnabled() bool {
+	return strings.ToLower(strings.TrimSpace(c.Mode)) == "rpc"
 }
 
 // HindsightClientConfig contains configuration for the Hindsight client
@@ -586,6 +605,18 @@ func parsePiConfig() PiConfig {
 		}
 	} else {
 		cfg.Timeout = 10 * time.Minute
+	}
+
+	// Parse protocol mode. Unset means text mode, which is today's behaviour.
+	cfg.Mode = os.Getenv("HYDRA_PI_MODE")
+
+	// Parse the rpc confirm policy. Only an explicit "true"/"1" opts in; any
+	// unparseable value keeps the safe deny-by-default.
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("HYDRA_PI_RPC_AUTO_CONFIRM"))) {
+	case "true", "1", "yes":
+		cfg.RPCAutoConfirm = true
+	default:
+		cfg.RPCAutoConfirm = false
 	}
 
 	// Parse API key name
@@ -1188,12 +1219,32 @@ func executeWithPi(
 	// Build the prompt message
 	prompt := buildPiPrompt(bead, hindsightContext, extras)
 
-	// Send prompt as plain text via stdin
-	if _, err := stdinPipe.Write([]byte(prompt + "\n")); err != nil {
-		return result, fmt.Errorf("failed to send prompt to pi: %w", err)
+	// turn is non-nil only in rpc mode, where it owns the protocol state and the
+	// verdict. It stays nil in text mode so that path is byte-for-byte unchanged.
+	var turn *rpcTurn
+
+	if piConfig.RPCEnabled() {
+		turn = newRPCTurn(piConfig.RPCAutoConfirm)
+		promptLine, err := rpcPromptLine(prompt)
+		if err != nil {
+			return result, fmt.Errorf("failed to encode rpc prompt: %w", err)
+		}
+		if _, err := stdinPipe.Write(append(promptLine, '\n')); err != nil {
+			return result, fmt.Errorf("failed to send rpc prompt to pi: %w", err)
+		}
+		// stdin deliberately stays OPEN. Replies to blocking UI asks travel back
+		// over it, so closing it here would strand Pi waiting on a question
+		// nobody can answer — the exact hang that made every earlier rpc attempt
+		// look like a timeout.
+		log.Printf("[Worker:rpc] prompt sent over rpc (autoConfirm=%v); awaiting agent_end", piConfig.RPCAutoConfirm)
+	} else {
+		// Send prompt as plain text via stdin
+		if _, err := stdinPipe.Write([]byte(prompt + "\n")); err != nil {
+			return result, fmt.Errorf("failed to send prompt to pi: %w", err)
+		}
+		// Close stdin to signal EOF — Pi starts processing when stdin closes
+		stdinPipe.Close()
 	}
-	// Close stdin to signal EOF — Pi starts processing when stdin closes
-	stdinPipe.Close()
 
 	// Capture output with activity monitoring
 	var stdoutBuf, stderrBuf bytes.Buffer
@@ -1208,6 +1259,18 @@ func executeWithPi(
 			line := scanner.Text()
 			stdoutBuf.WriteString(line + "\n")
 			activityMonitor.RecordActivity()
+			// In rpc mode every line is a protocol event: answer blocking UI
+			// asks, accumulate assistant text, and detect the end of the turn.
+			// Pi does not exit on its own once the turn is done, so finish()
+			// tears it down — otherwise the worker would wait out the full
+			// activity timeout on every bead.
+			if turn != nil && turn.handleLine(line, stdinPipe) {
+				pid := 0
+				if cmd.Process != nil {
+					pid = cmd.Process.Pid
+				}
+				turn.finish(pid, stdinPipe)
+			}
 			// Also stream to MCP for real-time monitoring
 			if mcpClient != nil {
 				streamLog(mcpClient, "info", fmt.Sprintf("[pi-stdout] %s", line))
@@ -1295,8 +1358,36 @@ monitorLoop:
 	result.Output = stdoutBuf.String()
 	result.Error = stderrBuf.String()
 
-	// Determine success based on exit code
-	if cmdErr == nil && result.ExitCode == 0 {
+	// Determine success. In rpc mode the exit code is meaningless: the worker
+	// itself kills Pi after agent_end (Pi would otherwise sit waiting for
+	// another prompt), so the process always dies by signal even on a perfect
+	// run. The event stream is the only honest verdict — and it must be read
+	// carefully, because a turn can reach agent_end and still carry a model
+	// failure in its message (stopReason/errorMessage).
+	if turn != nil && turn.Ended() {
+		if txt := turn.Text(); strings.TrimSpace(txt) != "" {
+			result.Output = txt
+		}
+		if s := turn.Stats(); s != nil {
+			log.Printf("📊 rpc session tokens: input=%d output=%d cacheRead=%d total=%d",
+				s.Input, s.Output, s.CacheRead, s.Total)
+		}
+		if turn.UIAnswered() > 0 {
+			log.Printf("[Worker:rpc] answered %d blocking UI ask(s) during this turn", turn.UIAnswered())
+		}
+		if turn.Failed() {
+			result.Success = false
+			result.ExitCode = 1
+			if msg := turn.ErrMsg(); msg != "" {
+				result.Error = msg
+			}
+			log.Printf("❌ Pi rpc turn reached agent_end but the model call FAILED: %s", turn.ErrMsg())
+		} else {
+			result.Success = true
+			result.ExitCode = 0
+			log.Printf("✅ Pi rpc turn completed (agent_end, last activity %v ago)", activityMonitor.TimeSinceActivity())
+		}
+	} else if cmdErr == nil && result.ExitCode == 0 {
 		result.Success = true
 		log.Printf("✅ Pi completed successfully (last activity %v ago)", activityMonitor.TimeSinceActivity())
 	} else {
@@ -1436,6 +1527,14 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 	args := []string{
 		"--offline",
 		"--no-session",
+	}
+
+	// RPC mode is what makes Pi initialise its extensions (rtk command
+	// rewriting, context-mode, caveman). The piped text mode initialises none
+	// of them, so every package declared in the worker's settings.json was
+	// installed but dormant. Verified in tools/pi-rpc.
+	if piConfig.RPCEnabled() {
+		args = append(args, "--mode", "rpc")
 	}
 
 	// Add provider
