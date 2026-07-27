@@ -13,9 +13,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/agents"
 	"github.com/haulmatic-dev/hydra/internal/api"
 	"github.com/haulmatic-dev/hydra/internal/core"
 	"github.com/haulmatic-dev/hydra/internal/logx"
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // sourceShellEnv sources environment variables from the user's shell configuration
@@ -119,8 +121,9 @@ func setupPath() {
 
 func main() {
 	var (
-		configPath = flag.String("config", "hydra.yaml", "Path to configuration file")
-		debug      = flag.Bool("debug", false, "Enable debug logging")
+		configPath  = flag.String("config", "hydra.yaml", "Path to configuration file")
+		debug       = flag.Bool("debug", false, "Enable debug logging")
+		rpcSelftest = flag.String("rpc-selftest", "", "Run a one-shot RPC self-test with the given prompt and exit")
 	)
 	flag.Parse()
 
@@ -156,6 +159,13 @@ func main() {
 		} else {
 			log.Printf("[Setup] API key %s loaded (%d chars)", config.Agents.Pi.ApiKeyName, len(apiKey))
 		}
+	}
+
+	// RPC self-test path: prove the Pi connector in-process, then exit.
+	// This branch must never start the daemon.
+	if *rpcSelftest != "" {
+		code := runRPCSelfTest(context.Background(), *rpcSelftest, config)
+		os.Exit(code)
 	}
 
 	// Create overseer
@@ -229,6 +239,58 @@ func main() {
 	}
 
 	fmt.Println("👋 Hydra stopped")
+}
+
+// runRPCSelfTest executes one prompt through the Pi connector using Hydra's
+// loaded configuration, reports the result, and returns an exit code.
+func runRPCSelfTest(ctx context.Context, prompt string, config *core.Config) int {
+	piConfig := agents.PiConfig{
+		Provider:      config.Agents.Pi.Provider,
+		Model:         config.Agents.Pi.Model,
+		ThinkingLevel: config.Agents.Pi.ThinkingLevel,
+		Timeout:       config.Agents.Pi.Timeout,
+		ApiKeyName:    config.Agents.Pi.ApiKeyName,
+		ConfigDir:     config.Pi.ConfigDir,
+		AutoConfirm:   config.Agents.Pi.AutoConfirm(),
+	}
+	connector := agents.NewPiConnector(piConfig, log.Default())
+
+	projectPath, _ := os.Getwd()
+
+	session, err := connector.Start(ctx, types.Bead{ID: types.BeadID("hydra-selftest"), Title: "rpc-selftest"}, agents.AgentOptions{ProjectPath: projectPath})
+	if err != nil {
+		fmt.Printf("rpc-selftest: success=false tokens=0 duration=0s\n")
+		fmt.Printf("start error: %v\n", err)
+		return 1
+	}
+	defer func() {
+		if err := connector.Cleanup(ctx, session); err != nil {
+			log.Printf("rpc-selftest cleanup error: %v", err)
+		}
+	}()
+
+	result, err := connector.Execute(ctx, session, prompt)
+	if result == nil {
+		result = &agents.AgentResult{Success: false, ExitCode: 1, Error: err.Error(), Duration: 0}
+	}
+
+	tokens := 0
+	if stats, statsErr := connector.SessionStats(ctx, session); statsErr == nil {
+		tokens = stats.Total
+	}
+
+	fmt.Printf("rpc-selftest: success=%v tokens=%d duration=%v\n", result.Success, tokens, result.Duration)
+	if result.Output != "" {
+		fmt.Println(result.Output)
+	}
+	if !result.Success && result.Error != "" {
+		fmt.Printf("error: %s\n", result.Error)
+	}
+
+	if result.Success {
+		return 0
+	}
+	return 1
 }
 
 // createConfigChangeHandler creates a handler that refreshes tool clients when config changes

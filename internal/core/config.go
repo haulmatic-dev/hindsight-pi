@@ -46,6 +46,15 @@ type PiConfig struct {
 	Timeout       string `yaml:"timeout"`
 	ApiKeyName    string `yaml:"api_key_name"`
 
+	// Mode controls whether the Pi connector uses RPC JSONL mode or the legacy
+	// piped text mode. Recognised values: "rpc". Anything else, including the
+	// empty default, selects text mode.
+	Mode string `yaml:"mode"`
+
+	// RPCAutoConfirm, when true, answers confirm UI asks with confirmed:true.
+	// Default false keeps the deny-by-default policy for unattended headless runs.
+	RPCAutoConfirm bool `yaml:"rpc_auto_confirm"`
+
 	// FallbackProvider/FallbackModel are used when the primary provider's
 	// circuit breaker opens after repeated rate-limit (429) failures.
 	// Empty disables failover.
@@ -57,6 +66,20 @@ type PiConfig struct {
 	// Provider or Model replaces the corresponding primary field, while empty
 	// fields fall back to the primary.
 	PhaseModels map[string]PhaseModel `yaml:"phase_models"`
+}
+
+// RPCEnabled reports whether the Pi connector should run in RPC JSONL mode.
+// Only the exact, case-insensitive value "rpc" enables it; the empty default
+// and any other value keep the existing text mode, preserving today's
+// behaviour when agents.pi.mode is unset.
+func (p PiConfig) RPCEnabled() bool {
+	return strings.ToLower(strings.TrimSpace(p.Mode)) == "rpc"
+}
+
+// AutoConfirm returns the rpc_auto_confirm setting. When true, confirm asks
+// are approved; when false (the default), they are denied.
+func (p PiConfig) AutoConfirm() bool {
+	return p.RPCAutoConfirm
 }
 
 // ModelForPhase returns the provider and model for a phase, falling back to
