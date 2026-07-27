@@ -8,6 +8,31 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- Gap adjudication can now be routed to a stronger model at maximum reasoning
+  effort (`compliance_cycle.adjudicator_thinking`, alongside the existing
+  `adjudicator_model`). Adjudication is the one high-consequence, low-volume
+  judgment in the loop — a wrong verdict drops a real defect or spawns a wasted
+  bead chain — so it is where paying for reasoning effort is justified, unlike
+  the high-volume build phases. `normalizeThinking` coerces `none`/`off` to
+  `low` because disabling thinking silently reroutes K3/K2.7 requests to the
+  older K2.6 model.
+- `scripts/prd-author.sh`: author a PRD on the VPS with the strong model
+  (`k3-256k` at `max` effort by default) via the create-prd skill — the
+  equivalent of authoring in Claude Code, which is not installed there.
+  User-initiated only; Hydra never calls it.
+- `docs/architecture/model-allocation.md`: the evidence-based model allocation
+  doctrine — intelligence at the low-volume/irreversible decision points
+  (PRD authoring, decomposition, adjudication, diagnosis), cheap models for
+  the hundreds of build beads, with the run data showing one-shot rate 1.0 on
+  K2.7 across every scored run.
+- `tools/prd-lint` + task-breakdown preflight: a deterministic linter
+  enforcing the create-prd compiler contract exactly as the task-breakdown
+  parser reads it (same-line Target Files, Type/Priority, AC bullets, unique
+  IDs, resolvable references, nfr-config commands), wired as a fail-open
+  preflight into `cli.mjs` (`--no-lint` escape hatch; missing binary skips).
+  One chokepoint covering every PRD author, including the compliance cycle's
+  auto-generated gap PRDs. All five current PRDs lint clean; the linter lints
+  its own PRD. *Authored by a Hydra dogfood run.*
 - `tools/hydra-observer` (self-improvement roadmap Phase 1, deterministic
   core): scans the daemon log for known failure signatures (empty-diff storms,
   stuck workers, panics, blocked users, escalations, timeouts, max-cycles),
@@ -124,6 +149,16 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   Target Files from the target clone.
 
 ### Fixed
+- Quota exhaustion is now classified as **infrastructure**, not a code
+  failure. Kimi returns an exhausted billing quota as HTTP 403 with a
+  `permission_error`/`access_terminated_error` payload, which the existing
+  rate-limit markers (`429`, `rate_limit`) did not match — so each affected
+  bead was retried 4x and then spawned a fix bead, and every one of those
+  retries was another rejected call against the quota that was already gone.
+  The failure consumed the quota it was failing on. `isQuotaError` now drives
+  both `shouldRetry` (fail fast) and `classifyFailure` (exit code 2 =
+  infrastructure → no fix bead, scheduler backoff). Observed live 2026-07-27:
+  36 useless fix beads from one exhausted quota.
 - `tools/gap-to-prd` now emits compiler-contract-compliant mini-PRDs:
   same-line `Target Files` (the old bullet list was unparseable by
   task-breakdown, silently producing targetless gap beads), `Type`/`Priority`
