@@ -235,6 +235,32 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   Target Files from the target clone.
 
 ### Fixed
+- **A transient provider blip no longer freezes the fleet for fifteen minutes.**
+  Kimi returns "The engine is currently overloaded, please try again later" as a
+  429 with `type: rate_limit_error`. That was classified as a rate limit (exit 2),
+  fed the circuit breaker, and three of them inside ten minutes opened the circuit
+  for fifteen — and because `fallback_provider` equals the primary there was
+  nothing to fail over to, so the spawn gate paused every worker
+  (`skipping spawns for 11m32s`) over an error whose own message says to retry
+  shortly. Pi already retries it internally. Capacity errors now classify as
+  **exit 7**: retryable infrastructure (so no fix bead is spawned) that never
+  touches the provider circuit. Genuine throughput rate limits still classify as
+  2, and quota exhaustion still wins with 6.
+- The breaker no longer claims a failover it cannot perform. With
+  `fallback_provider` equal to the primary it logged "failing over to
+  kimi-coding" while every worker was in fact paused; it now says so and points at
+  the config.
+
+### Changed
+- **Default Pi extension allowlist is `[rtk]`, not all three.** Measured over
+  three sequential trials of one prompt: no extensions ~12,271 tokens/turn, rtk
+  ~16,360 (+33%), rtk + caveman + context-mode ~26,679 (+117%). context-mode is
+  tool-call-shaped by design — one dogfood run logged 1,292 `ctx_*` calls against
+  85 rtk rewrites — and every tool call is another request, which raises exposure
+  to provider capacity errors under five concurrent workers. rtk is kept because
+  it compacts tool *output*: bounded cost, saving that scales with command noise.
+  caveman and context-mode are plausible but unmeasured; enable per project with
+  `extensions: [rtk, caveman]` once there is data rather than fleet-wide.
 - **Workers ran with zero Pi extensions, in both protocol modes.** The worker
   exported `PI_CODING_AGENT_DIR=<config_dir>/agent`, but on the deployed layout
   the package set lives in `<config_dir>` itself

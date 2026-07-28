@@ -204,6 +204,13 @@ func (wl *WorkerLifecycle) HandleFailure(worker *types.Worker, exitCode int, dur
 	if exitCode == 2 && wl.providerBreaker != nil {
 		wl.providerBreaker.RecordRateLimit()
 	}
+	// Exit 7 (transient provider overload) is deliberately absent from the
+	// breaker path. It is retried like any infra failure, but it must not open a
+	// circuit: three capacity blips inside ten minutes previously froze every
+	// spawn for fifteen minutes over an error that clears in seconds.
+	if exitCode == 7 {
+		log.Printf("[WorkerLifecycle] Transient provider overload (exit 7) for %s — retrying without tripping the provider circuit", worker.ID)
+	}
 	wl.retryManager.RecordRetry(worker.ID, workerErr)
 
 	retryCount := wl.retryManager.GetRetryCount(worker.ID)
@@ -233,7 +240,9 @@ func (wl *WorkerLifecycle) HandleFailure(worker *types.Worker, exitCode int, dur
 func isInfrastructureExitCode(code int) bool {
 	// 6 = quota exhausted: infrastructure, never a code defect, so it must not
 	// spawn a fix bead.
-	return code == 2 || code == 3 || code == 4 || code == 6
+	// 7 = transient provider overload: same reasoning, and deliberately NOT fed
+	// to the circuit breaker (see HandleFailure).
+	return code == 2 || code == 3 || code == 4 || code == 6 || code == 7
 }
 
 func (wl *WorkerLifecycle) scheduleAfterCompletion(worker *types.Worker, success bool, newlyReady []string) {
