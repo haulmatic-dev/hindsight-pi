@@ -169,6 +169,14 @@ func (g *GraphifyIndexer) build(abs string) error {
 
 	cmd := exec.CommandContext(ctx, g.binary, args...)
 	cmd.Dir = abs
+	// The timeout must hold even when the killed process leaves children behind.
+	// CommandContext kills only the direct child; CombinedOutput then blocks on
+	// the output pipe, which any orphaned grandchild (graphify shells out) still
+	// holds open — so without this the "hard timeout" waited for the runaway
+	// build anyway. Caught by CI on Linux: the test's fake binary (sh + sleep)
+	// exceeded a 200ms timeout by the full 30s sleep. macOS masked it because sh
+	// execs a trailing command, so the kill happened to hit the sleep itself.
+	cmd.WaitDelay = 5 * time.Second
 
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {

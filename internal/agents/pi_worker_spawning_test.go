@@ -158,17 +158,17 @@ func TestWorkerSpawning_AllSkillsPassed(t *testing.T) {
 	require.NotNil(t, skillResult)
 
 	// Verify all 13 skills are found
-	assert.Equal(t, 16, len(skillResult.Found), "Expected all 16 skills to be found")
+	assert.Equal(t, len(pi.DefaultSkills), len(skillResult.Found), "Expected every default skill to be found")
 	assert.Equal(t, 0, len(skillResult.Missing), "Expected 0 missing skills")
 	assert.False(t, skillResult.HasMissingSkills(), "Should not have missing skills")
 
 	// Verify 26 flags (13 skills × 2: --skill + path)
-	assert.Equal(t, 32, len(skillResult.Flags), "Expected 32 skill flags")
+	assert.Equal(t, len(pi.DefaultSkills)*2, len(skillResult.Flags), "Expected 2 flag elements per default skill")
 
 	// Verify args includes all skill flags
 	// Base args: --mode, rpc, --no-session, --provider, anthropic, --model, claude-3-5-sonnet
 	// Plus 26 skill flags = 33 total
-	assert.True(t, len(args) >= 32, "Args should include skill flags")
+	assert.True(t, len(args) >= len(pi.DefaultSkills)*2, "Args should include skill flags")
 
 	// Count --skill flags
 	skillFlagCount := 0
@@ -177,7 +177,7 @@ func TestWorkerSpawning_AllSkillsPassed(t *testing.T) {
 			skillFlagCount++
 		}
 	}
-	assert.Equal(t, 16, skillFlagCount, "Expected 16 --skill flags in args")
+	assert.Equal(t, len(pi.DefaultSkills), skillFlagCount, "Expected one --skill flag per default skill")
 
 	// Verify all expected skills are present
 	expectedSkills := []string{
@@ -305,7 +305,7 @@ func TestWorkerSpawning_MissingSkills(t *testing.T) {
 
 	// Verify only 5 skills are found
 	assert.Equal(t, 5, len(skillResult.Found), "Expected 5 found skills")
-	assert.Equal(t, 11, len(skillResult.Missing), "Expected 11 missing skills")
+	assert.Equal(t, len(pi.DefaultSkills)-5, len(skillResult.Missing), "Expected every default skill beyond the 5 created to be missing")
 	assert.True(t, skillResult.HasMissingSkills(), "Should have missing skills")
 	assert.True(t, skillResult.HasWarnings(), "Should have warnings")
 
@@ -339,7 +339,7 @@ func TestWorkerSpawning_MissingSkills(t *testing.T) {
 	assert.Equal(t, 5, skillFlagCount, "Expected 5 --skill flags for available skills")
 
 	// Verify warnings include missing skills
-	assert.Equal(t, 11, len(skillResult.Warnings), "Expected 11 warnings for missing skills")
+	assert.Equal(t, len(pi.DefaultSkills)-5, len(skillResult.Warnings), "Expected one warning per missing default skill")
 }
 
 // TestWorkerSpawning_FailFast verifies fail-fast behavior when enabled
@@ -358,7 +358,7 @@ func TestWorkerSpawning_FailFast(t *testing.T) {
 	result1, err := pi.BuildSkillFlagsWithOptions(tempDir, false)
 	require.NoError(t, err, "Should not error with failOnMissing=false")
 	assert.Equal(t, 3, len(result1.Found))
-	assert.Equal(t, 13, len(result1.Missing))
+	assert.Equal(t, len(pi.DefaultSkills)-3, len(result1.Missing))
 
 	// Test with failOnMissing = true
 	result2, err := pi.BuildSkillFlagsWithOptions(tempDir, true)
@@ -369,7 +369,7 @@ func TestWorkerSpawning_FailFast(t *testing.T) {
 
 	// Result should still contain information about what was found/missing
 	assert.Equal(t, 3, len(result2.Found))
-	assert.Equal(t, 13, len(result2.Missing))
+	assert.Equal(t, len(pi.DefaultSkills)-3, len(result2.Missing))
 	assert.True(t, result2.FailOnMissing)
 }
 
@@ -525,7 +525,7 @@ func TestWorkerSpawning_InvalidConfigDir(t *testing.T) {
 	require.NotNil(t, skillResult)
 
 	// All skills should be missing
-	assert.Equal(t, 16, len(skillResult.Missing), "Expected all 16 skills to be missing")
+	assert.Equal(t, len(pi.DefaultSkills), len(skillResult.Missing), "Expected every default skill to be missing")
 	assert.Equal(t, 0, len(skillResult.Found), "Expected 0 found skills")
 	assert.True(t, skillResult.HasMissingSkills())
 	assert.True(t, skillResult.HasWarnings())
@@ -772,7 +772,7 @@ func TestWorkerSpawning_IntegrationStyle(t *testing.T) {
 	assert.Contains(t, args, "claude-3-5-sonnet")
 
 	// Verify all skills included
-	assert.Equal(t, 16, len(skillResult.Found))
+	assert.Equal(t, len(pi.DefaultSkills), len(skillResult.Found))
 	assert.Equal(t, 0, len(skillResult.Missing))
 
 	// Count --skill occurrences
@@ -782,7 +782,7 @@ func TestWorkerSpawning_IntegrationStyle(t *testing.T) {
 			skillCount++
 		}
 	}
-	assert.Equal(t, 16, skillCount)
+	assert.Equal(t, len(pi.DefaultSkills), skillCount)
 
 	// Verify environment variables
 	assert.Contains(t, envVars, "PI_CODING_AGENT_DIR")
@@ -798,7 +798,7 @@ func TestWorkerSpawning_IntegrationStyle(t *testing.T) {
 	// Log summary
 	t.Logf("✅ Integration test passed")
 	t.Logf("   - Session ID: %s", session.ID)
-	t.Logf("   - Skills passed: %d/16", len(skillResult.Found))
+	t.Logf("   - Skills passed: %d/%d", len(skillResult.Found), len(pi.DefaultSkills))
 	t.Logf("   - Command args count: %d", len(args))
 	t.Logf("   - Environment variables: %d", len(envVars))
 }

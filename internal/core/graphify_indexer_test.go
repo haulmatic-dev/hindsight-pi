@@ -135,7 +135,11 @@ func TestGraphifyIndexer_FailingBuildIsSwallowed(t *testing.T) {
 // O(V x E) pathology (graphify issue #341: 114 minutes on a 50k-file monorepo,
 // never completing). A misbehaving build must be killed, not wedge the daemon.
 func TestGraphifyIndexer_TimeoutKillsRunawayBuild(t *testing.T) {
-	bin, _ := fakeGraphify(t, "sleep 30\n")
+	// The fake spawns sleep as a BACKGROUND child and waits, so killing the
+	// shell leaves an orphan holding the output pipe — the exact shape CI caught
+	// on Linux (a trailing command gets exec'd by some shells, which masked the
+	// orphan case on macOS). WaitDelay is what unblocks CombinedOutput.
+	bin, _ := fakeGraphify(t, "sleep 30 &\nwait\n")
 	project := t.TempDir()
 
 	idx := NewGraphifyIndexer(GraphifyConfig{
@@ -151,7 +155,12 @@ func TestGraphifyIndexer_TimeoutKillsRunawayBuild(t *testing.T) {
 	if err == nil {
 		t.Fatal("a build exceeding the timeout must return an error")
 	}
-	if elapsed > 5*time.Second {
+	// The bound is timeout (200ms) + WaitDelay (5s) + slack. WaitDelay is the
+	// grace Wait needs to unblock when an orphaned child keeps the output pipe
+	// open, so ~5.2s here is the fix working, not the timeout failing. What must
+	// never happen is waiting out the child's full 30s sleep — that is exactly
+	// what production did before WaitDelay was set.
+	if elapsed > 15*time.Second {
 		t.Errorf("build took %s — the timeout did not kill it", elapsed)
 	}
 	if !strings.Contains(err.Error(), "timed out") {
