@@ -925,6 +925,41 @@ func executeWithRetry(
 // 2026-07-27, where it was misclassified as a code failure and spawned 36
 // useless fix beads, each retried 4x — a feedback loop that burned more of
 // the very quota that was already exhausted).
+// transientOverloadMarkers identify provider CAPACITY errors, which are not the
+// same thing as being rate limited for sending too much.
+//
+// Kimi returns "The engine is currently overloaded, please try again later" as a
+// 429 with type rate_limit_error. Classifying that as a rate limit is what froze
+// the fleet on 2026-07-28: three of them inside ten minutes tripped the circuit
+// breaker for fifteen minutes, and because fallback_provider equals the primary
+// there was nothing to fail over to, so the spawn gate paused every worker —
+// "skipping spawns for 11m32s" — over an error whose own message says to try
+// again shortly. Pi already retries it internally (auto_retry_start).
+//
+// Measured the same day: 9/9 sequential turns succeeded against the same
+// provider with no 429 at all, which is what an intermittent capacity blip looks
+// like rather than a throughput ceiling we are exceeding.
+var transientOverloadMarkers = []string{
+	"engine is currently overloaded",
+	"overloaded",
+	"try again later",
+	"service unavailable",
+	"503",
+}
+
+// isTransientOverload reports whether the provider was momentarily unavailable
+// rather than rate-limiting us. Checked BEFORE the generic rate-limit markers,
+// because the payload carries both.
+func isTransientOverload(errStr string) bool {
+	s := strings.ToLower(errStr)
+	for _, m := range transientOverloadMarkers {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
+}
+
 var quotaErrorMarkers = []string{
 	"usage limit",
 	"billing cycle",
@@ -2169,6 +2204,12 @@ func classifyFailure(result *ExecutionResult) int {
 	// billing limit clears when the cycle rolls over.
 	case isQuotaError(err):
 		return 6
+	// Transient provider capacity, checked before the rate-limit markers because
+	// the payload contains both ("429" + rate_limit_error + "overloaded"). Exit 7
+	// is retryable infrastructure but must NOT trip the provider circuit: the
+	// remedy is a short retry, not a fifteen-minute fleet freeze.
+	case isTransientOverload(err):
+		return 7
 	case strings.Contains(err, "rate_limit") ||
 		strings.Contains(err, "token plan") ||
 		strings.Contains(err, "429"):

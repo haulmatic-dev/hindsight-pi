@@ -95,12 +95,27 @@ const defaultPiMode = "rpc"
 
 // defaultPiExtensions is the allowlist every phase gets unless overridden.
 //
-// An allowlist rather than Pi's own discovery because discovery loads
-// everything installed: measured on one identical turn, all installed
-// extensions cost 48,315 tokens against 12,059 for rtk alone. The excluded ones
-// (themes, editor widgets, subagent UI) cannot be used by a headless worker.
-// Set `extensions: []` explicitly to run with none.
-var defaultPiExtensions = []string{"rtk", "caveman", "context-mode"}
+// rtk only, by measurement. Three sequential trials of the same prompt against
+// the same provider, token totals per turn:
+//
+//	no extensions              ~12,271
+//	rtk                        ~16,360   (+33%)
+//	rtk + caveman + context-mode ~26,679 (+117%)
+//
+// Every extra token is also an extra request when it comes from a tool call, and
+// context-mode is tool-call-shaped by design: one dogfood run logged 1,292
+// `ctx_*` calls against 85 rtk rewrites. Under five concurrent workers that
+// request volume raises exposure to a provider that intermittently answers "the
+// engine is currently overloaded" — three of which used to freeze the fleet for
+// fifteen minutes.
+//
+// rtk earns its place differently from the other two: it compacts tool OUTPUT,
+// so its cost is bounded while its saving scales with how noisy the commands are.
+// caveman (terser model output) and context-mode (sandboxed context) are
+// plausible wins that are simply not measured yet — add them per project with
+// `extensions: [rtk, caveman]` once there is data, rather than fleet-wide on a
+// hunch.
+var defaultPiExtensions = []string{"rtk"}
 
 // applyPiDefaults fills in Pi settings the YAML did not specify.
 //
