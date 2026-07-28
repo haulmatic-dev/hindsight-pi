@@ -534,7 +534,7 @@ func DefaultConfig() *Config {
 		},
 		ComplianceCycle: ComplianceCycleConfig{
 			Enabled:      false,
-			MaxCycles:    5,
+			MaxCycles:    2,
 			PollInterval: 30 * time.Second,
 		},
 		MCP: MCPConfig{

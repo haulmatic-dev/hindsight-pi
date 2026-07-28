@@ -75,7 +75,16 @@ func (cm *ComplianceCycleManager) Start(ctx context.Context) {
 		cm.config.PollInterval = 30 * time.Second
 	}
 	if cm.config.MaxCycles == 0 {
-		cm.config.MaxCycles = 5
+		// Two, not five. Each cycle re-runs the analyzer, re-adjudicates, and
+		// decomposes surviving gaps into a fresh bead chain, so the cost
+		// multiplies rather than adds. Run H spent 5 gap-to-prd invocations and
+		// produced 15 fix beads against 18 real tasks; the later cycles were
+		// re-litigating the same findings rather than discovering new ones.
+		//
+		// Two still allows the useful case — analyze, fix, verify the fix — while
+		// cutting the tail where the gap set stops shrinking. Raise it per project
+		// if a PRD genuinely needs more.
+		cm.config.MaxCycles = 2
 	}
 
 	cm.running = true

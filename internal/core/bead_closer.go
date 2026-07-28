@@ -217,16 +217,48 @@ func (c *BeadCloser) closeBlockedOnFailed() bool {
 // with title "Fix: Fix: GAP: ..." and so on. We count the existing
 // "Fix: " prefix on the original bead's title and skip creation
 // when it exceeds 2 (i.e., the original gap + 1 retry level).
+// fixTitlePrefix is how an auto-created fix bead marks its title. Counting it is
+// how nesting depth is detected.
+const fixTitlePrefix = "Fix: "
+
+// maxFixNesting caps auto-created fix beads at one per original — no nesting.
+//
+// Measured on run H: the previous cap of 3 produced 158 fix beads against 18 real
+// tasks, with titles nested three deep ("Fix: Fix: Fix: NFR-001: ..."). Each extra
+// level re-ran identical instructions through the same mechanism that had just
+// failed, consuming a worker slot and provider quota per attempt.
+const maxFixNesting = 1
+
+// fixRecursionCappedLabel marks a bead whose fix bead was refused, so the outcome
+// is visible instead of the bead quietly closing as failed and unblocking its
+// dependents.
+const fixRecursionCappedLabel = "fix-recursion-capped"
+
 func (c *BeadCloser) createFixBeadForFailedClose(bead *types.Bead, projectPath, repoName, workerBeadID string) error {
 	var title, priorityBeadID string
 	priority := 1
 	if bead != nil {
-		// Recursion guard: skip if the original title already has
-		// 3 or more "Fix: " prefixes (i.e., gap → fix → fix → fix
-		// → blocked). Further fix beads would only repeat the
-		// original work; better to surface the original gap bead.
-		if strings.Count(bead.Title, "Fix: ") >= 3 {
-			log.Printf("[BeadCloser] Refusing to create nested fix bead for %s (title has %d 'Fix: ' prefixes); deeper recursion would be noise", bead.ID, strings.Count(bead.Title, "Fix: "))
+		// Recursion guard. One fix bead per original, and no nesting.
+		//
+		// This used to allow three levels, which is how run H produced titles
+		// like "Fix: Fix: Fix: NFR-001: The impact path stays cheap and offline"
+		// and 158 fix beads against 18 real tasks. A fix bead exists to redo work
+		// that failed; if the fix itself fails, creating another copy re-runs the
+		// same instructions through the same mechanism and fails the same way.
+		// The second and third attempts were pure churn: they consumed workers,
+		// tokens and provider quota, and buried the original gap.
+		if depth := strings.Count(bead.Title, fixTitlePrefix); depth >= maxFixNesting {
+			log.Printf("[BeadCloser] Refusing to create a nested fix bead for %s (title already has %d %q prefix(es), cap %d). "+
+				"The fix mechanism has already failed on this work; labelling for escalation instead of re-running it.",
+				bead.ID, depth, fixTitlePrefix, maxFixNesting)
+			// Label it. Without this the bead simply closes as failed and its
+			// dependents unblock — the exact regression close_blocked_on_failed
+			// exists to prevent — with no record of why no fix bead appeared.
+			if c.beadsClient != nil {
+				if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{fixRecursionCappedLabel}); err != nil {
+					log.Printf("[BeadCloser] Failed to label %s with %s: %v", bead.ID, fixRecursionCappedLabel, err)
+				}
+			}
 			return nil
 		}
 		title = "Fix: " + bead.Title
