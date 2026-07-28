@@ -8,6 +8,46 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- **rpc mode and the `[rtk, caveman, context-mode]` allowlist are now the
+  defaults.** A config that says nothing about the protocol gets both. rpc is the
+  default because text mode initialises no extension host at all — verified: a
+  marker extension loaded with `-e` in text mode is imported but nothing runs and
+  `pi --verbose` lists no extensions, while over rpc the same setup produces
+  `RTK rewrite: git status --short -> rtk git status --short`. The allowlist is
+  the default because Pi's own discovery loads every installed package (48,315
+  tokens on one measured turn versus 12,059 for the allowlist), and the extras —
+  themes, editor widgets, subagent UI — cannot be used by a headless worker.
+  Opt out with `mode: text` or `extensions: []`; both are explicit values, and
+  the defaulting distinguishes them from an omitted key. Defaults are applied
+  *after* the raw config is copied, because `LoadConfig` assigns
+  `config.Agents = raw.Agents` wholesale — anything set in `DefaultConfig` would
+  have been silently discarded by any file containing an `agents:` block.
+- Pi rpc mode is now actually wired to the worker execution path. `agents.pi.mode`
+  previously existed, parsed, and had a tested `RPCEnabled()` accessor while
+  changing nothing: beads run in a separate `hydra-worker` process that
+  hand-builds its own `pi --offline --no-session` command, so the daemon's mode
+  never reached the process that spawns Pi (and `spawnWorkerViaAgent`, the only
+  in-daemon caller of the rpc connector, is dead code). `buildPiEnv` now forwards
+  `HYDRA_PI_MODE` / `HYDRA_PI_RPC_AUTO_CONFIRM`, and the worker drives the rpc
+  protocol: keeps stdin open (UI-ask replies travel back over it — closing it is
+  what made earlier attempts hang), reads the verdict from the event stream
+  rather than the exit code (the worker kills Pi itself after `agent_end`, since
+  Pi waits for another prompt instead of exiting), treats an `agent_end` carrying
+  `stopReason: error` as a failure, and logs per-bead token counts from
+  `get_session_stats`. Text mode is untouched and remains the default.
+  Verified end-to-end on the VPS: `--mode rpc` in the argv, `agent_end` reached,
+  file actually written by the model, worker exit 0.
+- **Measured, and it does not yet pay off.** Same bead, three configs:
+  rpc with the worker config dir → 10,194 tokens / 18.0s / **no extensions
+  loaded**; rpc without it → 61,711 tokens / 87.8s / extensions **loaded**
+  (`notify=3 setStatus=4 setWidget=1`); text mode → 14.7s. The premise for rpc
+  was that rtk/context-mode/caveman cut tokens; loading them cost **6x more
+  tokens and ~5x more wall-clock** on this task. Cause of the split: setting
+  `HYDRA_PI_CONFIG_DIR` makes the worker export `PI_CODING_AGENT_DIR`, and with
+  that set `pi list` reports "No packages installed" — so today a worker can have
+  its skill flags **or** its extensions, not both. Do not enable
+  `agents.pi.mode: rpc` expecting savings until that is resolved and measured on
+  real beads.
 - Pi connector can speak pi's rpc JSONL protocol (`agents.pi.mode: rpc`,
   default text). This is Phase 0: the connector answers `extension_ui_request`
   asks — previously ignored entirely, which is why every rpc attempt hung once
@@ -172,6 +212,21 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   Target Files from the target clone.
 
 ### Fixed
+- **Workers ran with zero Pi extensions, in both protocol modes.** The worker
+  exported `PI_CODING_AGENT_DIR=<config_dir>/agent`, but on the deployed layout
+  the package set lives in `<config_dir>` itself
+  (`pi-worker/settings.json` + `pi-worker/npm/node_modules`, 239 packages);
+  `<config_dir>/agent` holds neither. Verified on the box with the same binary and
+  only that variable changed: `<cfg>/agent` -> `pi list` reports "No packages
+  installed", `<cfg>` -> 13 packages including `pi-rtk-optimizer@0.9.0`,
+  `caveman-milk-pi`, `context-mode`, `@aliou/pi-guardrails`. So no rtk command
+  rewriting, no context-mode, no caveman, no guardrails — for every bead Hydra has
+  ever run. It also explains why rtk's own savings counter on that host had not
+  moved since 06-26 despite workers making nearly all the tool calls.
+  `resolvePiAgentDir` now probes for the directory that actually holds the package
+  set, preferring `<cfg>/agent` so the developer-machine layout
+  (`~/.pi/agent/...`) is unchanged, and falling back to the historical value when
+  neither looks like a package root.
 - Hindsight recall no longer filters by bead type, which had silently switched
   off the recall half of the learning loop. Hindsight's `types` are memory kinds
   (`experience`, `observation`, `world`); bead types (`compliance`, TDD phases)

@@ -231,5 +231,15 @@ func (b *WorkerEnvBuilder) buildPiEnv(bead types.Bead) []string {
 		fmt.Sprintf("HYDRA_PI_TIMEOUT=%s", p.Timeout),
 		fmt.Sprintf("HYDRA_PI_API_KEY_NAME=%s", p.ApiKeyName),
 		fmt.Sprintf("HYDRA_PI_CONFIG_DIR=%s", piConfigDir),
+		// Protocol selection. Without these two the worker cannot know the
+		// daemon's agents.pi.mode at all: workers are separate processes
+		// configured purely through this env block, so `mode: rpc` in
+		// hydra.yaml was inert until it was forwarded here.
+		fmt.Sprintf("HYDRA_PI_MODE=%s", p.Mode),
+		fmt.Sprintf("HYDRA_PI_RPC_AUTO_CONFIRM=%t", p.AutoConfirm()),
+		// Extension allowlist for this bead's phase. Comma-separated so it
+		// survives the env hand-off; the worker resolves names to entry paths
+		// because only it knows the resolved package root.
+		fmt.Sprintf("HYDRA_PI_EXTENSIONS=%s", strings.Join(p.ExtensionsForPhase(phase), ",")),
 	}
 }

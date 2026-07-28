@@ -119,6 +119,13 @@ func UIResponseFor(id, method string, autoConfirm bool) ([]byte, bool) {
 	return b, true
 }
 
+// ParseSessionStats parses the data.tokens object from a get_session_stats
+// response. Exported so the worker's rpc turn handler can read token counts off
+// the same event stream without duplicating the envelope shape.
+func ParseSessionStats(line []byte) (SessionStats, error) {
+	return parseSessionStats(line)
+}
+
 // parseSessionStats parses the data.tokens object from a get_session_stats response.
 func parseSessionStats(line []byte) (SessionStats, error) {
 	var envelope struct {

@@ -66,6 +66,76 @@ type PiConfig struct {
 	// Provider or Model replaces the corresponding primary field, while empty
 	// fields fall back to the primary.
 	PhaseModels map[string]PhaseModel `yaml:"phase_models"`
+
+	// Extensions is the allowlist of Pi extensions to load (rpc mode only —
+	// text mode has no extension host). Names are package names or the short
+	// aliases in cmd/worker's resolver, e.g. ["rtk", "caveman", "context-mode"].
+	//
+	// An allowlist rather than "load everything" because loading everything is
+	// expensive: measured on one identical turn, all installed extensions cost
+	// 48,315 tokens versus 12,059 for rtk alone — 4x, for extensions a headless
+	// worker cannot use (themes, editor widgets, subagent UI). Empty disables
+	// extensions entirely, which is the default and today's behaviour.
+	Extensions []string `yaml:"extensions"`
+
+	// PhaseExtensions overrides Extensions for a specific phase (red, green,
+	// refactor, …), for cases where a phase needs something the others do not.
+	// A phase with no entry uses Extensions.
+	PhaseExtensions map[string][]string `yaml:"phase_extensions"`
+}
+
+// defaultPiMode is the protocol workers use unless the config says otherwise.
+//
+// rpc rather than text because text mode initialises no extension host at all —
+// verified: a marker extension loaded with -e in text mode is imported but
+// nothing runs, and `pi --verbose` reports no extensions. Over rpc the same
+// setup produces real work: "RTK rewrite: git status --short -> rtk git status
+// --short". Set `mode: text` explicitly to opt back out.
+const defaultPiMode = "rpc"
+
+// defaultPiExtensions is the allowlist every phase gets unless overridden.
+//
+// An allowlist rather than Pi's own discovery because discovery loads
+// everything installed: measured on one identical turn, all installed
+// extensions cost 48,315 tokens against 12,059 for rtk alone. The excluded ones
+// (themes, editor widgets, subagent UI) cannot be used by a headless worker.
+// Set `extensions: []` explicitly to run with none.
+var defaultPiExtensions = []string{"rtk", "caveman", "context-mode"}
+
+// applyPiDefaults fills in Pi settings the YAML did not specify.
+//
+// This runs AFTER the raw config is copied over, not in DefaultConfig, because
+// LoadConfig assigns `config.Agents = raw.Agents` wholesale — anything
+// DefaultConfig put in Agents.Pi is discarded the moment a config file contains
+// an `agents:` block, which every real one does. Defaults set only in
+// DefaultConfig would therefore be silently inert, the same failure already
+// found with min_score, a self-referential fallback_provider and mcp.enabled.
+//
+// The distinction between "unset" and "explicitly empty" is what makes both
+// opt-outs work: `mode: text` is a non-empty value, and `extensions: []`
+// unmarshals to an empty-but-non-nil slice.
+func (c *Config) applyPiDefaults() {
+	if strings.TrimSpace(c.Agents.Pi.Mode) == "" {
+		c.Agents.Pi.Mode = defaultPiMode
+	}
+	if c.Agents.Pi.Extensions == nil {
+		c.Agents.Pi.Extensions = append([]string(nil), defaultPiExtensions...)
+	}
+}
+
+// ExtensionsForPhase returns the extension allowlist for a phase, falling back
+// to the default Extensions list when the phase has no override. Phase lookup is
+// case-insensitive, matching ModelForPhase.
+func (p PiConfig) ExtensionsForPhase(phase string) []string {
+	if len(p.PhaseExtensions) > 0 {
+		key := strings.ToLower(strings.TrimSpace(phase))
+		if key != "" {
+			if ext, ok := p.PhaseExtensions[key]; ok {
+				return ext
+			}
+		}
+	}
+	return p.Extensions
 }
 
 // RPCEnabled reports whether the Pi connector should run in RPC JSONL mode.
@@ -626,6 +696,7 @@ func LoadConfig(path string) (*Config, error) {
 	config.API = raw.API
 	config.Intelligence = raw.Intelligence
 	config.Agents = raw.Agents
+	config.applyPiDefaults()
 	config.Validation = raw.Validation
 	config.ComplianceCycle = raw.ComplianceCycle
 	config.Pi = PiRootConfig{
@@ -689,6 +760,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 	config.API = raw.API
 	config.Intelligence = raw.Intelligence
 	config.Agents = raw.Agents
+	config.applyPiDefaults()
 	config.Pi = PiRootConfig{
 		ConfigDir:       raw.Pi.ConfigDir,
 		PiConfigDir:     raw.Pi.PiConfigDir,

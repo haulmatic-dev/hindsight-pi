@@ -56,6 +56,10 @@ func (c *client) send(payload []byte) error {
 	return err
 }
 
+// extraPiArgs are verbatim flags appended to pi's argv (repeatable --pi-arg).
+// Used to test extension allowlists such as: --pi-arg=--no-extensions --pi-arg=-e --pi-arg=<path>
+var extraPiArgs []string
+
 // start spawns pi in rpc mode and begins streaming events.
 func start(ctx context.Context, provider, model, cwd string, offline, trace, autoOK bool, dump io.Writer) (*client, error) {
 	args := []string{"--mode", "rpc", "--no-session"}
@@ -68,6 +72,7 @@ func start(ctx context.Context, provider, model, cwd string, offline, trace, aut
 	if model != "" {
 		args = append(args, "--model", model)
 	}
+	args = append(args, extraPiArgs...)
 
 	cmd := exec.CommandContext(ctx, "pi", args...)
 	if cwd != "" {
@@ -273,6 +278,10 @@ func main() {
 		timeout   = flag.Duration("timeout", 3*time.Minute, "per-turn timeout")
 		dumpPath  = flag.String("dump", "", "write every raw protocol line to this file (full JSONL, untruncated)")
 	)
+	flag.Func("pi-arg", "extra verbatim pi flag (repeatable), e.g. --pi-arg=--no-extensions", func(v string) error {
+		extraPiArgs = append(extraPiArgs, v)
+		return nil
+	})
 	flag.Parse()
 
 	if *prompt == "" {
