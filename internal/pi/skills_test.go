@@ -157,7 +157,7 @@ func TestBuildSkillFlags_InvalidConfigDir(t *testing.T) {
 
 	// All skills should be reported as missing
 	assert.True(t, result.HasMissingSkills(), "Expected missing skills when directory doesn't exist")
-	assert.Equal(t, 16, len(result.Missing), "Expected all 16 skills to be reported as missing")
+	assert.Equal(t, len(DefaultSkills), len(result.Missing), "Expected every default skill to be reported as missing")
 
 	// Paths should still be absolute in warnings
 	absPath, _ := filepath.Abs(invalidDir)
