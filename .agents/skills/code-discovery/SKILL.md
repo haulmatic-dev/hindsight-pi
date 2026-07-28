@@ -31,12 +31,12 @@ This skill depends on **code-search-and-intelligence**. Load it first:
 Check for existing patterns and anti-patterns:
 
 ```bash
-hindsight search "<bead title>: <bead description>" --limit 5
+hindsight search "<bead title>: <bead description>" --budget 2000
 ```
 
 **Example:**
 ```bash
-hindsight search "Hindsight server lifecycle: Initialize and manage embedded Python server" --limit 5
+hindsight search "Hindsight server lifecycle: Initialize and manage embedded Python server" --budget 2000
 ```
 
 ### Step 2: Search Code Semantically
@@ -45,16 +45,16 @@ Find existing code related to your task:
 
 ```bash
 # Search by task description
-llm-tldr search "<what you're implementing>" --limit 10
+graphify query "<what you're implementing>" --budget 2000
 
 # Search by functionality keywords
-llm-tldr search "<key functionality>"
+graphify query "<key functionality>"
 ```
 
 **Example:**
 ```bash
-llm-tldr search "server lifecycle management" --limit 10
-llm-tldr search "embedded python process"
+graphify query "server lifecycle management" --budget 2000
+graphify query "embedded python process"
 ```
 
 ### Step 3: Analyze Impact (Before Modifying)
@@ -62,12 +62,12 @@ llm-tldr search "embedded python process"
 If modifying existing files, check what depends on them:
 
 ```bash
-llm-tldr impact <file-path> --depth 2
+graphify affected <file-path> --depth 2
 ```
 
 **Example:**
 ```bash
-llm-tldr impact cmd/hydra/main.go --depth 2
+graphify affected cmd/hydra/main.go --depth 2
 ```
 
 ### Step 4: Document Your Findings
@@ -115,13 +115,13 @@ Document discovered files in your implementation summary:
 @skill_use skill_names=["code-search-and-intelligence"]
 
 # 2. Query patterns
-hindsight search "<task>" --limit 5
+hindsight search "<task>" --budget 2000
 
 # 3. Search code
-llm-tldr search "<query>" --limit 10
+graphify query "<query>" --budget 2000
 
 # 4. Check impact
-llm-tldr impact <file> --depth 2
+graphify affected <file> --depth 2
 
 # 5. Save findings
 br note add <bead-id> "Files: ..."

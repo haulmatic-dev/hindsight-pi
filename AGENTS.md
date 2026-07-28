@@ -14,23 +14,33 @@ cm context "<concise description of what you are about to implement>" --json
 - Read `content` field for proven patterns and anti-patterns.
 - **If an anti-pattern matches your current approach, STOP and follow the documented fix.**
 
-### Step 2: Search Codebase with TLDR
+### Step 2: Search the Codebase with the Code Graph
 
 ```bash
-llm-tldr search "<what you need to implement>" . --max 10
+graphify query "<what you need to implement>" --budget 2000
 ```
 
 - Use results to find existing code patterns before writing new code.
-- If semantic search returns 0 results, use `rg "<pattern>"` as fallback.
+- `--budget` caps the answer in tokens; keep it tight (2000 is the default).
+- The graph lives in `graphify-out/graph.json` and is refreshed by Hydra per
+  project, not per bead. If it is missing, fall back to `rg "<pattern>"` — never
+  build a graph yourself mid-bead, it costs ~15s and will be stale immediately.
 
 ### Step 3: Analyze Impact (For Modifications)
 
 ```bash
-llm-tldr impact <file-path> --depth 2
+graphify affected "<symbol or file>" --depth 2
 ```
 
 - Required when modifying existing files.
-- Shows downstream callers affected by your change.
+- Reverse traversal: shows what depends on the thing you are about to change.
+- `graphify god-nodes --top 10` names the architectural hubs — treat a change to
+  one as high blast radius.
+
+> Replaces `llm-tldr`, which is gone. It went unmaintained, returned zero
+> semantic units on Go (silently falling back to grep), and its service was not
+> even running in production. Do not reintroduce `llm-tldr` or `hydra-llm-tldr`
+> commands; neither binary exists.
 
 ### Step 4: Save New Patterns
 
@@ -72,7 +82,7 @@ After implementation:
 ## Anti-Patterns (DO NOT)
 
 1. **DO NOT** start implementing without querying CASS first.
-2. **DO NOT** write new code without checking TLDR for existing patterns.
+2. **DO NOT** write new code without querying the code graph for existing patterns.
 3. **DO NOT** modify files without running `impact` analysis.
 4. **DO NOT** discover a pattern and defer saving it to "later".
 5. **DO NOT** save raw execution output or JSON events — save distilled insights only.
@@ -111,7 +121,7 @@ After implementation:
 Before marking any task complete:
 
 - [ ] CASS queried and results reviewed
-- [ ] TLDR searched for existing patterns
+- [ ] Code graph queried for existing patterns (`graphify query`)
 - [ ] Impact analysis run (if modifying files)
 - [ ] Tests pass: `go test ./...`
 - [ ] New patterns saved to CASS (`cm add`)
@@ -234,7 +244,7 @@ projects:
 
 # Disable heavy features for faster startup
 intelligence:
-  tldr: { enabled: false }
+  graphify: { enabled: true }
   gptcache: { enabled: false }
   hindsight: { enabled: false }
   patterns: { enabled: false }

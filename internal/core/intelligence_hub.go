@@ -22,6 +22,7 @@ type IntelligenceHub struct {
 	hindsightClient   HindsightClient
 	batchRetentionSvc *services.BatchRetentionService
 	tldrIndexer       *TLDRIndexer
+	graphifyIndexer   *GraphifyIndexer
 	config            IntelligenceConfig
 }
 
@@ -53,6 +54,23 @@ func (h *IntelligenceHub) Initialize() {
 				"llm-tldr",
 			)
 			log.Printf("[IntelligenceHub] TLDR indexer initialized")
+		}
+	}
+
+	// Graphify replaces llm-tldr as the structural-intelligence layer. Agents
+	// reach it through the `graphify` skill (frontmatter-only prompt cost); the
+	// hub's only job is keeping each project's graph fresh with `graphify
+	// update`, which is AST-only and needs no model call.
+	if h.config.Graphify.Enabled {
+		h.graphifyIndexer = NewGraphifyIndexer(h.config.Graphify)
+		if h.graphifyIndexer.Available() {
+			log.Printf("[IntelligenceHub] Graphify indexer initialized (refresh: %s, timeout: %s)",
+				h.config.Graphify.RefreshInterval, h.config.Graphify.Timeout)
+		} else {
+			// Not fatal: the skill still works against whatever graph is on
+			// disk, and agents fall back to reading files.
+			log.Printf("[IntelligenceHub] ⚠️  Graphify enabled but binary %q not on PATH — graphs will not be refreshed (install: pip install graphifyy)",
+				h.config.Graphify.Binary)
 		}
 	}
 
@@ -139,8 +157,19 @@ func (h *IntelligenceHub) Indexer() *TLDRIndexer {
 	return h.tldrIndexer
 }
 
+// GraphifyIndexer returns the graphify indexer (may be nil).
+func (h *IntelligenceHub) GraphifyIndexer() *GraphifyIndexer {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.graphifyIndexer
+}
+
 // QueueInitialIndexing queues all project repositories for indexing.
 func (h *IntelligenceHub) QueueInitialIndexing(projects []types.Project) {
+	// Graph refresh runs independently of the legacy indexer, so a disabled or
+	// removed TLDR path cannot stop graphs from being built.
+	h.refreshGraphs(projects)
+
 	if h.tldrIndexer == nil {
 		return
 	}
@@ -160,8 +189,35 @@ func (h *IntelligenceHub) QueueInitialIndexing(projects []types.Project) {
 	}
 }
 
+// refreshGraphs asks the graphify indexer to rebuild each project's graph if it
+// is due. Per project, never per bead: beads run in throwaway worktrees, so a
+// per-bead build would repeat the whole extraction hundreds of times per run.
+func (h *IntelligenceHub) refreshGraphs(projects []types.Project) {
+	indexer := h.GraphifyIndexer()
+	if indexer == nil {
+		return
+	}
+	for _, project := range projects {
+		if project.Type == types.RepoTypeMulti {
+			for _, repo := range project.Repos {
+				if indexer.Refresh(repo.Path) {
+					log.Printf("[Graphify] refreshing graph: %s/%s", project.Name, repo.Name)
+				}
+			}
+			continue
+		}
+		if indexer.Refresh(project.Path) {
+			log.Printf("[Graphify] refreshing graph: %s", project.Name)
+		}
+	}
+}
+
 // QueueRepoIndexing queues a single repository for indexing.
 func (h *IntelligenceHub) QueueRepoIndexing(projectName, repoPath string) {
+	if indexer := h.GraphifyIndexer(); indexer != nil && indexer.Refresh(repoPath) {
+		log.Printf("[Graphify] refreshing graph: %s/%s", projectName, repoPath)
+	}
+
 	if h.tldrIndexer == nil {
 		return
 	}

@@ -55,14 +55,45 @@ projects:
       type: single
 
 intelligence:
-  tldr:
+  # Structural code intelligence. graphify replaced llm-tldr: llm-tldr went
+  # unmaintained, returned zero semantic units on Go (silently degrading to
+  # grep), and its service on :8787 was not running in production at all.
+  #
+  # Agents reach the graph through the `graphify` SKILL, which costs only its
+  # frontmatter (~380 B) in the prompt because skill bodies load on demand.
+  # Wiring it as an MCP server instead would put tool definitions in every
+  # bead's prompt — the comparable extension route measured +8,325 tokens/turn.
+  #
+  # Hydra's only job is keeping graphs fresh: `graphify update <project>` is pure
+  # tree-sitter AST work with no model call. Measured on the hydra repo: 529
+  # files, 9,720 nodes, 19,269 edges in 14.5s.
+  #
+  # Install: pip install graphifyy && graphify install --platform pi
+  graphify:
     enabled: true
+    binary: graphify
+    # Per project, never per bead — beads run in throwaway worktrees.
+    refresh_interval: 30m
+    # Hard stop: upstream has an O(V x E) report pathology on very large
+    # monorepos (graphify issue #341 — 114 min on 50k files, never finishing).
+    timeout: 10m
+    max_concurrent: 1
+    # Raw AST extraction only (no community report). Nodes+edges are all the
+    # query commands need; leave false to keep GRAPH_REPORT.md.
+    skip_clustering: false
+
+  tldr:
+    # Retired. Left disabled rather than deleted because impact analysis, scope
+    # validation and chain-completion detection still reference its types; those
+    # call sites are removed in a follow-up so each one gets a deliberate
+    # decision rather than a silent behaviour change.
+    enabled: false
     base_url: http://127.0.0.1:8787
     timeout: 30s
     max_files: 20
     max_tokens: 100000
     indexing:
-      enabled: true
+      enabled: false
       max_concurrent: 2
       queue_size: 100
       retry_attempts: 3

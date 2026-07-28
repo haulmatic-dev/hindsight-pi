@@ -83,7 +83,7 @@ Before saving, verify the pattern doesn't already exist.
 
 ```bash
 # Search Hindsight for similar patterns
-hindsight search "your pattern keywords" --limit 5
+hindsight search "your pattern keywords" --budget 2000
 
 # Check for exact matches
 grep -i "your pattern" ~/.pi/skills/*/SKILL.md 2>/dev/null || true
@@ -119,7 +119,7 @@ Score < 60:   Don't save
 # Ask: Is this novel? Generalizable? Documented? Proven? Non-obvious?
 
 # Step 3: Check for duplicates
-hindsight search "your insight" --limit 5
+hindsight search "your insight" --budget 2000
 
 # Step 4: Calculate quality score
 # Novel (20) + Generalizable (20) + Documented (20) + Proven (20) + Non-obvious (20) = 100
@@ -266,7 +266,7 @@ Don't save (mental note only)
 ## Related Skills
 
 - **code-search-and-intelligence**: Query existing patterns before saving
-- **tldr-code-intelligence**: Find related code to verify pattern
+- **graphify code graph**: Find related code to verify pattern
 - **systematic-debugging**: Document debugging insights worth saving
 
 ## Quick Reference
@@ -281,7 +281,7 @@ echo "□ Proven (tested and working)?"
 echo "□ Non-obvious (learned wisdom)?"
 
 # Search for duplicates
-hindsight search "your pattern keywords" --limit 5
+hindsight search "your pattern keywords" --budget 2000
 
 # Save quality pattern
 hindsight retain "[Title]: [Problem]. Solution: [How]. Context: [When]. Trade-offs: [Pros/Cons]. Example: [Code]." --metadata '{"category": "[category]"}'
