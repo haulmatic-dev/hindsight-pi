@@ -50,6 +50,18 @@ func (h *IntelligenceHub) Initialize() {
 			log.Printf("[IntelligenceHub] ⚠️  Graphify enabled but binary %q not on PATH — graphs will not be refreshed (install: pip install graphifyy)",
 				h.config.Graphify.Binary)
 		}
+	} else {
+		// Warn rather than stay quiet. LoadConfig assigns
+		// `config.Intelligence = raw.Intelligence` wholesale, so a config file
+		// with an `intelligence:` block but no `graphify:` key silently discards
+		// the DefaultConfig value and lands here with the structural layer off.
+		// That exact shape — present in code, inert in the process — has now
+		// bitten this config four times (min_score, a self-referential
+		// fallback_provider, mcp.enabled with no server, agents.pi.mode), and
+		// every time it was found by accident rather than by a signal.
+		log.Printf("[IntelligenceHub] ⚠️  Graphify DISABLED — no code graph will be built or refreshed. " +
+			"If this was not deliberate, add an `intelligence.graphify.enabled: true` block: a config " +
+			"with an `intelligence:` section but no `graphify:` key does NOT inherit the default.")
 	}
 
 	if h.config.GPTCache.Enabled {
