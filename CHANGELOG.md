@@ -8,6 +8,20 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- **rpc mode and the `[rtk, caveman, context-mode]` allowlist are now the
+  defaults.** A config that says nothing about the protocol gets both. rpc is the
+  default because text mode initialises no extension host at all — verified: a
+  marker extension loaded with `-e` in text mode is imported but nothing runs and
+  `pi --verbose` lists no extensions, while over rpc the same setup produces
+  `RTK rewrite: git status --short -> rtk git status --short`. The allowlist is
+  the default because Pi's own discovery loads every installed package (48,315
+  tokens on one measured turn versus 12,059 for the allowlist), and the extras —
+  themes, editor widgets, subagent UI — cannot be used by a headless worker.
+  Opt out with `mode: text` or `extensions: []`; both are explicit values, and
+  the defaulting distinguishes them from an omitted key. Defaults are applied
+  *after* the raw config is copied, because `LoadConfig` assigns
+  `config.Agents = raw.Agents` wholesale — anything set in `DefaultConfig` would
+  have been silently discarded by any file containing an `agents:` block.
 - Pi rpc mode is now actually wired to the worker execution path. `agents.pi.mode`
   previously existed, parsed, and had a tested `RPCEnabled()` accessor while
   changing nothing: beads run in a separate `hydra-worker` process that

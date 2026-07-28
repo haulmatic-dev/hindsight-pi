@@ -77,24 +77,66 @@ func TestWorkerEnv_ForwardsRPCModeFromYAML(t *testing.T) {
 	}
 }
 
-// TestWorkerEnv_DefaultsToTextMode: an omitted mode must forward an empty value,
-// which the worker reads as text mode. Today's production behaviour has to remain
-// the default, so enabling rpc is an explicit, revertible act.
-func TestWorkerEnv_DefaultsToTextMode(t *testing.T) {
+// TestWorkerEnv_DefaultsToRPCWithExtensions pins the shipped defaults: a config
+// that says nothing about the protocol gets rpc plus the standard allowlist.
+//
+// rpc is the default because text mode initialises no extension host, so rtk,
+// caveman and context-mode cannot run there at all — the whole reason for the
+// protocol. The allowlist is the default because Pi's own discovery loads every
+// installed package (48,315 tokens on one measured turn against 12,059 for the
+// allowlist), most of which a headless worker cannot use.
+func TestWorkerEnv_DefaultsToRPCWithExtensions(t *testing.T) {
 	cfg := writeRPCModeConfig(t, "")
 
-	if cfg.Agents.Pi.RPCEnabled() {
-		t.Error("an omitted mode must not enable rpc")
+	if !cfg.Agents.Pi.RPCEnabled() {
+		t.Errorf("an omitted mode must default to rpc, got Mode=%q", cfg.Agents.Pi.Mode)
+	}
+	if got := strings.Join(cfg.Agents.Pi.ExtensionsForPhase("green"), ","); got != "rtk,caveman,context-mode" {
+		t.Errorf("default extensions = %q, want rtk,caveman,context-mode", got)
 	}
 
 	env := NewWorkerEnvBuilder(cfg).Build(
 		types.Bead{ID: "b1", Title: "GREEN: implement"}, "/tmp/p", "orchestrator", 0)
 
-	if got := envLastValue(env, "HYDRA_PI_MODE"); got != "" {
-		t.Errorf("HYDRA_PI_MODE = %q, want empty so the worker keeps text mode", got)
+	if got := envLastValue(env, "HYDRA_PI_MODE"); got != "rpc" {
+		t.Errorf("HYDRA_PI_MODE = %q, want \"rpc\"", got)
 	}
+	if got := envLastValue(env, "HYDRA_PI_EXTENSIONS"); got != "rtk,caveman,context-mode" {
+		t.Errorf("HYDRA_PI_EXTENSIONS = %q, want the default allowlist", got)
+	}
+	// Confirms stay denied by default even with rpc on: a worker running
+	// unreviewed commands is a worse failure than a stalled bead.
 	if got := envLastValue(env, "HYDRA_PI_RPC_AUTO_CONFIRM"); got != "false" {
-		t.Errorf("HYDRA_PI_RPC_AUTO_CONFIRM = %q, want \"false\" (confirms denied by default)", got)
+		t.Errorf("HYDRA_PI_RPC_AUTO_CONFIRM = %q, want \"false\"", got)
+	}
+}
+
+// TestWorkerEnv_ExplicitTextModeOptsOut: `mode: text` must still win. Defaults
+// are only for what the operator did not say.
+func TestWorkerEnv_ExplicitTextModeOptsOut(t *testing.T) {
+	cfg := writeRPCModeConfig(t, "    mode: text\n")
+
+	if cfg.Agents.Pi.RPCEnabled() {
+		t.Error("an explicit mode: text must not be overridden by the rpc default")
+	}
+	env := NewWorkerEnvBuilder(cfg).Build(types.Bead{ID: "b1", Title: "t"}, "/tmp/p", "orchestrator", 0)
+	if got := envLastValue(env, "HYDRA_PI_MODE"); got != "text" {
+		t.Errorf("HYDRA_PI_MODE = %q, want \"text\"", got)
+	}
+}
+
+// TestWorkerEnv_ExplicitEmptyExtensionsOptsOut: `extensions: []` disables them.
+// This is the distinction the defaulting relies on — an omitted key is nil, an
+// explicit empty list is not — so it needs a test of its own.
+func TestWorkerEnv_ExplicitEmptyExtensionsOptsOut(t *testing.T) {
+	cfg := writeRPCModeConfig(t, "    mode: rpc\n    extensions: []\n")
+
+	if got := cfg.Agents.Pi.ExtensionsForPhase("green"); len(got) != 0 {
+		t.Errorf("extensions: [] must disable extensions, got %v", got)
+	}
+	env := NewWorkerEnvBuilder(cfg).Build(types.Bead{ID: "b1", Title: "t"}, "/tmp/p", "orchestrator", 0)
+	if got := envLastValue(env, "HYDRA_PI_EXTENSIONS"); got != "" {
+		t.Errorf("HYDRA_PI_EXTENSIONS = %q, want empty", got)
 	}
 }
 
@@ -127,19 +169,6 @@ func TestWorkerEnv_PerPhaseExtensions(t *testing.T) {
 	greenEnv := b.Build(types.Bead{ID: "b2", Title: "GREEN: make it pass"}, "/tmp/p", "orchestrator", 0)
 	if got := envLastValue(greenEnv, "HYDRA_PI_EXTENSIONS"); got != "rtk,caveman,context-mode" {
 		t.Errorf("GREEN bead HYDRA_PI_EXTENSIONS = %q, want the default list", got)
-	}
-}
-
-// TestWorkerEnv_NoExtensionsByDefault: extensions stay off unless configured, so
-// merging this cannot change the cost of a single existing bead.
-func TestWorkerEnv_NoExtensionsByDefault(t *testing.T) {
-	cfg := writeRPCModeConfig(t, "    mode: rpc\n")
-	if got := cfg.Agents.Pi.ExtensionsForPhase("green"); len(got) != 0 {
-		t.Errorf("no extensions configured must yield none, got %v", got)
-	}
-	env := NewWorkerEnvBuilder(cfg).Build(types.Bead{ID: "b1", Title: "t"}, "/tmp/p", "orchestrator", 0)
-	if got := envLastValue(env, "HYDRA_PI_EXTENSIONS"); got != "" {
-		t.Errorf("HYDRA_PI_EXTENSIONS = %q, want empty", got)
 	}
 }
 
