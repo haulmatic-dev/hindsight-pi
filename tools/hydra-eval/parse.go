@@ -87,6 +87,17 @@ func ParseDaemonLogSince(r io.Reader, markers []string, since time.Time) (events
 		if !f.allow(line) {
 			return
 		}
+		// Skip worker stderr that the daemon streams into its own log. Those
+		// lines carry the model's raw JSONL — including its thinking text — so a
+		// substring marker matches whatever the model happened to say.
+		//
+		// Measured on run H: the "closed as failed" marker matched 7,884 lines, of
+		// which 7,739 were worker passthrough (mostly thinking_delta text) and only
+		// 145 were genuine [closeBead] lines. failed_closes was reported as 6,707,
+		// which is not a count of anything real.
+		if isWorkerPassthrough(line) {
+			return
+		}
 		if ev, ok := parseCloseEvent(line); ok {
 			if t, ok := ParseLogTime(line); ok {
 				ev.Time = t
@@ -100,6 +111,14 @@ func ParseDaemonLogSince(r io.Reader, markers []string, since time.Time) (events
 		}
 	})
 	return events, counts
+}
+
+// isWorkerPassthrough reports whether a daemon-log line is streamed worker
+// stderr rather than something the daemon itself emitted. The daemon prefixes
+// those with "[Worker:<bead>] [stderr]", and their payload is the model's own
+// output, so they must never be counted as daemon events.
+func isWorkerPassthrough(line []byte) bool {
+	return bytes.Contains(line, []byte("[stderr]")) || bytes.Contains(line, []byte("[stdout]"))
 }
 
 // collectLines scans input and collects every value for which parse returns

@@ -91,11 +91,12 @@ func TestWorkerEnv_DefaultsToRPCWithExtensions(t *testing.T) {
 	if !cfg.Agents.Pi.RPCEnabled() {
 		t.Errorf("an omitted mode must default to rpc, got Mode=%q", cfg.Agents.Pi.Mode)
 	}
-	// rtk only, by measurement: all three cost +117% tokens per turn against
-	// +33% for rtk alone, and context-mode's tool-call volume (1,292 ctx_* calls
-	// in one run) raises 429 exposure under concurrency.
-	if got := strings.Join(cfg.Agents.Pi.ExtensionsForPhase("green"), ","); got != "rtk" {
-		t.Errorf("default extensions = %q, want rtk", got)
+	// rtk + context-mode, on each extension's own accounting: context-mode's
+	// stats report 1,249,024 tokens saved across worker sessions, and rtk shows a
+	// measured 77-81% reduction on high-output commands. caveman is excluded — at
+	// ultra it produced MORE output tokens (1,103 vs 927) on a prose-heavy prompt.
+	if got := strings.Join(cfg.Agents.Pi.ExtensionsForPhase("green"), ","); got != "rtk,context-mode" {
+		t.Errorf("default extensions = %q, want rtk,context-mode", got)
 	}
 
 	env := NewWorkerEnvBuilder(cfg).Build(
@@ -104,7 +105,7 @@ func TestWorkerEnv_DefaultsToRPCWithExtensions(t *testing.T) {
 	if got := envLastValue(env, "HYDRA_PI_MODE"); got != "rpc" {
 		t.Errorf("HYDRA_PI_MODE = %q, want \"rpc\"", got)
 	}
-	if got := envLastValue(env, "HYDRA_PI_EXTENSIONS"); got != "rtk" {
+	if got := envLastValue(env, "HYDRA_PI_EXTENSIONS"); got != "rtk,context-mode" {
 		t.Errorf("HYDRA_PI_EXTENSIONS = %q, want the default allowlist", got)
 	}
 	// Confirms stay denied by default even with rpc on: a worker running
