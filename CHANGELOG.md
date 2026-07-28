@@ -235,6 +235,26 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   Target Files from the target clone.
 
 ### Fixed
+- `failed_closes` in the eval metrics was counting the model's own words. The
+  daemon streams worker stderr into its own log, and that payload is raw JSONL
+  including `thinking_delta` text, so a substring marker matched whatever the
+  model happened to write. On run H the `closed as failed` marker matched 7,884
+  lines — **7,739 worker passthrough, 145 genuine `[closeBead]` lines** — and the
+  metric was reported as 6,707. Marker counting now skips `[stderr]`/`[stdout]`
+  passthrough lines. This affected every marker-derived metric, not just this one.
+
+### Changed
+- Default Pi extension allowlist is `[rtk, context-mode]`. context-mode was
+  dropped a few hours earlier on the strength of one trivial prompt where it only
+  added tokens; that prompt gave it nothing worth sandboxing, so the measurement
+  was wrong. Its own stats across 155 worker sessions report **4,401,021 bytes
+  sandboxed against 485,148 returned and 1,249,024 tokens saved** — lumpy (median
+  3,385 per active session, one session 1,095,981), earning its place by
+  occasionally avoiding an enormous context load rather than shaving a steady
+  percentage. caveman stays out: at ultra it produced **1,103 output tokens against
+  927 without it**, plus ~8,500 input tokens of its own instructions, because it
+  compresses assistant prose while exempting code — and a worker's output is
+  mostly tool calls and code.
 - **A hung provider request no longer costs a worker ten minutes.** In rpc mode
   the activity timeout is now 4 minutes rather than 10, because the two protocols
   emit at very different densities: text mode streams prose and a long tool run

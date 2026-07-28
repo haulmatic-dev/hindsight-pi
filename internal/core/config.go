@@ -95,27 +95,30 @@ const defaultPiMode = "rpc"
 
 // defaultPiExtensions is the allowlist every phase gets unless overridden.
 //
-// rtk only, by measurement. Three sequential trials of the same prompt against
-// the same provider, token totals per turn:
+// rtk and context-mode, on each extension's own accounting rather than on a
+// synthetic prompt.
 //
-//	no extensions              ~12,271
-//	rtk                        ~16,360   (+33%)
-//	rtk + caveman + context-mode ~26,679 (+117%)
+// context-mode was briefly dropped from this list on the strength of a single
+// trivial prompt, where it only added tokens. That was the wrong measurement: the
+// prompt gave it nothing worth sandboxing. Its own stats across 155 worker
+// sessions (24 of which used it) report 4,401,021 bytes sandboxed against 485,148
+// returned, and 1,249,024 tokens saved. The saving is lumpy — median 3,385 per
+// active session, one session 1,095,981 — so it earns its place by occasionally
+// avoiding an enormous context load, not by shaving a steady percentage.
 //
-// Every extra token is also an extra request when it comes from a tool call, and
-// context-mode is tool-call-shaped by design: one dogfood run logged 1,292
-// `ctx_*` calls against 85 rtk rewrites. Under five concurrent workers that
-// request volume raises exposure to a provider that intermittently answers "the
-// engine is currently overloaded" — three of which used to freeze the fleet for
-// fifteen minutes.
+// rtk compacts tool OUTPUT and its effect is directly measurable: 77-81%
+// reduction on high-output commands (an `rg` over internal/core went 111,165
+// bytes to 21,073), and ~0% on already-terse ones. Bounded cost, saving that
+// scales with how noisy the command is.
 //
-// rtk earns its place differently from the other two: it compacts tool OUTPUT,
-// so its cost is bounded while its saving scales with how noisy the commands are.
-// caveman (terser model output) and context-mode (sandboxed context) are
-// plausible wins that are simply not measured yet — add them per project with
-// `extensions: [rtk, caveman]` once there is data, rather than fleet-wide on a
-// hunch.
-var defaultPiExtensions = []string{"rtk"}
+// caveman is deliberately NOT here. At its most aggressive setting (ultra,
+// verified live) it produced 1,103 output tokens against 927 without it on a
+// prose-heavy prompt — no saving, plus ~8,500 input tokens of its own
+// instructions. Its mechanism compresses assistant prose while exempting code
+// blocks, and a bead worker's output is mostly tool calls and code, so there is
+// little for it to compress. Enable it per project with
+// `extensions: [rtk, context-mode, caveman]` if a workload is prose-heavy.
+var defaultPiExtensions = []string{"rtk", "context-mode"}
 
 // applyPiDefaults fills in Pi settings the YAML did not specify.
 //
