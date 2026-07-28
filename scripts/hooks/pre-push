@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# pre-push guard. Install with: scripts/install-hooks.sh
+#
+# Each check exists because the corresponding mistake actually happened and cost
+# real time. None of them is a style preference.
+#
+# Set HYDRA_SKIP_PREPUSH=1 to bypass deliberately (e.g. pushing a docs-only
+# branch based on another branch on purpose).
+set -uo pipefail
+
+BASE_BRANCH="${HYDRA_BASE_BRANCH:-development}"
+REMOTE="${1:-}"
+fail=0
+
+say()  { printf '  %s\n' "$*"; }
+warn() { printf '  ⚠️  %s\n' "$*"; }
+bad()  { printf '  ❌ %s\n' "$*"; fail=1; }
+
+if [ "${HYDRA_SKIP_PREPUSH:-0}" = "1" ]; then
+	echo "pre-push: skipped (HYDRA_SKIP_PREPUSH=1)"
+	exit 0
+fi
+
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+echo "pre-push: checking $branch"
+
+# Nothing to guard when pushing the base branch itself.
+if [ "$branch" = "$BASE_BRANCH" ] || [ "$branch" = "main" ]; then
+	echo "pre-push: on $branch, nothing to check"
+	exit 0
+fi
+
+# Resolve the base. Prefer the remote being pushed to, so this works whether the
+# org remote is called origin or github.
+base_ref=""
+for candidate in "${REMOTE:+$REMOTE/$BASE_BRANCH}" "github/$BASE_BRANCH" "origin/$BASE_BRANCH" "$BASE_BRANCH"; do
+	[ -n "$candidate" ] || continue
+	if git rev-parse --verify --quiet "$candidate" >/dev/null; then
+		base_ref="$candidate"
+		break
+	fi
+done
+
+if [ -z "$base_ref" ]; then
+	warn "cannot resolve $BASE_BRANCH on any remote — skipping base checks"
+else
+	# CHECK 1: is this branch stacked on another feature branch?
+	#
+	# PR #87 was branched off another PR's branch instead of development, so it
+	# carried that PR's commits. A reviewer approved it, merged the other PR,
+	# then dismissed the approval because the same change appeared twice. The
+	# work was fine; the base was wrong.
+	commits=$(git log --oneline "$base_ref..HEAD" 2>/dev/null | wc -l | tr -d ' ')
+	say "commits ahead of $base_ref: $commits"
+	if [ "$commits" -gt 6 ]; then
+		warn "$commits commits ahead — is this branch based on $BASE_BRANCH, or stacked on another branch?"
+		git log --oneline "$base_ref..HEAD" | sed 's/^/      /'
+	fi
+
+	# A merge-base far behind the base branch tip usually means a stale or
+	# wrongly-chosen starting point.
+	mb=$(git merge-base "$base_ref" HEAD 2>/dev/null || echo "")
+	if [ -n "$mb" ] && [ "$mb" != "$(git rev-parse "$base_ref")" ]; then
+		behind=$(git rev-list --count "$mb..$base_ref" 2>/dev/null || echo 0)
+		if [ "$behind" -gt 20 ]; then
+			warn "branch point is $behind commits behind $base_ref — consider rebasing"
+		fi
+	fi
+fi
+
+# CHECK 2: does every commit being pushed actually contain something?
+#
+# Commit 9cb2bb3 contained only a changelog entry because a `git add` naming a
+# not-yet-created path made git abort the entire invocation. It looked like a
+# normal commit and broke the next deploy.
+while read -r sha; do
+	[ -n "$sha" ] || continue
+	files=$(git show --stat --format="" "$sha" | grep -c "|" || true)
+	if [ "${files:-0}" -eq 0 ]; then
+		bad "commit $(git log -1 --format=%h "$sha") changes no files"
+	fi
+done < <(git rev-list "${base_ref:-HEAD~1}..HEAD" 2>/dev/null || true)
+
+# CHECK 3: a commit whose message claims code but only touches docs.
+#
+# The same failure class as above, one step subtler: #85's description and
+# changelog claimed a provider_breaker.go change that a silent no-op string
+# replacement never applied. Nothing verified the claim.
+while read -r sha; do
+	[ -n "$sha" ] || continue
+	subject=$(git log -1 --format=%s "$sha")
+	case "$subject" in
+	feat*|fix*|refactor*|perf*)
+		if ! git show --stat --format="" "$sha" | grep -qE "\.(go|mjs|js|ts|sh|py)\s*\|"; then
+			warn "commit ${subject:0:60} is typed as code (${subject%%:*}) but touches no source file"
+		fi
+		;;
+	esac
+done < <(git rev-list "${base_ref:-HEAD~1}..HEAD" 2>/dev/null || true)
+
+# CHECK 4: the module must compile. Cheap insurance against pushing a branch that
+# cannot build, which is what reviewers and CI then waste time on.
+if command -v go >/dev/null 2>&1; then
+	if ! go build ./... >/tmp/hydra-prepush-build.log 2>&1; then
+		bad "go build ./... fails — see /tmp/hydra-prepush-build.log"
+		tail -5 /tmp/hydra-prepush-build.log | sed 's/^/      /'
+	else
+		say "go build ./... ok"
+	fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+	echo "pre-push: BLOCKED. Fix the above, or set HYDRA_SKIP_PREPUSH=1 to override deliberately."
+	exit 1
+fi
+
+echo "pre-push: ok"
+exit 0
