@@ -323,3 +323,59 @@ Universal rules for every agent working in this repo — human, Claude, or Hydra
 4. **Exact errors.** Quote error messages verbatim, never paraphrased — the exact string is the next agent's search key.
 5. **Honest completion.** Anything not done or not verified is reported as **NOT DONE** / **NOT VERIFIED** in the final summary. A false "done" costs ten times a true "blocked".
 6. **Root cause, not symptom.** Silencing an error, skipping a test, or widening a timeout is a symptom fix; it is acceptable only when evidence shows it IS the root cause.
+
+---
+
+## Change Hygiene (mechanical, not aspirational)
+
+Every rule here exists because the mistake happened and cost real time. Install
+the guards once:
+
+```bash
+./scripts/install-hooks.sh
+```
+
+### Branch from the base branch explicitly
+
+```bash
+git fetch github --quiet
+git checkout -b <name> github/development
+```
+
+Not `git checkout -b <name>` from wherever you happen to be standing. PR #87 was
+branched off another PR's branch, carried that PR's commits, and had its approval
+dismissed because the same change appeared in two open PRs. The work was correct;
+the starting point was not. The pre-push hook warns when a branch looks stacked.
+
+### Never hide `git add` errors, and verify what landed
+
+```bash
+git add <explicit paths>          # never with 2>/dev/null
+git show --stat HEAD              # confirm the files you intended are there
+```
+
+Two separate incidents: a `git add` naming a path that did not exist yet made git
+abort the *entire* invocation, producing a commit with only a changelog entry that
+broke the next deploy; and a `git add` on a path behind a symlink failed with its
+error swallowed by `2>/dev/null`, so a PR shipped half its content. `git add` is
+all-or-nothing — one bad pathspec discards the whole staging operation.
+
+### Edit code with tools that fail loudly
+
+A silent `str.replace` / `perl -pi -e` that matches nothing leaves the file
+untouched and reports success. That is how #85's description and changelog came to
+claim a `provider_breaker.go` change the commit did not contain — the replacement
+used two tabs against a file indented with one.
+
+Prefer an editor that errors when its anchor is missing. If you must use a script,
+`grep` for the result afterwards and treat a zero count as failure.
+
+### Verify the effect, not the command
+
+The pattern behind all of the above is asserting an action succeeded because it
+exited 0. Check the effect: `git show --stat` after committing, `grep -c` after a
+scripted edit, a build after a refactor.
+
+The same applies to measurement. State the denominator and the window — "0 hits in
+the last 3 minutes" was reported as "extensions are not firing" when the true
+figure was 1,170 hits across 26 logs; only one log fell inside that window.

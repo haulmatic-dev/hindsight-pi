@@ -1,0 +1,97 @@
+name: CI
+
+# The repository had no CI at all until now, and that absence let real breakage
+# reach production. On 2026-07-27 a commit landed containing only a changelog
+# entry — the code it claimed was dropped because a `git add` in the same
+# invocation named a path that did not exist yet, so git aborted the whole
+# invocation. Nothing caught it; the VPS build failed on the next deploy with
+# `undefined: hindsight.WithMaxTokens`. A build job would have caught it in
+# seconds.
+#
+# Scope is deliberately narrow so this is green from day one. A CI job that fails
+# on arrival gets ignored, and an ignored check is worse than no check because it
+# trains everyone to click past red. The known-failing packages are listed
+# explicitly below with the reason, rather than silently omitted.
+
+on:
+  pull_request:
+    branches: [development, main]
+  push:
+    branches: [development]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # The whole module must compile. This is the check that would have caught
+      # the code-less commit described above.
+      - name: go build ./...
+        run: go build ./...
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Packages that pass today. Kept as an explicit allowlist rather than
+      # `./...` so this job is meaningful instead of permanently red.
+      - name: go test (green packages)
+        run: |
+          go test -count=1 \
+            ./agents/... \
+            ./cmd/worker/... \
+            ./graph/... \
+            ./internal/agents/... \
+            ./internal/api/... \
+            ./internal/hindsight/... \
+            ./internal/logx/... \
+            ./internal/project/... \
+            ./internal/security/... \
+            ./internal/services/... \
+            ./internal/validation/... \
+            ./pkg/... \
+            ./tools/hydra-eval/...
+
+      # internal/core is the biggest package and worth gating, minus one test
+      # that hard-codes a VPS absolute path
+      # (/opt/outreach-workflow/tools/gap-to-prd/gap-to-prd) and so cannot pass
+      # anywhere else. Decoupling it from the environment is tracked separately;
+      # skipping it here is honest and keeps the rest of the package gated.
+      - name: go test ./internal/core (excluding the environment-coupled test)
+        run: go test -count=1 -skip 'TestComplianceCycleManager_runGapToPRD' ./internal/core/...
+
+  # Not gated yet, but reported, so the backlog is visible instead of forgotten.
+  # Each of these fails on development today for its own pre-existing reason:
+  #   internal/bv                       test file references removed PlanData fields
+  #   internal/pi                       LSP/skill-install tests depend on the host
+  #   internal/beads                    br CLI fixtures
+  #   internal/integration              end-to-end fixtures
+  #   docs/collective-unconscious/...   vet: redundant newline in an example
+  known-failing:
+    name: known-failing (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet ./... (informational)
+        run: go vet ./... || true
+      - name: go test ./... (informational)
+        run: go test -count=1 ./... || true
