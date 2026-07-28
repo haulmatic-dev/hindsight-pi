@@ -255,6 +255,24 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   927 without it**, plus ~8,500 input tokens of its own instructions, because it
   compresses assistant prose while exempting code — and a worker's output is
   mostly tool calls and code.
+- **Gap-churn: fix beads no longer spawn fix beads.** The recursion guard allowed
+  three levels, which is how run H produced titles like
+  `Fix: Fix: Fix: NFR-001: The impact path stays cheap and offline` and **158 fix
+  beads against 18 real tasks**. A fix bead exists to redo work that failed; if the
+  fix itself fails, another copy re-runs identical instructions through the
+  mechanism that just failed, burning a worker slot and provider quota per attempt
+  while burying the original gap. Capped at one fix bead per original
+  (`maxFixNesting = 1`).
+  Refusal is now also **labelled** (`fix-recursion-capped`). Previously the refusal
+  path returned silently, so the bead closed as failed and its dependents unblocked
+  — the exact regression `close_blocked_on_failed` exists to prevent — with no
+  record of why no fix bead appeared.
+- `compliance_cycle.max_cycles` defaults to **2**, down from 5, in both
+  `DefaultConfig` and the runtime fallback. Each cycle re-runs the analyzer,
+  re-adjudicates and decomposes surviving gaps into a fresh bead chain, so cost
+  multiplies rather than adds. Run H spent 5 gap-to-prd invocations with the later
+  cycles re-litigating findings rather than discovering new ones. Two still covers
+  analyze → fix → verify.
 - **A hung provider request no longer costs a worker ten minutes.** In rpc mode
   the activity timeout is now 4 minutes rather than 10, because the two protocols
   emit at very different densities: text mode streams prose and a long tool run
