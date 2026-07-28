@@ -135,7 +135,11 @@ func TestGraphifyIndexer_FailingBuildIsSwallowed(t *testing.T) {
 // O(V x E) pathology (graphify issue #341: 114 minutes on a 50k-file monorepo,
 // never completing). A misbehaving build must be killed, not wedge the daemon.
 func TestGraphifyIndexer_TimeoutKillsRunawayBuild(t *testing.T) {
-	bin, _ := fakeGraphify(t, "sleep 30\n")
+	// The fake spawns sleep as a BACKGROUND child and waits, so killing the
+	// shell leaves an orphan holding the output pipe — the exact shape CI caught
+	// on Linux (a trailing command gets exec'd by some shells, which masked the
+	// orphan case on macOS). WaitDelay is what unblocks CombinedOutput.
+	bin, _ := fakeGraphify(t, "sleep 30 &\nwait\n")
 	project := t.TempDir()
 
 	idx := NewGraphifyIndexer(GraphifyConfig{
