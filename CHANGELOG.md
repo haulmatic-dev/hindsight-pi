@@ -235,6 +235,18 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   Target Files from the target clone.
 
 ### Fixed
+- **A hung provider request no longer costs a worker ten minutes.** In rpc mode
+  the activity timeout is now 4 minutes rather than 10, because the two protocols
+  emit at very different densities: text mode streams prose and a long tool run
+  can legitimately go quiet, while rpc emits an event for every step
+  (`tool_execution_*`, `message_update`, `extension_ui_request`), so silence means
+  the request has hung. Measured 2026-07-28: a worker logged "prompt sent over rpc"
+  at 07:50:09 and emitted nothing until the timeout fired at 08:00:29, while the
+  next attempt received a 429 in five seconds — and Pi's own retry backoff is
+  `delayMs: 2000`, so a ten-minute gap is never Pi waiting politely. Waiting it
+  out wasted a worker slot; across five slots the run stopped closing beads
+  entirely (0 in 45 minutes, against 8 in the preceding text-mode window).
+  `HYDRA_WORKER_ACTIVITY_TIMEOUT` still overrides both.
 - **A transient provider blip no longer freezes the fleet for fifteen minutes.**
   Kimi returns "The engine is currently overloaded, please try again later" as a
   429 with `type: rate_limit_error`. That was classified as a rate limit (exit 2),

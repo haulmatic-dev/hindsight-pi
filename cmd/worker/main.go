@@ -1193,6 +1193,33 @@ func isTransientStartupFailure(result *ExecutionResult, err error) bool {
 		strings.Contains(hay, "use --list-models")
 }
 
+// defaultActivityTimeout returns how long a worker tolerates total silence from
+// Pi before killing it.
+//
+// The two protocols warrant different patience because they emit at very
+// different densities. In text mode Pi streams prose, and a long tool run can
+// legitimately go quiet for minutes, so 10 minutes is a fair backstop. In rpc
+// mode every step is an event — tool_execution_start/update/end, message_update,
+// extension_ui_request — so a working session is never quiet for long, and
+// silence means the provider request has hung.
+//
+// That hang is real and measured: on 2026-07-28 a worker logged "prompt sent over
+// rpc" at 07:50:09 and produced literally nothing until the 10-minute timeout
+// fired at 08:00:29, while the immediately following attempt got a 429 response
+// in five seconds. Pi's own retry backoff is delayMs: 2000, so a ten-minute gap
+// is never Pi waiting politely — it is a request that will not come back.
+//
+// Waiting 10 minutes on a dead request wastes a worker slot; with five slots the
+// run stopped closing beads entirely. Failing fast returns the slot for a retry
+// that usually succeeds immediately. HYDRA_WORKER_ACTIVITY_TIMEOUT still
+// overrides both.
+func defaultActivityTimeout(piConfig PiConfig) time.Duration {
+	if piConfig.RPCEnabled() {
+		return 4 * time.Minute
+	}
+	return 10 * time.Minute
+}
+
 // executeWithPi executes the Pi agent CLI with activity-based timeout monitoring
 func executeWithPi(
 	bead types.Bead,
@@ -1214,7 +1241,7 @@ func executeWithPi(
 	// touching healthy ones. Lowered from 30m (which let stalls burn up to the
 	// 15m maxTotalRuntime before Charon's blunter kill). Tunable via
 	// HYDRA_WORKER_ACTIVITY_TIMEOUT (e.g. "8m", "15m").
-	activityTimeout := 10 * time.Minute
+	activityTimeout := defaultActivityTimeout(piConfig)
 	if v := os.Getenv("HYDRA_WORKER_ACTIVITY_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			activityTimeout = d
