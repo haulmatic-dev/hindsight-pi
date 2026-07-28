@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -94,6 +95,51 @@ func TestWorkerEnv_DefaultsToTextMode(t *testing.T) {
 	}
 	if got := envLastValue(env, "HYDRA_PI_RPC_AUTO_CONFIRM"); got != "false" {
 		t.Errorf("HYDRA_PI_RPC_AUTO_CONFIRM = %q, want \"false\" (confirms denied by default)", got)
+	}
+}
+
+// TestWorkerEnv_PerPhaseExtensions pins the per-phase allowlist reaching the
+// worker. Extensions are opt-in and phase-aware because loading everything is
+// expensive — measured on one identical turn, all installed extensions cost
+// 48,315 tokens against 12,059 for rtk alone.
+func TestWorkerEnv_PerPhaseExtensions(t *testing.T) {
+	cfg := writeRPCModeConfig(t, `    mode: rpc
+    extensions: [rtk, caveman, context-mode]
+    phase_extensions:
+      red: [rtk]
+`)
+
+	if got := cfg.Agents.Pi.ExtensionsForPhase("green"); strings.Join(got, ",") != "rtk,caveman,context-mode" {
+		t.Errorf("a phase with no override must use the default list, got %v", got)
+	}
+	if got := cfg.Agents.Pi.ExtensionsForPhase("red"); strings.Join(got, ",") != "rtk" {
+		t.Errorf("RED override = %v, want [rtk]", got)
+	}
+	if got := cfg.Agents.Pi.ExtensionsForPhase("RED"); strings.Join(got, ",") != "rtk" {
+		t.Errorf("phase lookup must be case-insensitive, got %v", got)
+	}
+
+	b := NewWorkerEnvBuilder(cfg)
+	redEnv := b.Build(types.Bead{ID: "b1", Title: "RED: write the failing test"}, "/tmp/p", "orchestrator", 0)
+	if got := envLastValue(redEnv, "HYDRA_PI_EXTENSIONS"); got != "rtk" {
+		t.Errorf("RED bead HYDRA_PI_EXTENSIONS = %q, want \"rtk\"", got)
+	}
+	greenEnv := b.Build(types.Bead{ID: "b2", Title: "GREEN: make it pass"}, "/tmp/p", "orchestrator", 0)
+	if got := envLastValue(greenEnv, "HYDRA_PI_EXTENSIONS"); got != "rtk,caveman,context-mode" {
+		t.Errorf("GREEN bead HYDRA_PI_EXTENSIONS = %q, want the default list", got)
+	}
+}
+
+// TestWorkerEnv_NoExtensionsByDefault: extensions stay off unless configured, so
+// merging this cannot change the cost of a single existing bead.
+func TestWorkerEnv_NoExtensionsByDefault(t *testing.T) {
+	cfg := writeRPCModeConfig(t, "    mode: rpc\n")
+	if got := cfg.Agents.Pi.ExtensionsForPhase("green"); len(got) != 0 {
+		t.Errorf("no extensions configured must yield none, got %v", got)
+	}
+	env := NewWorkerEnvBuilder(cfg).Build(types.Bead{ID: "b1", Title: "t"}, "/tmp/p", "orchestrator", 0)
+	if got := envLastValue(env, "HYDRA_PI_EXTENSIONS"); got != "" {
+		t.Errorf("HYDRA_PI_EXTENSIONS = %q, want empty", got)
 	}
 }
 

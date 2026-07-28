@@ -62,6 +62,11 @@ type PiConfig struct {
 	// false denies them — a worker running unreviewed commands because the
 	// connector auto-approved is a worse failure than a stalled bead.
 	RPCAutoConfirm bool
+
+	// Extensions is the allowlist of Pi extensions to load, already narrowed to
+	// this bead's phase by the daemon. Only meaningful in rpc mode: text mode
+	// has no extension host, so the flags would be inert.
+	Extensions []string
 }
 
 // RPCEnabled reports whether this worker should drive Pi over the rpc JSONL
@@ -618,6 +623,9 @@ func parsePiConfig() PiConfig {
 	default:
 		cfg.RPCAutoConfirm = false
 	}
+
+	// Parse the per-phase extension allowlist chosen by the daemon.
+	cfg.Extensions = parseExtensionList(os.Getenv("HYDRA_PI_EXTENSIONS"))
 
 	// Parse API key name
 	cfg.APIKeyName = os.Getenv("HYDRA_PI_API_KEY_NAME")
@@ -1540,6 +1548,14 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 	// installed but dormant. Verified in tools/pi-rpc.
 	if piConfig.RPCEnabled() {
 		args = append(args, "--mode", "rpc")
+		// Load exactly the allowlisted extensions. Only attempted in rpc mode:
+		// text mode initialises no extension host, so these flags would do
+		// nothing but lengthen the command line.
+		if extArgs := extensionArgs(resolveExtensionPaths(resolvePiAgentDir(piConfig.ConfigDir), piConfig.Extensions)); len(extArgs) > 0 {
+			args = append(args, extArgs...)
+			log.Printf("[Worker:rpc] loading %d allowlisted extension(s): %s",
+				(len(extArgs)-1)/2, strings.Join(piConfig.Extensions, ", "))
+		}
 	}
 
 	// Add provider

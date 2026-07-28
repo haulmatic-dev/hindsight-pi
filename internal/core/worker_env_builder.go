@@ -237,5 +237,9 @@ func (b *WorkerEnvBuilder) buildPiEnv(bead types.Bead) []string {
 		// hydra.yaml was inert until it was forwarded here.
 		fmt.Sprintf("HYDRA_PI_MODE=%s", p.Mode),
 		fmt.Sprintf("HYDRA_PI_RPC_AUTO_CONFIRM=%t", p.AutoConfirm()),
+		// Extension allowlist for this bead's phase. Comma-separated so it
+		// survives the env hand-off; the worker resolves names to entry paths
+		// because only it knows the resolved package root.
+		fmt.Sprintf("HYDRA_PI_EXTENSIONS=%s", strings.Join(p.ExtensionsForPhase(phase), ",")),
 	}
 }

@@ -66,6 +66,37 @@ type PiConfig struct {
 	// Provider or Model replaces the corresponding primary field, while empty
 	// fields fall back to the primary.
 	PhaseModels map[string]PhaseModel `yaml:"phase_models"`
+
+	// Extensions is the allowlist of Pi extensions to load (rpc mode only —
+	// text mode has no extension host). Names are package names or the short
+	// aliases in cmd/worker's resolver, e.g. ["rtk", "caveman", "context-mode"].
+	//
+	// An allowlist rather than "load everything" because loading everything is
+	// expensive: measured on one identical turn, all installed extensions cost
+	// 48,315 tokens versus 12,059 for rtk alone — 4x, for extensions a headless
+	// worker cannot use (themes, editor widgets, subagent UI). Empty disables
+	// extensions entirely, which is the default and today's behaviour.
+	Extensions []string `yaml:"extensions"`
+
+	// PhaseExtensions overrides Extensions for a specific phase (red, green,
+	// refactor, …), for cases where a phase needs something the others do not.
+	// A phase with no entry uses Extensions.
+	PhaseExtensions map[string][]string `yaml:"phase_extensions"`
+}
+
+// ExtensionsForPhase returns the extension allowlist for a phase, falling back
+// to the default Extensions list when the phase has no override. Phase lookup is
+// case-insensitive, matching ModelForPhase.
+func (p PiConfig) ExtensionsForPhase(phase string) []string {
+	if len(p.PhaseExtensions) > 0 {
+		key := strings.ToLower(strings.TrimSpace(phase))
+		if key != "" {
+			if ext, ok := p.PhaseExtensions[key]; ok {
+				return ext
+			}
+		}
+	}
+	return p.Extensions
 }
 
 // RPCEnabled reports whether the Pi connector should run in RPC JSONL mode.
