@@ -183,7 +183,21 @@ func (b *ProviderBreaker) RecordRateLimit() {
 
 	if len(kept) >= b.threshold && b.fallbackProvider != "" {
 		b.openUntil[prov] = now.Add(b.openFor)
-		log.Printf("[ProviderBreaker] provider %s tripped (%d rate-limits within %s) — open %s, failing over to %s",
-			prov, len(kept), b.window, b.openFor, b.fallbackProvider)
+		// Say what will actually happen. A fallback equal to the primary cannot be
+		// failed over to, so announcing a failover is false — the real consequence
+		// is that ShouldPause freezes spawning. The deployed config has exactly
+		// this shape (fallback_provider: kimi-coding on a kimi-coding primary), and
+		// during run H the log read "failing over to kimi-coding" while every
+		// worker was in fact paused for 11m32s. The behaviour was right; the
+		// message sent me looking in the wrong place.
+		if b.fallbackProvider == b.primaryProvider {
+			log.Printf("[ProviderBreaker] provider %s tripped (%d rate-limits within %s) — open %s. "+
+				"fallback_provider is the SAME as the primary, so there is nothing to fail over to: "+
+				"spawning pauses instead. Set a distinct fallback or remove the key.",
+				prov, len(kept), b.window, b.openFor)
+		} else {
+			log.Printf("[ProviderBreaker] provider %s tripped (%d rate-limits within %s) — open %s, failing over to %s",
+				prov, len(kept), b.window, b.openFor, b.fallbackProvider)
+		}
 	}
 }
