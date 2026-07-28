@@ -1,6 +1,11 @@
 package core
 
-import "testing"
+import (
+	"bytes"
+	"log"
+	"strings"
+	"testing"
+)
 
 // TestIsInfrastructureExitCode_IncludesTransientOverload: exit 7 must be treated
 // as infrastructure so the bead is retried rather than blamed. A provider being
@@ -66,5 +71,49 @@ func TestProviderBreaker_DistinctFallbackDoesNotPause(t *testing.T) {
 	}
 	if prov, model := b.Override("primary", "m1"); prov != "secondary" || model != "m2" {
 		t.Errorf("Override = %q/%q, want secondary/m2", prov, model)
+	}
+}
+
+// TestProviderBreaker_LogsHonestlyWhenFallbackIsSelf pins the message, not just
+// the behaviour.
+//
+// This assertion exists because the fix it guards silently failed to apply the
+// first time: a string replacement with the wrong indentation was a no-op, the
+// commit went out without it, and the claim survived into a PR description. A
+// test would have caught that; a grep afterwards did.
+func TestProviderBreaker_LogsHonestlyWhenFallbackIsSelf(t *testing.T) {
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(old)
+
+	b := NewProviderBreaker("kimi-coding", "m", "kimi-coding", "m")
+	for i := 0; i < 3; i++ {
+		b.RecordRateLimit()
+	}
+
+	out := buf.String()
+	if strings.Contains(out, "failing over to") {
+		t.Errorf("must not announce a failover it cannot perform; got: %s", out)
+	}
+	if !strings.Contains(out, "nothing to fail over to") {
+		t.Errorf("expected the log to name the real consequence; got: %s", out)
+	}
+}
+
+// TestProviderBreaker_LogsFailoverWhenFallbackIsDistinct: the honest-log change
+// must not mute the genuine failover message.
+func TestProviderBreaker_LogsFailoverWhenFallbackIsDistinct(t *testing.T) {
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(old)
+
+	b := NewProviderBreaker("primary", "m1", "secondary", "m2")
+	for i := 0; i < 3; i++ {
+		b.RecordRateLimit()
+	}
+	if out := buf.String(); !strings.Contains(out, "failing over to secondary") {
+		t.Errorf("expected a real failover to be announced; got: %s", out)
 	}
 }
