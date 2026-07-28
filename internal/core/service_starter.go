@@ -82,11 +82,11 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 		log.Println("📚 Skill updater started")
 	}
 
-	// Start TLDR indexer if enabled
-	if indexer := o.intelligenceHub.Indexer(); indexer != nil {
-		indexer.Start()
-		log.Println("📇 TLDR indexer started")
+	// Refresh each project's code graph. The graphify indexer has no background
+	// worker to start: each refresh is a bounded one-shot subprocess.
+	if o.intelligenceHub.GraphifyIndexer() != nil {
 		o.intelligenceHub.QueueInitialIndexing(o.projects)
+		log.Println("🕸️  Graphify code-graph refresh queued")
 	}
 
 	// Start epic scanner
@@ -116,10 +116,7 @@ func (s *ServiceStarter) Stop() {
 		o.skillUpdater.Stop()
 		log.Println("📚 Skill updater stopped")
 	}
-	if indexer := o.intelligenceHub.Indexer(); indexer != nil {
-		indexer.Stop()
-		log.Println("📇 TLDR indexer stopped")
-	}
+
 	if o.epicScanner != nil {
 		o.epicScanner.Stop()
 		log.Println("🏛️  Epic scanner stopped")

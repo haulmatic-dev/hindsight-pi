@@ -5,7 +5,6 @@ import (
 
 	"github.com/haulmatic-dev/hydra/graph/model"
 	"github.com/haulmatic-dev/hydra/internal/core"
-	"github.com/haulmatic-dev/hydra/internal/intelligence"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -160,51 +159,6 @@ func ToGraphQLConfig(config *core.Config) *model.Config {
 		RetryDelay:    30, // Default retry delay in seconds - not directly in config
 		WorkerTimeout: int32(config.Overseer.WorkerTimeout.Seconds()),
 		APIPort:       int32(config.API.Port),
-	}
-}
-
-// ToGraphQLImpactAnalysis converts TLDR impact to GraphQL model
-func ToGraphQLImpactAnalysis(impact *intelligence.TLDRImpactResponse) *model.ImpactAnalysis {
-	if impact == nil {
-		return &model.ImpactAnalysis{
-			Files:    0,
-			Tokens:   0,
-			Exceeded: false,
-			Callers:  []*model.Dependency{},
-			Callees:  []*model.Dependency{},
-		}
-	}
-
-	// Convert callers
-	callers := make([]*model.Dependency, len(impact.Impact.Callers))
-	for i, caller := range impact.Impact.Callers {
-		callers[i] = ToGraphQLDependency(caller)
-	}
-
-	// Convert callees
-	callees := make([]*model.Dependency, len(impact.Impact.Callees))
-	for i, callee := range impact.Impact.Callees {
-		callees[i] = ToGraphQLDependency(callee)
-	}
-
-	return &model.ImpactAnalysis{
-		Files:    int32(impact.Scope.Files),
-		Tokens:   int32(impact.Scope.Tokens),
-		Exceeded: impact.Scope.Exceeded,
-		Callers:  callers,
-		Callees:  callees,
-	}
-}
-
-// ToGraphQLDependency converts internal TLDR Dependency to GraphQL model
-func ToGraphQLDependency(dep intelligence.Dependency) *model.Dependency {
-	function := dep.Function
-	line := int32(dep.Line)
-
-	return &model.Dependency{
-		File:     dep.File,
-		Function: &function,
-		Line:     &line,
 	}
 }
 

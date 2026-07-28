@@ -1,6 +1,6 @@
 ---
 name: code-search-and-intelligence
-description: Query institutional knowledge with Hindsight and search code semantically with llm-tldr. This skill provides actionable commands that MUST be executed before implementing any code. Run these commands first to discover patterns, avoid anti-patterns, and understand the codebase.
+description: Query institutional knowledge with Hindsight and search code semantically with graphify. This skill provides actionable commands that MUST be executed before implementing any code. Run these commands first to discover patterns, avoid anti-patterns, and understand the codebase.
 ---
 
 # Code Search and Intelligence
@@ -8,7 +8,7 @@ description: Query institutional knowledge with Hindsight and search code semant
 This skill provides **two intelligence commands** that you MUST run before implementing:
 
 1. **hindsight** → query institutional knowledge
-2. **llm-tldr** → search code semantically
+2. **graphify** → search code semantically
 
 ## ⚠️  CRITICAL: Run These Commands FIRST
 
@@ -17,7 +17,7 @@ This skill provides **two intelligence commands** that you MUST run before imple
 ### Step 1: Query Institutional Knowledge (MANDATORY)
 
 ```bash
-hindsight search "<your task description>" --limit 5
+hindsight search "<your task description>" --budget 2000
 ```
 
 **Run this FIRST for every task.** This retrieves:
@@ -27,20 +27,20 @@ hindsight search "<your task description>" --limit 5
 
 **Example:**
 ```bash
-hindsight search "implement user authentication with JWT tokens" --limit 5
+hindsight search "implement user authentication with JWT tokens" --budget 2000
 ```
 
 ### Step 2: Search Code Semantically (MANDATORY for implementation)
 
 ```bash
-llm-tldr search "<what you need to implement>"
+graphify query "<what you need to implement>"
 ```
 
 **Run this SECOND to find existing code before writing new code.**
 
 **Example:**
 ```bash
-llm-tldr search "authentication middleware implementation"
+graphify query "authentication middleware implementation"
 ```
 
 ### Step 3: Analyze Impact (MANDATORY for modifications)
@@ -48,12 +48,12 @@ llm-tldr search "authentication middleware implementation"
 If modifying existing code:
 
 ```bash
-llm-tldr impact <file-path> --depth 2
+graphify affected <file-path> --depth 2
 ```
 
 **Example:**
 ```bash
-llm-tldr impact internal/auth/handler.go --depth 2
+graphify affected internal/auth/handler.go --depth 2
 ```
 
 ## Why This Matters
@@ -68,19 +68,19 @@ llm-tldr impact internal/auth/handler.go --depth 2
 ### Good Hindsight Queries
 ```bash
 # ✅ Be specific about intent
-hindsight search "implement OAuth2 with refresh tokens" --limit 5
+hindsight search "implement OAuth2 with refresh tokens" --budget 2000
 
 # ✅ Include the problem context
-hindsight search "debug memory leak in worker pool" --limit 5
+hindsight search "debug memory leak in worker pool" --budget 2000
 ```
 
-### Good TLDR Search Queries
+### Good Graph Query Phrasing
 ```bash
 # ✅ Describe behavior, not keywords
-llm-tldr search "validates JWT tokens"
+graphify query "validates JWT tokens"
 
 # ✅ Be specific but not too narrow
-llm-tldr search "database transaction rollback handling"
+graphify query "database transaction rollback handling"
 ```
 
 ## Available Commands Reference
@@ -91,13 +91,13 @@ Query patterns and anti-patterns from past work.
 
 ```bash
 # Query context for your task (ALWAYS RUN THIS FIRST)
-hindsight search "<task description>" --limit 5
+hindsight search "<task description>" --budget 2000
 
 # Search with minimum relevance threshold
-hindsight search "<task>" --min-relevance 0.7 --limit 5
+hindsight search "<task>" --min-relevance 0.7 --budget 2000
 
 # Get context for a specific bead
-hindsight context --bead-id <bead-id> --limit 5
+hindsight context --bead-id <bead-id> --budget 2000
 ```
 
 **Relevance Scores:**
@@ -106,22 +106,22 @@ hindsight context --bead-id <bead-id> --limit 5
 - 0.4-0.6 - Weakly relevant (may not apply)
 - <0.4 - Not relevant (ignore)
 
-### llm-tldr - Semantic Code Search
+### graphify - Semantic Code Search
 
 Find code by what it does, not what it's named.
 
 ```bash
 # Search by behavior description
-llm-tldr search "<behavior description>"
+graphify query "<behavior description>"
 
 # Search with limit
-llm-tldr search "<description>" --limit 5
+graphify query "<description>" --budget 2000
 
 # Search in specific directory
-llm-tldr search "<description>" --path <directory>
+graphify query "<description>" --path <directory>
 
 # Analyze impact before changing
-llm-tldr impact <file> --depth 2
+graphify affected <file> --depth 2
 ```
 
 ## Complete Workflow Example
@@ -130,13 +130,13 @@ llm-tldr impact <file> --depth 2
 
 ```bash
 # 1. Query institutional knowledge FIRST
-hindsight search "implement user authentication with JWT" --limit 5
+hindsight search "implement user authentication with JWT" --budget 2000
 
 # 2. Search for existing authentication code
-llm-tldr search "JWT authentication middleware"
+graphify query "JWT authentication middleware"
 
 # 3. If modifying existing auth code, check impact
-llm-tldr impact internal/auth/middleware.js --depth 2
+graphify affected internal/auth/middleware.js --depth 2
 
 # 4. Now implement with full context
 ```
@@ -158,11 +158,11 @@ llm-tldr impact internal/auth/middleware.js --depth 2
 
 ```bash
 # ALWAYS run first
-hindsight search "<your task>" --limit 5
+hindsight search "<your task>" --budget 2000
 
 # For implementation tasks
-llm-tldr search "<what to implement>"
+graphify query "<what to implement>"
 
 # For modifications
-llm-tldr impact <file> --depth 2
+graphify affected <file> --depth 2
 ```

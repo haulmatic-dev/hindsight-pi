@@ -14,7 +14,7 @@ func TestE2E_BeadDiscoveryAndScheduling(t *testing.T) {
 	config := DefaultConfig()
 	config.Overseer.MaxWorkers = 2
 	config.Overseer.BeadDiscoveryInterval = 3 * time.Second
-	config.Intelligence.TLDR.Enabled = false
+	config.Intelligence.Graphify.Enabled = false
 	config.Intelligence.GPTCache.Enabled = false
 	config.Intelligence.Hindsight.Enabled = false
 	config.Intelligence.Patterns.Enabled = false

@@ -1278,5 +1278,5 @@ func TestMatchesBeadFilter(t *testing.T) {
 
 // createTestSubscriptionResolver creates a test resolver with mocked dependencies for subscription tests
 func createTestSubscriptionResolver() *Resolver {
-	return NewResolver(nil, nil)
+	return NewResolver(nil)
 }

@@ -94,7 +94,7 @@ func NewTestSuite(t *testing.T) *TestSuite {
 	config.API.Enabled = true
 	config.API.Port = 0        // Let the OS assign a port
 	config.MCP.Enabled = false // Disable MCP for basic tests
-	config.Intelligence.TLDR.Enabled = false
+	config.Intelligence.Graphify.Enabled = false
 	config.Intelligence.GPTCache.Enabled = false
 
 	// Configure test project

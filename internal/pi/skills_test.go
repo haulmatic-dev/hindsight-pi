@@ -38,8 +38,10 @@ func TestBuildSkillFlags_ReturnsAllSkills(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	// Assert we have 32 elements (16 skills × 2 for --skill + path)
-	assert.Len(t, result.Flags, 32, "Expected 32 elements (16 skills × 2)")
+	// Two elements per skill: "--skill" and the path. Derived from DefaultSkills
+	// rather than hardcoded, so registering a skill does not silently rot this.
+	assert.Len(t, result.Flags, len(DefaultSkills)*2,
+		"Expected 2 flag elements per default skill (%d skills)", len(DefaultSkills))
 
 	// Verify structure: alternating "--skill" and path
 	for i := 0; i < len(result.Flags); i += 2 {
@@ -81,7 +83,7 @@ func TestBuildSkillFlags_ReturnsAllSkills(t *testing.T) {
 	// With all skills available, should have no missing
 	assert.False(t, result.HasMissingSkills(), "Expected no missing skills when all directories exist")
 	assert.Equal(t, 0, len(result.Missing), "Expected 0 missing skills")
-	assert.Equal(t, 16, len(result.Found), "Expected 16 found skills")
+	assert.Equal(t, len(DefaultSkills), len(result.Found), "Expected every default skill to be found")
 	assert.False(t, result.HasWarnings(), "Expected no warnings when all skills exist")
 }
 

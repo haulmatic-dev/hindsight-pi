@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"log"
 	"time"
-
-	"github.com/haulmatic-dev/hydra/internal/intelligence"
 )
 
 // ToolType identifies which tool configuration has changed
@@ -15,15 +13,12 @@ const (
 	ToolNone ToolType = iota
 	ToolBV
 	ToolBeads
-	ToolTLDR
 	ToolGPTCache
 	ToolMCP
 )
 
 func (t ToolType) String() string {
 	switch t {
-	case ToolTLDR:
-		return "TLDR"
 	case ToolGPTCache:
 		return "GPTCache"
 	case ToolMCP:
@@ -77,15 +72,6 @@ func (d *ConfigChangeDetector) DetectChanges(oldCfg, newCfg *Config) []ToolConfi
 
 	var changes []ToolConfigChange
 
-	if d.tldrChanged(oldCfg.Intelligence.TLDR, newCfg.Intelligence.TLDR) {
-		changes = append(changes, ToolConfigChange{
-			Tool:          ToolTLDR,
-			EnabledBefore: oldCfg.Intelligence.TLDR.Enabled,
-			EnabledAfter:  newCfg.Intelligence.TLDR.Enabled,
-			HasChanged:    true,
-		})
-	}
-
 	if d.gptCacheChanged(oldCfg.Intelligence.GPTCache, newCfg.Intelligence.GPTCache) {
 		changes = append(changes, ToolConfigChange{
 			Tool:          ToolGPTCache,
@@ -115,12 +101,6 @@ func (d *ConfigChangeDetector) detectAllChanges(cfg *Config) []ToolConfigChange 
 
 	return []ToolConfigChange{
 		{
-			Tool:          ToolTLDR,
-			EnabledBefore: false,
-			EnabledAfter:  cfg.Intelligence.TLDR.Enabled,
-			HasChanged:    true,
-		},
-		{
 			Tool:          ToolGPTCache,
 			EnabledBefore: false,
 			EnabledAfter:  cfg.Intelligence.GPTCache.Enabled,
@@ -133,15 +113,6 @@ func (d *ConfigChangeDetector) detectAllChanges(cfg *Config) []ToolConfigChange 
 			HasChanged:    true,
 		},
 	}
-}
-
-// tldrChanged checks if TLDR config has changed
-func (d *ConfigChangeDetector) tldrChanged(old, new TLDRConfig) bool {
-	return old.Enabled != new.Enabled ||
-		old.Timeout != new.Timeout ||
-		old.BaseURL != new.BaseURL ||
-		old.MaxFiles != new.MaxFiles ||
-		old.MaxTokens != new.MaxTokens
 }
 
 // gptCacheChanged checks if GPTCache config has changed
@@ -164,10 +135,9 @@ func (d *ConfigChangeDetector) mcpChanged(old, new MCPConfig) bool {
 
 // RefreshHandler creates and manages tool clients based on config changes
 type RefreshHandler struct {
-	tldrClient *intelligence.TLDRClient
-	gptCache   *GPTCacheClient
-	config     *Config
-	logger     *log.Logger
+	gptCache *GPTCacheClient
+	config   *Config
+	logger   *log.Logger
 }
 
 // NewRefreshHandler creates a new refresh handler
@@ -184,37 +154,12 @@ func NewRefreshHandler(config *Config, logger *log.Logger) *RefreshHandler {
 // ApplyChange applies a single tool configuration change
 func (h *RefreshHandler) ApplyChange(change ToolConfigChange) {
 	switch change.Tool {
-	case ToolTLDR:
-		h.refreshTLDR(change)
 	case ToolGPTCache:
 		h.refreshGPTCache(change)
 	}
 }
 
 // refreshTLDR handles TLDR client refresh
-func (h *RefreshHandler) refreshTLDR(change ToolConfigChange) {
-	cfg := h.config.Intelligence.TLDR
-
-	if change.IsDisable() {
-		h.tldrClient = nil
-		h.logger.Printf("[Intelligence] %s client disabled", change.Tool)
-		return
-	}
-
-	// Use CLI mode for TLDR (HTTP daemon has issues)
-	h.tldrClient = intelligence.NewTLDRClient(
-		cfg.BaseURL,
-		true, // useCLI
-		"llm-tldr",
-		"",
-		cfg.Timeout,
-	)
-
-	h.logRefresh(change.Tool.String(), change.IsReconfigure(),
-		"baseURL", cfg.BaseURL,
-		"timeout",
-	)
-}
 
 // refreshGPTCache handles GPTCache client refresh
 func (h *RefreshHandler) refreshGPTCache(change ToolConfigChange) {
@@ -256,18 +201,12 @@ func (h *RefreshHandler) logRefresh(toolName string, wasReconfigure bool, keyVal
 	h.logger.Printf("[Intelligence] %s client %s (%s)", toolName, action, pairs)
 }
 
-// GetTLDRClient returns the current TLDR client
-func (h *RefreshHandler) GetTLDRClient() *intelligence.TLDRClient {
-	return h.tldrClient
-}
-
 // GetGPTCacheClient returns the current GPTCache client
 func (h *RefreshHandler) GetGPTCacheClient() *GPTCacheClient {
 	return h.gptCache
 }
 
 // SetClients allows injection of existing clients (for testing or initialization)
-func (h *RefreshHandler) SetClients(tldr *intelligence.TLDRClient, gpt *GPTCacheClient) {
-	h.tldrClient = tldr
+func (h *RefreshHandler) SetClients(gpt *GPTCacheClient) {
 	h.gptCache = gpt
 }

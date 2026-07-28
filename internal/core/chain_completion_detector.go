@@ -229,7 +229,6 @@ type ChainPatternExtractor struct {
 	qualityGateSvc   *intelligence.QualityGateService
 	patternReviewSvc *intelligence.PatternReviewService
 	hindsightClient  *hindsight.Client
-	tldrClient       *intelligence.TLDRClient
 }
 
 func NewChainPatternExtractor(
@@ -237,14 +236,11 @@ func NewChainPatternExtractor(
 	qg *intelligence.QualityGateService,
 	prs *intelligence.PatternReviewService,
 ) *ChainPatternExtractor {
-	// Use CLI mode for llm-tldr (HTTP daemon has Python compatibility issues)
-	tldrClient := intelligence.NewTLDRClient("", true, "llm-tldr", "", 30*time.Second)
 
 	return &ChainPatternExtractor{
 		overseer:         overseer,
 		qualityGateSvc:   qg,
 		patternReviewSvc: prs,
-		tldrClient:       tldrClient,
 	}
 }
 
@@ -269,44 +265,6 @@ func (e *ChainPatternExtractor) ExtractPatterns(event ChainCompletedEvent) error
 
 func (e *ChainPatternExtractor) extractPatterns(chain *ChainInfo) []*intelligence.ExtractedPattern {
 	patterns := make([]*intelligence.ExtractedPattern, 0)
-
-	// Try TLDR semantic search first to get code patterns
-	if e.tldrClient != nil {
-		projectPath := e.overseer.GetProjectPath(chain.RootBeadID.Project())
-		if projectPath != "" {
-			// Set the search path dynamically
-			e.tldrClient.SetSearchPath(projectPath)
-
-			// Build semantic index synchronously before searching
-			if err := e.tldrClient.BuildIndex(); err != nil {
-				log.Printf("[ChainPattern] TLDR index build warning: %v", err)
-			}
-
-			semanticResult, err := e.tldrClient.SemanticSearch(fmt.Sprintf("bead %s implementation", chain.RootBeadID))
-			if err == nil && len(semanticResult.Results) > 0 {
-				var files []string
-				for _, r := range semanticResult.Results {
-					files = append(files, r.File)
-				}
-
-				pattern := &intelligence.ExtractedPattern{
-					ID:          fmt.Sprintf("%s_tldr_%d", chain.RootBeadID, time.Now().Unix()),
-					BeadID:      chain.RootBeadID,
-					PatternType: "code_pattern",
-					Title:       fmt.Sprintf("Code pattern from %d files", len(files)),
-					Description: fmt.Sprintf("TLDR found %d code snippets in: %v", len(semanticResult.Results), files),
-					Confidence:  0.85,
-					Tags:        []string{"code_pattern", "tldr", string(chain.RootBeadID.Project())},
-					ExtractedAt: time.Now(),
-					Files:       files,
-				}
-				patterns = append(patterns, pattern)
-				log.Printf("[ChainPattern] TLDR extracted %d code patterns from chain", len(semanticResult.Results))
-			} else {
-				log.Printf("[ChainPattern] TLDR search failed or no results: %v", err)
-			}
-		}
-	}
 
 	// Always add workflow pattern as fallback/supplement
 	patterns = append(patterns, &intelligence.ExtractedPattern{

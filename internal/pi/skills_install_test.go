@@ -726,7 +726,9 @@ func TestCheckAndInstallSkills_GetSkillInfo(t *testing.T) {
 
 func TestCheckAndInstallSkills_ListDefaultSkills(t *testing.T) {
 	skills := ListDefaultSkills()
-	assert.Len(t, skills, 13, "Should have 13 default skills")
+	// Derived, not hardcoded: this assertion was already stale (it expected 13
+	// against a 16-entry list) and failed before graphify was registered.
+	assert.Len(t, skills, len(DefaultSkills), "Should list every default skill")
 
 	// Verify all expected skills are present
 	skillNames := make(map[string]bool)

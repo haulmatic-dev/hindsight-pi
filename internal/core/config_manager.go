@@ -3,8 +3,6 @@ package core
 import (
 	"log"
 	"time"
-
-	"github.com/haulmatic-dev/hydra/internal/intelligence"
 )
 
 // ConfigManager handles dynamic configuration changes for the overseer.
@@ -63,42 +61,10 @@ func (cm *ConfigManager) applyToolConfigChange(change ToolConfigChange) {
 		change.Tool, change.EnabledBefore, change.EnabledAfter)
 
 	switch change.Tool {
-	case ToolTLDR:
-		cm.refreshTLDRClient(change)
 	case ToolGPTCache:
 		cm.refreshGPTCacheClient(change)
 	case ToolMCP:
 		cm.refreshMCPClient(change)
-	}
-}
-
-func (cm *ConfigManager) refreshTLDRClient(change ToolConfigChange) {
-	o := cm.overseer
-	o.intelMutex.Lock()
-	defer o.intelMutex.Unlock()
-
-	config := o.config.Intelligence.TLDR
-
-	if !config.Enabled {
-		if o.tldrClient != nil {
-			o.tldrClient = nil
-			log.Printf("[Intelligence] TLDR client disabled")
-		}
-		return
-	}
-
-	o.tldrClient = intelligence.NewTLDRClient(
-		config.BaseURL,
-		true,
-		"llm-tldr",
-		"",
-		config.Timeout,
-	)
-
-	if change.EnabledBefore && change.EnabledAfter {
-		log.Printf("[Intelligence] TLDR client reinitialized")
-	} else {
-		log.Printf("[Intelligence] TLDR client initialized")
 	}
 }
 

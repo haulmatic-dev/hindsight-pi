@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -45,6 +46,16 @@ var DefaultSkills = []Skill{
 	{Name: "code-review", Repo: "supercent-io/skills-template/.agent-skills/code-review", Description: "Code review excellence"},
 	{Name: "code-refactoring", Repo: "supercent-io/skills-template/.agent-skills/code-refactoring", Description: "Code refactoring patterns"},
 	{Name: "lsp-code-analysis", Repo: "lsp-client/lsp-skill/skills/lsp-code-analysis", Description: "LSP-based code analysis"},
+	// Externally managed: installed by `graphify install --platform pi` (see
+	// packaging/install-graphify.sh), not by `npx skills add`, hence no Repo.
+	// Registered here because skill flags are built from this list — a skill
+	// present in the config directory but absent from DefaultSkills is never
+	// passed to Pi, so installing it alone does nothing.
+	//
+	// Stack-agnostic on purpose: the code graph answers questions about any
+	// codebase (36 tree-sitter grammars), and as a skill it costs only its
+	// frontmatter (~380 B) until an agent actually invokes it.
+	{Name: "graphify", Repo: "", Description: "Code knowledge graph: query, blast radius, architectural hubs"},
 }
 
 // DetectStacks inspects a project directory for well-known stack markers and
@@ -269,8 +280,17 @@ func (sm *SetupManager) CheckAndInstallSkills() error {
 	return nil
 }
 
-// installSkill installs a single skill using npx skills add
+// installSkill installs a single skill using npx skills add.
+//
+// Skills with no Repo are externally managed — they are installed by their own
+// tooling (graphify by pip plus `graphify install --platform pi`) and must not be
+// handed to `npx skills add`, which would fail on an empty repo argument every
+// startup.
 func (sm *SetupManager) installSkill(skill Skill) error {
+	if strings.TrimSpace(skill.Repo) == "" {
+		log.Printf("[Skills] %s is externally managed (no repo) — skipping npx install", skill.Name)
+		return nil
+	}
 	// Check if skills CLI is available
 	if !sm.isSkillsCLIAvailable() {
 		return fmt.Errorf("skills CLI not available")

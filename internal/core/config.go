@@ -246,12 +246,59 @@ type projectsListConfig struct {
 
 // IntelligenceConfig contains configuration for intelligence services
 type IntelligenceConfig struct {
-	TLDR                  TLDRConfig                  `yaml:"tldr"`
+	Graphify              GraphifyConfig              `yaml:"graphify"`
 	GPTCache              GPTCacheConfig              `yaml:"gptcache"`
 	SettledState          SettledStateConfig          `yaml:"settled_state"`
 	Patterns              PatternConfig               `yaml:"patterns"`
 	CollectiveUnconscious CollectiveUnconsciousConfig `yaml:"collective_unconscious"`
 	Hindsight             HindsightConfig             `yaml:"hindsight"`
+}
+
+// GraphifyConfig controls the code knowledge graph that replaces llm-tldr as the
+// structural-intelligence layer.
+//
+// Graphify is reached two ways, deliberately split by cost:
+//
+//   - Agents query it through the `graphify` **skill**, which costs only its
+//     frontmatter (~380 B) in the prompt because skill bodies load on demand.
+//     Wiring it as an MCP server instead would put its tool definitions in every
+//     bead's prompt — the extension route measured +8,325 tokens per turn.
+//   - Hydra keeps the graph fresh by running `graphify update <project>`, which
+//     is pure tree-sitter AST extraction with no model call. Measured on this
+//     repo: 529 files, 9,720 nodes, 19,269 edges in 14.5s.
+//
+// Refresh is per project on an interval, never per bead. Beads run in throwaway
+// worktrees, so a per-bead build would pay the extraction cost hundreds of times
+// per run; and because every bead mutates code, a graph is stale the moment the
+// next bead closes. Stale structure is worse than none — it tells a worker a
+// symbol exists that an earlier bead deleted, which is the phantom-file failure
+// class the compliance analyzer already exists to catch.
+type GraphifyConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// Binary is the graphify executable (default "graphify", resolved on PATH).
+	Binary string `yaml:"binary"`
+
+	// RefreshInterval is the minimum gap between graph rebuilds for one project.
+	// Zero disables periodic refresh, leaving whatever graph is on disk.
+	RefreshInterval time.Duration `yaml:"refresh_interval"`
+
+	// Timeout bounds a single `graphify update` run. Upstream has an O(V x E)
+	// pathology on very large monorepos (their issue #341: 114 minutes on a
+	// 50k-file repo), so this is a hard stop rather than a suggestion.
+	Timeout time.Duration `yaml:"timeout"`
+
+	// MaxConcurrent caps simultaneous graph builds across projects.
+	MaxConcurrent int `yaml:"max_concurrent"`
+
+	// SkipClustering passes --no-cluster, writing the raw AST extraction without
+	// community detection or the markdown report. Nodes and edges are all the
+	// query/affected/god-nodes commands need, so this is the cheap mode.
+	//
+	// Note: --no-viz is NOT valid here. It belongs to `cluster-only`, and
+	// passing it to `update` fails the build with "unknown update option" —
+	// caught by running the real binary rather than trusting the help text.
+	SkipClustering bool `yaml:"skip_clustering"`
 }
 
 // PatternConfig contains pattern extraction settings
@@ -313,25 +360,6 @@ type CUSecurityConfig struct {
 	ScanForSecrets   bool     `yaml:"scan_for_secrets"`
 	AllowedLicenses  []string `yaml:"allowed_licenses"`
 	SanitizePatterns bool     `yaml:"sanitize_patterns"`
-}
-
-// TLDRIndexingConfig contains TLDR indexing settings
-type TLDRIndexingConfig struct {
-	Enabled       bool          `yaml:"enabled"`
-	MaxConcurrent int           `yaml:"max_concurrent"`
-	QueueSize     int           `yaml:"queue_size"`
-	RetryAttempts int           `yaml:"retry_attempts"`
-	RetryDelay    time.Duration `yaml:"retry_delay"`
-}
-
-// TLDRConfig contains TLDR service settings
-type TLDRConfig struct {
-	Enabled   bool               `yaml:"enabled"`
-	BaseURL   string             `yaml:"base_url"`
-	Timeout   time.Duration      `yaml:"timeout"`
-	MaxFiles  int                `yaml:"max_files"`
-	MaxTokens int                `yaml:"max_tokens"`
-	Indexing  TLDRIndexingConfig `yaml:"indexing"`
 }
 
 // GPTCacheConfig contains GPTCache service settings
@@ -506,19 +534,15 @@ func DefaultConfig() *Config {
 			Port:    8080,
 		},
 		Intelligence: IntelligenceConfig{
-			TLDR: TLDRConfig{
-				Enabled:   true,
-				BaseURL:   "http://127.0.0.1:8787",
-				Timeout:   10 * time.Second,
-				MaxFiles:  50,
-				MaxTokens: 100000,
-				Indexing: TLDRIndexingConfig{
-					Enabled:       true,
-					MaxConcurrent: 2,
-					QueueSize:     100,
-					RetryAttempts: 3,
-					RetryDelay:    5 * time.Second,
-				},
+			// Graphify: the structural-intelligence layer. Enabled by default;
+			// agents reach it through the `graphify` skill, and hydra only keeps
+			// each project's graph fresh with an AST-only `graphify update`.
+			Graphify: GraphifyConfig{
+				Enabled:         true,
+				Binary:          "graphify",
+				RefreshInterval: 30 * time.Minute,
+				Timeout:         10 * time.Minute,
+				MaxConcurrent:   1,
 			},
 			GPTCache: GPTCacheConfig{
 				Enabled:   true,

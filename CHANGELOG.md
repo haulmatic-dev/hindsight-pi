@@ -7,6 +7,29 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Removed
+- **llm-tldr, entirely.** It went unmaintained, returned zero semantic units on
+  Go (silently degrading to grep), and its service on :8787 was not running in
+  production — so the structural-intelligence layer had been dead for a while
+  without anything failing loudly. graphify replaces it.
+  Deleted: `internal/intelligence/tldr.go`, `internal/core/tldr_indexer.go`,
+  `internal/core/impact_analyzer.go` (its only caller, `analyzeImpactWithTLDR`,
+  was already dead code), the hub's client/indexer wiring, the `ToolTLDR`
+  refresh path, `TLDRConfig`/`TLDRIndexingConfig`, and the GraphQL tldr
+  plumbing. Two consequences worth naming rather than burying:
+  - `ChainPatternExtractor` no longer runs a semantic search per chain. That
+    call is the source of the recurring `TLDR indexing failed … after 4
+    attempts: indexing timed out after 30 seconds` in the daemon log, so this
+    also removes a standing 30s-per-chain stall.
+  - GraphQL `Bead.impact` now returns nil. The field and its nullable schema are
+    kept, so no API contract changes — and nil is what production already
+    returned, since the backing service was down. Wiring it to
+    `graphify affected` is a follow-up: real reverse traversal, not a rename.
+  `ScopeValidator` no longer borrows its file limit from
+  `intelligence.tldr.max_files`; that coupled a scope invariant to a tool's
+  config and silently disabled the check whenever the tool was disabled. It is
+  now the `maxScopeFiles` constant.
+
 ### Added
 - **rpc mode and the `[rtk, caveman, context-mode]` allowlist are now the
   defaults.** A config that says nothing about the protocol gets both. rpc is the

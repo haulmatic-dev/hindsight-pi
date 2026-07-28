@@ -45,6 +45,7 @@ var defaultIgnore = []string{
 	"*.out", "*.exe", "*.dll", "*.so", "*.dylib",
 	// Generated graph index
 	".gograph/",
+	"graphify-out/",
 	// Go binary — NOTE: only file-level ignore, not dir, to avoid skipping cmd/outreach/
 	// "outreach",
 	// Generated files

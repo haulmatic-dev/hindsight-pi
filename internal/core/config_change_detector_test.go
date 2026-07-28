@@ -22,16 +22,6 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 			expected: 0,
 		},
 		{
-			name:     "detect TLDR enabled change",
-			oldCfg:   createTestConfig(),
-			newCfg:   modifyConfig(createTestConfig(), func(c *Config) { c.Intelligence.TLDR.Enabled = false }),
-			expected: 1,
-			check: func(changes []ToolConfigChange) bool {
-				return len(changes) == 1 &&
-					changes[0].HasChanged
-			},
-		},
-		{
 			name:     "detect GPTCache disabled change",
 			oldCfg:   createTestConfig(),
 			newCfg:   modifyConfig(createTestConfig(), func(c *Config) { c.Intelligence.GPTCache.Enabled = false }),
@@ -40,26 +30,6 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 				return len(changes) == 1 &&
 					changes[0].EnabledBefore == true &&
 					changes[0].EnabledAfter == false
-			},
-		},
-		{
-			name:     "detect TLDR timeout change",
-			oldCfg:   createTestConfig(),
-			newCfg:   modifyConfig(createTestConfig(), func(c *Config) { c.Intelligence.TLDR.Timeout = 20 * time.Second }),
-			expected: 1,
-			check: func(changes []ToolConfigChange) bool {
-				return len(changes) == 1 &&
-					changes[0].Tool == ToolTLDR &&
-					changes[0].HasChanged
-			},
-		},
-		{
-			name:     "detect TLDR BaseURL change",
-			oldCfg:   createTestConfig(),
-			newCfg:   modifyConfig(createTestConfig(), func(c *Config) { c.Intelligence.TLDR.BaseURL = "http://localhost:9999" }),
-			expected: 1,
-			check: func(changes []ToolConfigChange) bool {
-				return len(changes) == 1 && changes[0].Tool == ToolTLDR
 			},
 		},
 		{
@@ -96,33 +66,15 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 			},
 		},
 		{
-			name:   "detect multiple changes",
-			oldCfg: createTestConfig(),
-			newCfg: modifyConfig(createTestConfig(), func(c *Config) {
-				c.Intelligence.TLDR.Enabled = false
-				c.MCP.Enabled = false
-			}),
+			name:   "nil old config returns all as changes",
+			oldCfg: nil,
+			newCfg: createTestConfig(),
+			// Two refreshable tool clients remain (GPTCache, MCP) since llm-tldr
+			// was removed. graphify needs no client refresh: each graph build is a
+			// bounded one-shot subprocess, not a long-lived connection.
 			expected: 2,
 			check: func(changes []ToolConfigChange) bool {
-				if len(changes) != 2 {
-					return false
-				}
-				foundTLDR := false
-				for _, c := range changes {
-					if c.Tool == ToolTLDR {
-						foundTLDR = true
-					}
-				}
-				return foundTLDR
-			},
-		},
-		{
-			name:     "nil old config returns all as changes",
-			oldCfg:   nil,
-			newCfg:   createTestConfig(),
-			expected: 3,
-			check: func(changes []ToolConfigChange) bool {
-				return len(changes) == 3
+				return len(changes) == 2
 			},
 		},
 		{
@@ -143,57 +95,6 @@ func TestConfigChangeDetector_DetectChanges(t *testing.T) {
 
 			if tt.check != nil && !tt.check(changes) {
 				t.Errorf("changes validation failed: %+v", changes)
-			}
-		})
-	}
-}
-
-func TestConfigChangeDetector_tldrChanged(t *testing.T) {
-	detector := NewConfigChangeDetector()
-
-	tests := []struct {
-		name     string
-		old      TLDRConfig
-		new      TLDRConfig
-		expected bool
-	}{
-		{
-			name:     "no change",
-			old:      TLDRConfig{Enabled: true, Timeout: 10 * time.Second},
-			new:      TLDRConfig{Enabled: true, Timeout: 10 * time.Second},
-			expected: false,
-		},
-		{
-			name:     "timeout changed",
-			old:      TLDRConfig{Timeout: 10 * time.Second},
-			new:      TLDRConfig{Timeout: 20 * time.Second},
-			expected: true,
-		},
-		{
-			name:     "BaseURL changed",
-			old:      TLDRConfig{BaseURL: "http://localhost:3000"},
-			new:      TLDRConfig{BaseURL: "http://localhost:3001"},
-			expected: true,
-		},
-		{
-			name:     "max files changed",
-			old:      TLDRConfig{MaxFiles: 50},
-			new:      TLDRConfig{MaxFiles: 100},
-			expected: true,
-		},
-		{
-			name:     "max tokens changed",
-			old:      TLDRConfig{MaxTokens: 100000},
-			new:      TLDRConfig{MaxTokens: 200000},
-			expected: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := detector.tldrChanged(tt.old, tt.new)
-			if result != tt.expected {
-				t.Errorf("expected %v, got %v", tt.expected, result)
 			}
 		})
 	}
@@ -300,12 +201,9 @@ func TestConfigChangeDetector_mcpChanged(t *testing.T) {
 func createTestConfig() *Config {
 	return &Config{
 		Intelligence: IntelligenceConfig{
-			TLDR: TLDRConfig{
-				Enabled:   true,
-				BaseURL:   "http://localhost:8787",
-				Timeout:   10 * time.Second,
-				MaxFiles:  50,
-				MaxTokens: 100000,
+			Graphify: GraphifyConfig{
+				Enabled: true,
+				Binary:  "graphify",
 			},
 			GPTCache: GPTCacheConfig{
 				Enabled:   true,

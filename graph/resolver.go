@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/haulmatic-dev/hydra/graph/model"
 	"github.com/haulmatic-dev/hydra/internal/core"
-	"github.com/haulmatic-dev/hydra/internal/intelligence"
 )
 
 // Resolver is the root resolver for GraphQL
@@ -16,7 +15,6 @@ import (
 
 type Resolver struct {
 	Overseer *core.Overseer
-	TLDR     *intelligence.TLDRClient
 
 	// Event broadcasting system for subscriptions
 	eventChannel chan SubscriptionEvent
@@ -50,12 +48,11 @@ type EventSubscriber struct {
 
 // NewResolver creates a new Resolver with the given dependencies.
 // It initializes the event broadcasting system for subscriptions.
-func NewResolver(overseer *core.Overseer, tldr *intelligence.TLDRClient) *Resolver {
+func NewResolver(overseer *core.Overseer) *Resolver {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	r := &Resolver{
 		Overseer:     overseer,
-		TLDR:         tldr,
 		eventChannel: make(chan SubscriptionEvent, 100), // Buffered channel
 		subscribers:  make(map[string]*EventSubscriber),
 		ctx:          ctx,
