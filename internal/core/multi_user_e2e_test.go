@@ -9,8 +9,6 @@ import (
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
-
-
 // TestMultiUser_EndToEnd verifies the full pipeline from user config discovery
 // through project discovery, bead loading, scheduling, and worker spawn attribution.
 func TestMultiUser_EndToEnd(t *testing.T) {
@@ -67,7 +65,7 @@ projects:
 	config.Overseer.WorkerTimeout = 10 * time.Second
 	config.API.Enabled = false
 	config.MCP.Enabled = false
-	config.Intelligence.TLDR.Enabled = false
+	config.Intelligence.Graphify.Enabled = false
 	config.Intelligence.GPTCache.Enabled = false
 	config.ComplianceCycle.Enabled = false
 

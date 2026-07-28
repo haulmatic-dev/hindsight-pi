@@ -246,7 +246,6 @@ type projectsListConfig struct {
 
 // IntelligenceConfig contains configuration for intelligence services
 type IntelligenceConfig struct {
-	TLDR                  TLDRConfig                  `yaml:"tldr"`
 	Graphify              GraphifyConfig              `yaml:"graphify"`
 	GPTCache              GPTCacheConfig              `yaml:"gptcache"`
 	SettledState          SettledStateConfig          `yaml:"settled_state"`
@@ -361,25 +360,6 @@ type CUSecurityConfig struct {
 	ScanForSecrets   bool     `yaml:"scan_for_secrets"`
 	AllowedLicenses  []string `yaml:"allowed_licenses"`
 	SanitizePatterns bool     `yaml:"sanitize_patterns"`
-}
-
-// TLDRIndexingConfig contains TLDR indexing settings
-type TLDRIndexingConfig struct {
-	Enabled       bool          `yaml:"enabled"`
-	MaxConcurrent int           `yaml:"max_concurrent"`
-	QueueSize     int           `yaml:"queue_size"`
-	RetryAttempts int           `yaml:"retry_attempts"`
-	RetryDelay    time.Duration `yaml:"retry_delay"`
-}
-
-// TLDRConfig contains TLDR service settings
-type TLDRConfig struct {
-	Enabled   bool               `yaml:"enabled"`
-	BaseURL   string             `yaml:"base_url"`
-	Timeout   time.Duration      `yaml:"timeout"`
-	MaxFiles  int                `yaml:"max_files"`
-	MaxTokens int                `yaml:"max_tokens"`
-	Indexing  TLDRIndexingConfig `yaml:"indexing"`
 }
 
 // GPTCacheConfig contains GPTCache service settings
@@ -554,19 +534,15 @@ func DefaultConfig() *Config {
 			Port:    8080,
 		},
 		Intelligence: IntelligenceConfig{
-			TLDR: TLDRConfig{
-				Enabled:   true,
-				BaseURL:   "http://127.0.0.1:8787",
-				Timeout:   10 * time.Second,
-				MaxFiles:  50,
-				MaxTokens: 100000,
-				Indexing: TLDRIndexingConfig{
-					Enabled:       true,
-					MaxConcurrent: 2,
-					QueueSize:     100,
-					RetryAttempts: 3,
-					RetryDelay:    5 * time.Second,
-				},
+			// Graphify: the structural-intelligence layer. Enabled by default;
+			// agents reach it through the `graphify` skill, and hydra only keeps
+			// each project's graph fresh with an AST-only `graphify update`.
+			Graphify: GraphifyConfig{
+				Enabled:         true,
+				Binary:          "graphify",
+				RefreshInterval: 30 * time.Minute,
+				Timeout:         10 * time.Minute,
+				MaxConcurrent:   1,
 			},
 			GPTCache: GPTCacheConfig{
 				Enabled:   true,

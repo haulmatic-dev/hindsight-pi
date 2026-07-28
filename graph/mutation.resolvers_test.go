@@ -30,9 +30,6 @@ func createTestOverseer() *core.Overseer {
 			Port:    8080,
 		},
 		Intelligence: core.IntelligenceConfig{
-			TLDR: core.TLDRConfig{
-				Enabled: false,
-			},
 			GPTCache: core.GPTCacheConfig{
 				Enabled: false,
 			},

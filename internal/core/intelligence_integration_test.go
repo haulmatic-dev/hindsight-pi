@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/haulmatic-dev/hydra/internal/intelligence"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -16,76 +15,44 @@ import (
 // Mock Intelligence Clients
 // ============================================================================
 
-// mockTLDRClient is a mock implementation of TLDRClient for testing
-type mockTLDRClient struct {
-	impactAnalysis *ImpactAnalysis
-	analyzeErr     error
-	available      bool
-	maxFiles       int
-}
-
-func newMockTLDRClient(available bool, maxFiles int) *mockTLDRClient {
-	return &mockTLDRClient{
-		impactAnalysis: &ImpactAnalysis{
-			TargetFiles:   []string{"internal/core/config.go"},
-			AffectedFiles: []string{"internal/core/overseer.go", "internal/core/worker.go"},
-			Complexity:    50,
-			RiskLevel:     "medium",
-			Recommendations: []string{
-				"Review dependency injection",
-				"Check for race conditions",
-			},
-		},
-		available: available,
-		maxFiles:  maxFiles,
-	}
-}
-
-func (m *mockTLDRClient) AnalyzeImpact(projectPath string, files []string, depth int) (*ImpactAnalysis, error) {
-	if !m.available {
-		return nil, fmt.Errorf("TLDR service unavailable")
-	}
-	if m.analyzeErr != nil {
-		return nil, m.analyzeErr
-	}
-	return m.impactAnalysis, nil
-}
-
 // SetImpactSize configures the mock to return a specific number of affected files
-func (m *mockTLDRClient) SetImpactSize(affectedCount int) {
-	affectedFiles := make([]string, affectedCount)
-	for i := 0; i < affectedCount; i++ {
-		affectedFiles[i] = fmt.Sprintf("internal/core/file%d.go", i)
-	}
-	m.impactAnalysis.AffectedFiles = affectedFiles
-}
 
 // ============================================================================
 // Test: Pre-Execution Intelligence - Success Case
 // ============================================================================
 
+// testImpactAnalysis is the impact fixture these tests assemble bundles around.
+// It used to come from a mock llm-tldr client; llm-tldr is gone, and the tests
+// are about bundle assembly and scope validation, not about who produced the
+// analysis.
+func testImpactAnalysis(affectedCount int) *ImpactAnalysis {
+	affected := []string{"internal/core/overseer.go", "internal/core/worker.go"}
+	if affectedCount > 0 {
+		affected = make([]string, affectedCount)
+		for i := range affected {
+			affected[i] = fmt.Sprintf("internal/core/file%d.go", i)
+		}
+	}
+	return &ImpactAnalysis{
+		TargetFiles:     []string{"internal/core/config.go"},
+		AffectedFiles:   affected,
+		Complexity:      50,
+		RiskLevel:       "medium",
+		Recommendations: []string{"Review dependency injection", "Check for race conditions"},
+	}
+}
+
 func TestPreExecutionIntelligence_Success(t *testing.T) {
 	// Setup test overseer with intelligence enabled
 	config := DefaultConfig()
-	config.Intelligence.TLDR.Enabled = true
-	config.Intelligence.TLDR.MaxFiles = 50
+	config.Intelligence.Graphify.Enabled = true
 
 	overseer := NewOverseer(config)
 
 	// Create mock clients
-	mockTLDR := newMockTLDRClient(true, 50)
-
-	// Inject mock clients
-	overseer.tldrClient = intelligence.NewTLDRClient(
-		"http://mock-tldr:8787",
-		false, // useCLI
-		"llm-tldr",
-		"",
-		30*time.Second,
-	)
+	impact := testImpactAnalysis(0)
 
 	// Override the query methods with our mocks
-	overseer.config.Intelligence.TLDR.Enabled = true
 
 	// Create a test bead with file references (used for context)
 	_ = &types.Bead{
@@ -131,7 +98,7 @@ func TestPreExecutionIntelligence_Success(t *testing.T) {
 				CreatedAt: time.Now(),
 			},
 		},
-		ImpactAnalysis: mockTLDR.impactAnalysis,
+		ImpactAnalysis: impact,
 		ScopeValidated: true,
 		GatheredAt:     time.Now(),
 	}
@@ -173,101 +140,13 @@ func TestPreExecutionIntelligence_Success(t *testing.T) {
 
 	// Verify file count is within limits
 	totalFiles := len(bundle.ImpactAnalysis.TargetFiles) + len(bundle.ImpactAnalysis.AffectedFiles)
-	if totalFiles > config.Intelligence.TLDR.MaxFiles*2 {
+	if totalFiles > maxScopeFiles*2 {
 		t.Errorf("Total files %d exceeds safe threshold", totalFiles)
 	}
 }
 
 // ============================================================================
 // Test: Pre-Execution Intelligence - TLDR Down
-// ============================================================================
-
-func TestPreExecutionIntelligence_TLDRDown(t *testing.T) {
-	config := DefaultConfig()
-	config.Intelligence.TLDR.Enabled = true
-
-	overseer := NewOverseer(config)
-
-	// Simulate TLDR being down
-	_ = newMockTLDRClient(false, 50) // unavailable - documented for clarity
-
-	// Create a test bead (for context documentation)
-	_ = &types.Bead{
-		ID:          "test-project-003",
-		Title:       "Test TLDR Down",
-		Description: "Modify internal/core/config.go",
-		Type:        "implement",
-		Status:      types.StatusOpen,
-		Project:     "test-project",
-	}
-
-	// Add project
-	overseer.projects = []types.Project{
-		{
-			Name: "test-project",
-			Path: "/test/test-project",
-			Type: types.RepoTypeSingle,
-		},
-	}
-
-	// Create bundle with test data but no impact analysis
-	bundle := &IntelligenceBundle{
-		Patterns: []Pattern{
-			{
-				ID:          "pattern-1",
-				Type:        "test-pattern",
-				Description: "Test pattern 1",
-				Confidence:  0.95,
-				Tags:        []string{"test", "mock"},
-				CreatedAt:   time.Now(),
-			},
-		},
-		ContextEntries: []ContextEntry{
-			{
-				ID:        "ctx-1",
-				BeadType:  "implement",
-				Files:     []string{"internal/core/config.go"},
-				Summary:   "Previous config change",
-				Relevance: 0.85,
-				CreatedAt: time.Now(),
-			},
-		},
-		ImpactAnalysis: nil, // TLDR is down
-		ScopeValidated: true,
-		GatheredAt:     time.Now(),
-	}
-
-	// Verify bundle is created even without TLDR
-	if bundle == nil {
-		t.Fatal("Expected bundle to be created even without TLDR")
-	}
-
-	// Verify patterns are present (cass_memory available)
-	if len(bundle.Patterns) == 0 {
-		t.Error("Expected patterns from cass_memory even when TLDR is down")
-	}
-
-	// Verify context entries are present (cass_memory available)
-	if len(bundle.ContextEntries) == 0 {
-		t.Error("Expected context entries from cass_memory even when TLDR is down")
-	}
-
-	// Verify impact analysis is nil (TLDR unavailable)
-	if bundle.ImpactAnalysis != nil {
-		t.Error("Expected no impact analysis when TLDR is down")
-	}
-
-	// Verify scope validation still passes (without impact analysis)
-	if !bundle.ScopeValidated {
-		t.Error("Expected scope validation to pass despite TLDR being down")
-	}
-
-	// Simulate worker spawn check
-	canSpawn := bundle.ScopeValidated || bundle.ValidationError == ""
-	if !canSpawn {
-		t.Error("Expected worker to be spawnable even when TLDR is down")
-	}
-}
 
 // ============================================================================
 // Test: Pre-Execution Intelligence - Scope Violation
@@ -275,14 +154,11 @@ func TestPreExecutionIntelligence_TLDRDown(t *testing.T) {
 
 func TestPreExecutionIntelligence_ScopeViolation(t *testing.T) {
 	config := DefaultConfig()
-	config.Intelligence.TLDR.Enabled = true
-	config.Intelligence.TLDR.MaxFiles = 50 // Limit is 50 files
+	config.Intelligence.Graphify.Enabled = true
 
 	overseer := NewOverseer(config)
 
 	// Create mock with impact showing 100 affected files (exceeds limit)
-	mockTLDR := newMockTLDRClient(true, 50)
-	mockTLDR.SetImpactSize(100) // 100 affected files, exceeds safe threshold
 
 	// Create a test bead with target files (for context)
 	_ = &types.Bead{
@@ -459,50 +335,40 @@ func extractRuleIDs(labels []string) []string {
 func TestIntelligenceConfigLoading(t *testing.T) {
 	tests := []struct {
 		name                  string
-		tldrEnabled           bool
+		graphifyEnabled       bool
 		gptCacheEnabled       bool
 		expectCassInitialized bool
-		expectTLDRInitialized bool
 		expectGPTInitialized  bool
 	}{
 		{
 			name:                  "all services enabled",
-			tldrEnabled:           true,
 			gptCacheEnabled:       true,
 			expectCassInitialized: true,
-			expectTLDRInitialized: true,
 			expectGPTInitialized:  true,
 		},
 		{
 			name:                  "only cass_memory enabled",
-			tldrEnabled:           false,
 			gptCacheEnabled:       false,
 			expectCassInitialized: true,
-			expectTLDRInitialized: false,
 			expectGPTInitialized:  false,
 		},
 		{
-			name:                  "only TLDR enabled",
-			tldrEnabled:           true,
+			name:                  "only graphify enabled",
+			graphifyEnabled:       true,
 			gptCacheEnabled:       false,
 			expectCassInitialized: false,
-			expectTLDRInitialized: true,
 			expectGPTInitialized:  false,
 		},
 		{
 			name:                  "only GPTCache enabled",
-			tldrEnabled:           false,
 			gptCacheEnabled:       true,
 			expectCassInitialized: false,
-			expectTLDRInitialized: false,
 			expectGPTInitialized:  true,
 		},
 		{
 			name:                  "all services disabled",
-			tldrEnabled:           false,
 			gptCacheEnabled:       false,
 			expectCassInitialized: false,
-			expectTLDRInitialized: false,
 			expectGPTInitialized:  false,
 		},
 	}
@@ -510,16 +376,10 @@ func TestIntelligenceConfigLoading(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config := DefaultConfig()
-			config.Intelligence.TLDR.Enabled = tt.tldrEnabled
+			config.Intelligence.Graphify.Enabled = tt.graphifyEnabled
 			config.Intelligence.GPTCache.Enabled = tt.gptCacheEnabled
 
 			overseer := NewOverseer(config)
-
-			// Check TLDR client initialization via hub
-			hasTLDR := overseer.intelligenceHub.TLDR() != nil
-			if hasTLDR != tt.expectTLDRInitialized {
-				t.Errorf("TLDR client initialized = %v, expected %v", hasTLDR, tt.expectTLDRInitialized)
-			}
 
 			// Check GPTCache client initialization via hub
 			hasGPT := overseer.intelligenceHub.GPTCache() != nil
@@ -529,7 +389,7 @@ func TestIntelligenceConfigLoading(t *testing.T) {
 
 			// Verify isIntelligenceEnabled reflects the config
 			isEnabled := overseer.isIntelligenceEnabled()
-			expectedEnabled := tt.tldrEnabled || tt.gptCacheEnabled
+			expectedEnabled := tt.graphifyEnabled || tt.gptCacheEnabled
 			if isEnabled != expectedEnabled {
 				t.Errorf("isIntelligenceEnabled = %v, expected %v", isEnabled, expectedEnabled)
 			}
@@ -543,7 +403,7 @@ func TestIntelligenceConfigLoading(t *testing.T) {
 
 func TestIntelligenceBundlePassedToWorker(t *testing.T) {
 	config := DefaultConfig()
-	config.Intelligence.TLDR.Enabled = true
+	config.Intelligence.Graphify.Enabled = true
 
 	// Create overseer to verify initialization with intelligence enabled
 	_ = NewOverseer(config)
@@ -681,7 +541,7 @@ func stringSlicesEqual(a, b []string) bool {
 
 func TestPreExecutionIntelligence_NoTargetFiles(t *testing.T) {
 	config := DefaultConfig()
-	config.Intelligence.TLDR.Enabled = true
+	config.Intelligence.Graphify.Enabled = true
 
 	overseer := NewOverseer(config)
 
@@ -734,7 +594,7 @@ func TestPreExecutionIntelligence_NoTargetFiles(t *testing.T) {
 
 func TestPreExecutionIntelligence_HighComplexity(t *testing.T) {
 	config := DefaultConfig()
-	config.Intelligence.TLDR.Enabled = true
+	config.Intelligence.Graphify.Enabled = true
 
 	overseer := NewOverseer(config)
 
@@ -769,7 +629,7 @@ func TestPreExecutionIntelligence_HighComplexity(t *testing.T) {
 
 func TestPreExecutionIntelligence_HighRisk(t *testing.T) {
 	config := DefaultConfig()
-	config.Intelligence.TLDR.Enabled = true
+	config.Intelligence.Graphify.Enabled = true
 
 	overseer := NewOverseer(config)
 
@@ -1052,7 +912,6 @@ func TestFindProjectPath(t *testing.T) {
 
 func TestValidateScope_FileCountLimit(t *testing.T) {
 	config := DefaultConfig()
-	config.Intelligence.TLDR.MaxFiles = 10
 
 	overseer := NewOverseer(config)
 
@@ -1072,8 +931,11 @@ func TestValidateScope_FileCountLimit(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:        "exceeds target file limit",
-			targetFiles: make([]string, 15), // 15 > 10
+			name: "exceeds target file limit",
+			// Derived from the constant rather than hardcoded: the limit used to
+			// come from intelligence.tldr.max_files, which coupled a scope rule to
+			// a tool that no longer exists.
+			targetFiles: make([]string, maxScopeFiles+1),
 			impact:      nil,
 			wantErr:     true,
 			errContains: "too many target files",
@@ -1082,7 +944,7 @@ func TestValidateScope_FileCountLimit(t *testing.T) {
 			name:        "exceeds total files threshold",
 			targetFiles: []string{"file1.go", "file2.go"},
 			impact: &ImpactAnalysis{
-				AffectedFiles: make([]string, 100), // 2 + 100 = 102 > 20 (MaxFiles*2)
+				AffectedFiles: make([]string, maxScopeFiles*2+1),
 			},
 			wantErr:     true,
 			errContains: "scope too large",

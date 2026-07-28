@@ -8,20 +8,19 @@ import (
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/hindsight"
-	"github.com/haulmatic-dev/hydra/internal/intelligence"
 	"github.com/haulmatic-dev/hydra/internal/services"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // IntelligenceHub encapsulates all external intelligence service clients.
-// It manages TLDR, GPTCache, and Hindsight clients, plus the TLDR indexer.
+// It manages the GPTCache and Hindsight clients plus the graphify code-graph
+// indexer. llm-tldr was removed: unmaintained, zero semantic units on Go, and
+// its service was not running in production.
 type IntelligenceHub struct {
 	mu                sync.RWMutex
-	tldrClient        *intelligence.TLDRClient
 	gptCache          *GPTCacheClient
 	hindsightClient   HindsightClient
 	batchRetentionSvc *services.BatchRetentionService
-	tldrIndexer       *TLDRIndexer
 	graphifyIndexer   *GraphifyIndexer
 	config            IntelligenceConfig
 }
@@ -35,27 +34,6 @@ func NewIntelligenceHub(config IntelligenceConfig) *IntelligenceHub {
 func (h *IntelligenceHub) Initialize() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-
-	if h.config.TLDR.Enabled {
-		h.tldrClient = intelligence.NewTLDRClient(
-			h.config.TLDR.BaseURL,
-			true, // useCLI
-			"llm-tldr",
-			"",
-			h.config.TLDR.Timeout,
-		)
-		log.Printf("[IntelligenceHub] TLDR client initialized (baseURL: %s)", h.config.TLDR.BaseURL)
-
-		if h.config.TLDR.Indexing.Enabled {
-			h.tldrIndexer = NewTLDRIndexer(
-				h.config.TLDR.Indexing.MaxConcurrent,
-				h.config.TLDR.Indexing.RetryAttempts,
-				h.config.TLDR.Indexing.RetryDelay,
-				"llm-tldr",
-			)
-			log.Printf("[IntelligenceHub] TLDR indexer initialized")
-		}
-	}
 
 	// Graphify replaces llm-tldr as the structural-intelligence layer. Agents
 	// reach it through the `graphify` skill (frontmatter-only prompt cost); the
@@ -107,14 +85,7 @@ func (h *IntelligenceHub) Initialize() {
 func (h *IntelligenceHub) Enabled() bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.config.TLDR.Enabled || h.config.GPTCache.Enabled || h.config.Hindsight.Enabled
-}
-
-// TLDR returns the TLDR client (may be nil).
-func (h *IntelligenceHub) TLDR() *intelligence.TLDRClient {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.tldrClient
+	return h.config.Graphify.Enabled || h.config.GPTCache.Enabled || h.config.Hindsight.Enabled
 }
 
 // Hindsight returns the Hindsight client (may be nil).
@@ -150,13 +121,6 @@ func (h *IntelligenceHub) SubmitExecutionResult(bead types.Bead, execResult serv
 	}
 }
 
-// Indexer returns the TLDR indexer (may be nil).
-func (h *IntelligenceHub) Indexer() *TLDRIndexer {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.tldrIndexer
-}
-
 // GraphifyIndexer returns the graphify indexer (may be nil).
 func (h *IntelligenceHub) GraphifyIndexer() *GraphifyIndexer {
 	h.mu.RLock()
@@ -164,29 +128,12 @@ func (h *IntelligenceHub) GraphifyIndexer() *GraphifyIndexer {
 	return h.graphifyIndexer
 }
 
-// QueueInitialIndexing queues all project repositories for indexing.
+// QueueInitialIndexing refreshes every project's code graph.
+//
+// Named for the legacy indexing it replaced; the work is now a graphify graph
+// refresh per project.
 func (h *IntelligenceHub) QueueInitialIndexing(projects []types.Project) {
-	// Graph refresh runs independently of the legacy indexer, so a disabled or
-	// removed TLDR path cannot stop graphs from being built.
 	h.refreshGraphs(projects)
-
-	if h.tldrIndexer == nil {
-		return
-	}
-	log.Printf("[IntelligenceHub] Queueing initial indexing for %d projects", len(projects))
-	for _, project := range projects {
-		if project.Type == types.RepoTypeMulti {
-			for _, repo := range project.Repos {
-				if h.tldrIndexer.QueueIndex(repo.Path) {
-					log.Printf("[IntelligenceHub] Queued: %s/%s", project.Name, repo.Name)
-				}
-			}
-		} else {
-			if h.tldrIndexer.QueueIndex(project.Path) {
-				log.Printf("[IntelligenceHub] Queued: %s", project.Name)
-			}
-		}
-	}
 }
 
 // refreshGraphs asks the graphify indexer to rebuild each project's graph if it
@@ -216,12 +163,5 @@ func (h *IntelligenceHub) refreshGraphs(projects []types.Project) {
 func (h *IntelligenceHub) QueueRepoIndexing(projectName, repoPath string) {
 	if indexer := h.GraphifyIndexer(); indexer != nil && indexer.Refresh(repoPath) {
 		log.Printf("[Graphify] refreshing graph: %s/%s", projectName, repoPath)
-	}
-
-	if h.tldrIndexer == nil {
-		return
-	}
-	if h.tldrIndexer.QueueIndex(repoPath) {
-		log.Printf("[IntelligenceHub] Queued: %s/%s", projectName, repoPath)
 	}
 }

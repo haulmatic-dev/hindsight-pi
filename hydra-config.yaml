@@ -82,22 +82,6 @@ intelligence:
     # query commands need; leave false to keep GRAPH_REPORT.md.
     skip_clustering: false
 
-  tldr:
-    # Retired. Left disabled rather than deleted because impact analysis, scope
-    # validation and chain-completion detection still reference its types; those
-    # call sites are removed in a follow-up so each one gets a deliberate
-    # decision rather than a silent behaviour change.
-    enabled: false
-    base_url: http://127.0.0.1:8787
-    timeout: 30s
-    max_files: 20
-    max_tokens: 100000
-    indexing:
-      enabled: false
-      max_concurrent: 2
-      queue_size: 100
-      retry_attempts: 3
-      retry_delay: 5s
   hindsight:
     enabled: true
     base_url: http://127.0.0.1:8888

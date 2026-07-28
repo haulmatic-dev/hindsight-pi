@@ -721,7 +721,7 @@ func TestGraphQLSubscriptions(t *testing.T) {
 	overseer := core.NewOverseer(config)
 
 	// Create resolver with event broadcasting
-	resolver := graph.NewResolver(overseer, nil)
+	resolver := graph.NewResolver(overseer)
 	defer resolver.Stop()
 
 	// Create GraphQL server

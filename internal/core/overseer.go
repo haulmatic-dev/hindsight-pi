@@ -11,7 +11,6 @@ import (
 	"github.com/haulmatic-dev/hydra/internal/beads"
 	"github.com/haulmatic-dev/hydra/internal/bv"
 	"github.com/haulmatic-dev/hydra/internal/hindsight"
-	"github.com/haulmatic-dev/hydra/internal/intelligence"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/internal/pi"
 	"github.com/haulmatic-dev/hydra/internal/services"
@@ -84,7 +83,6 @@ type Overseer struct {
 	retryManager    *RetryManager    // Retry and validation-retry tracking
 	intelligenceHub *IntelligenceHub // Encapsulates TLDR, GPTCache, Hindsight clients
 	// These clients remain direct fields until IntelligenceHub fully exposes their APIs.
-	tldrClient         *intelligence.TLDRClient        // TLDR client for impact analysis
 	gptCache           *GPTCacheClient                 // GPTCache client for caching
 	hindsightClient    HindsightClient                 // Hindsight client for pre-execution context retrieval
 	batchRetentionSvc  *services.BatchRetentionService // Batch retention service for efficient memory storage
@@ -111,7 +109,6 @@ type Overseer struct {
 	dagBuilder *DAGBuilder // Builds DAG from project beads
 
 	// Impact analyzer for TLDR-based impact analysis
-	impactAnalyzer *ImpactAnalyzer // Analyzes code impact using TLDR
 
 	// Worker tracker for persistent PID tracking
 	workerTracker *WorkerTracker // Tracks worker PIDs to identify Hydra workers
@@ -130,7 +127,6 @@ type Overseer struct {
 	skillUpdaterInitializer *SkillUpdaterInitializer
 
 	// TLDR indexer for deterministic code indexing
-	tldrIndexer *TLDRIndexer // Indexes repositories after code changes
 
 	// Epic scanner for periodic epic auto-close
 	epicScanner *EpicScanner // Scans and closes epics when all tasks complete
@@ -219,7 +215,6 @@ func NewOverseer(config *Config) *Overseer {
 	o.dagBuilder = NewDAGBuilder(o.errorLogger)
 
 	// Initialize impact analyzer
-	o.impactAnalyzer = NewImpactAnalyzer(o.findProjectPath)
 
 	// Initialize worker environment builder + provider failover breaker
 	// (rate-limit on the primary provider -> fallback provider/model).
@@ -429,11 +424,6 @@ func (o *Overseer) initializeChainCompletionDetector() {
 	o.chainCompletionInitializer.Initialize()
 }
 
-// analyzeImpactWithTLDR performs impact analysis using TLDR service
-func (o *Overseer) analyzeImpactWithTLDR(client *intelligence.TLDRClient, bead *types.Bead, files []string) (*types.ImpactAnalysis, error) {
-	return o.impactAnalyzer.Analyze(client, bead, files)
-}
-
 // findProjectPath finds the project path for a given bead.
 // Falls back to beadAnalyzer if initialized, otherwise uses projectResolver.
 func (o *Overseer) findProjectPath(bead *types.Bead) string {
@@ -462,7 +452,7 @@ func (o *Overseer) validateScope(bundle *types.IntelligenceBundle, targetFiles [
 
 // shouldRetry checks if a bead should be retried based on retry count and cooldown
 func (o *Overseer) isIntelligenceEnabled() bool {
-	return o.config.Intelligence.TLDR.Enabled || o.config.Intelligence.GPTCache.Enabled
+	return o.config.Intelligence.Graphify.Enabled || o.config.Intelligence.GPTCache.Enabled
 }
 
 // Start begins the overseer's main loop
@@ -1027,11 +1017,6 @@ func (o *Overseer) RefreshToolClients(changes []ToolConfigChange) {
 // applyToolConfigChange applies a single tool configuration change.
 func (o *Overseer) applyToolConfigChange(change ToolConfigChange) {
 	o.configManager.applyToolConfigChange(change)
-}
-
-// refreshTLDRClient reinitializes the TLDR client.
-func (o *Overseer) refreshTLDRClient(change ToolConfigChange) {
-	o.configManager.refreshTLDRClient(change)
 }
 
 // refreshGPTCacheClient reinitializes the GPTCache client.

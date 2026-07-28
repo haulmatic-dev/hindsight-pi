@@ -6,11 +6,8 @@ package graph
 import (
 	"context"
 	"fmt"
-	"sync"
-	"time"
 
 	"github.com/haulmatic-dev/hydra/graph/model"
-	"github.com/haulmatic-dev/hydra/internal/intelligence"
 )
 
 // BeadResolver resolves fields for the Bead type.
@@ -29,19 +26,6 @@ type WorkerResolver interface {
 	Bead(ctx context.Context, obj *model.Worker) (*model.Bead, error)
 	Logs(ctx context.Context, obj *model.Worker) ([]*model.LogEntry, error)
 }
-
-// Cache entry for impact analysis with TTL
-type impactCacheEntry struct {
-	analysis   *intelligence.TLDRImpactResponse
-	expiration time.Time
-}
-
-// Global cache for impact analysis results with mutex for thread safety
-var (
-	impactCache   = make(map[string]*impactCacheEntry)
-	impactCacheMu sync.RWMutex
-	cacheTTL      = 5 * time.Minute
-)
 
 // beadResolver handles field resolution for the Bead type.
 // It provides lazy loading of dependencies, dependents, workers, patterns, and impact analysis.
@@ -143,43 +127,14 @@ func (r *beadResolver) Patterns(ctx context.Context, obj *model.Bead) ([]*model.
 // Impact resolves the impact field for a Bead.
 // It runs TLDR impact analysis on files mentioned in the bead, with caching.
 func (r *beadResolver) Impact(ctx context.Context, obj *model.Bead) (*model.ImpactAnalysis, error) {
-	if r.Resolver.TLDR == nil {
-		return nil, nil
-	}
-
-	// Extract target files from the bead
-	files := extractTargetFiles(obj)
-	if len(files) == 0 {
-		return nil, nil
-	}
-
-	// Use first file for analysis (primary target)
-	targetFile := files[0]
-
-	// Check cache first
-	impactCacheMu.RLock()
-	if cached, exists := impactCache[obj.ID]; exists && time.Now().Before(cached.expiration) {
-		impactCacheMu.RUnlock()
-		return convertTLDRResponseToModel(cached.analysis), nil
-	}
-	impactCacheMu.RUnlock()
-
-	// Perform impact analysis
-	analysis, err := r.Resolver.TLDR.ImpactAnalysis(targetFile, 2) // depth 2
-	if err != nil {
-		// Return nil on error (graceful degradation)
-		return nil, nil
-	}
-
-	// Cache the result
-	impactCacheMu.Lock()
-	impactCache[obj.ID] = &impactCacheEntry{
-		analysis:   analysis,
-		expiration: time.Now().Add(cacheTTL),
-	}
-	impactCacheMu.Unlock()
-
-	return convertTLDRResponseToModel(analysis), nil
+	// Impact analysis is unwired. It was backed by llm-tldr, which has been
+	// removed (unmaintained; zero semantic units on Go; its service was not
+	// running in production, so this field already returned nil there).
+	//
+	// The schema field is kept and nullable, so no API contract changes. Wiring
+	// it to `graphify affected` is a follow-up: that is a real reverse-traversal
+	// query, not a rename, and deserves its own tests.
+	return nil, nil
 }
 
 // workerResolver handles field resolution for the Worker type.
@@ -213,53 +168,6 @@ func (r *workerResolver) Logs(ctx context.Context, obj *model.Worker) ([]*model.
 	// For now, return empty logs since we don't have a log storage mechanism yet
 	// TODO: Implement log storage and retrieval when available
 	return []*model.LogEntry{}, nil
-}
-
-// convertTLDRResponseToModel converts TLDR impact response to GraphQL model.
-func convertTLDRResponseToModel(resp *intelligence.TLDRImpactResponse) *model.ImpactAnalysis {
-	if resp == nil {
-		return nil
-	}
-
-	// Convert callers
-	callers := make([]*model.Dependency, 0, len(resp.Impact.Callers))
-	for _, caller := range resp.Impact.Callers {
-		dep := &model.Dependency{
-			File: caller.File,
-		}
-		if caller.Function != "" {
-			dep.Function = &caller.Function
-		}
-		if caller.Line > 0 {
-			line := int32(caller.Line)
-			dep.Line = &line
-		}
-		callers = append(callers, dep)
-	}
-
-	// Convert callees
-	callees := make([]*model.Dependency, 0, len(resp.Impact.Callees))
-	for _, callee := range resp.Impact.Callees {
-		dep := &model.Dependency{
-			File: callee.File,
-		}
-		if callee.Function != "" {
-			dep.Function = &callee.Function
-		}
-		if callee.Line > 0 {
-			line := int32(callee.Line)
-			dep.Line = &line
-		}
-		callees = append(callees, dep)
-	}
-
-	return &model.ImpactAnalysis{
-		Files:    int32(resp.Scope.Files),
-		Tokens:   int32(resp.Scope.Tokens),
-		Exceeded: resp.Scope.Exceeded,
-		Callers:  callers,
-		Callees:  callees,
-	}
 }
 
 // extractTargetFiles extracts file paths from a bead model.

@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/haulmatic-dev/hydra/graph/model"
-	"github.com/haulmatic-dev/hydra/internal/intelligence"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -120,28 +118,6 @@ func (m *fieldMockOverseer) addWorker(worker types.Worker) {
 	m.workers = append(m.workers, worker)
 }
 
-// fieldMockTLDR is a mock implementation of the TLDRClient for testing
-type fieldMockTLDR struct {
-	returnError bool
-	response    *intelligence.TLDRImpactResponse
-}
-
-func newFieldMockTLDR() *fieldMockTLDR {
-	return &fieldMockTLDR{
-		response: &intelligence.TLDRImpactResponse{},
-	}
-}
-
-func (m *fieldMockTLDR) ImpactAnalysis(file string, depth int) (*intelligence.TLDRImpactResponse, error) {
-	if m.returnError {
-		return nil, fmt.Errorf("mock TLDR error")
-	}
-	if m.response != nil {
-		return m.response, nil
-	}
-	return nil, fmt.Errorf("no mock response configured")
-}
-
 // ============================================================================
 // TEST RESOLVER INTERFACES
 // ============================================================================
@@ -153,14 +129,9 @@ type fieldOverseerInterface interface {
 	GetActiveWorkers() []types.Worker
 }
 
-type fieldTLDRInterface interface {
-	ImpactAnalysis(file string, depth int) (*intelligence.TLDRImpactResponse, error)
-}
-
 // fieldTestBeadResolver wraps beadResolver with test-specific dependencies
 type fieldTestBeadResolver struct {
 	overseer fieldOverseerInterface
-	tldr     fieldTLDRInterface
 }
 
 func (r *fieldTestBeadResolver) Dependencies(ctx context.Context, obj *model.Bead) ([]*model.Bead, error) {
@@ -231,38 +202,9 @@ func (r *fieldTestBeadResolver) Patterns(ctx context.Context, obj *model.Bead) (
 }
 
 func (r *fieldTestBeadResolver) Impact(ctx context.Context, obj *model.Bead) (*model.ImpactAnalysis, error) {
-	if r.tldr == nil {
-		return nil, nil
-	}
-
-	files := extractTargetFiles(obj)
-	if len(files) == 0 {
-		return nil, nil
-	}
-
-	targetFile := files[0]
-
-	// Check cache first
-	impactCacheMu.RLock()
-	if cached, exists := impactCache[obj.ID]; exists && time.Now().Before(cached.expiration) {
-		impactCacheMu.RUnlock()
-		return convertTLDRResponseToModel(cached.analysis), nil
-	}
-	impactCacheMu.RUnlock()
-
-	analysis, err := r.tldr.ImpactAnalysis(targetFile, 2)
-	if err != nil {
-		return nil, nil
-	}
-
-	impactCacheMu.Lock()
-	impactCache[obj.ID] = &impactCacheEntry{
-		analysis:   analysis,
-		expiration: time.Now().Add(cacheTTL),
-	}
-	impactCacheMu.Unlock()
-
-	return convertTLDRResponseToModel(analysis), nil
+	// Impact analysis was backed by llm-tldr, which has been removed. The
+	// production resolver returns nil for the same reason.
+	return nil, nil
 }
 
 // fieldTestWorkerResolver wraps workerResolver with test-specific dependencies
@@ -760,244 +702,6 @@ func TestBeadPatterns(t *testing.T) {
 	}
 }
 
-func TestBeadImpact(t *testing.T) {
-	// Clear cache before each test
-	impactCacheMu.Lock()
-	impactCache = make(map[string]*impactCacheEntry)
-	impactCacheMu.Unlock()
-
-	tests := []struct {
-		name           string
-		setupMocks     func(*fieldMockTLDR)
-		bead           *model.Bead
-		expectedNil    bool
-		expectedFiles  int32
-		expectedTokens int32
-		checkCache     bool
-	}{
-		{
-			name: "returns impact analysis",
-			setupMocks: func(m *fieldMockTLDR) {
-				m.response = &intelligence.TLDRImpactResponse{
-					File: "internal/core/config.go",
-					Impact: struct {
-						Callers []intelligence.Dependency `json:"callers"`
-						Callees []intelligence.Dependency `json:"callees"`
-					}{
-						Callers: []intelligence.Dependency{
-							{File: "main.go", Function: "main", Line: 10},
-						},
-						Callees: []intelligence.Dependency{
-							{File: "internal/utils/helper.go", Function: "HelperFunc", Line: 25},
-						},
-					},
-					Scope: struct {
-						Files    int  `json:"files"`
-						Tokens   int  `json:"tokens"`
-						Exceeded bool `json:"exceeded"`
-					}{
-						Files:    5,
-						Tokens:   2500,
-						Exceeded: false,
-					},
-				}
-			},
-			bead: &model.Bead{
-				ID:          "test-project-A",
-				Title:       "Modify config.go",
-				Type:        "implement",
-				Project:     "test-project",
-				Description: fieldStrPtr("Update internal/core/config.go to add new settings"),
-			},
-			expectedNil:    false,
-			expectedFiles:  5,
-			expectedTokens: 2500,
-		},
-		{
-			name: "nil when TLDR unavailable",
-			setupMocks: func(m *fieldMockTLDR) {
-				m.returnError = true
-			},
-			bead: &model.Bead{
-				ID:          "test-project-A",
-				Title:       "Modify config.go",
-				Type:        "implement",
-				Project:     "test-project",
-				Description: fieldStrPtr("Update internal/core/config.go"),
-			},
-			expectedNil: true,
-		},
-		{
-			name: "nil when no files in description",
-			setupMocks: func(m *fieldMockTLDR) {
-				m.response = &intelligence.TLDRImpactResponse{
-					File: "",
-					Scope: struct {
-						Files    int  `json:"files"`
-						Tokens   int  `json:"tokens"`
-						Exceeded bool `json:"exceeded"`
-					}{
-						Files:    0,
-						Tokens:   0,
-						Exceeded: false,
-					},
-				}
-			},
-			bead: &model.Bead{
-				ID:          "test-project-A",
-				Title:       "Update documentation",
-				Type:        "documentation",
-				Project:     "test-project",
-				Description: fieldStrPtr("Improve the README with better examples"),
-			},
-			expectedNil: true,
-		},
-		{
-			name: "caching works - first call stores in cache",
-			setupMocks: func(m *fieldMockTLDR) {
-				m.response = &intelligence.TLDRImpactResponse{
-					File: "api/server.go",
-					Scope: struct {
-						Files    int  `json:"files"`
-						Tokens   int  `json:"tokens"`
-						Exceeded bool `json:"exceeded"`
-					}{
-						Files:    3,
-						Tokens:   1500,
-						Exceeded: false,
-					},
-				}
-			},
-			bead: &model.Bead{
-				ID:          "test-project-B",
-				Title:       "Modify server.go",
-				Type:        "implement",
-				Project:     "test-project",
-				Description: fieldStrPtr("Update api/server.go"),
-			},
-			expectedNil:    false,
-			expectedFiles:  3,
-			expectedTokens: 1500,
-			checkCache:     true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Clear cache before test
-			impactCacheMu.Lock()
-			impactCache = make(map[string]*impactCacheEntry)
-			impactCacheMu.Unlock()
-
-			mockTLDR := newFieldMockTLDR()
-			tt.setupMocks(mockTLDR)
-
-			resolver := &fieldTestBeadResolver{
-				tldr: fieldTLDRInterface(mockTLDR),
-			}
-
-			ctx := context.Background()
-			impact, err := resolver.Impact(ctx, tt.bead)
-
-			if err != nil {
-				t.Fatalf("Impact() unexpected error: %v", err)
-			}
-
-			if tt.expectedNil {
-				if impact != nil {
-					t.Errorf("Impact() returned non-nil, expected nil")
-				}
-			} else {
-				if impact == nil {
-					t.Fatal("Impact() returned nil, expected impact analysis")
-				}
-				if impact.Files != tt.expectedFiles {
-					t.Errorf("Impact().Files = %d, expected %d", impact.Files, tt.expectedFiles)
-				}
-				if impact.Tokens != tt.expectedTokens {
-					t.Errorf("Impact().Tokens = %d, expected %d", impact.Tokens, tt.expectedTokens)
-				}
-			}
-
-			// Check cache if needed
-			if tt.checkCache {
-				impactCacheMu.RLock()
-				cached, exists := impactCache[tt.bead.ID]
-				impactCacheMu.RUnlock()
-
-				if !exists {
-					t.Error("Expected impact to be cached, but not found in cache")
-				} else if cached.analysis == nil {
-					t.Error("Cached analysis is nil")
-				} else if cached.expiration.Before(time.Now()) {
-					t.Error("Cached entry is already expired")
-				}
-			}
-		})
-	}
-}
-
-func TestBeadImpactCaching(t *testing.T) {
-	// Test that caching actually returns cached value on second call
-	impactCacheMu.Lock()
-	impactCache = make(map[string]*impactCacheEntry)
-	impactCacheMu.Unlock()
-
-	mockTLDR := newFieldMockTLDR()
-	callCount := 0
-
-	// Create a custom mock that tracks call count
-	trackingMock := &fieldTrackingTLDRMock{
-		mockTLDR:  mockTLDR,
-		callCount: &callCount,
-	}
-
-	resolver := &fieldTestBeadResolver{
-		tldr: trackingMock,
-	}
-
-	bead := &model.Bead{
-		ID:          "test-project-cache",
-		Title:       "Test Caching",
-		Type:        "implement",
-		Project:     "test-project",
-		Description: fieldStrPtr("Update internal/test.go"),
-	}
-
-	ctx := context.Background()
-
-	// First call - should hit TLDR
-	_, err := resolver.Impact(ctx, bead)
-	if err != nil {
-		t.Fatalf("First Impact() call failed: %v", err)
-	}
-
-	if callCount != 1 {
-		t.Errorf("Expected 1 TLDR call after first Impact(), got %d", callCount)
-	}
-
-	// Second call - should use cache
-	_, err = resolver.Impact(ctx, bead)
-	if err != nil {
-		t.Fatalf("Second Impact() call failed: %v", err)
-	}
-
-	if callCount != 1 {
-		t.Errorf("Expected 1 TLDR call after second Impact() (cache hit), got %d", callCount)
-	}
-}
-
-// fieldTrackingTLDRMock wraps fieldMockTLDR to track call counts
-type fieldTrackingTLDRMock struct {
-	mockTLDR  *fieldMockTLDR
-	callCount *int
-}
-
-func (t *fieldTrackingTLDRMock) ImpactAnalysis(file string, depth int) (*intelligence.TLDRImpactResponse, error) {
-	*t.callCount++
-	return t.mockTLDR.ImpactAnalysis(file, depth)
-}
-
 func TestWorkerBead(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1207,35 +911,6 @@ func TestBeadDependenciesWithOverseerNil(t *testing.T) {
 	}
 }
 
-// TestBeadImpactWithTLDRNil tests the actual production behavior
-func TestBeadImpactWithTLDRNil(t *testing.T) {
-	resolver := &beadResolver{
-		Resolver: &Resolver{
-			TLDR: nil,
-		},
-	}
-
-	desc := "Update internal/core/config.go"
-	bead := &model.Bead{
-		ID:          "test-project-A",
-		Title:       "Test Bead",
-		Type:        "implement",
-		Project:     "test-project",
-		Description: &desc,
-	}
-
-	ctx := context.Background()
-	impact, err := resolver.Impact(ctx, bead)
-
-	if err != nil {
-		t.Fatalf("Impact() unexpected error: %v", err)
-	}
-
-	if impact != nil {
-		t.Errorf("Expected nil when TLDR is nil, got %v", impact)
-	}
-}
-
 // TestExtractTargetFiles tests the file extraction helper function
 func TestExtractTargetFiles(t *testing.T) {
 	tests := []struct {
@@ -1287,120 +962,6 @@ func TestExtractTargetFiles(t *testing.T) {
 				if i < len(files) && files[i] != expected {
 					t.Errorf("extractTargetFiles()[%d] = %s, expected %s", i, files[i], expected)
 				}
-			}
-		})
-	}
-}
-
-// TestConvertTLDRResponseToModel tests the conversion function
-func TestConvertTLDRResponseToModel(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    *intelligence.TLDRImpactResponse
-		expected *model.ImpactAnalysis
-	}{
-		{
-			name: "converts full response",
-			input: &intelligence.TLDRImpactResponse{
-				File: "main.go",
-				Impact: struct {
-					Callers []intelligence.Dependency `json:"callers"`
-					Callees []intelligence.Dependency `json:"callees"`
-				}{
-					Callers: []intelligence.Dependency{
-						{File: "cmd/main.go", Function: "main", Line: 10},
-					},
-					Callees: []intelligence.Dependency{
-						{File: "pkg/utils.go", Function: "Helper", Line: 25},
-					},
-				},
-				Scope: struct {
-					Files    int  `json:"files"`
-					Tokens   int  `json:"tokens"`
-					Exceeded bool `json:"exceeded"`
-				}{
-					Files:    10,
-					Tokens:   5000,
-					Exceeded: false,
-				},
-			},
-			expected: &model.ImpactAnalysis{
-				Files:    10,
-				Tokens:   5000,
-				Exceeded: false,
-				Callers: []*model.Dependency{
-					{File: "cmd/main.go", Function: fieldStrPtr("main"), Line: fieldInt32Ptr(10)},
-				},
-				Callees: []*model.Dependency{
-					{File: "pkg/utils.go", Function: fieldStrPtr("Helper"), Line: fieldInt32Ptr(25)},
-				},
-			},
-		},
-		{
-			name:     "handles nil input",
-			input:    nil,
-			expected: nil,
-		},
-		{
-			name: "handles empty dependencies",
-			input: &intelligence.TLDRImpactResponse{
-				File: "simple.go",
-				Impact: struct {
-					Callers []intelligence.Dependency `json:"callers"`
-					Callees []intelligence.Dependency `json:"callees"`
-				}{
-					Callers: []intelligence.Dependency{},
-					Callees: []intelligence.Dependency{},
-				},
-				Scope: struct {
-					Files    int  `json:"files"`
-					Tokens   int  `json:"tokens"`
-					Exceeded bool `json:"exceeded"`
-				}{
-					Files:    1,
-					Tokens:   100,
-					Exceeded: false,
-				},
-			},
-			expected: &model.ImpactAnalysis{
-				Files:    1,
-				Tokens:   100,
-				Exceeded: false,
-				Callers:  []*model.Dependency{},
-				Callees:  []*model.Dependency{},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := convertTLDRResponseToModel(tt.input)
-
-			if tt.expected == nil {
-				if result != nil {
-					t.Errorf("Expected nil, got %v", result)
-				}
-				return
-			}
-
-			if result == nil {
-				t.Fatal("Expected non-nil result, got nil")
-			}
-
-			if result.Files != tt.expected.Files {
-				t.Errorf("Files = %d, expected %d", result.Files, tt.expected.Files)
-			}
-			if result.Tokens != tt.expected.Tokens {
-				t.Errorf("Tokens = %d, expected %d", result.Tokens, tt.expected.Tokens)
-			}
-			if result.Exceeded != tt.expected.Exceeded {
-				t.Errorf("Exceeded = %v, expected %v", result.Exceeded, tt.expected.Exceeded)
-			}
-			if len(result.Callers) != len(tt.expected.Callers) {
-				t.Errorf("Callers count = %d, expected %d", len(result.Callers), len(tt.expected.Callers))
-			}
-			if len(result.Callees) != len(tt.expected.Callees) {
-				t.Errorf("Callees count = %d, expected %d", len(result.Callees), len(tt.expected.Callees))
 			}
 		})
 	}
