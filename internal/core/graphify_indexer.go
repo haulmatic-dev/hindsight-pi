@@ -152,6 +152,13 @@ func (g *GraphifyIndexer) release(abs string) {
 
 // build runs a single bounded `graphify update`.
 func (g *GraphifyIndexer) build(abs string) error {
+	// graphify writes its output INSIDE the repo (graphify-out/, ~26 MB on this
+	// codebase). Hydra commits and pushes worker changes, so without an ignore
+	// rule the graph would be committed into whatever repo it indexed — user
+	// projects included, which do not carry our .gitignore. Written before the
+	// build so a partial or failed run is covered too.
+	ensureGitignoreLine(filepath.Join(abs, ".gitignore"), "graphify-out/")
+
 	ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
 	defer cancel()
 

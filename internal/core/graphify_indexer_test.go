@@ -215,3 +215,53 @@ func TestNewGraphifyIndexer_DefaultsForUnsetFields(t *testing.T) {
 		t.Errorf("concurrency cap = %d, want at least 1", cap(idx.sem))
 	}
 }
+
+// TestGraphifyIndexer_GitignoresOutput pins the containment rule. graphify writes
+// graphify-out/ inside the repo (~26 MB here) and Hydra commits + pushes worker
+// changes, so without this the graph gets committed into whatever repo it
+// indexed — including user projects, which do not carry Hydra's .gitignore.
+func TestGraphifyIndexer_GitignoresOutput(t *testing.T) {
+	bin, calls := fakeGraphify(t, "exit 0\n")
+	project := t.TempDir()
+
+	idx := NewGraphifyIndexer(GraphifyConfig{Enabled: true, Binary: bin})
+	if err := idx.build(project); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got := waitForFile(t, calls, 3*time.Second); got == "" {
+		t.Fatal("graphify was never invoked")
+	}
+
+	data, err := os.ReadFile(filepath.Join(project, ".gitignore"))
+	if err != nil {
+		t.Fatalf(".gitignore should have been created: %v", err)
+	}
+	if !strings.Contains(string(data), "graphify-out/") {
+		t.Errorf(".gitignore = %q, want it to ignore graphify-out/", string(data))
+	}
+}
+
+// TestGraphifyIndexer_GitignoreIsIdempotent: repeated refreshes must not append
+// the same rule over and over.
+func TestGraphifyIndexer_GitignoreIsIdempotent(t *testing.T) {
+	bin, _ := fakeGraphify(t, "exit 0\n")
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, ".gitignore"), []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	idx := NewGraphifyIndexer(GraphifyConfig{Enabled: true, Binary: bin})
+	for i := 0; i < 3; i++ {
+		if err := idx.build(project); err != nil {
+			t.Fatalf("build %d: %v", i, err)
+		}
+	}
+
+	data, _ := os.ReadFile(filepath.Join(project, ".gitignore"))
+	if n := strings.Count(string(data), "graphify-out/"); n != 1 {
+		t.Errorf("graphify-out/ appears %d times, want exactly 1", n)
+	}
+	if !strings.Contains(string(data), "node_modules/") {
+		t.Error("existing .gitignore content must be preserved")
+	}
+}
