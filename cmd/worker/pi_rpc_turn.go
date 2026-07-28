@@ -98,6 +98,16 @@ func (t *rpcTurn) handleLine(line string, stdin io.Writer) bool {
 			}
 			t.notifications[method]++
 			t.mu.Unlock()
+			// Log the message body for `notify`, which is how extensions report
+			// what they actually did — rtk announces each rewrite this way
+			// ("RTK rewrite: git status --short -> rtk git status --short").
+			// Without this the log proves an extension spoke, but not what it did,
+			// which is the difference between "loaded" and "earning its tokens".
+			if method == "notify" {
+				if msg, _ := event["message"].(string); msg != "" {
+					log.Printf("[Worker:rpc] extension notice: %s", msg)
+				}
+			}
 			return false
 		}
 		reply, ok := piagents.UIResponseFor(id, method, t.autoConfirm)
