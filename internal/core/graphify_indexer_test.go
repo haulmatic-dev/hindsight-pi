@@ -155,7 +155,12 @@ func TestGraphifyIndexer_TimeoutKillsRunawayBuild(t *testing.T) {
 	if err == nil {
 		t.Fatal("a build exceeding the timeout must return an error")
 	}
-	if elapsed > 5*time.Second {
+	// The bound is timeout (200ms) + WaitDelay (5s) + slack. WaitDelay is the
+	// grace Wait needs to unblock when an orphaned child keeps the output pipe
+	// open, so ~5.2s here is the fix working, not the timeout failing. What must
+	// never happen is waiting out the child's full 30s sleep — that is exactly
+	// what production did before WaitDelay was set.
+	if elapsed > 15*time.Second {
 		t.Errorf("build took %s — the timeout did not kill it", elapsed)
 	}
 	if !strings.Contains(err.Error(), "timed out") {
