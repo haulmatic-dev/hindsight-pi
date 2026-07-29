@@ -649,8 +649,6 @@ func (d *DAG) CloseReadyEpics() []string {
 	return closed
 }
 
-
-
 // GetNodeCount returns the total number of nodes in the DAG.
 //
 // Returns:

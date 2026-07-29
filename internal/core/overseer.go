@@ -365,6 +365,9 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize bead closer
 	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o.validationService, config)
+	// Structured decision stream (Shepherd C1/C2): central day-files plus
+	// per-repo .hydra/events.jsonl mirrors.
+	o.beadCloser.SetEventSink(NewEventSink(DefaultEventsDir()))
 
 	// Per-chain worktree isolation (opt-in via overseer.worktree_isolation).
 	// Wires the manager into spawn (run worker in the chain's worktree) and

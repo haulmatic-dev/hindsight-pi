@@ -66,22 +66,22 @@ func TestRunTDDValidation_CreatesFixBeadOnGap(t *testing.T) {
 
 	// Create RED bead with a test file that lacks meaningful assertions
 	redBead := types.Bead{
-		ID:          "test-red",
-		Type:        "test",
-		Title:       "RED: Write tests",
-		Project:     "test",
-		Metadata:    map[string]string{"target_files": "test_feature.go"},
-		Status:      types.StatusClosed,
+		ID:       "test-red",
+		Type:     "test",
+		Title:    "RED: Write tests",
+		Project:  "test",
+		Metadata: map[string]string{"target_files": "test_feature.go"},
+		Status:   types.StatusClosed,
 	}
 
 	// Create GREEN bead with missing implementation file
 	greenBead := types.Bead{
-		ID:          "test-green",
-		Type:        "implement",
-		Title:       "GREEN: Implement feature",
-		Project:     "test",
-		Metadata:    map[string]string{"target_files": "feature.go"},
-		Status:      types.StatusClosed,
+		ID:       "test-green",
+		Type:     "implement",
+		Title:    "GREEN: Implement feature",
+		Project:  "test",
+		Metadata: map[string]string{"target_files": "feature.go"},
+		Status:   types.StatusClosed,
 	}
 
 	refactorBead := types.Bead{
@@ -121,21 +121,21 @@ func TestRunTDDValidation_ExhaustedRetries(t *testing.T) {
 	projectPath := t.TempDir()
 
 	redBead := types.Bead{
-		ID:          "test-red",
-		Type:        "test",
-		Title:       "RED: Write tests",
-		Project:     "test",
-		Metadata:    map[string]string{"target_files": "test_feature.go"},
-		Status:      types.StatusClosed,
+		ID:       "test-red",
+		Type:     "test",
+		Title:    "RED: Write tests",
+		Project:  "test",
+		Metadata: map[string]string{"target_files": "test_feature.go"},
+		Status:   types.StatusClosed,
 	}
 
 	greenBead := types.Bead{
-		ID:          "test-green",
-		Type:        "implement",
-		Title:       "GREEN: Implement feature",
-		Project:     "test",
-		Metadata:    map[string]string{"target_files": "feature.go"},
-		Status:      types.StatusClosed,
+		ID:       "test-green",
+		Type:     "implement",
+		Title:    "GREEN: Implement feature",
+		Project:  "test",
+		Metadata: map[string]string{"target_files": "feature.go"},
+		Status:   types.StatusClosed,
 	}
 
 	refactorBead := types.Bead{
@@ -235,12 +235,12 @@ func TestRunPRDValidation_CreatesFixBeads(t *testing.T) {
 	}
 
 	leafBead := types.Bead{
-		ID:          "test-leaf",
-		Type:        "implement",
-		Title:       "Implement Feature X",
-		Project:     "test",
-		Metadata:    map[string]string{"target_files": "feature.go"},
-		Status:      types.StatusClosed,
+		ID:       "test-leaf",
+		Type:     "implement",
+		Title:    "Implement Feature X",
+		Project:  "test",
+		Metadata: map[string]string{"target_files": "feature.go"},
+		Status:   types.StatusClosed,
 	}
 
 	mockBeads.addBead(rootBead)
@@ -289,12 +289,12 @@ func TestRunPRDValidation_WithExistingFiles(t *testing.T) {
 	}
 
 	leafBead := types.Bead{
-		ID:          "test-leaf",
-		Type:        "implement",
-		Title:       "Implement Feature X",
-		Project:     "test",
-		Metadata:    map[string]string{"target_files": "feature.go"},
-		Status:      types.StatusClosed,
+		ID:       "test-leaf",
+		Type:     "implement",
+		Title:    "Implement Feature X",
+		Project:  "test",
+		Metadata: map[string]string{"target_files": "feature.go"},
+		Status:   types.StatusClosed,
 	}
 
 	mockBeads.addBead(rootBead)

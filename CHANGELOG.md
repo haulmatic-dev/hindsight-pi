@@ -31,6 +31,24 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   now the `maxScopeFiles` constant.
 
 ### Added
+- **Cause-aware, deduplicated fix beads (Shepherd A2).** A fix bead's description
+  now carries the original's exit code plus a `What failed last time` block
+  extracted from its newest worker log (`ExtractFailureCause`: priority-ordered —
+  model failure > failing test > package FAIL > Error — passthrough JSONL
+  excluded except the model-failure marker, 2 KB budget). Creation is deduplicated
+  via `findOpenFixBeadForOriginal`: one open fix bead per original, closing the
+  duplicate-spawn defect (the A2 build run itself produced SEVEN duplicate
+  cause-less fix beads for one bead before this landed — the problem demonstrating
+  its own fix). Built by dogfood run A2 (FR-001 initially stubbed; a later fix
+  bead completed it), harvested from the working tree since both gates correctly
+  closed `failed` on the mid-run mess.
+- **Structured daemon event stream (Shepherd C1/C2).** Typed JSONL written by
+  daemon code about daemon decisions — worker output structurally cannot enter
+  it, retiring the passthrough-contamination class (4 incidents). Two tiers:
+  central day-files under `HYDRA_HOME/events/`, and per-repo
+  `.hydra/events.jsonl` mirrors (gitignored) so each user sees what hydra did to
+  their repo. First emitters wired in the closer: `fix_created`, `fix_capped`,
+  `fix_deduped`.
 - **rpc mode and the `[rtk, caveman, context-mode]` allowlist are now the
   defaults.** A config that says nothing about the protocol gets both. rpc is the
   default because text mode initialises no extension host at all — verified: a

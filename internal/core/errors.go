@@ -194,7 +194,6 @@ func (e *GracefulDegradationError) Unwrap() error {
 	return e.Err
 }
 
-
 // ProjectNotFoundError represents an error when a project cannot be resolved.
 type ProjectNotFoundError struct {
 	Project string
@@ -241,7 +240,6 @@ func (e *ValidationFailedError) Error() string {
 	return fmt.Sprintf("validation failed for bead %s: %s", e.BeadID, e.Details)
 }
 
-
 // MCPError represents an MCP-related error.
 type MCPError struct {
 	Op  string
@@ -261,9 +259,9 @@ func (e *MCPError) Unwrap() error {
 
 // AgentError represents an agent-related error.
 type AgentError struct {
-	Op      string
+	Op       string
 	BeadType string
-	Err     error
+	Err      error
 }
 
 func (e *AgentError) Error() string {

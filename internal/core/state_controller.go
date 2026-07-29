@@ -7,10 +7,10 @@ import (
 
 // StateController manages Overseer runtime state (running, paused, workers).
 type StateController struct {
-	mu                 sync.RWMutex
-	running            bool
-	paused             bool
-	maxWorkers         int
+	mu                    sync.RWMutex
+	running               bool
+	paused                bool
+	maxWorkers            int
 	beadDiscoveryInterval time.Duration
 }
 

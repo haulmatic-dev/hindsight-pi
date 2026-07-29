@@ -305,8 +305,8 @@ func TestCharon_ClearStaleActiveWorkers(t *testing.T) {
 	var clearedIDs []string
 	j.SetActiveWorkersSnapshot(func() map[string]int {
 		return map[string]int{
-			"bead-stale-1": 0,   // placeholder, should be cleared
-			"bead-stale-2": 0,   // placeholder, should be cleared
+			"bead-stale-1": 0,    // placeholder, should be cleared
+			"bead-stale-2": 0,    // placeholder, should be cleared
 			"bead-running": 1234, // real PID, should NOT be cleared
 		}
 	})

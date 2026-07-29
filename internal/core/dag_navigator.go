@@ -84,7 +84,6 @@ func (n *DAGNavigator) Clear() {
 	}
 }
 
-
 // GetReadyBeads returns beads that are ready for execution, filtering out
 // approval gates and already-completed beads, sorted by priority descending.
 func (n *DAGNavigator) GetReadyBeads(completed map[string]bool) []types.Bead {

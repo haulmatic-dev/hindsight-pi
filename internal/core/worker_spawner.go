@@ -319,20 +319,11 @@ func (s *WorkerSpawner) findUserForProject(projectPath string) string {
 	return ""
 }
 
-// workerLogDir is the directory holding per-bead worker output logs.
-func workerLogDir() string {
-	base := os.Getenv("HYDRA_HOME")
-	if base == "" {
-		base = os.TempDir()
-	}
-	return filepath.Join(base, "logs", "workers")
-}
-
 // openWorkerLogFile opens (creating parent dirs) the per-bead worker output
 // log. Returns nil on failure, in which case callers fall back to streaming
 // every line to the daemon log (previous behavior).
 func openWorkerLogFile(beadID string, pid int) *os.File {
-	dir := workerLogDir()
+	dir := workersLogDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		log.Printf("[Worker] could not create worker log dir %s: %v (streaming to daemon log)", dir, err)
 		return nil
