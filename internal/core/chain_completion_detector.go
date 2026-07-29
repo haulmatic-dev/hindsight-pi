@@ -166,6 +166,26 @@ func (d *ChainCompletionDetector) countCompletedBeads(beadIDs []types.BeadID) in
 	return count
 }
 
+// ChainHasFailedBeads reports whether any member of the chain carries the
+// closed-failed label — i.e. it closed, but as a failure. Chain "completion"
+// only means every bead reached a terminal state; this is the verdict that
+// decides integrate versus quarantine. Reads issues.jsonl (via the same file
+// reader countCompletedBeads uses), so it is restart-safe.
+func (d *ChainCompletionDetector) ChainHasFailedBeads(beadIDs []types.BeadID) bool {
+	for _, beadID := range beadIDs {
+		bead := d.overseer.beadFileReader.FindByID(string(beadID))
+		if bead == nil {
+			continue
+		}
+		for _, l := range bead.Labels {
+			if l == closedFailedLabel {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (d *ChainCompletionDetector) RegisterChain(rootBeadID types.BeadID, allBeadIDs []types.BeadID) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

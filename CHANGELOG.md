@@ -31,6 +31,17 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   now the `maxScopeFiles` constant.
 
 ### Added
+- **Failed chains quarantine instead of integrating (Shepherd A1).** Chain
+  "completion" only ever meant every bead reached a terminal state — closed-as-
+  failed counted the same as completed, so failed chains merged into the working
+  branch exactly like successful ones (a deliberately red test landed on the
+  testbed's branch this way). Failed closes now get a durable `closed-failed`
+  label (issues.jsonl carries no close reason; a label survives daemon restarts
+  where in-memory state would not — four mid-run restarts this week),
+  `ChainHasFailedBeads` reads it at completion time, and failed chains go to
+  `hydra/quarantine/<key>` — work preserved for the fix bead to inspect, working
+  branch untouched. Emits `chain_quarantined` and `bead_closed` events.
+  `BeadFileReader` now parses labels (previously dropped them entirely).
 - **Cause-aware, deduplicated fix beads (Shepherd A2).** A fix bead's description
   now carries the original's exit code plus a `What failed last time` block
   extracted from its newest worker log (`ExtractFailureCause`: priority-ordered —

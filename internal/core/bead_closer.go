@@ -176,6 +176,19 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 		}
 	}
 
+	// File-backed close verdict: issues.jsonl has no close-reason field, so a
+	// failed close is recorded as a label. The chain-completion detector reads
+	// this to decide integrate-vs-quarantine, and it survives daemon restarts —
+	// an in-memory map would not (proven: four mid-run restarts this week).
+	if reason == "failed" && bead != nil && c.beadsClient != nil {
+		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{closedFailedLabel}); err != nil {
+			log.Printf("[closeBead] Failed to add %s label to %s: %v", closedFailedLabel, bead.ID, err)
+		}
+	}
+	c.events.EmitRepo(projectPath, Event{Type: "bead_closed", Project: repoName,
+		Bead: worker.BeadID.String(), Reason: reason,
+		Fields: map[string]any{"exit_code": exitCode, "success": success}})
+
 	return c.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason)
 }
 
@@ -237,6 +250,11 @@ const maxFixNesting = 1
 // is visible instead of the bead quietly closing as failed and unblocking its
 // dependents.
 const fixRecursionCappedLabel = "fix-recursion-capped"
+
+// closedFailedLabel marks a bead that closed with reason "failed". The beads
+// store keeps no close reason, so this label is the durable record other
+// components (chain verdicts, the Shepherd cron) read.
+const closedFailedLabel = "closed-failed"
 
 func (c *BeadCloser) createFixBeadForFailedClose(bead *types.Bead, projectPath, repoName, workerBeadID string) error {
 	return c.createFixBeadForFailedCloseWithExitCode(bead, projectPath, repoName, workerBeadID, 0)

@@ -1,0 +1,4 @@
+{"time":"2026-07-29T11:19:21.141Z","type":"bead_closed","bead":"FR-001","reason":"completed","fields":{"exit_code":0,"success":true}}
+{"time":"2026-07-29T11:19:22.055Z","type":"bead_closed","bead":"FR-002","reason":"completed","fields":{"exit_code":0,"success":true}}
+{"time":"2026-07-29T11:19:23.114Z","type":"bead_closed","bead":"NFR-001","reason":"completed","fields":{"exit_code":0,"success":true}}
+{"time":"2026-07-29T11:19:23.642Z","type":"bead_closed","bead":"NFR-001","reason":"completed","fields":{"exit_code":0,"success":true}}

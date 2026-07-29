@@ -52,10 +52,26 @@ func (i *ChainCompletionInitializer) Initialize() {
 			}
 		}
 
-		// Per-chain worktree isolation: integrate the completed chain's branch
-		// back into the working branch and remove the worktree.
+		// Per-chain worktree isolation. "Completed" only means every bead reached
+		// a terminal state — a chain whose beads closed as FAILED used to
+		// integrate here exactly like a successful one, which left a
+		// deliberately red test on the testbed's working branch (2026-07-28).
+		// Failed chains now quarantine: work preserved on hydra/quarantine/<key>
+		// for the fix bead to inspect, working branch untouched.
 		if o.worktreeManager != nil && projectPath != "" {
-			if err := o.worktreeManager.IntegrateAndRemove(projectPath, event.ChainInfo.RootBeadID.String()); err != nil {
+			key := event.ChainInfo.RootBeadID.String()
+			if o.chainCompletionDetector != nil && o.chainCompletionDetector.ChainHasFailedBeads(event.ChainInfo.AllBeadIDs) {
+				if qBranch, qErr := o.worktreeManager.QuarantineAndRemove(projectPath, key); qErr != nil {
+					log.Printf("[Worktree] quarantine failed for chain %s: %v", event.ChainInfo.RootBeadID, qErr)
+				} else if qBranch != "" {
+					log.Printf("[Worktree] quarantined failed chain %s on %s (not integrated)", event.ChainInfo.RootBeadID, qBranch)
+					if o.beadCloser != nil && o.beadCloser.events != nil {
+						o.beadCloser.events.EmitRepo(projectPath, Event{Type: "chain_quarantined",
+							Bead: key, Reason: "failed_beads_in_chain",
+							Fields: map[string]any{"branch": qBranch}})
+					}
+				}
+			} else if err := o.worktreeManager.IntegrateAndRemove(projectPath, key); err != nil {
 				log.Printf("[Worktree] integrate failed for chain %s: %v", event.ChainInfo.RootBeadID, err)
 			}
 		}
