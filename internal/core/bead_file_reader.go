@@ -93,5 +93,14 @@ func parseBeadFromRaw(raw map[string]interface{}) types.Bead {
 			}
 		}
 	}
+	// Labels carry durable close verdicts (closed-failed, fix-recursion-capped);
+	// without parsing them the chain integrate-vs-quarantine decision is blind.
+	if labels, ok := raw["labels"].([]interface{}); ok {
+		for _, l := range labels {
+			if ls, ok := l.(string); ok {
+				bead.Labels = append(bead.Labels, ls)
+			}
+		}
+	}
 	return bead
 }

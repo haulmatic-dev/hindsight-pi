@@ -120,11 +120,11 @@ func TestComplianceCycleManager_runGapToPRD(t *testing.T) {
 
 	// Create a simple gap report
 	gapReport := map[string]interface{}{
-		"passed":    false,
-		"prd_path":  "/tmp/test-prd.md",
-		"cycles":    0,
-		"summary":   "1 gap found",
-		"checks":    []map[string]interface{}{{"name": "verify-routes", "passed": false}},
+		"passed":   false,
+		"prd_path": "/tmp/test-prd.md",
+		"cycles":   0,
+		"summary":  "1 gap found",
+		"checks":   []map[string]interface{}{{"name": "verify-routes", "passed": false}},
 		"gaps": []map[string]interface{}{
 			{
 				"id":             "route-get-status",

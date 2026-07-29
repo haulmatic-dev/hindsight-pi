@@ -15,6 +15,7 @@ type BeadCloser struct {
 	projectResolver   *ProjectResolver
 	validationService *ValidationService
 	config            *Config
+	events            *EventSink              // nil-safe; structured decision stream (Shepherd C1)
 	worktreeManager   *WorktreeManager        // per-chain git isolation; nil = disabled
 	chainKeyFn        func(types.Bead) string // maps a bead to its chain's worktree key
 	isChainMember     func(types.BeadID) bool // reports whether a bead belongs to a registered multi-bead chain
@@ -41,6 +42,9 @@ func NewBeadCloser(beadsClient BeadsClient, intelligenceHub *IntelligenceHub, pr
 		config:            config,
 	}
 }
+
+// SetEventSink attaches the structured event stream. Nil stays a no-op.
+func (c *BeadCloser) SetEventSink(s *EventSink) { c.events = s }
 
 // Close closes the bead via beadsClient based on worker completion status.
 //
@@ -120,7 +124,7 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			}
 		} else {
 			log.Printf("[closeBead] Bead %s closed as failed with close_blocked_on_failed=true; creating fix bead to keep dependents blocked", worker.BeadID.String())
-			if err := c.createFixBeadForFailedClose(bead, projectPath, repoName, worker.BeadID.String()); err != nil {
+			if err := c.createFixBeadForFailedCloseWithExitCode(bead, projectPath, repoName, worker.BeadID.String(), exitCode); err != nil {
 				log.Printf("[closeBead] Failed to create fix bead for %s: %v", worker.BeadID.String(), err)
 			}
 		}
@@ -171,6 +175,19 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			log.Printf("[Worktree] worktree lookup failed for %s: %v", bead.ID, err)
 		}
 	}
+
+	// File-backed close verdict: issues.jsonl has no close-reason field, so a
+	// failed close is recorded as a label. The chain-completion detector reads
+	// this to decide integrate-vs-quarantine, and it survives daemon restarts —
+	// an in-memory map would not (proven: four mid-run restarts this week).
+	if reason == "failed" && bead != nil && c.beadsClient != nil {
+		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{closedFailedLabel}); err != nil {
+			log.Printf("[closeBead] Failed to add %s label to %s: %v", closedFailedLabel, bead.ID, err)
+		}
+	}
+	c.events.EmitRepo(projectPath, Event{Type: "bead_closed", Project: repoName,
+		Bead: worker.BeadID.String(), Reason: reason,
+		Fields: map[string]any{"exit_code": exitCode, "success": success}})
 
 	return c.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason)
 }
@@ -234,7 +251,16 @@ const maxFixNesting = 1
 // dependents.
 const fixRecursionCappedLabel = "fix-recursion-capped"
 
+// closedFailedLabel marks a bead that closed with reason "failed". The beads
+// store keeps no close reason, so this label is the durable record other
+// components (chain verdicts, the Shepherd cron) read.
+const closedFailedLabel = "closed-failed"
+
 func (c *BeadCloser) createFixBeadForFailedClose(bead *types.Bead, projectPath, repoName, workerBeadID string) error {
+	return c.createFixBeadForFailedCloseWithExitCode(bead, projectPath, repoName, workerBeadID, 0)
+}
+
+func (c *BeadCloser) createFixBeadForFailedCloseWithExitCode(bead *types.Bead, projectPath, repoName, workerBeadID string, exitCode int) error {
 	var title, priorityBeadID string
 	priority := 1
 	if bead != nil {
@@ -258,6 +284,9 @@ func (c *BeadCloser) createFixBeadForFailedClose(bead *types.Bead, projectPath, 
 				if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{fixRecursionCappedLabel}); err != nil {
 					log.Printf("[BeadCloser] Failed to label %s with %s: %v", bead.ID, fixRecursionCappedLabel, err)
 				}
+				c.events.EmitRepo(projectPath, Event{Type: "fix_capped", Project: repoName,
+					Bead: bead.ID.String(), Reason: "recursion_capped",
+					Detail: "fix bead refused: the fix mechanism already failed on this work"})
 			}
 			return nil
 		}
@@ -272,24 +301,78 @@ func (c *BeadCloser) createFixBeadForFailedClose(bead *types.Bead, projectPath, 
 		title = "Fix: failed-closure bead " + workerBeadID
 		priorityBeadID = workerBeadID
 	}
-	description := "Auto-created fix bead because the original closed as `failed`.\n\n" +
-		"Original bead: " + priorityBeadID + "\n" +
-		"Close reason: failed (worker exited non-zero or hit retry exhaustion; " +
-		"the original bead may still hold placeholder implementations)\n\n" +
-		"Re-run the original task and ensure it closes as `completed`."
+	// Dedup before create: one open/in-progress fix bead per original.
+	if bead != nil {
+		dupID, err := c.findOpenFixBeadForOriginal(projectPath, repoName, types.BeadID(priorityBeadID))
+		if err != nil {
+			log.Printf("[BeadCloser] Could not list beads for dedup while creating fix bead for %s: %v", priorityBeadID, err)
+		} else if dupID != "" {
+			log.Printf("[BeadCloser] Skipping duplicate fix bead for original %s; existing open fix bead %s already tracks it", priorityBeadID, dupID)
+			c.events.EmitRepo(projectPath, Event{Type: "fix_deduped", Project: repoName,
+				Bead: priorityBeadID, Reason: "duplicate_fix_exists",
+				Fields: map[string]any{"existing_fix": dupID}})
+			return nil
+		}
+	}
+
+	var description strings.Builder
+	fmt.Fprintf(&description, "Auto-created fix bead because the original closed as `failed`.\n\n"+
+		"Original bead: %s\n"+
+		"Close reason: failed (worker exited non-zero or hit retry exhaustion; the original bead may still hold placeholder implementations)\n"+
+		"Exit code: %d\n\n", priorityBeadID, exitCode)
+
+	cause := ExtractFailureCause(workersLogDir(), priorityBeadID, 2048)
+	if cause != "" {
+		description.WriteString("### What failed last time\n\n")
+		description.WriteString("```\n")
+		description.WriteString(cause)
+		description.WriteString("\n```\n\n")
+	}
+	description.WriteString("Address the failure above, then re-run the original task and ensure it closes as `completed`.")
+
 	req := types.CreateBeadRequest{
 		Title:        title,
-		Description:  description,
+		Description:  description.String(),
 		Type:         "fix",
 		Priority:     priority,
 		Dependencies: []types.BeadID{types.BeadID(priorityBeadID)},
 		Labels:       []string{"auto-fix", "failed-closure"},
 	}
-	_, err := c.beadsClient.CreateBead(projectPath, req)
+	newID, err := c.beadsClient.CreateBead(projectPath, req)
 	if err != nil && !strings.Contains(err.Error(), "already exists") {
 		return err
 	}
+	if err == nil {
+		c.events.EmitRepo(projectPath, Event{Type: "fix_created", Project: repoName,
+			Bead: string(newID), Reason: "failed_close",
+			Fields: map[string]any{"original": priorityBeadID, "exit_code": exitCode}})
+	}
 	return nil
+}
+
+// findOpenFixBeadForOriginal returns the ID of an existing open or in-progress
+// fix bead that depends on the given original bead. If none exists, it returns
+// an empty ID and a nil error. Listing errors are returned so the caller can
+// decide whether to fail open or log and continue.
+func (c *BeadCloser) findOpenFixBeadForOriginal(projectPath, repoName string, originalID types.BeadID) (types.BeadID, error) {
+	if c.beadsClient == nil {
+		return "", nil
+	}
+	beads, err := c.beadsClient.ListBeads(projectPath, repoName)
+	if err != nil {
+		return "", err
+	}
+	for _, b := range beads {
+		if b.Type != "fix" || b.Status.IsTerminal() {
+			continue
+		}
+		for _, dep := range b.Dependencies {
+			if dep == originalID {
+				return b.ID, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 // verifiedCloseEnabled reports whether the verified-close gate is active.

@@ -68,6 +68,7 @@ projects:
 	config.Intelligence.Graphify.Enabled = false
 	config.Intelligence.GPTCache.Enabled = false
 	config.ComplianceCycle.Enabled = false
+	config.Overseer.ResourceMonitoring.MaxMemoryPercent = 100.0
 
 	overseer := NewOverseer(config)
 

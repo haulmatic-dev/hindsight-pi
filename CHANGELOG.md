@@ -31,6 +31,51 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   now the `maxScopeFiles` constant.
 
 ### Added
+- **AIMD concurrency governor (Shepherd B1, dogfood-built).** When provider
+  health degrades, the fleet's own request pressure raises its exposure to the
+  overload it is stalling on (219 activity timeouts vs 4 clean turns on
+  2026-07-28). New `ConcurrencyGovernor` applies TCP-style congestion control
+  to worker slots: halve effective concurrency when ≥50% of the last 8
+  provider-shaped outcomes failed, regrow one slot per quiet 2-minute window,
+  floor 1 — never a hard stop. Only exit codes 2/7 and activity timeouts count
+  as failures; a bead failing on its own defect (exit 1/5) never shrinks the
+  fleet. Config `overseer.concurrency_governor` (default disabled = byte-
+  identical behaviour). Built end-to-end by a hydra dogfood run (commit
+  authored by the fleet, harvested after gates closed).
+
+### Fixed
+- `DefaultEventsDir` no longer falls back to a cwd-relative `.hydra-events/`
+  when HYDRA_HOME is unset — tests were writing event day-files into the repo
+  (one got committed). Unset HYDRA_HOME now disables the central stream.
+- **Failed chains quarantine instead of integrating (Shepherd A1).** Chain
+  "completion" only ever meant every bead reached a terminal state — closed-as-
+  failed counted the same as completed, so failed chains merged into the working
+  branch exactly like successful ones (a deliberately red test landed on the
+  testbed's branch this way). Failed closes now get a durable `closed-failed`
+  label (issues.jsonl carries no close reason; a label survives daemon restarts
+  where in-memory state would not — four mid-run restarts this week),
+  `ChainHasFailedBeads` reads it at completion time, and failed chains go to
+  `hydra/quarantine/<key>` — work preserved for the fix bead to inspect, working
+  branch untouched. Emits `chain_quarantined` and `bead_closed` events.
+  `BeadFileReader` now parses labels (previously dropped them entirely).
+- **Cause-aware, deduplicated fix beads (Shepherd A2).** A fix bead's description
+  now carries the original's exit code plus a `What failed last time` block
+  extracted from its newest worker log (`ExtractFailureCause`: priority-ordered —
+  model failure > failing test > package FAIL > Error — passthrough JSONL
+  excluded except the model-failure marker, 2 KB budget). Creation is deduplicated
+  via `findOpenFixBeadForOriginal`: one open fix bead per original, closing the
+  duplicate-spawn defect (the A2 build run itself produced SEVEN duplicate
+  cause-less fix beads for one bead before this landed — the problem demonstrating
+  its own fix). Built by dogfood run A2 (FR-001 initially stubbed; a later fix
+  bead completed it), harvested from the working tree since both gates correctly
+  closed `failed` on the mid-run mess.
+- **Structured daemon event stream (Shepherd C1/C2).** Typed JSONL written by
+  daemon code about daemon decisions — worker output structurally cannot enter
+  it, retiring the passthrough-contamination class (4 incidents). Two tiers:
+  central day-files under `HYDRA_HOME/events/`, and per-repo
+  `.hydra/events.jsonl` mirrors (gitignored) so each user sees what hydra did to
+  their repo. First emitters wired in the closer: `fix_created`, `fix_capped`,
+  `fix_deduped`.
 - **rpc mode and the `[rtk, caveman, context-mode]` allowlist are now the
   defaults.** A config that says nothing about the protocol gets both. rpc is the
   default because text mode initialises no extension host at all — verified: a

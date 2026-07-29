@@ -147,6 +147,40 @@ func (m *WorktreeManager) IntegrateAndRemove(projectPath, key string) error {
 	return nil
 }
 
+// QuarantineAndRemove preserves a failed chain's work on a quarantine branch
+// and removes the worktree WITHOUT merging into the working branch.
+//
+// Failed chains used to integrate like successful ones — the chain-completion
+// predicate counted closed-as-failed beads as completed — which left a
+// deliberately red test committed on the testbed's working branch (2026-07-28).
+// A failed PRD must not contaminate the branch developers pull; its partial
+// work is kept on hydra/quarantine/<key> for inspection instead of deleted,
+// because the fix bead that retries the work may want the diff.
+func (m *WorktreeManager) QuarantineAndRemove(projectPath, key string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	wtPath := m.worktreePath(projectPath, key)
+	branch := m.branchName(key)
+	if !isGitWorktree(wtPath) && !branchExists(projectPath, branch) {
+		return "", nil // nothing to quarantine
+	}
+
+	qBranch := "hydra/quarantine/" + key
+	// -f: a re-run of the same chain overwrites its previous quarantine — the
+	// newest failed attempt is the one worth inspecting.
+	if _, err := gitOut(projectPath, "branch", "-f", qBranch, branch); err != nil {
+		return "", fmt.Errorf("quarantine %s failed (worktree left at %s): %w", branch, wtPath, err)
+	}
+
+	if isGitWorktree(wtPath) {
+		_, _ = gitOut(projectPath, "worktree", "remove", wtPath, "--force")
+	}
+	_, _ = gitOut(projectPath, "branch", "-D", branch)
+	_, _ = gitOut(projectPath, "worktree", "prune")
+	return qBranch, nil
+}
+
 // Remove tears down a chain's worktree + branch without integrating (used to
 // discard abandoned/failed chains).
 func (m *WorktreeManager) Remove(projectPath, key string) {

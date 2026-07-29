@@ -48,7 +48,7 @@ func TestStreamWorkerOutput_WritesToFile(t *testing.T) {
 
 func TestWorkerLogDir_UsesHydraHome(t *testing.T) {
 	t.Setenv("HYDRA_HOME", "/opt/hydra")
-	if got := workerLogDir(); got != filepath.Join("/opt/hydra", "logs", "workers") {
-		t.Errorf("workerLogDir = %q", got)
+	if got := workersLogDir(); got != filepath.Join("/opt/hydra", "logs", "workers") {
+		t.Errorf("workersLogDir = %q", got)
 	}
 }

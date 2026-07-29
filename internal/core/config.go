@@ -411,6 +411,9 @@ type OverseerConfig struct {
 	RetryDelay            time.Duration            `yaml:"retry_delay"`
 	ResourceMonitoring    ResourceMonitoringConfig `yaml:"resource_monitoring"`
 	ChainDetection        ChainDetectionConfig     `yaml:"chain_detection"`
+	// ConcurrencyGovernor enables AIMD adaptive concurrency limiting.
+	// Disabled by default.
+	ConcurrencyGovernor GovernorConfig `yaml:"concurrency_governor"`
 	// WorktreeIsolation runs each chain in its own git worktree and commits
 	// its work on verified-close, integrating back to the working branch on
 	// chain completion. Off by default (opt-in).
