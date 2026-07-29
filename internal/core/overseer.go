@@ -149,6 +149,9 @@ type Overseer struct {
 	// WorkerEnvBuilder builds environment variables for worker processes
 	workerEnvBuilder *WorkerEnvBuilder
 	providerBreaker  *ProviderBreaker
+	// ConcurrencyGovernor throttles effective concurrency based on observed
+	// provider health. Nil when disabled.
+	concurrencyGovernor *ConcurrencyGovernor
 
 	// BeadDiscovery finds beads ready to execute from various sources
 	beadDiscovery *BeadDiscovery
@@ -224,6 +227,15 @@ func NewOverseer(config *Config) *Overseer {
 		config.Agents.Pi.FallbackProvider, config.Agents.Pi.FallbackModel,
 	)
 	o.workerEnvBuilder.SetProviderBreaker(o.providerBreaker)
+
+	if config.Overseer.ConcurrencyGovernor.Enabled {
+		o.concurrencyGovernor = NewConcurrencyGovernor(config.Overseer.MaxWorkers, config.Overseer.ConcurrencyGovernor)
+		log.Printf("[Governor] Initialized (window=%d, decrease=%.3f, increase=%.3f, cooldown=%ds)",
+			config.Overseer.ConcurrencyGovernor.WindowSize,
+			config.Overseer.ConcurrencyGovernor.DecreaseThreshold,
+			config.Overseer.ConcurrencyGovernor.IncreaseThreshold,
+			config.Overseer.ConcurrencyGovernor.CooldownSeconds)
+	}
 
 	o.beadDiscovery = NewBeadDiscovery(o.beadsClient, o.bvClient, o.projects, o.completed, o.dag, &o.dagMu)
 
@@ -302,6 +314,7 @@ func NewOverseer(config *Config) *Overseer {
 		o.triggerImmediateSchedule,
 		o.sendMCPWorkerCompletion,
 		o.getMaxRetries,
+		o.concurrencyGovernor,
 	)
 	o.workerLifecycle.providerBreaker = o.providerBreaker
 

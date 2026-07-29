@@ -92,3 +92,4 @@ tools/pi-rpc/pi-rpc-linux
 
 # graphify code knowledge graph output (26M+; rebuilt from source by the daemon)
 graphify-out/
+.hydra-events/

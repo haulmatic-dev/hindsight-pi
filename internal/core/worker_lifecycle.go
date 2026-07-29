@@ -26,6 +26,8 @@ type WorkerLifecycle struct {
 	notifyMCP       func(worker *types.Worker, success bool, exitCode int, duration time.Duration)
 	getMaxRetries   func() int
 	providerBreaker *ProviderBreaker // rate-limit failover; may be nil
+	// concurrencyGovernor adapts effective concurrency based on observed outcomes.
+	concurrencyGovernor *ConcurrencyGovernor // may be nil
 }
 
 // NewWorkerLifecycle creates a new worker lifecycle manager.
@@ -42,20 +44,22 @@ func NewWorkerLifecycle(
 	triggerSchedule func(),
 	notifyMCP func(worker *types.Worker, success bool, exitCode int, duration time.Duration),
 	getMaxRetries func() int,
+	concurrencyGovernor *ConcurrencyGovernor,
 ) *WorkerLifecycle {
 	return &WorkerLifecycle{
-		retryManager:    retryManager,
-		errorLogger:     errorLogger,
-		workerTracker:   workerTracker,
-		settledStateSvc: settledStateSvc,
-		dag:             dag,
-		dagMu:           dagMu,
-		completed:       completed,
-		removeWorker:    removeWorker,
-		closeBead:       closeBead,
-		triggerSchedule: triggerSchedule,
-		notifyMCP:       notifyMCP,
-		getMaxRetries:   getMaxRetries,
+		retryManager:        retryManager,
+		errorLogger:         errorLogger,
+		workerTracker:       workerTracker,
+		settledStateSvc:     settledStateSvc,
+		dag:                 dag,
+		dagMu:               dagMu,
+		completed:           completed,
+		removeWorker:        removeWorker,
+		closeBead:           closeBead,
+		triggerSchedule:     triggerSchedule,
+		notifyMCP:           notifyMCP,
+		getMaxRetries:       getMaxRetries,
+		concurrencyGovernor: concurrencyGovernor,
 	}
 }
 
@@ -89,6 +93,15 @@ func (wl *WorkerLifecycle) Wait(worker *types.Worker, cmd *exec.Cmd) workerCompl
 	success := exitCode == 0
 	duration := time.Since(worker.StartTime)
 	log.Printf("[DEBUG] waitForWorker: worker %s finished with exitCode=%d, success=%v", worker.ID, exitCode, success)
+
+	// Feed observed provider-shaped outcomes to the adaptive concurrency governor.
+	// Code-level failures (exit 1, 5, ...) are intentionally not recorded because
+	// they describe bead defects, not provider health.
+	if success {
+		wl.concurrencyGovernor.RecordOutcome(true)
+	} else if exitCode == 2 || exitCode == 3 || exitCode == 7 {
+		wl.concurrencyGovernor.RecordOutcome(false)
+	}
 
 	var newlyReady []string
 	if success {

@@ -160,11 +160,13 @@ func ReadEvents(path string) ([]Event, error) {
 	return out, nil
 }
 
-// DefaultEventsDir resolves the central events directory from HYDRA_HOME,
-// falling back beside the working directory when unset (dev runs).
+// DefaultEventsDir resolves the central events directory from HYDRA_HOME.
+// With HYDRA_HOME unset (dev runs, go test) it returns "", which disables the
+// central stream — a cwd-relative fallback wrote day-files into whatever
+// directory constructed an overseer, including the repo during tests.
 func DefaultEventsDir() string {
 	if home := os.Getenv("HYDRA_HOME"); home != "" {
 		return filepath.Join(home, "events")
 	}
-	return filepath.Join(".hydra-events")
+	return ""
 }

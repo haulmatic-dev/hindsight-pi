@@ -31,6 +31,22 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   now the `maxScopeFiles` constant.
 
 ### Added
+- **AIMD concurrency governor (Shepherd B1, dogfood-built).** When provider
+  health degrades, the fleet's own request pressure raises its exposure to the
+  overload it is stalling on (219 activity timeouts vs 4 clean turns on
+  2026-07-28). New `ConcurrencyGovernor` applies TCP-style congestion control
+  to worker slots: halve effective concurrency when ≥50% of the last 8
+  provider-shaped outcomes failed, regrow one slot per quiet 2-minute window,
+  floor 1 — never a hard stop. Only exit codes 2/7 and activity timeouts count
+  as failures; a bead failing on its own defect (exit 1/5) never shrinks the
+  fleet. Config `overseer.concurrency_governor` (default disabled = byte-
+  identical behaviour). Built end-to-end by a hydra dogfood run (commit
+  authored by the fleet, harvested after gates closed).
+
+### Fixed
+- `DefaultEventsDir` no longer falls back to a cwd-relative `.hydra-events/`
+  when HYDRA_HOME is unset — tests were writing event day-files into the repo
+  (one got committed). Unset HYDRA_HOME now disables the central stream.
 - **Failed chains quarantine instead of integrating (Shepherd A1).** Chain
   "completion" only ever meant every bead reached a terminal state — closed-as-
   failed counted the same as completed, so failed chains merged into the working

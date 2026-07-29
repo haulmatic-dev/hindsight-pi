@@ -20,6 +20,23 @@ func NewScheduler(overseer *Overseer) *Scheduler {
 	return &Scheduler{overseer: overseer}
 }
 
+// effectiveMaxWorkers returns the configured maxWorkers capped by the
+// concurrency governor when one is enabled and its limit is positive. Zero or
+// negative maxWorkers means unlimited and is returned unchanged so callers can
+// detect it.
+func (s *Scheduler) effectiveMaxWorkers(maxWorkers int) int {
+	if maxWorkers <= 0 {
+		return 0
+	}
+	if s.overseer == nil || s.overseer.concurrencyGovernor == nil {
+		return maxWorkers
+	}
+	if limit := s.overseer.concurrencyGovernor.Limit(); limit > 0 && limit < maxWorkers {
+		return limit
+	}
+	return maxWorkers
+}
+
 // getRetryEligibleBeads returns beads that are eligible for retry.
 func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead {
 	o := s.overseer
@@ -103,6 +120,7 @@ func (s *Scheduler) Tick() error {
 	o.workerMutex.RUnlock()
 
 	maxWorkers := o.GetMaxWorkers()
+	effectiveMax := s.effectiveMaxWorkers(maxWorkers)
 
 	// Handle max_workers = 0 as "unlimited"
 	var availableSlots int
@@ -110,7 +128,7 @@ func (s *Scheduler) Tick() error {
 		availableSlots = 20
 		log.Printf("📊 Unlimited worker mode active (max_workers=0), allowing up to %d slots per tick", availableSlots)
 	} else {
-		availableSlots = maxWorkers - activeCount
+		availableSlots = effectiveMax - activeCount
 	}
 
 	if availableSlots <= 0 {
@@ -186,7 +204,7 @@ func (s *Scheduler) Tick() error {
 		currentActive := len(o.activeWorkers)
 		o.workerMutex.RUnlock()
 
-		currentAvailable := maxWorkers - currentActive
+		currentAvailable := s.effectiveMaxWorkers(maxWorkers) - currentActive
 		if maxWorkers == 0 {
 			currentAvailable = 20
 		}
@@ -301,7 +319,12 @@ func (s *Scheduler) GetAvailableWorkerSlots() int {
 	activeCount := len(o.activeWorkers)
 	o.workerMutex.RUnlock()
 	maxWorkers := o.GetMaxWorkers()
-	available := maxWorkers - activeCount
+	var available int
+	if maxWorkers == 0 {
+		available = 20 - activeCount
+	} else {
+		available = s.effectiveMaxWorkers(maxWorkers) - activeCount
+	}
 	if available <= 0 {
 		log.Printf("No available slots (%d/%d workers active)", activeCount, maxWorkers)
 	}
@@ -325,7 +348,7 @@ func (s *Scheduler) SpawnWorkersForNodes(nodes []*Node, maxSlots int) int {
 		currentActive := len(o.activeWorkers)
 		o.workerMutex.RUnlock()
 		maxWorkers := o.GetMaxWorkers()
-		currentAvailable := maxWorkers - currentActive
+		currentAvailable := s.effectiveMaxWorkers(maxWorkers) - currentActive
 		if maxWorkers == 0 {
 			currentAvailable = 20
 		}
