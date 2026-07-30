@@ -328,7 +328,7 @@ func (c *BeadCloser) createFixBeadForFailedCloseWithExitCode(bead *types.Bead, p
 	}
 	// Dedup before create: one open/in-progress fix bead per original.
 	if bead != nil {
-		dupID, err := c.findOpenFixBeadForOriginal(projectPath, repoName, types.BeadID(priorityBeadID))
+		dupID, err := c.findOpenFixBeadForOriginal(projectPath, repoName, types.BeadID(priorityBeadID), title)
 		if err != nil {
 			log.Printf("[BeadCloser] Could not list beads for dedup while creating fix bead for %s: %v", priorityBeadID, err)
 		} else if dupID != "" {
@@ -376,10 +376,18 @@ func (c *BeadCloser) createFixBeadForFailedCloseWithExitCode(bead *types.Bead, p
 }
 
 // findOpenFixBeadForOriginal returns the ID of an existing open or in-progress
-// fix bead that depends on the given original bead. If none exists, it returns
-// an empty ID and a nil error. Listing errors are returned so the caller can
-// decide whether to fail open or log and continue.
-func (c *BeadCloser) findOpenFixBeadForOriginal(projectPath, repoName string, originalID types.BeadID) (types.BeadID, error) {
+// fix bead for the given original. If none exists, it returns an empty ID and
+// a nil error. Listing errors are returned so the caller can decide whether to
+// fail open or log and continue.
+//
+// Matching is by exact fix title first, dependency second: `br list --json`
+// returns dependencies as null (only dependency_count is populated), so the
+// dependency check alone never matched anything — dedup was structurally dead
+// from the day it shipped (fix_deduped events: zero across every run; run D3
+// created four identical fix beads for one original). The title of a fix bead
+// is deterministic ("Fix: " + original title), so an exact title match on a
+// non-terminal fix bead identifies a duplicate without a per-bead `br show`.
+func (c *BeadCloser) findOpenFixBeadForOriginal(projectPath, repoName string, originalID types.BeadID, fixTitle string) (types.BeadID, error) {
 	if c.beadsClient == nil {
 		return "", nil
 	}
@@ -390,6 +398,9 @@ func (c *BeadCloser) findOpenFixBeadForOriginal(projectPath, repoName string, or
 	for _, b := range beads {
 		if b.Type != "fix" || b.Status.IsTerminal() {
 			continue
+		}
+		if fixTitle != "" && b.Title == fixTitle {
+			return b.ID, nil
 		}
 		for _, dep := range b.Dependencies {
 			if dep == originalID {

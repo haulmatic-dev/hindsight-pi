@@ -52,6 +52,17 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   authored by the fleet, harvested after gates closed).
 
 ### Fixed
+- **Fix-bead dedup was structurally dead.** `br list --json` returns
+  `dependencies: null` (only `dependency_count`), so the dependency-based
+  duplicate check never matched — `fix_deduped` events stayed at zero across
+  every run and run D3 created four identical fix beads for one original.
+  Dedup now matches by the deterministic fix title ("Fix: <original title>")
+  first, dependencies second.
+- **Cause extractor no longer harvests stringified source code.** A worker
+  implementing a log parser echoed code containing `--- FAIL:` into its log
+  and the extractor shipped that as the "cause" (run D3). Failure markers now
+  anchor at payload start and lines carrying literal escape sequences
+  (`\n`, `\t`, `\"`) are rejected as echoed source.
 - `DefaultEventsDir` no longer falls back to a cwd-relative `.hydra-events/`
   when HYDRA_HOME is unset — tests were writing event day-files into the repo
   (one got committed). Unset HYDRA_HOME now disables the central stream.

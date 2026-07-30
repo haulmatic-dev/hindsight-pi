@@ -150,3 +150,45 @@ func TestExtractFailureCause_NoExecNoHTTPNoNetImports(t *testing.T) {
 	// be caught by the compiler and fail the package build.
 	t.Log("NFR-001: fix_cause.go is a pure log parser; no exec/net/http imports")
 }
+
+// Regression (run D3): a worker implementing a log parser echoed source code
+// containing the literal `--- FAIL:` into its log; the extractor harvested
+// that stringified code as the failure cause. Escaped source must never win
+// over (or pollute) real failure lines.
+func TestExtractFailureCause_IgnoresEscapedSourceCode(t *testing.T) {
+	dir := t.TempDir()
+	log := `2026-07-29T20:00:01Z [stdout] writing fix_parse.go:
+2026-07-29T20:00:01Z [stdout] ntinue\n\t\t}\n\n\t\tif strings.Contains(line, \"--- FAIL:\") {\n\t\t\tfailTestLines = append(failTestLines, l
+2026-07-29T20:00:02Z [stderr] --- FAIL: TestRealFailure (0.01s)
+2026-07-29T20:00:02Z [stderr] FAIL	github.com/example/pkg	0.5s
+`
+	if err := os.WriteFile(filepath.Join(dir, "b-1-100.log"), []byte(log), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := ExtractFailureCause(dir, "b-1", 2048)
+	if !strings.Contains(got, "--- FAIL: TestRealFailure") {
+		t.Errorf("real failure line must be extracted, got %q", got)
+	}
+	if strings.Contains(got, `\t\t`) || strings.Contains(got, "failTestLines = append") {
+		t.Errorf("escaped source code leaked into the cause block: %q", got)
+	}
+}
+
+// A marker mid-prose (model narrating, not go test output) must not be
+// harvested as a failing-test line: the marker anchors at payload start.
+func TestExtractFailureCause_MarkerMidLineIsNotATestFailure(t *testing.T) {
+	dir := t.TempDir()
+	log := `2026-07-29T20:00:01Z [stdout] I will now grep for --- FAIL: markers in the output
+2026-07-29T20:00:02Z [stderr]     --- FAIL: TestSubtest (0.00s)
+`
+	if err := os.WriteFile(filepath.Join(dir, "b-2-100.log"), []byte(log), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := ExtractFailureCause(dir, "b-2", 2048)
+	if !strings.Contains(got, "TestSubtest") {
+		t.Errorf("indented real subtest failure must be extracted, got %q", got)
+	}
+	if strings.Contains(got, "I will now grep") {
+		t.Errorf("prose mentioning the marker mid-line must not be harvested: %q", got)
+	}
+}

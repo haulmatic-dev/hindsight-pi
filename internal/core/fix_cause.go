@@ -65,11 +65,23 @@ func ExtractFailureCause(logDir, beadID string, maxBytes int) string {
 			continue
 		}
 
-		if strings.Contains(line, "--- FAIL:") {
+		// Anchor on line structure, not substring presence: a worker that
+		// writes parser code echoes lines like `strings.Contains(line,
+		// "--- FAIL:")` into its log, and a substring match harvests that
+		// source code as a "cause" (run D3 shipped such a block). Real go
+		// test output puts the marker at the start of the payload, and real
+		// output never carries literal \n/\t/\" escape sequences — those
+		// mark stringified source.
+		pl := payload(line)
+		if looksLikeEscapedSource(pl) {
+			continue
+		}
+		trimmed := strings.TrimLeft(pl, " \t")
+		if strings.HasPrefix(trimmed, "--- FAIL:") {
 			failTestLines = append(failTestLines, line)
-		} else if strings.Contains(line, "FAIL") && strings.Contains(line, "\t") {
+		} else if strings.HasPrefix(trimmed, "FAIL") && strings.Contains(pl, "\t") {
 			failPkgLines = append(failPkgLines, line)
-		} else if strings.Contains(line, "Error:") || strings.Contains(line, "error:") {
+		} else if strings.Contains(pl, "Error:") || strings.Contains(pl, "error:") {
 			errLines = append(errLines, line)
 		}
 	}
@@ -113,6 +125,13 @@ func ExtractFailureCause(logDir, beadID string, maxBytes int) string {
 // when constructing log file names.
 func safeBeadID(beadID string) string {
 	return strings.NewReplacer("/", "-", " ", "-").Replace(beadID)
+}
+
+// looksLikeEscapedSource reports whether a payload is stringified source code
+// rather than real command output: literal backslash escape sequences only
+// appear when code containing strings is echoed into the log.
+func looksLikeEscapedSource(pl string) bool {
+	return strings.Contains(pl, `\n`) || strings.Contains(pl, `\t`) || strings.Contains(pl, `\"`)
 }
 
 // payload returns the portion of a logged line after the worker timestamp/tag
