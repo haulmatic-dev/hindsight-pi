@@ -26,6 +26,8 @@ Quick links to everything you need.
 
 | Document | Description |
 |----------|-------------|
+| [System Loop](architecture/system-loop.md) | The three nested control loops and whether each closes — start here |
+| [Shepherd Layer](architecture/shepherd.md) | Events, quarantine, fix beads, concurrency governor, verdict memory — how failure is bounded and observed |
 | [System Architecture](architecture/system-architecture-20260309.md) | High-level system design |
 | [Bead Processing Flow](architecture/bead-processing-flow-20260309.md) | How beads move through the system |
 | [Worker Lifecycle](architecture/worker-lifecycle-20260309.md) | Spawn, monitor, complete |

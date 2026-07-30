@@ -91,6 +91,13 @@ After implementation:
 
 ## Hydra-Specific Patterns (Quick Reference)
 
+### Shepherd Layer (read before touching close/chain/fix/scheduler code)
+- `docs/architecture/system-loop.md` — the three control loops and where your change sits.
+- `docs/architecture/shepherd.md` — event stream contract, closed-failed labels + quarantine, fix-bead lifecycle (cause/dedup/cap), AIMD governor, verdict memory.
+- Every significant close/fix/chain decision must emit its typed event; the stream is fail-open and must never gate the pipeline.
+- The beads store has no close-reason field — durable verdicts are labels (`closed-failed`, `fix-recursion-capped`, `infra-exhausted`).
+
+
 ### Bead IDs
 - `NewNumericBeadID(project, repo, number).ID()` returns only the numeric suffix.
 - Use `string(NewNumericBeadID(...))` for the full bead ID.
