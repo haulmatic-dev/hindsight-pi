@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/haulmatic-dev/hydra/internal/hindsight"
 )
 
 // gapReport mirrors the on-disk schema emitted by hydra-compliance-analyzer.
@@ -115,6 +117,7 @@ func (cm *ComplianceCycleManager) adjudicateGaps(gapReportPath string) (filtered
 
 		v := cm.adjudicateGap(ctx, g)
 		adj[fp] = adjudication{Verdict: v.Verdict, Confidence: v.Confidence, Reasoning: v.Reasoning, GapID: g.ID, Cycle: cm.cycles}
+		cm.retainAdjudication(g, adj[fp], fp)
 
 		switch v.Verdict {
 		case "false_positive":
@@ -202,7 +205,8 @@ func (cm *ComplianceCycleManager) adjudicateGap(ctx context.Context, g gap) adju
 	c := exec.CommandContext(ctx, piPath, args...)
 	c.Dir = cm.config.ProjectDir
 	c.Env = os.Environ() // inherit the daemon env (provider API keys)
-	c.Stdin = strings.NewReader(buildAdjudicationPrompt(g))
+	prior := cm.priorVerdictsForGap(g)
+	c.Stdin = strings.NewReader(buildAdjudicationPrompt(g, prior...))
 	var stdout, stderr bytes.Buffer
 	c.Stdout = &stdout
 	c.Stderr = &stderr
@@ -221,9 +225,34 @@ func (cm *ComplianceCycleManager) adjudicateGap(ctx context.Context, g gap) adju
 	return v
 }
 
+// priorVerdictsForGap queries Hindsight for prior adjudications of similar
+// gaps. It fail-opens: a nil client, disabled client, error, or empty result
+// returns nil so the prompt stays byte-identical to today's behaviour.
+func (cm *ComplianceCycleManager) priorVerdictsForGap(g gap) []hindsight.Memory {
+	if cm.overseer == nil || cm.overseer.hindsightClient == nil || !cm.overseer.hindsightClient.IsEnabled() {
+		return nil
+	}
+	resp, err := cm.overseer.hindsightClient.Search(priorVerdictQuery(g), "", 3)
+	if err != nil || resp == nil {
+		log.Printf("[Adjudicator] prior verdict search failed for gap %s: %v", g.ID, err)
+		return nil
+	}
+	return resp.Memories
+}
+
+func priorVerdictQuery(g gap) string {
+	first := strings.TrimSpace(g.Description)
+	if i := strings.Index(first, "."); i >= 0 {
+		first = strings.TrimSpace(first[:i])
+	}
+	return strings.TrimSpace(g.Category) + " " + first
+}
+
 // buildAdjudicationPrompt builds the two-sided (argue-real then argue-false)
-// judgment prompt. The model must end with a single JSON verdict line.
-func buildAdjudicationPrompt(g gap) string {
+// judgment prompt, optionally enriched with prior Hindsight verdicts (FR-003).
+// With no prior memories the prompt is byte-identical to the original. The
+// model must end with a single JSON verdict line.
+func buildAdjudicationPrompt(g gap, prior ...hindsight.Memory) string {
 	var b strings.Builder
 	b.WriteString("You are adjudicating whether a compliance GAP flagged by an automated detector is REAL (needs a code change) or a FALSE POSITIVE, for a source-to-Go migration.\n\n")
 	b.WriteString("GAP:\n")
@@ -241,9 +270,37 @@ func buildAdjudicationPrompt(g gap) string {
 	b.WriteString("1. Argue the strongest case that the gap is REAL and requires a change. Cite file:line on BOTH the source and Go sides — compare the SAME layer/symbol.\n")
 	b.WriteString("2. Argue the strongest case that it is a FALSE POSITIVE (already satisfied at HEAD, or a cross-layer detector misfire).\n")
 	b.WriteString("3. Decide. Prefer REAL when uncertain. Choose false_positive ONLY with concrete same-layer evidence that the Go code already satisfies it; choose ambiguous if a human must decide.\n\n")
+	if len(prior) > 0 {
+		b.WriteString("## Prior verdicts on similar gaps\n")
+		for _, m := range prior {
+			line := strings.TrimSpace(m.Title)
+			if line == "" {
+				line = "prior verdict"
+			}
+			if content := strings.TrimSpace(m.Content); content != "" {
+				content = strings.ReplaceAll(content, "\n", " ")
+				if len(content) > 120 {
+					content = content[:120] + "..."
+				}
+				line += ": " + content
+			}
+			b.WriteString("- " + line + "\n")
+		}
+		b.WriteString("\n")
+	}
 	b.WriteString("End your reply with ONE JSON object on the final line and nothing after it:\n")
 	b.WriteString(`{"verdict":"real|false_positive|ambiguous","confidence":0.0,"reasoning":"one sentence"}` + "\n")
 	return b.String()
+}
+
+// buildPriorVerdictQuery forms the Hindsight search text from a gap's category
+// and the first sentence of its description.
+func buildPriorVerdictQuery(g gap) string {
+	desc := strings.TrimSpace(g.Description)
+	if i := strings.Index(desc, "."); i >= 0 {
+		desc = desc[:i]
+	}
+	return strings.TrimSpace(strings.TrimSpace(g.Category) + " " + strings.TrimSpace(desc))
 }
 
 // parseAdjudication extracts the final JSON verdict object from model
@@ -278,4 +335,31 @@ func sameStringSet(a, b map[string]bool) bool {
 		}
 	}
 	return true
+}
+
+// projectName derives a stable project label for retained memories from the
+// compliance config's project directory.
+func (cm *ComplianceCycleManager) projectName() string {
+	return filepath.Base(cm.config.ProjectDir)
+}
+
+// retainAdjudication retains a fresh (non-cached) verdict as a Hindsight
+// memory (Shepherd D3). Cached verdicts never reach here — the fingerprint
+// suppression path returns before adjudication — so each judgment is retained
+// exactly once. Fail-open: no retainer, nil memory (ambiguous), or a Hindsight
+// error costs the memory, never the cycle.
+func (cm *ComplianceCycleManager) retainAdjudication(g gap, adj adjudication, fingerprint string) {
+	if cm.retainer == nil {
+		return
+	}
+	mem := buildAdjudicationMemory(cm.projectName(), g, adj, fingerprint)
+	if mem == nil {
+		return
+	}
+	cm.retainer.Retain(mem)
+	if cm.overseer != nil && cm.overseer.beadCloser != nil {
+		cm.overseer.beadCloser.events.Emit(Event{Type: "verdict_retained",
+			Project: cm.projectName(), Bead: string(mem.BeadID), Reason: "adjudication",
+			Fields: map[string]any{"kind": "adjudication", "verdict": adj.Verdict}})
+	}
 }

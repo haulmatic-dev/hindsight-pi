@@ -24,6 +24,10 @@ func initQuarantineRepo(t *testing.T) string {
 		}
 	}
 	run("init", "-q", "-b", "main")
+	// Repo-local identity: WorktreeManager.Commit runs bare `git commit`, and
+	// CI runners have no global identity. Worktrees inherit the repo config.
+	run("config", "user.name", "t")
+	run("config", "user.email", "t@t")
 	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
