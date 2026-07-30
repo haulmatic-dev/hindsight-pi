@@ -86,6 +86,8 @@ type Overseer struct {
 	gptCache              *GPTCacheClient                 // GPTCache client for caching
 	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
 	lastSpawnBlockedEvent time.Time                       // throttle for spawn_blocked events (scheduler)
+	providerPool          *ProviderPool                   // nil-safe; shared provider concurrency budget (Shepherd B3)
+	poolReleases          sync.Map                        // workerID -> func() releasing its provider-pool slot
 	batchRetentionSvc     *services.BatchRetentionService // Batch retention service for efficient memory storage
 	hindsightLifecycle    *services.HindsightLifecycle    // Hindsight lifecycle manager for memory management
 	intelMutex            sync.RWMutex                    // Mutex for intelligence clients
@@ -242,6 +244,13 @@ func NewOverseer(config *Config) *Overseer {
 		log.Printf("[Governor] Initialized (%s)", o.concurrencyGovernor.Describe())
 	}
 
+	// Shared provider budget (Shepherd B3). Sized to the plan's concurrency, not
+	// to max_workers: a worker is only one of four consumers of that budget.
+	if config.Overseer.ProviderPool.Enabled {
+		o.providerPool = NewProviderPool(config.Overseer.ProviderPool.Size, config.Overseer.ProviderPool)
+		log.Printf("[ProviderPool] Initialized (%s)", o.providerPool.Describe())
+	}
+
 	o.beadDiscovery = NewBeadDiscovery(o.beadsClient, o.bvClient, o.projects, o.completed, o.dag, &o.dagMu)
 
 	// Initialize project resolver
@@ -322,6 +331,7 @@ func NewOverseer(config *Config) *Overseer {
 		o.concurrencyGovernor,
 	)
 	o.workerLifecycle.providerBreaker = o.providerBreaker
+	o.workerLifecycle.releaseProviderSlot = o.releaseProviderSlot
 
 	// Initialize bead analyzer (projects will be updated after discovery)
 	o.beadAnalyzer = NewBeadAnalyzer(o.projects)
@@ -386,6 +396,7 @@ func NewOverseer(config *Config) *Overseer {
 	// Structured decision stream (Shepherd C1/C2): central day-files plus
 	// per-repo .hydra/events.jsonl mirrors.
 	o.beadCloser.SetEventSink(NewEventSink(DefaultEventsDir()))
+	o.providerPool.SetEventSink(NewEventSink(DefaultEventsDir()))
 	retainer := NewVerdictRetainer(o.hindsightClient)
 	o.beadCloser.SetVerdictRetainer(retainer)
 
@@ -668,6 +679,24 @@ func (o *Overseer) getReadyBeadsFromBVPlan() ([]types.Bead, error) {
 // spawnWorker creates and starts a worker for a bead using the configured spawner
 func (o *Overseer) spawnWorker(bead types.Bead) error {
 	return o.workerSpawner.Spawn(bead)
+}
+
+// holdProviderSlot records the pool reservation taken for a worker so it can be
+// returned when that worker completes.
+func (o *Overseer) holdProviderSlot(workerID string, release func()) {
+	if release != nil {
+		o.poolReleases.Store(workerID, release)
+	}
+}
+
+// releaseProviderSlot returns a worker's pool reservation. Safe to call for an
+// unknown worker and safe to call twice — the underlying release is idempotent.
+func (o *Overseer) releaseProviderSlot(workerID string) {
+	if v, ok := o.poolReleases.LoadAndDelete(workerID); ok {
+		if release, ok := v.(func()); ok && release != nil {
+			release()
+		}
+	}
 }
 
 // HindsightClient defines the interface for Hindsight memory operations

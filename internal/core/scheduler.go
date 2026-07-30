@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -199,6 +200,7 @@ func (s *Scheduler) Tick() error {
 	// Spawn workers for ready beads
 	spawnedCount := 0
 	resourceBlocked := 0
+	poolBlocked := 0
 	for _, bead := range retryBeads {
 		// CRITICAL: Recalculate available slots before each spawn
 		o.workerMutex.RLock()
@@ -253,13 +255,38 @@ func (s *Scheduler) Tick() error {
 			continue
 		}
 
+		// Shared provider budget (Shepherd B3). Acquired BEFORE spawning, because
+		// a spawned worker immediately starts calling the provider — asking
+		// afterwards would be asking permission for something already happening.
+		var poolRelease func()
+		if o.providerPool != nil {
+			acquireCtx, cancel := context.WithCancel(context.Background())
+			rel, err := o.providerPool.Acquire(acquireCtx, "worker", o.providerPool.WeightFor("worker"))
+			cancel()
+			if err != nil {
+				// No slot free. This is not a bead failure — leave it for the next
+				// tick rather than burning a retry or spawning a doomed worker.
+				log.Printf("[ProviderPool] No slot for bead %s (%s): %v", bead.ID, o.providerPool.Describe(), err)
+				poolBlocked++
+				continue
+			}
+			poolRelease = rel
+		}
+
 		// Check rate limiting
 		if !o.spawnRateLimiter.CanSpawn() {
 			log.Printf("[RateLimit] Blocking spawn for bead %s: rate limit exceeded", bead.ID)
+			if poolRelease != nil {
+				poolRelease()
+			}
 			break
 		}
 
 		if err := o.spawnWorker(bead); err != nil {
+			// The worker never started, so nothing will ever release its slot.
+			if poolRelease != nil {
+				poolRelease()
+			}
 			errMsg := err.Error()
 			isResourceConstraint := strings.Contains(errMsg, "worker limit reached") ||
 				strings.Contains(errMsg, "rate limit exceeded") ||
@@ -275,6 +302,10 @@ func (s *Scheduler) Tick() error {
 		// Record successful spawn for rate limiting
 		o.spawnRateLimiter.RecordSpawn()
 
+		// Hand the reservation to the worker: WorkerLifecycle.Monitor releases it
+		// when the process exits, however it exits.
+		o.holdProviderSlot(beadIDStr, poolRelease)
+
 		// Clear retry state on successful spawn
 		o.retryManager.ClearRetry(beadIDStr)
 		availableSlots--
@@ -285,6 +316,9 @@ func (s *Scheduler) Tick() error {
 		log.Printf("📊 Spawned %d workers this tick (batch limit: %d)", spawnedCount, batchLimit)
 	}
 	o.emitSpawnBlocked(resourceBlocked)
+	if poolBlocked > 0 {
+		log.Printf("📊 %d spawn(s) waited on the provider pool this tick (%s)", poolBlocked, o.providerPool.Describe())
+	}
 
 	return nil
 }

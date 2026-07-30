@@ -202,6 +202,23 @@ func (cm *ComplianceCycleManager) adjudicateGap(ctx context.Context, g gap) adju
 	}
 	args := adjudicatorArgs(core.Provider, model, cm.config.AdjudicatorThinking)
 
+	// The adjudicator holds a provider slot for minutes at adjudicator_thinking:
+	// max, so it must be inside the shared pool rather than beside it — this is
+	// the call that was starving worker spawns while looking like a provider
+	// fault (Shepherd B3).
+	if cm.overseer != nil && cm.overseer.providerPool != nil {
+		pool := cm.overseer.providerPool
+		release, err := pool.Acquire(ctx, "adjudicator", pool.WeightFor("adjudicator"))
+		if err != nil {
+			// A queue timeout says nothing about the gap. Treat it as real so the
+			// cycle re-adjudicates on its next pass rather than silently passing
+			// a gap it never actually judged.
+			log.Printf("[Adjudicator] could not get a provider slot for gap %s: %v — treating as real", g.ID, err)
+			return adjudication{Verdict: "real", GapID: g.ID}
+		}
+		defer release()
+	}
+
 	c := exec.CommandContext(ctx, piPath, args...)
 	c.Dir = cm.config.ProjectDir
 	c.Env = os.Environ() // inherit the daemon env (provider API keys)

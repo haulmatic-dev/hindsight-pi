@@ -414,6 +414,11 @@ type OverseerConfig struct {
 	// ConcurrencyGovernor enables AIMD adaptive concurrency limiting.
 	// Disabled by default.
 	ConcurrencyGovernor GovernorConfig `yaml:"concurrency_governor"`
+
+	// ProviderPool bounds concurrent provider requests across every consumer —
+	// worker spawns, the adjudicator, and validation — so they stop refusing
+	// each other's calls (Shepherd B3).
+	ProviderPool PoolConfig `yaml:"provider_pool"`
 	// WorktreeIsolation runs each chain in its own git worktree and commits
 	// its work on verified-close, integrating back to the working branch on
 	// chain completion. Off by default (opt-in).
