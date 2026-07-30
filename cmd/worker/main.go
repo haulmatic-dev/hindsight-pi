@@ -960,6 +960,45 @@ func isTransientOverload(errStr string) bool {
 	return false
 }
 
+// concurrencyLimitMarkers identify a provider refusing a request because too
+// many of OUR OWN requests are already in flight — a ceiling on parallelism,
+// not on volume. The remedy is fewer concurrent workers for a few seconds, and
+// the AIMD governor (Shepherd B1) exists precisely to apply it.
+//
+// This must be checked BEFORE isQuotaError, because Kimi returns the
+// concurrency refusal with the SAME type as genuine quota exhaustion:
+// HTTP 403 with type access_terminated_error. Observed live 2026-07-30:
+//
+//	{"error":{"message":"You've reached your concurrent request limit. Please
+//	 wait for your ongoing requests to finish and try again.",
+//	 "type":"access_terminated_error"}}
+//
+// Classified as quota, that message tripped a 30-minute fleet-wide spawn pause
+// 37 times in one day and starved a dogfood run to a ~10% duty cycle, while the
+// account's quota was fine the whole time and a single sequential probe
+// succeeded. The provider's own message says to wait for in-flight requests to
+// finish — which is a concurrency instruction, not a billing one.
+var concurrencyLimitMarkers = []string{
+	"concurrent request limit",
+	"concurrency limit",
+	"too many concurrent",
+	"max concurrent",
+}
+
+// isConcurrencyLimit reports whether the provider rejected the call for having
+// too many simultaneous requests. Callers treat it as retryable capacity
+// pressure (exit 7): it feeds the concurrency governor and must never trip the
+// provider circuit breaker.
+func isConcurrencyLimit(errStr string) bool {
+	s := strings.ToLower(errStr)
+	for _, m := range concurrencyLimitMarkers {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
+}
+
 var quotaErrorMarkers = []string{
 	"usage limit",
 	"billing cycle",
@@ -2226,6 +2265,11 @@ func classifyFailure(result *ExecutionResult) int {
 	}
 	err := strings.ToLower(result.Error)
 	switch {
+	// Concurrency ceiling, checked BEFORE quota because Kimi reports both as
+	// HTTP 403 / access_terminated_error. Exit 7 routes it to the governor
+	// (thin the fleet) instead of the breaker (freeze the fleet for 30m).
+	case isConcurrencyLimit(err):
+		return 7
 	// Quota/billing exhaustion gets its own code so the daemon can apply a long
 	// cooldown instead of a rate-limit failover: a 429 clears in seconds, a
 	// billing limit clears when the cycle rolls over.

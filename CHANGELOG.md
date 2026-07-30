@@ -52,6 +52,17 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   authored by the fleet, harvested after gates closed).
 
 ### Fixed
+- **A concurrency ceiling was being classified as quota exhaustion**, so the
+  daemon froze every spawn for 30 minutes over a condition that clears in
+  seconds. Kimi returns "You've reached your concurrent request limit" with the
+  same HTTP 403 and `access_terminated_error` type as genuine quota
+  exhaustion, and only the message distinguishes them — so the quota markers
+  matched. On 2026-07-30 that produced 37 fleet-wide pauses in one day and
+  starved a dogfood run to roughly a 10% duty cycle while the account's quota
+  was never touched; a single sequential probe against the same provider
+  succeeded. Concurrency refusals now classify as exit 7, which feeds the AIMD
+  governor (thin the fleet) instead of the circuit breaker (freeze it) — the
+  response the provider's own message asks for.
 - **Fix-bead dedup was structurally dead.** `br list --json` returns
   `dependencies: null` (only `dependency_count`), so the dependency-based
   duplicate check never matched — `fix_deduped` events stayed at zero across
