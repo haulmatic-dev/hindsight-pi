@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"log"
 	"math"
 	"sync"
@@ -167,4 +168,21 @@ func (g *ConcurrencyGovernor) emitChangeLocked(old, new int, reason string) {
 		g.onChange(old, new, reason)
 	}
 	log.Printf("[Governor] concurrency %d -> %d (%s)", old, new, reason)
+}
+
+// Describe returns the governor's resolved settings for logging. Reading these
+// off the struct rather than the caller's config block is deliberate: defaults
+// are applied to a by-value copy inside the constructor, so the caller's block
+// still holds zeros for anything it omitted.
+func (g *ConcurrencyGovernor) Describe() string {
+	if g == nil {
+		return "disabled"
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.maxWorkers <= 0 {
+		return "disabled (unlimited max_workers)"
+	}
+	return fmt.Sprintf("limit=%d/%d window=%d decrease=%.3f increase=%.3f cooldown=%s",
+		g.limit, g.maxWorkers, g.windowSize, g.decThreshold, g.incThreshold, g.cooldown)
 }
