@@ -83,13 +83,14 @@ type Overseer struct {
 	retryManager    *RetryManager    // Retry and validation-retry tracking
 	intelligenceHub *IntelligenceHub // Encapsulates TLDR, GPTCache, Hindsight clients
 	// These clients remain direct fields until IntelligenceHub fully exposes their APIs.
-	gptCache           *GPTCacheClient                 // GPTCache client for caching
-	hindsightClient    HindsightClient                 // Hindsight client for pre-execution context retrieval
-	batchRetentionSvc  *services.BatchRetentionService // Batch retention service for efficient memory storage
-	hindsightLifecycle *services.HindsightLifecycle    // Hindsight lifecycle manager for memory management
-	intelMutex         sync.RWMutex                    // Mutex for intelligence clients
-	bvClient           *bv.Client                      // BV client for graph analytics
-	settledStateSvc    *SettledStateService            // Settled-state detection service
+	gptCache              *GPTCacheClient                 // GPTCache client for caching
+	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
+	lastSpawnBlockedEvent time.Time                       // throttle for spawn_blocked events (scheduler)
+	batchRetentionSvc     *services.BatchRetentionService // Batch retention service for efficient memory storage
+	hindsightLifecycle    *services.HindsightLifecycle    // Hindsight lifecycle manager for memory management
+	intelMutex            sync.RWMutex                    // Mutex for intelligence clients
+	bvClient              *bv.Client                      // BV client for graph analytics
+	settledStateSvc       *SettledStateService            // Settled-state detection service
 
 	// MCP manager for Model Context Protocol operations
 	mcpManager *MCPManager
