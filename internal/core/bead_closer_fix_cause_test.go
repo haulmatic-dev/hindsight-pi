@@ -229,3 +229,52 @@ func TestCreateFixBead_CauseAndDedupDoNotAffectRecursionCap(t *testing.T) {
 		t.Errorf("expected 0 nested fix beads, got %d", got)
 	}
 }
+
+// AC-2b (regression, run D3): production `br list --json` returns dependencies
+// as null, so a dedup that relies on the Dependencies field never matches —
+// run D3 created four identical fix beads for one original while fix_deduped
+// stayed at zero. Dedup must work when the listed fix bead carries no
+// dependencies at all, via its deterministic "Fix: <original title>" title.
+func TestCreateFixBead_DeduplicatesWhenListDropsDependencies(t *testing.T) {
+	projectPath := t.TempDir()
+	closer, mock := setupFixCauseCloser(t, projectPath)
+
+	projectName := filepath.Base(projectPath)
+	origID := types.BeadID(fmt.Sprintf("%s-9", projectName))
+	orig := types.Bead{
+		ID:       origID,
+		Title:    "Discovery: Verdict Memory Builder",
+		Project:  projectName,
+		Priority: 2,
+		Status:   types.StatusInProgress,
+	}
+	mock.addBead(orig)
+
+	// The pre-existing fix bead as `br list --json` actually reports it:
+	// correct title, type fix, open — and NO dependencies.
+	mock.addBead(types.Bead{
+		ID:      types.BeadID(fmt.Sprintf("%s-10", projectName)),
+		Title:   "Fix: Discovery: Verdict Memory Builder",
+		Type:    "fix",
+		Project: projectName,
+		Status:  types.StatusOpen,
+	})
+
+	if err := closer.createFixBeadForFailedClose(&orig, projectPath, "", string(origID)); err != nil {
+		t.Fatalf("createFixBeadForFailedClose: %v", err)
+	}
+	if got := countFixBeadsForOriginal(mock, origID); got != 0 {
+		t.Errorf("dedup must match by title when dependencies are absent; %d new fix beads created", got)
+	}
+	mock.mu.RLock()
+	fixCount := 0
+	for _, b := range mock.beads {
+		if b.Type == "fix" {
+			fixCount++
+		}
+	}
+	mock.mu.RUnlock()
+	if fixCount != 1 {
+		t.Errorf("expected the single pre-existing fix bead, got %d fix beads", fixCount)
+	}
+}

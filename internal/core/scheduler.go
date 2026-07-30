@@ -198,6 +198,7 @@ func (s *Scheduler) Tick() error {
 
 	// Spawn workers for ready beads
 	spawnedCount := 0
+	resourceBlocked := 0
 	for _, bead := range retryBeads {
 		// CRITICAL: Recalculate available slots before each spawn
 		o.workerMutex.RLock()
@@ -248,6 +249,7 @@ func (s *Scheduler) Tick() error {
 		// Check resource limits before spawning
 		if o.resourceMonitor != nil && !o.resourceMonitor.CanSpawnWorker() {
 			log.Printf("[ResourceMonitor] Blocking worker spawn for bead %s: resource limits exceeded", bead.ID)
+			resourceBlocked++
 			continue
 		}
 
@@ -282,8 +284,26 @@ func (s *Scheduler) Tick() error {
 	if spawnedCount > 0 {
 		log.Printf("📊 Spawned %d workers this tick (batch limit: %d)", spawnedCount, batchLimit)
 	}
+	o.emitSpawnBlocked(resourceBlocked)
 
 	return nil
+}
+
+// emitSpawnBlocked surfaces resource-blocked spawns in the event stream. The
+// 2026-07-30 hindsight-api leak blocked every spawn for 2.5 hours with no
+// signal outside per-bead log spam — a stalled fleet must be visible in the
+// stream the shepherd cron watches. Throttled to one event per 5 minutes.
+func (o *Overseer) emitSpawnBlocked(blocked int) {
+	if blocked == 0 || o.beadCloser == nil {
+		return
+	}
+	now := time.Now()
+	if !o.lastSpawnBlockedEvent.IsZero() && now.Sub(o.lastSpawnBlockedEvent) < 5*time.Minute {
+		return
+	}
+	o.lastSpawnBlockedEvent = now
+	o.beadCloser.events.Emit(Event{Type: "spawn_blocked", Reason: "resource_limits",
+		Fields: map[string]any{"blocked_this_tick": blocked}})
 }
 
 // TriggerImmediateSchedule spawns workers for ready beads without waiting for next poll.

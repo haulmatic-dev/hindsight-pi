@@ -6,6 +6,8 @@
 set -e
 
 ENVIRONMENT="${1:-production}"
+# Baseline for the post-deploy freshness assertion (see scripts/verify-deploy.sh).
+DEPLOY_STARTED_AT="$(date +%s)"
 HYDRA_USER="hydra"
 HYDRA_HOME="/opt/hydra"
 HYDRA_CONFIG="/etc/hydra/hydra.yaml"
@@ -77,7 +79,17 @@ build_binaries() {
         print_error "Not in Hydra repository root"
         exit 1
     fi
-    
+
+    # Nightly known-answer verdict (Shepherd D2). Blocks only on a fresh `fail`
+    # — a missing, stale, or inconclusive verdict warns and proceeds, because
+    # absence of evidence is not evidence of a regression.
+    if [[ -x "scripts/testbed-gate.sh" ]]; then
+        if ! scripts/testbed-gate.sh; then
+            print_error "Deploy blocked by the nightly testbed matrix (see above)"
+            exit 1
+        fi
+    fi
+
     # Build hydra
     go build -o "$HYDRA_HOME/bin/hydra" cmd/hydra/main.go
     print_status "Built hydra binary"
@@ -277,6 +289,17 @@ start_service() {
     
     if systemctl is-active --quiet hydra; then
         print_status "Hydra service started successfully"
+
+        # Prove the running code is the code we just installed. `systemctl
+        # is-active` only says a process exists — on 2026-07-30 the service was
+        # "started successfully" all day while executing a binary from the
+        # previous day, because the install wrote to a path nothing runs.
+        if [[ -x "scripts/verify-deploy.sh" ]]; then
+            if ! scripts/verify-deploy.sh "$DEPLOY_STARTED_AT"; then
+                print_error "The running daemon is not the binary just installed — deploy NOT applied"
+                exit 1
+            fi
+        fi
         echo ""
         echo "Service status:"
         systemctl status hydra --no-pager -l

@@ -50,8 +50,18 @@ sudo -u hydra bash -lc "cd $TARGET && br close $GATE -r approved-eval-run --forc
 echo "gate $GATE approved"
 
 START_TS=$(date -u "+%Y/%m/%d %H:%M:%S")
+RESTART_AT=$(date +%s)
 echo "== run start $START_TS (restarting daemon) =="
 systemctl restart hydra
+
+# A scored run against a stale binary measures the wrong code and produces
+# metrics that look authoritative. Warn rather than abort: the run is still
+# informative, but the operator must know which build produced the numbers.
+if [ -x "$(dirname "$0")/../scripts/verify-deploy.sh" ]; then
+  sleep 5
+  "$(dirname "$0")/../scripts/verify-deploy.sh" "$RESTART_AT" \
+    || echo "== WARNING: scoring a run whose daemon is NOT the freshly built binary =="
+fi
 
 echo "== watch (timeout ${TIMEOUT_MIN}m) =="
 DEADLINE=$(( $(date +%s) + TIMEOUT_MIN*60 ))

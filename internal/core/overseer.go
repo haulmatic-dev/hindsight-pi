@@ -83,13 +83,14 @@ type Overseer struct {
 	retryManager    *RetryManager    // Retry and validation-retry tracking
 	intelligenceHub *IntelligenceHub // Encapsulates TLDR, GPTCache, Hindsight clients
 	// These clients remain direct fields until IntelligenceHub fully exposes their APIs.
-	gptCache           *GPTCacheClient                 // GPTCache client for caching
-	hindsightClient    HindsightClient                 // Hindsight client for pre-execution context retrieval
-	batchRetentionSvc  *services.BatchRetentionService // Batch retention service for efficient memory storage
-	hindsightLifecycle *services.HindsightLifecycle    // Hindsight lifecycle manager for memory management
-	intelMutex         sync.RWMutex                    // Mutex for intelligence clients
-	bvClient           *bv.Client                      // BV client for graph analytics
-	settledStateSvc    *SettledStateService            // Settled-state detection service
+	gptCache              *GPTCacheClient                 // GPTCache client for caching
+	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
+	lastSpawnBlockedEvent time.Time                       // throttle for spawn_blocked events (scheduler)
+	batchRetentionSvc     *services.BatchRetentionService // Batch retention service for efficient memory storage
+	hindsightLifecycle    *services.HindsightLifecycle    // Hindsight lifecycle manager for memory management
+	intelMutex            sync.RWMutex                    // Mutex for intelligence clients
+	bvClient              *bv.Client                      // BV client for graph analytics
+	settledStateSvc       *SettledStateService            // Settled-state detection service
 
 	// MCP manager for Model Context Protocol operations
 	mcpManager *MCPManager
@@ -231,11 +232,14 @@ func NewOverseer(config *Config) *Overseer {
 
 	if config.Overseer.ConcurrencyGovernor.Enabled {
 		o.concurrencyGovernor = NewConcurrencyGovernor(config.Overseer.MaxWorkers, config.Overseer.ConcurrencyGovernor)
-		log.Printf("[Governor] Initialized (window=%d, decrease=%.3f, increase=%.3f, cooldown=%ds)",
-			config.Overseer.ConcurrencyGovernor.WindowSize,
-			config.Overseer.ConcurrencyGovernor.DecreaseThreshold,
-			config.Overseer.ConcurrencyGovernor.IncreaseThreshold,
-			config.Overseer.ConcurrencyGovernor.CooldownSeconds)
+		// Log the governor's RESOLVED settings, not the raw config block. The
+		// constructor applies defaults to its own by-value copy, so a config
+		// carrying only `enabled: true` logged "window=0, decrease=0.000,
+		// cooldown=0s" — which reads exactly like a governor that can never act
+		// (or one about to divide by zero) while the real instance was correctly
+		// running window=8 at 0.5/0.125. A status line that misrepresents live
+		// state is worse than no status line.
+		log.Printf("[Governor] Initialized (%s)", o.concurrencyGovernor.Describe())
 	}
 
 	o.beadDiscovery = NewBeadDiscovery(o.beadsClient, o.bvClient, o.projects, o.completed, o.dag, &o.dagMu)
