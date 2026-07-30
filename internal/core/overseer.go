@@ -210,6 +210,7 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize intelligence hub
 	o.intelligenceHub.Initialize()
+	o.hindsightClient = o.intelligenceHub.Hindsight()
 
 	// Initialize config manager
 	o.configManager = NewConfigManager(o)
@@ -381,6 +382,8 @@ func NewOverseer(config *Config) *Overseer {
 	// Structured decision stream (Shepherd C1/C2): central day-files plus
 	// per-repo .hydra/events.jsonl mirrors.
 	o.beadCloser.SetEventSink(NewEventSink(DefaultEventsDir()))
+	retainer := NewVerdictRetainer(o.hindsightClient)
+	o.beadCloser.SetVerdictRetainer(retainer)
 
 	// Per-chain worktree isolation (opt-in via overseer.worktree_isolation).
 	// Wires the manager into spawn (run worker in the chain's worktree) and
@@ -665,6 +668,7 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 
 // HindsightClient defines the interface for Hindsight memory operations
 type HindsightClient interface {
+	Search(query, beadType string, limit int) (*hindsight.SearchResponse, error)
 	SearchByBead(title, beadType string) (*hindsight.SearchResponse, error)
 	Reflect(beadID types.BeadID, context map[string]interface{}) ([]hindsight.ReflectionInsight, error)
 	Retain(memory *hindsight.ExecutionMemory) (*hindsight.RetentionResult, error)

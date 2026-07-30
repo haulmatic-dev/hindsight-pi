@@ -53,14 +53,20 @@ type ComplianceCycleManager struct {
 	running       bool
 	approved      bool // sticky in-memory approval flag; see isApproved
 	stopCh        chan struct{}
-	prevSurviving map[string]bool // fingerprints of last cycle's real gaps (progress-delta)
+	prevSurviving map[string]bool  // fingerprints of last cycle's real gaps (progress-delta)
+	retainer      *VerdictRetainer // nil-safe; Hindsight verdict retention (Shepherd D3)
 }
 
 // NewComplianceCycleManager creates a new compliance cycle manager.
 func NewComplianceCycleManager(overseer *Overseer, config ComplianceCycleConfig) *ComplianceCycleManager {
+	var retainer *VerdictRetainer
+	if overseer != nil && overseer.beadCloser != nil {
+		retainer = overseer.beadCloser.retainer
+	}
 	return &ComplianceCycleManager{
 		overseer: overseer,
 		config:   config,
+		retainer: retainer,
 		stopCh:   make(chan struct{}),
 	}
 }
@@ -442,15 +448,22 @@ func (cm *ComplianceCycleManager) autoApproveGapGate(gapPRDPath string) error {
 	return nil
 }
 
+// hindsightClient returns the Hindsight client from the overseer's
+// intelligence hub, or nil when retention is not configured.
+func (cm *ComplianceCycleManager) hindsightClient() HindsightClient {
+	if cm.overseer == nil || cm.overseer.intelligenceHub == nil {
+		return nil
+	}
+	return cm.overseer.intelligenceHub.Hindsight()
+}
+
 // notifyMaxCyclesReached logs and notifies that max cycles were reached.
 func (cm *ComplianceCycleManager) notifyMaxCyclesReached() {
 	msg := fmt.Sprintf("[ComplianceCycle] MAX CYCLES REACHED (%d/%d)", cm.cycles, cm.config.MaxCycles)
 	log.Println(msg)
-	// TODO: Send notification (Slack, email, etc.)
 }
 
 // notifyApproved logs and notifies that the PRD is approved.
 func (cm *ComplianceCycleManager) notifyApproved() {
 	log.Println("[ComplianceCycle] PRD FULLY COMPLIANT. All checks passed. Ready to ship.")
-	// TODO: Send notification
 }

@@ -19,6 +19,7 @@ type BeadCloser struct {
 	worktreeManager   *WorktreeManager        // per-chain git isolation; nil = disabled
 	chainKeyFn        func(types.Bead) string // maps a bead to its chain's worktree key
 	isChainMember     func(types.BeadID) bool // reports whether a bead belongs to a registered multi-bead chain
+	retainer          *VerdictRetainer        // nil-safe; Hindsight verdict retention (Shepherd D3)
 }
 
 // SetWorktreeManager enables commit-on-close and singleton integrate-on-close
@@ -45,6 +46,28 @@ func NewBeadCloser(beadsClient BeadsClient, intelligenceHub *IntelligenceHub, pr
 
 // SetEventSink attaches the structured event stream. Nil stays a no-op.
 func (c *BeadCloser) SetEventSink(s *EventSink) { c.events = s }
+
+// SetVerdictRetainer attaches Hindsight verdict retention (Shepherd D3).
+// Nil stays a no-op.
+func (c *BeadCloser) SetVerdictRetainer(r *VerdictRetainer) { c.retainer = r }
+
+// retainFailedClose retains a failed close as a Hindsight memory when a
+// failure cause was extracted. Fail-open: nil retainer or nil memory (no bead,
+// empty cause) does nothing. Emits verdict_retained only on an actual retain.
+func (c *BeadCloser) retainFailedClose(bead *types.Bead, worker *types.Worker, exitCode int, cause string) {
+	project := ""
+	if bead != nil {
+		project = bead.Project
+	}
+	mem := buildFailedCloseMemory(project, bead, cause, exitCode)
+	if mem == nil || c.retainer == nil {
+		return
+	}
+	c.retainer.Retain(mem)
+	c.events.Emit(Event{Type: "verdict_retained", Project: project,
+		Bead: worker.BeadID.String(), Reason: "failed_close",
+		Fields: map[string]any{"kind": "failed_close", "exit_code": exitCode}})
+}
 
 // Close closes the bead via beadsClient based on worker completion status.
 //
@@ -111,6 +134,7 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 	// their dependents unblocked. The flag below lets operators keep
 	// the old behaviour for fast iteration but defaults to blocking.
 	if c.closeBlockedOnFailed() && reason == "failed" {
+		cause := ExtractFailureCause(workersLogDir(), worker.BeadID.String(), 2048)
 		if isInfrastructureExitCode(exitCode) {
 			// Infrastructure failure: do not create a fix bead.  The bead
 			// will be retried by the scheduler with exponential backoff
@@ -128,6 +152,7 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 				log.Printf("[closeBead] Failed to create fix bead for %s: %v", worker.BeadID.String(), err)
 			}
 		}
+		c.retainFailedClose(bead, worker, exitCode, cause)
 	}
 
 	// Verified-close gate (WO-2): a bead that "completed" must show real

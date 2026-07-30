@@ -31,6 +31,14 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   now the `maxScopeFiles` constant.
 
 ### Added
+- **Verdicts feed memory (Shepherd D3, dogfood-built + hand-finished).** The
+  system's most expensive judgments no longer evaporate: fresh gap
+  adjudications (real/false_positive with reasoning) and failed closes with an
+  extracted cause are retained as Hindsight memories at judgment time, and the
+  adjudicator now sees up to 3 prior verdicts on similar gaps in its prompt.
+  Ambiguous verdicts and cause-less failures are never retained (noise, not
+  memory); cached fingerprints never re-retain. Fail-open everywhere — a
+  Hindsight outage costs memories, never runs. New event: `verdict_retained`.
 - **AIMD concurrency governor (Shepherd B1, dogfood-built).** When provider
   health degrades, the fleet's own request pressure raises its exposure to the
   overload it is stalling on (219 activity timeouts vs 4 clean turns on
