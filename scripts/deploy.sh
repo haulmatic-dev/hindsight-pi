@@ -77,7 +77,17 @@ build_binaries() {
         print_error "Not in Hydra repository root"
         exit 1
     fi
-    
+
+    # Nightly known-answer verdict (Shepherd D2). Blocks only on a fresh `fail`
+    # — a missing, stale, or inconclusive verdict warns and proceeds, because
+    # absence of evidence is not evidence of a regression.
+    if [[ -x "scripts/testbed-gate.sh" ]]; then
+        if ! scripts/testbed-gate.sh; then
+            print_error "Deploy blocked by the nightly testbed matrix (see above)"
+            exit 1
+        fi
+    fi
+
     # Build hydra
     go build -o "$HYDRA_HOME/bin/hydra" cmd/hydra/main.go
     print_status "Built hydra binary"

@@ -1,0 +1,17 @@
+[Unit]
+Description=Nightly Hydra testbed known-answer run (Shepherd D2)
+
+[Timer]
+# 02:00 UTC: after the daily provider quota window has rolled over and well
+# clear of the ~06:11 unattended-upgrades restart, so the run neither starts
+# quota-starved nor gets killed mid-flight.
+OnCalendar=*-*-* 02:00:00 UTC
+# Spread across a few minutes so a fleet of boxes wouldn't all hit the provider
+# at the same instant.
+RandomizedDelaySec=300
+# If the box was down at 02:00, run once it comes back rather than skipping the
+# night entirely — a missed night is a missing deploy gate.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,23 @@
+[Unit]
+Description=Hydra nightly testbed known-answer run (Shepherd D2)
+Documentation=file:///opt/dev-tools/components/hydra/docs/architecture/shepherd.md
+After=network-online.target hydra.service
+
+[Service]
+Type=oneshot
+# Runs as root: it restarts hydra.service and drops to the hydra user for every
+# repo and beads operation itself.
+User=root
+Environment=HYDRA_HOME=/opt/hydra
+WorkingDirectory=/opt/dev-tools/components/hydra
+ExecStart=/opt/dev-tools/components/hydra/eval/testbed-matrix.sh 180
+# A failing verdict is data, not a unit failure — the script exits 0 for it, and
+# this makes sure an unexpected crash still doesn't leave the unit in a failed
+# state that suppresses later timer firings.
+SuccessExitStatus=0 1
+TimeoutStartSec=4h
+StandardOutput=append:/var/log/hydra/testbed-matrix.log
+StandardError=append:/var/log/hydra/testbed-matrix.log
+
+[Install]
+WantedBy=multi-user.target
