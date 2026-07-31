@@ -7,6 +7,16 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- **PRD: worker park-and-resume on provider congestion**
+  (`docs/PRDs/worker-park-and-resume-20260731.md`). Workers whose session is
+  interrupted by provider-capacity errors (403 concurrency, 429, overload)
+  should park the live pi rpc session and resume it after backoff instead of
+  terminating and losing all context — the root cause of repeated rework seen
+  in the 2026-07-31 `hydra-testbed-y05` autopsy (~50 min compute, zero merged
+  output). Includes parked-aware timeouts, a new provider-congestion class,
+  and scheduler spawn-pausing during congestion storms.
+
 ### Changed
 - **Runtime state moved out of `/opt/hydra` into `/opt/dev-tools/var/hydra`.**
   Code (`components/hydra`), shared config (`config/pi`) and runtime state
