@@ -42,6 +42,17 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   `~/.pi/agent` points at it, and no retired copy is still referenced.
 
 ### Fixed
+- **Charon fleet deadlock: phantom worker records blocked orphan-bead recovery
+  forever.** A worker that died without cleanup left a `running` record in
+  `workers.json`; `recoverOrphanInProgressBeads` then believed a live worker
+  existed and skipped the bead, while the dead-PID sweep that would clear the
+  phantom sat behind `getOpenBeads`, which aborted the whole scan whenever any
+  one project's `br list` failed (lib-nestjs/demo exit 2). Result on
+  2026-07-31: 11 beads stuck `in_progress`, `ReadyNodes:0 BlockedNodes:14`,
+  fleet idle for hours. The dead-PID sweep now runs first, before any br
+  dependency; `getOpenBeads` skips failing projects instead of aborting; and
+  the orphan-kill decision is fail-closed per project — a worker whose project
+  cannot be listed is never killed on the strength of a partial open-bead map.
 - **`deploy.sh` no longer overwrites live configuration.** `create_config`,
   `create_systemd_service`, `setup_logrotate` and `setup_firewall` wrote canned
   templates on every run. On 2026-07-31 an ordinary deploy replaced the tuned
