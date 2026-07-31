@@ -9,7 +9,7 @@ ENVIRONMENT="${1:-production}"
 # Baseline for the post-deploy freshness assertion (see scripts/verify-deploy.sh).
 DEPLOY_STARTED_AT="$(date +%s)"
 HYDRA_USER="hydra"
-HYDRA_HOME="/opt/hydra"
+HYDRA_HOME="${HYDRA_HOME:-/opt/dev-tools/var/hydra}"
 HYDRA_CONFIG="/etc/hydra/hydra.yaml"
 HYDRA_SERVICE="/etc/systemd/system/hydra.service"
 
@@ -99,12 +99,15 @@ build_binaries() {
         fi
     fi
 
-    # Build hydra
-    go build -o "$HYDRA_HOME/bin/hydra" cmd/hydra/main.go
+    # Build the PACKAGES, not single files. `go build cmd/worker/main.go` compiles
+    # main.go alone as "command-line-arguments" and silently ignores its siblings
+    # (pi_agent_dir.go, pi_extensions.go, pi_rpc_turn.go), so the deploy died on
+    # 2026-07-31 with eight "undefined:" errors for symbols that were right there
+    # in the same package. Any file added beside main.go breaks a file-list build.
+    go build -o "$HYDRA_HOME/bin/hydra" ./cmd/hydra
     print_status "Built hydra binary"
-    
-    # Build worker
-    go build -o "$HYDRA_HOME/bin/worker" cmd/worker/main.go
+
+    go build -o "$HYDRA_HOME/bin/worker" ./cmd/worker
     print_status "Built worker binary"
     
     # Set permissions
@@ -113,9 +116,25 @@ build_binaries() {
 }
 
 # Create configuration
+#
+# PROVISIONING ONLY. This writes a canned starter config, so it must never touch
+# an existing one. On 2026-07-31 an ordinary deploy overwrote the live
+# /etc/hydra/hydra.yaml with this template and silently discarded every tuned
+# setting — max_workers, the provider pool, the concurrency governor, the shared
+# Pi config dir, hindsight, the project list — and the daemon came up on the
+# template. A deploy builds and restarts; it does not reprovision.
 create_config() {
+    if [[ -f "$HYDRA_CONFIG" ]]; then
+        print_status "Config exists at $HYDRA_CONFIG — leaving it alone"
+        return 0
+    fi
+    if [[ "${HYDRA_PROVISION:-0}" != "1" ]]; then
+        print_warning "No config at $HYDRA_CONFIG. Re-run with HYDRA_PROVISION=1 to write a starter config."
+        return 0
+    fi
+
     echo "Creating configuration..."
-    
+
     cat > "$HYDRA_CONFIG" << 'EOF'
 overseer:
   poll_interval: 5s
@@ -171,9 +190,24 @@ EOF
 }
 
 # Create systemd service
+#
+# PROVISIONING ONLY, for the same reason as create_config. The template lacks
+# things the live unit carries — EnvironmentFile=/etc/hydra/api-keys.env and the
+# beads-rust/beads-viewer entries on PATH — so overwriting a working unit takes
+# the daemon's API keys and `br` binary away with it. That happened on
+# 2026-07-31.
 create_systemd_service() {
+    if [[ -f "$HYDRA_SERVICE" ]]; then
+        print_status "Service unit exists at $HYDRA_SERVICE — leaving it alone"
+        return 0
+    fi
+    if [[ "${HYDRA_PROVISION:-0}" != "1" ]]; then
+        print_warning "No unit at $HYDRA_SERVICE. Re-run with HYDRA_PROVISION=1 to write a starter unit."
+        return 0
+    fi
+
     echo "Creating systemd service..."
-    
+
     cat > "$HYDRA_SERVICE" << EOF
 [Unit]
 Description=Hydra Agent Orchestrator
@@ -221,8 +255,17 @@ EOF
 
 # Setup log rotation
 setup_logrotate() {
+    if [[ -f /etc/logrotate.d/hydra ]]; then
+        print_status "logrotate config exists — leaving it alone"
+        return 0
+    fi
+    if [[ "${HYDRA_PROVISION:-0}" != "1" ]]; then
+        print_warning "No /etc/logrotate.d/hydra. Re-run with HYDRA_PROVISION=1 to write a starter rule."
+        return 0
+    fi
+
     echo "Setting up log rotation..."
-    
+
     cat > /etc/logrotate.d/hydra << 'EOF'
 /var/log/hydra/*.log {
     daily
@@ -244,6 +287,9 @@ EOF
 
 # Setup firewall
 setup_firewall() {
+    if [[ "${HYDRA_PROVISION:-0}" != "1" ]]; then
+        return 0
+    fi
     echo "Configuring firewall..."
     
     # Check if ufw is installed

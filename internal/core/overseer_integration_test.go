@@ -814,6 +814,10 @@ func TestUS002_Overseer_InitializeSkillUpdater_AutoEnabled(t *testing.T) {
 	config := &Config{
 		Pi: PiRootConfig{
 			ConfigDir: "./test-pi-config",
+			// The updater writes into ConfigDir, so it needs manage_config.
+			// Production leaves this false because ConfigDir is shared with
+			// human shells — see TestSkillUpdater_NotCreatedWhenNotManaging.
+			ManageConfig: true,
 			Skills: PiSkillsConfig{
 				AutoUpdate:     true,
 				UpdateInterval: "24h",
@@ -875,6 +879,7 @@ func TestUS002_Overseer_DefaultInterval(t *testing.T) {
 				AutoUpdate:     true,
 				UpdateInterval: "", // Empty - should default to 24h
 			},
+			ManageConfig: true, // the updater writes into ConfigDir
 		},
 		Overseer: OverseerConfig{
 			MaxWorkers:            4,
@@ -912,7 +917,8 @@ func TestUS002_Overseer_CustomInterval(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			config := &Config{
 				Pi: PiRootConfig{
-					ConfigDir: "./test-pi-config",
+					ConfigDir:    "./test-pi-config",
+					ManageConfig: true, // the updater writes into ConfigDir
 					Skills: PiSkillsConfig{
 						AutoUpdate:     true,
 						UpdateInterval: tt.interval,

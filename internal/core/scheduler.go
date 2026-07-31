@@ -51,8 +51,23 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 		readyMap[string(bead.ID)] = bead
 	}
 
+	// Retry state now survives a spawn, so a bead being worked on right now is
+	// still in the snapshot. Queueing it would race a second worker against the
+	// live one for the same bead — the spawner would refuse it, and that refusal
+	// would be recorded as another failure.
+	o.workerMutex.RLock()
+	active := make(map[string]bool, len(o.activeWorkers))
+	for id := range o.activeWorkers {
+		active[id] = true
+	}
+	o.workerMutex.RUnlock()
+
 	for beadID := range retrySnapshot {
 		if _, exists := readyMap[beadID]; exists {
+			continue
+		}
+
+		if active[beadID] {
 			continue
 		}
 
@@ -114,6 +129,11 @@ func (s *Scheduler) Tick() error {
 	if o.IsPaused() {
 		return nil
 	}
+
+	// Give a lowered concurrency limit a way back up. A cut made during a provider
+	// outage cannot be undone by outcome volume alone, because the cut is what
+	// suppresses outcome volume — so the clock has to drive it.
+	o.concurrencyGovernor.MaybeRecover()
 
 	// Get active worker count
 	o.workerMutex.RLock()
@@ -306,8 +326,11 @@ func (s *Scheduler) Tick() error {
 		// when the process exits, however it exits.
 		o.holdProviderSlot(beadIDStr, poolRelease)
 
-		// Clear retry state on successful spawn
-		o.retryManager.ClearRetry(beadIDStr)
+		// Retry state is deliberately NOT cleared here. Clearing on spawn reset the
+		// count on every attempt, so it could never reach 2 and the maxRetries cap
+		// never fired once: across 2026-07-31 every recorded failure was "attempt 1"
+		// and zero beads were ever abandoned. HandleSuccess clears it on actual
+		// completion, which is the only outcome that proves the bead is fine.
 		availableSlots--
 		spawnedCount++
 	}

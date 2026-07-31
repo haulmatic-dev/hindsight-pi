@@ -8,7 +8,7 @@ Type=oneshot
 # Runs as root: it restarts hydra.service and drops to the hydra user for every
 # repo and beads operation itself.
 User=root
-Environment=HYDRA_HOME=/opt/hydra
+Environment=HYDRA_HOME=/opt/dev-tools/var/hydra
 WorkingDirectory=/opt/dev-tools/components/hydra
 ExecStart=/opt/dev-tools/components/hydra/eval/testbed-matrix.sh 180
 # A failing verdict is data, not a unit failure — the script exits 0 for it, and

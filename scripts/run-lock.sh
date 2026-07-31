@@ -24,7 +24,7 @@
 
 set -uo pipefail
 
-HYDRA_HOME="${HYDRA_HOME:-/opt/hydra}"
+HYDRA_HOME="${HYDRA_HOME:-/opt/dev-tools/var/hydra}"
 LOCK="${HYDRA_RUN_LOCK:-$HYDRA_HOME/run.lock}"
 ACTION="${1:-check}"
 # The owner is the CALLER, not this script: $$ here is run-lock.sh's own PID,

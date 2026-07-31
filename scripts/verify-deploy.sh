@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # verify-deploy.sh — prove the RUNNING daemon and worker contain the change.
 #
-# A deploy can succeed and change nothing. systemd runs /opt/hydra/bin/hydra, a
+# A deploy can succeed and change nothing. systemd runs /opt/dev-tools/var/hydra/bin/hydra, a
 # symlink into the repo's bin/, while `command -v hydra` resolves to
 # /usr/local/bin/hydra — a path nothing executes. On 2026-07-30 a full day of
 # deploys landed there: the AIMD governor, failed-chain quarantine and
@@ -29,7 +29,7 @@ SINCE="${1:-$(( $(date +%s) - 600 ))}"
 MARKER="${2:-}"
 MARKER_TARGET="${3:-both}"
 
-HYDRA_HOME="${HYDRA_HOME:-/opt/hydra}"
+HYDRA_HOME="${HYDRA_HOME:-/opt/dev-tools/var/hydra}"
 DAEMON_LINK="$HYDRA_HOME/bin/hydra"
 WORKER_LINK="$HYDRA_HOME/bin/worker"
 

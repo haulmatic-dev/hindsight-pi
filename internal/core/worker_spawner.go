@@ -344,14 +344,24 @@ func openWorkerLogFile(beadID string, pid int) *os.File {
 func streamWorkerOutput(pipe io.Reader, beadID, tag string, f *os.File, mu *sync.Mutex) {
 	scanner := bufio.NewScanner(pipe)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	written := 0
+	capped := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		if f != nil {
 			mu.Lock()
-			fmt.Fprintf(f, "%s%s %s\n", time.Now().Format(time.RFC3339), tag, line)
+			if !capped {
+				n, _ := fmt.Fprintf(f, "%s%s %s\n", time.Now().Format(time.RFC3339), tag, line)
+				written += n
+				if written > maxWorkerLogBytes {
+					capped = true
+					fmt.Fprintf(f, "%s%s [hydra] per-bead log capped at %d bytes; further output for this stream is dropped\n",
+						time.Now().Format(time.RFC3339), tag, maxWorkerLogBytes)
+				}
+			}
 			mu.Unlock()
 			if isNotableWorkerLine(line) {
-				log.Printf("[Worker:%s]%s %s", beadID, tag, line)
+				log.Printf("[Worker:%s]%s %s", beadID, tag, truncateForDaemonLog(line))
 			}
 		} else {
 			log.Printf("[Worker:%s]%s %s", beadID, tag, line)
@@ -359,16 +369,56 @@ func streamWorkerOutput(pipe io.Reader, beadID, tag string, f *os.File, mu *sync
 	}
 }
 
+// maxWorkerLogBytes bounds one stream's per-bead log.
+//
+// The per-bead log is the forensic record — fix_cause.go parses it to explain a
+// failure — so it keeps full lines rather than the daemon log's 2 KB clip. It
+// still needs a ceiling: on 2026-07-31 /opt/hydra/logs/workers held 30 GB across
+// 1,590 files accumulated in two days, with single beads reaching 853 MB of pi
+// stream JSON. Rotation cannot save a directory that grows at 15 GB a day.
+//
+// 32 MB is far more than any real failure needs to explain itself, and bounds
+// the worst case to something a disk can hold. Notable lines still reach the
+// daemon log after the cap, so a capped worker is not a silent worker.
+const maxWorkerLogBytes = 32 << 20
+
+// maxDaemonLogLine bounds a promoted worker line. A notable line's signal is at
+// its start; the rest is payload that belongs in the per-bead log.
+const maxDaemonLogLine = 2000
+
+// truncateForDaemonLog shortens a worker line before it reaches the daemon log,
+// marking the cut so nobody mistakes a clipped line for the whole story.
+func truncateForDaemonLog(s string) string {
+	if len(s) <= maxDaemonLogLine {
+		return s
+	}
+	return s[:maxDaemonLogLine] + fmt.Sprintf(" …[truncated %d bytes; full line in the per-bead log]", len(s)-maxDaemonLogLine)
+}
+
 // isNotableWorkerLine reports whether a worker output line is important enough
 // to also surface to the daemon log (errors, failures, rate limits), so those
 // stay visible without the full per-bead firehose.
 func isNotableWorkerLine(s string) bool {
+	trimmed := strings.TrimSpace(s)
+
 	// Hindsight memory recall lines quote past failures ("Task X failed
 	// with...") — the recalled TEXT matching failure keywords does not make
 	// the line itself notable.
-	if strings.HasPrefix(strings.TrimSpace(s), "Memory ") {
+	if strings.HasPrefix(trimmed, "Memory ") {
 		return false
 	}
+
+	// pi's stream-JSON control events are machine traffic, and their payloads
+	// (thinking text, tool results, echoed source) routinely contain "error",
+	// "failed" and "timeout" as ordinary content. Promoting them wrote 1.56 GB
+	// into the daemon log in 4h50m on 2026-07-31 at ~12 KB a line, and — worse
+	// than the disk cost — it salted the log with phrases that made every
+	// unanchored grep report failures that never happened. The per-bead log
+	// keeps every one of these lines; the daemon log does not need them.
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[{") {
+		return false
+	}
+
 	l := strings.ToLower(s)
 	for _, k := range []string{
 		"❌", "panic", "fatal", "error:", "failed", "timed out", "timeout",

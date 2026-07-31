@@ -1,6 +1,7 @@
 package core
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,5 +49,24 @@ func TestWorktreeRoot_UniquePerProject(t *testing.T) {
 	b := worktreeRoot("/home/bob/projects/svc")
 	if a == b {
 		t.Errorf("distinct projects must get distinct roots; both = %q", a)
+	}
+}
+
+// TestWorktreeRoot_TestsNeverTouchProductionState is the regression test for the
+// 10,251 dead worktree registrations found under /opt/hydra/.hydra-worktrees on
+// 2026-07-31. They were created by workers running this repo's own test suite:
+// the daemon exports HYDRA_HOME=/opt/hydra, workers inherit it, and any test
+// that created a worktree therefore wrote into live state.
+//
+// TestMain pins HYDRA_HOME to a temp dir for the whole package, so a test that
+// does not set it explicitly must never resolve to the production root.
+func TestWorktreeRoot_TestsNeverTouchProductionState(t *testing.T) {
+	root := worktreeRoot("/home/alice/projects/svc")
+
+	if strings.HasPrefix(root, "/opt/hydra") {
+		t.Fatalf("a test resolved the PRODUCTION worktree root (%q) — TestMain isolation is not in effect", root)
+	}
+	if got := os.Getenv("HYDRA_HOME"); got == "/opt/hydra" || got == "" {
+		t.Errorf("HYDRA_HOME = %q during tests, want an isolated temp dir", got)
 	}
 }

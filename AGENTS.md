@@ -89,6 +89,21 @@ After implementation:
 
 ---
 
+## Picking Up Development
+
+Read `docs/operations/handoff-20260731.md` first. It records the current state of
+the box, what changed most recently, the open work in priority order, and — most
+importantly — the measurement traps that produced wrong conclusions repeatedly.
+Two you will hit within your first hour:
+
+- **Anchor log greps on the daemon's own prefix.** Worker output is echoed into the
+  same file as `[Worker:<bead>] [stderr] {...}`, which also starts with a bracket.
+  An unanchored grep reported 473 `infra-exhausted` events that never happened and
+  20 gap-to-prd cycles the daemon never logged. Run every count twice, with and
+  without `grep -vE '^[0-9/]+ [0-9:]+ \[Worker:'`; if they differ, it is contaminated.
+- **`grep -c` exits 1 on no match**, so `$(grep -c x f || echo 0)` yields `"0\n0"`
+  and every `[ ... -eq ]` on it dies — falsy, so guards built that way never fire.
+
 ## Hydra-Specific Patterns (Quick Reference)
 
 ### Shepherd Layer (read before touching close/chain/fix/scheduler code)
@@ -174,6 +189,82 @@ pi:
 ```bash
 ls <dev-tools-checkout>/config/pi/skills/
 # Should show: angular-component, golang-patterns, test-driven-development, tdd-chain-validation, ...
+```
+
+### 1b. Paths: code, config and state are separate
+
+```
+/opt/dev-tools/components/hydra/   code (git checkout) — never written at runtime
+/opt/dev-tools/config/pi/          shared Pi config (see 1a)
+/opt/dev-tools/var/hydra/          runtime state = $HYDRA_HOME = the hydra user's home
+/var/log/hydra/                    daemon stdout/stderr, written by systemd
+```
+
+Runtime state must NOT live inside the code checkout. It is a git working tree: a
+`.hydra-events/` directory was once committed into the repo from a cwd fallback,
+and `git clean -fdx` there would delete live worktrees and the run lock. `var/` is
+gitignored in the `/opt/dev-tools` monorepo for the same reason.
+
+`/opt/hydra` is a compatibility symlink to `/opt/dev-tools/var/hydra` and will be
+removed; do not write new references to it.
+
+**Never let a test use the real `$HYDRA_HOME`.** `TestMain` in `internal/core`
+pins it to a temp dir. Without that, tests inherit the daemon's value — workers
+running this repo's suite created 10,251 dead worktree entries in live state.
+
+**Never deploy to `command -v hydra`.** systemd runs `$HYDRA_HOME/bin/hydra`;
+`/usr/local/bin/hydra` is a different file, and installing there succeeds while
+changing nothing. Build packages (`./cmd/hydra`), not single files, then prove it
+with `scripts/verify-deploy.sh`.
+
+Full reference: `docs/architecture/filesystem-layout.md`.
+
+### 1a. One Pi config, shared with humans (CRITICAL)
+
+`config_dir` and `worker_config_dir` MUST be the same directory, and hydra MUST
+NOT write to it:
+
+```yaml
+pi:
+  config_dir: /opt/dev-tools/config/pi
+  worker_config_dir: /opt/dev-tools/config/pi   # same value, deliberately
+  manage_config: false                          # read-only: never write here
+```
+
+That directory is also every human's Pi config — each user's `~/.pi/agent` is a
+symlink to it — so a skill or extension added once is used by the worker fleet
+and by interactive shells alike.
+
+**Never split them again.** They were split until 2026-07-31:
+`/opt/dev-tools/config/pi-worker` was a generated `rsync` copy, and it drifted
+to 239 npm packages against the canonical 242 with nothing detecting it. Its two
+original purposes are both obsolete — the "remove context-mode for faster
+startup" edit had stopped applying (the copy still listed
+`npm:context-mode@1.0.169`), and workers bypass `settings.json` discovery anyway
+via `--no-extensions`; and "keep sessions separate" is unnecessary because Pi
+namespaces `sessions/` by working directory, which is already unique per worker
+worktree.
+
+**`manage_config: false` is the default and must stay false for a shared
+directory.** When true, daemon startup creates the directory structure, installs
+Pi and LSP servers, and refreshes skills on a timer — i.e. it edits the team's
+environment as a side effect of starting. Set it true only for a config
+directory hydra alone owns.
+
+**Extensions are chosen by hydra, not discovered.** The daemon passes a per-phase
+allowlist (`agents.pi.extensions`, default `[rtk, context-mode]`, overridable per
+phase via `phase_extensions`); the worker turns that into `--no-extensions` plus
+explicit `-e <abs path>` resolved from `{config_dir}/npm/node_modules`. This is
+why sharing the config does not drag in the interactive extras: loading
+everything measured 48,315 tokens against 12,059 for rtk alone, and themes and
+editor widgets are unusable by a headless worker.
+
+**Verify before trusting any of the above:**
+```bash
+scripts/verify-pi-config.sh
+# asserts: the two dirs match, it is a Pi package root, every allowlisted
+# extension resolves, each ~/.pi/agent points at it, and no retired copy is
+# still referenced
 ```
 
 **Verify local fallback:**

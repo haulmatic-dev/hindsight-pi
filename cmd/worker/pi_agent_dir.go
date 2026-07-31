@@ -10,8 +10,13 @@ import (
 //
 // Two layouts exist in practice and they differ by exactly one level:
 //
-//	~/.pi/agent/{settings.json, npm/node_modules}                 (developer machine)
-//	/opt/dev-tools/config/pi-worker/{settings.json, npm/node_modules}  (VPS worker config)
+//	~/.pi/agent/{settings.json, npm/node_modules}              (developer machine)
+//	/opt/dev-tools/config/pi/{settings.json, npm/node_modules}  (VPS, shared)
+//
+// The VPS path was /opt/dev-tools/config/pi-worker until 2026-07-31, a generated
+// rsync copy of the canonical config. It was retired: workers and interactive
+// shells now resolve the same directory, so a skill or extension added once is
+// used by both.
 //
 // The worker used to append "agent" unconditionally. On the VPS layout that names
 // a directory containing neither, and Pi then reports "No packages installed" —

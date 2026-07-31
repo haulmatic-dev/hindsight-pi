@@ -235,12 +235,15 @@ Hydra's Collective Unconscious is a cross-project pattern learning system that e
 - [Worker Lifecycle](docs/architecture/worker-lifecycle-20260309.md) - How workers are spawned, monitored, and terminated
 - [Collective Unconscious](docs/collective-unconscious/test-results/TEST_RESULTS.md) - Pattern learning and injection
 - [Pi Agent Skills](docs/pi-agent-skills-implementation.md) - Automatic installation and management of 16 specialized coding skills for Pi agents
+- [Pi Configuration](docs/architecture/pi-config.md) - One shared Pi config for workers and human shells: what is shared, why `manage_config` is read-only, how extensions are chosen
+- [Filesystem Layout](docs/architecture/filesystem-layout.md) - Where code, shared config and runtime state live on the VPS, and why state is not in the checkout
 
 ### ⚙️ Operations
 - [Configuration Guide](docs/operations/configuration-guide-20260309.md) - hydra.yaml reference
 - [Monitoring & Metrics](docs/operations/monitoring-metrics-20260309.md) - Observability and alerting
 - [Hindsight Memory Optimization](docs/HINDSIGHT_MEMORY_OPTIMIZATION.md) - Reduce memory usage from 10GB to 3-6GB using cloud providers
 - [Hindsight Memory Management](docs/HINDSIGHT_MEMORY_MANAGEMENT.md) - Understanding and managing Hindsight memory usage
+- [Handoff 2026-07-31](docs/operations/handoff-20260731.md) - **Start here if picking up development**: how not to be wrong about this system, what changed, open work in priority order
 - [Troubleshooting](docs/operations/troubleshooting-20260309.md) - Common issues and solutions
 
 ### 💻 Development

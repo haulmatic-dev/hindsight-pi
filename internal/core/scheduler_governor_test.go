@@ -72,37 +72,29 @@ func TestScheduler_GovernorEnabled_ShrinksAvailableSlots(t *testing.T) {
 		t.Fatalf("effective max before outcomes = %d, want 5", got)
 	}
 
-	// Record a full window of provider-shaped failures to trigger a decrease.
+	// Each full window of provider-shaped failures steps the limit down by one.
 	for i := 0; i < 8; i++ {
 		o.concurrencyGovernor.RecordOutcome(false)
 	}
-	if got := s.effectiveMaxWorkers(5); got != 3 {
-		t.Fatalf("effective max after first decrease = %d, want 3", got)
+	if got := s.effectiveMaxWorkers(5); got != 4 {
+		t.Fatalf("effective max after first decrease = %d, want 4", got)
 	}
 
 	addActiveWorkers(t, o, 1)
-	if got := s.GetAvailableWorkerSlots(); got != 2 {
-		t.Fatalf("available slots with limit 3 and 1 active = %d, want 2", got)
+	if got := s.GetAvailableWorkerSlots(); got != 3 {
+		t.Fatalf("available slots with limit 4 and 1 active = %d, want 3", got)
 	}
 
-	// Another full window of failures pushes the limit down to 2.
-	for i := 0; i < 8; i++ {
-		o.concurrencyGovernor.RecordOutcome(false)
-	}
-	if got := s.effectiveMaxWorkers(5); got != 2 {
-		t.Fatalf("effective max after second decrease = %d, want 2", got)
-	}
-	if got := s.GetAvailableWorkerSlots(); got != 1 {
-		t.Fatalf("available slots with limit 2 and 1 active = %d, want 1", got)
+	for _, want := range []int{3, 2, 1} {
+		for i := 0; i < 8; i++ {
+			o.concurrencyGovernor.RecordOutcome(false)
+		}
+		if got := s.effectiveMaxWorkers(5); got != want {
+			t.Fatalf("effective max after decrease = %d, want %d", got, want)
+		}
 	}
 
-	// A third window reaches the floor of 1.
-	for i := 0; i < 8; i++ {
-		o.concurrencyGovernor.RecordOutcome(false)
-	}
-	if got := s.effectiveMaxWorkers(5); got != 1 {
-		t.Fatalf("effective max at floor = %d, want 1", got)
-	}
+	// The floor holds at 1: one active worker leaves no free slot.
 	if got := s.GetAvailableWorkerSlots(); got != 0 {
 		t.Fatalf("available slots with limit 1 and 1 active = %d, want 0", got)
 	}
@@ -145,11 +137,11 @@ func TestScheduler_GovernorEnabled_AbsentConfig_BehaviourUnchanged(t *testing.T)
 func TestScheduler_GovernorRecoversOneSlotPerWindow(t *testing.T) {
 	s, o := newTestScheduler(t, 5, testGovernorConfig())
 
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 16; i++ {
 		o.concurrencyGovernor.RecordOutcome(false)
 	}
 	if got := s.effectiveMaxWorkers(5); got != 3 {
-		t.Fatalf("effective max after decrease = %d, want 3", got)
+		t.Fatalf("effective max after two decreases = %d, want 3", got)
 	}
 
 	// Advance past the cooldown so a full window of successes can raise the limit.

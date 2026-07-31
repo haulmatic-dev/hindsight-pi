@@ -129,22 +129,35 @@ writing files — anchor on the log's line structure before trusting a block.
 
 ## 4. Concurrency governor (B1) — `concurrency_governor.go`, `scheduler.go`
 
-AIMD (additive-increase / multiplicative-decrease — TCP congestion control
-applied to worker slots). When the provider degrades, the fleet's own request
-pressure raises its exposure to the very overload stalling it (measured: 219
-activity timeouts vs 4 clean turns in one storm). The governor thins the
-fleet instead of freezing it:
+Additive-increase / additive-decrease over worker slots. When the provider
+degrades, the fleet's own request pressure raises its exposure to the very
+overload stalling it (measured: 219 activity timeouts vs 4 clean turns in one
+storm). The governor thins the fleet instead of freezing it:
 
 - **Signal:** worker completions. Only provider-shaped outcomes count —
-  success, or failure with exit 2/7/activity-timeout. A bead failing on its
+  success, or failure with exit 2 (429) or 3 (timeout). A bead failing on its
   own defect (exit 1/5) says nothing about provider health and never shrinks
-  the fleet.
-- **Decrease:** window of 8 outcomes ≥ 50% failures → halve the limit (round
-  up), floor 1. Never a hard stop: one worker always proceeds.
+  the fleet. **Exit 7 is excluded**: it is a capacity blip that clears in
+  seconds, and feeding it in made the governor and the provider pool two
+  controllers fighting over one actuator.
+- **Decrease:** window of 8 outcomes ≥ 50% failures → limit − 1, floor 1.
+  Never a hard stop: one worker always proceeds.
 - **Increase:** ≤ 1 failure in a full window and ≥ 120s since last change →
   +1 slot, up to `max_workers`.
+- **Quiet recovery:** no provider-pressure failure for `recovery_interval_seconds`
+  (default 300) → +1 slot, *regardless of how many outcomes have been seen*.
+  Driven from the scheduler tick, not from outcomes.
 - **Read:** scheduler computes slots from `min(max_workers, Limit())`.
   Every change logs `[Governor] concurrency N -> M (reason)`.
+
+*Why the last two rules look like that.* The original design halved on decrease
+and recovered only on a full window of outcomes. Both failed together on
+2026-07-31: a single one-hour provider capacity window took the limit 4 → 2 → 1,
+and it then stayed at 1 for the remaining 2.5 hours on one completion. Halving
+overshoots at the small limits we actually run at, and recovery gated on outcome
+volume cannot undo a deep cut, because the cut is precisely what suppresses
+outcome volume. A lower limit yields fewer completions, so the window never
+refills, so the limit never rises.
 
 Config (default **disabled** — absent block is byte-identical to no governor):
 
@@ -156,6 +169,7 @@ overseer:
     decrease_threshold: 0.5
     increase_threshold: 0.125
     cooldown_seconds: 120
+    recovery_interval_seconds: 300
 ```
 
 Composes with the provider circuit breaker: the breaker pauses spawns for a

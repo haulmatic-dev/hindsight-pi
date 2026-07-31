@@ -5,7 +5,7 @@
 set -e
 
 HYDRA_USER="hydra"
-HYDRA_HOME="/opt/hydra"
+HYDRA_HOME="${HYDRA_HOME:-/opt/dev-tools/var/hydra}"
 HYDRA_CONFIG="/etc/hydra/hydra.yaml"
 
 # Colors
