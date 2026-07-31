@@ -287,7 +287,32 @@ func TestPerformCleanup_OldOrphanUpdateFailureIsLogged(t *testing.T) {
 	}
 }
 
-// Ensure the log-capture tests do not leak log output state if they panic.
+// TestMain isolates this package's tests from the production state directory,
+// and ensures the log-capture tests do not leak log output state if they panic.
+//
+// worktreeRoot() roots worktrees under $HYDRA_HOME, which is exactly right in
+// production and catastrophic under test: the daemon sets HYDRA_HOME=/opt/hydra
+// and workers inherit it, so when a worker ran this repo's own test suite (hydra
+// dogfooding hydra), every test that created a worktree registered it in the
+// live state directory. That accumulated 10,251 dead entries under
+// /opt/hydra/.hydra-worktrees by 2026-07-31 — none with a .git file, all named
+// after Go test functions — and Charon then walked all of them on every orphan
+// sweep.
+//
+// Forcing HYDRA_HOME to a per-run temp directory here fixes it for every test in
+// the package, including ones not yet written. Tests that assert on a specific
+// HYDRA_HOME still use t.Setenv, which overrides this and restores it after.
 func TestMain(m *testing.M) {
-	os.Exit(m.Run())
+	tmp, err := os.MkdirTemp("", "hydra-core-test-home-")
+	if err != nil {
+		panic("could not create an isolated HYDRA_HOME for tests: " + err.Error())
+	}
+	if err := os.Setenv("HYDRA_HOME", tmp); err != nil {
+		panic("could not isolate HYDRA_HOME: " + err.Error())
+	}
+
+	code := m.Run()
+
+	os.RemoveAll(tmp)
+	os.Exit(code)
 }

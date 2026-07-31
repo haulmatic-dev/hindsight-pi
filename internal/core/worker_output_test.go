@@ -81,3 +81,62 @@ func TestTruncateForDaemonLog(t *testing.T) {
 		t.Error("a clipped line must say so, or it reads as the whole story")
 	}
 }
+
+// TestStreamWorkerOutput_CapsPerBeadLog: the per-bead log is the forensic record,
+// but it cannot be unbounded. 30 GB accumulated across 1,590 files in two days on
+// 2026-07-31, one bead reaching 853 MB.
+func TestStreamWorkerOutput_CapsPerBeadLog(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "wl-*.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 512 KB lines, well under the scanner's 1 MB token limit, repeated past the cap.
+	line := strings.Repeat("x", 512<<10) + "\n"
+	var sb strings.Builder
+	for i := 0; i < 80; i++ {
+		sb.WriteString(line)
+	}
+
+	var mu sync.Mutex
+	streamWorkerOutput(strings.NewReader(sb.String()), "bead-big", "", f, &mu)
+	_ = f.Close()
+
+	fi, err := os.Stat(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The cap is checked after a write, so allow one oversized line plus the notice.
+	limit := int64(maxWorkerLogBytes) + int64(2<<20)
+	if fi.Size() > limit {
+		t.Errorf("per-bead log grew to %d bytes, cap is %d", fi.Size(), maxWorkerLogBytes)
+	}
+
+	data, _ := os.ReadFile(f.Name())
+	if !strings.Contains(string(data), "per-bead log capped") {
+		t.Error("a capped log must say it was capped, or it reads as complete output")
+	}
+}
+
+// TestStreamWorkerOutput_SmallLogsUncapped guards against the cap changing normal
+// behaviour: an ordinary worker log must be written in full.
+func TestStreamWorkerOutput_SmallLogsUncapped(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "wl-*.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	streamWorkerOutput(strings.NewReader("first\nsecond\nthird\n"), "bead-small", "", f, &mu)
+	_ = f.Close()
+
+	data, _ := os.ReadFile(f.Name())
+	s := string(data)
+	for _, want := range []string{"first", "second", "third"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("line %q missing from an uncapped log", want)
+		}
+	}
+	if strings.Contains(s, "capped") {
+		t.Error("a small log was reported as capped")
+	}
+}
