@@ -60,6 +60,20 @@ emit() {
 # Guards. A missing testbed or PRD is an ops problem, not a harness failure —
 # report inconclusive so the deploy gate warns instead of blocking.
 # ---------------------------------------------------------------------------
+# Never restart the daemon on top of an in-flight run. On 2026-07-31 this
+# script did exactly that at 02:03, bouncing a dogfood run mid-flight, because
+# nothing checked. Report inconclusive rather than fail: a skipped night is an
+# ops gap, not a behavioural regression, and must not block deploys.
+LOCK_SH="$(dirname "$0")/../scripts/run-lock.sh"
+if [ -x "$LOCK_SH" ] && "$LOCK_SH" check; then
+  emit inconclusive "skipped: $("$LOCK_SH" describe) already owns the daemon"
+  exit 0
+fi
+if [ -x "$LOCK_SH" ]; then
+  "$LOCK_SH" acquire matrix "$PRD" >/dev/null || { emit inconclusive "could not acquire the run lock"; exit 0; }
+  trap '"$LOCK_SH" release >/dev/null 2>&1' EXIT
+fi
+
 [ -d "$TESTBED/.git" ] || { emit inconclusive "testbed repo not found at $TESTBED"; exit 0; }
 [ -f "$TESTBED/$PRD" ]  || { emit inconclusive "testbed PRD missing: $PRD"; exit 0; }
 

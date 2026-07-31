@@ -80,6 +80,15 @@ build_binaries() {
         exit 1
     fi
 
+    # An in-flight run owns the daemon. Deploying restarts it, which kills every
+    # worker mid-task and makes the run redo that work — the single largest
+    # source of wasted capacity measured on 2026-07-30.
+    if [[ -x "scripts/run-lock.sh" ]] && scripts/run-lock.sh check; then
+        print_error "Deploy refused: $(scripts/run-lock.sh describe)"
+        print_warning "Wait for it to finish, or override with HYDRA_IGNORE_RUN_LOCK=1"
+        [[ "${HYDRA_IGNORE_RUN_LOCK:-0}" == "1" ]] || exit 1
+    fi
+
     # Nightly known-answer verdict (Shepherd D2). Blocks only on a fresh `fail`
     # — a missing, stale, or inconclusive verdict warns and proceeds, because
     # absence of evidence is not evidence of a regression.
