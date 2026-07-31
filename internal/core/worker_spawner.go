@@ -351,7 +351,7 @@ func streamWorkerOutput(pipe io.Reader, beadID, tag string, f *os.File, mu *sync
 			fmt.Fprintf(f, "%s%s %s\n", time.Now().Format(time.RFC3339), tag, line)
 			mu.Unlock()
 			if isNotableWorkerLine(line) {
-				log.Printf("[Worker:%s]%s %s", beadID, tag, line)
+				log.Printf("[Worker:%s]%s %s", beadID, tag, truncateForDaemonLog(line))
 			}
 		} else {
 			log.Printf("[Worker:%s]%s %s", beadID, tag, line)
@@ -359,16 +359,43 @@ func streamWorkerOutput(pipe io.Reader, beadID, tag string, f *os.File, mu *sync
 	}
 }
 
+// maxDaemonLogLine bounds a promoted worker line. A notable line's signal is at
+// its start; the rest is payload that belongs in the per-bead log.
+const maxDaemonLogLine = 2000
+
+// truncateForDaemonLog shortens a worker line before it reaches the daemon log,
+// marking the cut so nobody mistakes a clipped line for the whole story.
+func truncateForDaemonLog(s string) string {
+	if len(s) <= maxDaemonLogLine {
+		return s
+	}
+	return s[:maxDaemonLogLine] + fmt.Sprintf(" …[truncated %d bytes; full line in the per-bead log]", len(s)-maxDaemonLogLine)
+}
+
 // isNotableWorkerLine reports whether a worker output line is important enough
 // to also surface to the daemon log (errors, failures, rate limits), so those
 // stay visible without the full per-bead firehose.
 func isNotableWorkerLine(s string) bool {
+	trimmed := strings.TrimSpace(s)
+
 	// Hindsight memory recall lines quote past failures ("Task X failed
 	// with...") — the recalled TEXT matching failure keywords does not make
 	// the line itself notable.
-	if strings.HasPrefix(strings.TrimSpace(s), "Memory ") {
+	if strings.HasPrefix(trimmed, "Memory ") {
 		return false
 	}
+
+	// pi's stream-JSON control events are machine traffic, and their payloads
+	// (thinking text, tool results, echoed source) routinely contain "error",
+	// "failed" and "timeout" as ordinary content. Promoting them wrote 1.56 GB
+	// into the daemon log in 4h50m on 2026-07-31 at ~12 KB a line, and — worse
+	// than the disk cost — it salted the log with phrases that made every
+	// unanchored grep report failures that never happened. The per-bead log
+	// keeps every one of these lines; the daemon log does not need them.
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[{") {
+		return false
+	}
+
 	l := strings.ToLower(s)
 	for _, k := range []string{
 		"❌", "panic", "fatal", "error:", "failed", "timed out", "timeout",
