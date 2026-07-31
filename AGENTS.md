@@ -176,6 +176,34 @@ ls <dev-tools-checkout>/config/pi/skills/
 # Should show: angular-component, golang-patterns, test-driven-development, tdd-chain-validation, ...
 ```
 
+### 1b. Paths: code, config and state are separate
+
+```
+/opt/dev-tools/components/hydra/   code (git checkout) — never written at runtime
+/opt/dev-tools/config/pi/          shared Pi config (see 1a)
+/opt/dev-tools/var/hydra/          runtime state = $HYDRA_HOME = the hydra user's home
+/var/log/hydra/                    daemon stdout/stderr, written by systemd
+```
+
+Runtime state must NOT live inside the code checkout. It is a git working tree: a
+`.hydra-events/` directory was once committed into the repo from a cwd fallback,
+and `git clean -fdx` there would delete live worktrees and the run lock. `var/` is
+gitignored in the `/opt/dev-tools` monorepo for the same reason.
+
+`/opt/hydra` is a compatibility symlink to `/opt/dev-tools/var/hydra` and will be
+removed; do not write new references to it.
+
+**Never let a test use the real `$HYDRA_HOME`.** `TestMain` in `internal/core`
+pins it to a temp dir. Without that, tests inherit the daemon's value — workers
+running this repo's suite created 10,251 dead worktree entries in live state.
+
+**Never deploy to `command -v hydra`.** systemd runs `$HYDRA_HOME/bin/hydra`;
+`/usr/local/bin/hydra` is a different file, and installing there succeeds while
+changing nothing. Build packages (`./cmd/hydra`), not single files, then prove it
+with `scripts/verify-deploy.sh`.
+
+Full reference: `docs/architecture/filesystem-layout.md`.
+
 ### 1a. One Pi config, shared with humans (CRITICAL)
 
 `config_dir` and `worker_config_dir` MUST be the same directory, and hydra MUST

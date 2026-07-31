@@ -119,7 +119,7 @@ done
 
 # 5. A retired copy left on disk is fine; a retired copy still referenced is
 #    how the drift comes back.
-for stale in /opt/dev-tools/config/pi-worker /opt/hydra/pi-config /opt/hydra/.agents/skills; do
+for stale in /opt/dev-tools/config/pi-worker /opt/dev-tools/var/hydra/pi-config /opt/dev-tools/var/hydra/.agents/skills; do
 	if [ -e "$stale" ]; then
 		if grep -qs -- "$stale" "$CONFIG"; then
 			bad "$stale still exists AND is referenced by $CONFIG"

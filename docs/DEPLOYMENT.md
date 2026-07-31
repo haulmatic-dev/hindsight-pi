@@ -94,7 +94,7 @@ sudo ./scripts/deploy.sh --verbose
 ### Step 1: Create User
 
 ```bash
-sudo useradd -r -s /bin/false -d /opt/hydra -m hydra
+sudo useradd -r -s /bin/false -d /opt/dev-tools/var/hydra -m hydra
 sudo usermod -aG docker hydra  # If using Docker
 ```
 
@@ -102,18 +102,18 @@ sudo usermod -aG docker hydra  # If using Docker
 
 ```bash
 # Create directories
-sudo mkdir -p /opt/hydra/{bin,logs,config}
+sudo mkdir -p /opt/dev-tools/var/hydra/{bin,logs,config}
 sudo mkdir -p /etc/hydra
 sudo mkdir -p /var/log/hydra
 sudo mkdir -p /var/lib/hydra
 
 # Build
 cd /path/to/hydra
-go build -o /opt/hydra/bin/hydra cmd/hydra/main.go
-go build -o /opt/hydra/bin/worker cmd/worker/main.go
+go build -o /opt/dev-tools/var/hydra/bin/hydra ./cmd/hydra
+go build -o /opt/dev-tools/var/hydra/bin/worker ./cmd/worker
 
 # Set ownership
-sudo chown -R hydra:hydra /opt/hydra
+sudo chown -R hydra:hydra /opt/dev-tools/var/hydra
 sudo chown -R hydra:hydra /var/log/hydra
 sudo chown -R hydra:hydra /var/lib/hydra
 ```
@@ -197,7 +197,7 @@ Service file location: `/etc/systemd/system/hydra.service`
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `HYDRA_CONFIG` | Config file path | `/etc/hydra/hydra.yaml` |
-| `HYDRA_HOME` | Installation directory | `/opt/hydra` |
+| `HYDRA_HOME` | Installation directory | `/opt/dev-tools/var/hydra` |
 | `HYDRA_ENVIRONMENT` | Environment name | `production` |
 | `HYDRA_DEBUG` | Enable debug logging | `false` |
 | `HYDRA_LOG_LEVEL` | Log level | `info` |
@@ -345,8 +345,8 @@ sudo chmod 600 /etc/hydra/hydra.yaml
 sudo chown hydra:hydra /etc/hydra/hydra.yaml
 
 # Binaries
-sudo chmod 755 /opt/hydra/bin/*
-sudo chown root:root /opt/hydra/bin/*
+sudo chmod 755 /opt/dev-tools/var/hydra/bin/*
+sudo chown root:root /opt/dev-tools/var/hydra/bin/*
 
 # Logs
 sudo chmod 640 /var/log/hydra/*
@@ -447,14 +447,14 @@ sudo certbot --nginx -d hydra.yourdomain.com
 
 3. **Check permissions:**
    ```bash
-   ls -la /opt/hydra/bin/
+   ls -la /opt/dev-tools/var/hydra/bin/
    ls -la /etc/hydra/
    ls -la /var/log/hydra/
    ```
 
 4. **Test manually:**
    ```bash
-   sudo -u hydra /opt/hydra/bin/hydra -config /etc/hydra/hydra.yaml
+   sudo -u hydra /opt/dev-tools/var/hydra/bin/hydra -config /etc/hydra/hydra.yaml
    ```
 
 ### High Resource Usage
@@ -494,7 +494,7 @@ du -sh /var/lib/hydra/
 
 3. **Test manually:**
    ```bash
-   HYDRA_BEAD_ID=test HYDRA_PROJECT=test /opt/hydra/bin/worker
+   HYDRA_BEAD_ID=test HYDRA_PROJECT=test /opt/dev-tools/var/hydra/bin/worker
    ```
 
 ### API Not Responding
@@ -583,7 +583,7 @@ sudo ./scripts/hydra-service.sh update
 sudo systemctl stop hydra
 
 # 2. Pull latest code
-cd /opt/hydra
+cd /opt/dev-tools/var/hydra
 git pull origin main
 
 # 3. Build new binaries

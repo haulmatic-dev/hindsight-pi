@@ -236,6 +236,7 @@ Hydra's Collective Unconscious is a cross-project pattern learning system that e
 - [Collective Unconscious](docs/collective-unconscious/test-results/TEST_RESULTS.md) - Pattern learning and injection
 - [Pi Agent Skills](docs/pi-agent-skills-implementation.md) - Automatic installation and management of 16 specialized coding skills for Pi agents
 - [Pi Configuration](docs/architecture/pi-config.md) - One shared Pi config for workers and human shells: what is shared, why `manage_config` is read-only, how extensions are chosen
+- [Filesystem Layout](docs/architecture/filesystem-layout.md) - Where code, shared config and runtime state live on the VPS, and why state is not in the checkout
 
 ### ⚙️ Operations
 - [Configuration Guide](docs/operations/configuration-guide-20260309.md) - hydra.yaml reference

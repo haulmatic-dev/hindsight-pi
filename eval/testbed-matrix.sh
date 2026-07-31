@@ -24,7 +24,7 @@ set -uo pipefail
 TIMEOUT_MIN="${1:-180}"
 TESTBED="${HYDRA_TESTBED_DIR:-/home/buddhi/projects/source-to-pay/hydra-testbed}"
 PRD="docs/PRDs/testbed-notes-v1-20260728.md"
-HYDRA_HOME="${HYDRA_HOME:-/opt/hydra}"
+HYDRA_HOME="${HYDRA_HOME:-/opt/dev-tools/var/hydra}"
 DAEMON_LOG="/var/log/hydra/hydra-error.log"
 HISTORY="$TESTBED/docs/assertion-history.jsonl"
 VERDICT="$HYDRA_HOME/shepherd/testbed-verdict.json"

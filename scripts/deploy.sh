@@ -9,7 +9,7 @@ ENVIRONMENT="${1:-production}"
 # Baseline for the post-deploy freshness assertion (see scripts/verify-deploy.sh).
 DEPLOY_STARTED_AT="$(date +%s)"
 HYDRA_USER="hydra"
-HYDRA_HOME="/opt/hydra"
+HYDRA_HOME="${HYDRA_HOME:-/opt/dev-tools/var/hydra}"
 HYDRA_CONFIG="/etc/hydra/hydra.yaml"
 HYDRA_SERVICE="/etc/systemd/system/hydra.service"
 

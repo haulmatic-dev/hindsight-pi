@@ -8,6 +8,17 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Changed
+- **Runtime state moved out of `/opt/hydra` into `/opt/dev-tools/var/hydra`.**
+  Code (`components/hydra`), shared config (`config/pi`) and runtime state
+  (`var/hydra`) now sit side by side under `/opt/dev-tools`, split by what changes
+  them. `$HYDRA_HOME`, the `hydra` user's home, three systemd units, logrotate and
+  the shell-script defaults all point at the new path; `/opt/hydra` remains as a
+  compatibility symlink and will be removed after a clean run. `var/` is
+  gitignored in the monorepo — state must never sit in a git working tree, which
+  is how a `.hydra-events/` directory once got committed. See
+  `docs/architecture/filesystem-layout.md`.
+- **Per-bead worker logs rotate daily with `maxsize 64M`** instead of weekly with
+  `rotate 2`, which could not contain a directory growing at ~15 GB/day.
 - **Pi config consolidated to one shared directory.** `pi.worker_config_dir` now
   equals `pi.config_dir` (`/opt/dev-tools/config/pi`), so hydra workers and human
   shells resolve the same skills and extensions. The old generated copy at
@@ -31,6 +42,15 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   `~/.pi/agent` points at it, and no retired copy is still referenced.
 
 ### Fixed
+- **Per-bead worker logs are capped at 32 MB per stream.** `logs/workers/` had
+  reached 30 GB across 1,590 files in two days, with single beads writing 853 MB
+  of pi stream JSON. A capped log says so in the file, so it cannot be mistaken
+  for complete output.
+- **Tests no longer write to production state.** `worktreeRoot()` roots worktrees
+  under `$HYDRA_HOME`; the daemon exports it and workers inherit it, so a worker
+  running this repo's own suite registered every test worktree in live state —
+  10,251 dead entries, each named after a Go test function, which Charon walked on
+  every orphan sweep. `TestMain` now pins `HYDRA_HOME` to a per-run temp dir.
 - **Retry cap had never fired.** Retry state was cleared on successful *spawn*
   rather than completion, so the count could never reach 2. Provider failures
   (429/timeout/overload/quota) now pace retries without consuming the budget;

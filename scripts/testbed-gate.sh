@@ -21,7 +21,7 @@
 
 set -uo pipefail
 
-HYDRA_HOME="${HYDRA_HOME:-/opt/hydra}"
+HYDRA_HOME="${HYDRA_HOME:-/opt/dev-tools/var/hydra}"
 VERDICT="${HYDRA_TESTBED_VERDICT:-$HYDRA_HOME/shepherd/testbed-verdict.json}"
 MAX_AGE_HOURS="${HYDRA_TESTBED_MAX_AGE_HOURS:-36}"
 

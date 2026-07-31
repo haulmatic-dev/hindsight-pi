@@ -21,7 +21,7 @@ Every user reaches the same tree through a symlink:
 ```
 /root/.pi/agent           -> /opt/dev-tools/config/pi
 /home/<user>/.pi/agent    -> /opt/dev-tools/config/pi
-/opt/hydra/.pi/agent      -> /opt/dev-tools/config/pi     # the daemon user
+/opt/dev-tools/var/hydra/.pi/agent      -> /opt/dev-tools/config/pi     # the daemon user
 ```
 
 So a skill or extension installed once is available to the fleet and to whoever
@@ -110,13 +110,13 @@ skills trees were identical.
 
 The copy was retired to `/opt/dev-tools/config/pi-worker.retired-20260731`, and
 these dormant leftovers under the daemon home were moved to
-`/opt/hydra/.retired-pi-config-20260731`:
+`/opt/dev-tools/var/hydra/.retired-pi-config-20260731`:
 
 | Retired | Why it was dead |
 |---|---|
-| `/opt/hydra/.agents/skills/` | 13 skill copies from Jun 22, 6 differing from central (central newer). Unreachable: `discoverLocalSkills` looks in `<parent of config_dir>/.agents/skills`, which does not exist. |
-| `/opt/hydra/.pi/skills/` | symlinks into the above |
-| `/opt/hydra/pi-config/`, `/opt/hydra/config/`, `/opt/hydra/.pi/hydra-config/` | empty |
+| `/opt/dev-tools/var/hydra/.agents/skills/` | 13 skill copies from Jun 22, 6 differing from central (central newer). Unreachable: `discoverLocalSkills` looks in `<parent of config_dir>/.agents/skills`, which does not exist. |
+| `/opt/dev-tools/var/hydra/.pi/skills/` | symlinks into the above |
+| `/opt/dev-tools/var/hydra/pi-config/`, `/opt/dev-tools/var/hydra/config/`, `/opt/dev-tools/var/hydra/.pi/hydra-config/` | empty |
 
 ## Verifying
 
