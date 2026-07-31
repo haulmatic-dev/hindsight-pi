@@ -3,6 +3,10 @@ package core
 import (
 	"context"
 	"log"
+	"time"
+
+	"github.com/haulmatic-dev/hydra/internal/pan"
+	"github.com/haulmatic-dev/hydra/internal/registry"
 )
 
 // ServiceStarter starts all overseer background services.
@@ -23,6 +27,31 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	if o.orphanJanitor != nil {
 		o.orphanJanitor.Start()
 		log.Println("🧹 Orphan janitor started")
+	}
+
+	// Open the worker registry (daemon-owned SQLite truth; PRD
+	// worker-park-and-resume Part 4) and construct Pan, the shepherd.
+	// Done here rather than in NewOverseer so tests constructing an Overseer
+	// never touch the filesystem. Fail-open: if the registry cannot be
+	// opened, the daemon runs without it exactly as before, and Pan (which
+	// reads it) is not started either.
+	if regStore, err := registry.Open(registryPath()); err != nil {
+		log.Printf("[Overseer] Warning: registry unavailable, running without it: %v", err)
+	} else {
+		o.registryStore = regStore
+		log.Printf("[Registry] Initialized")
+		panCfg := o.config.Shepherd.Pan
+		o.panShepherd = pan.New(pan.Config{
+			Enabled:          panCfg.Enabled,
+			Interval:         time.Duration(panCfg.IntervalSeconds) * time.Second,
+			HungAfter:        time.Duration(panCfg.HungAfterSeconds) * time.Second,
+			ParkOverdueGrace: time.Duration(panCfg.ParkOverdueGraceSeconds) * time.Second,
+			NudgeCap:         panCfg.NudgeCap,
+			Provider:         panCfg.Provider,
+			Model:            panCfg.Model,
+			Thinking:         panCfg.Thinking,
+			APIKeyName:       panCfg.APIKeyName,
+		}, o.registryStore, nil)
 	}
 
 	// Start Pan, the shepherd (fail-open; nil when the registry is unavailable)

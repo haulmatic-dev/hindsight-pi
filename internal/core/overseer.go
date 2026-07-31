@@ -322,29 +322,6 @@ func NewOverseer(config *Config) *Overseer {
 	// own the map).
 	o.orphanJanitor.SetOnStaleActiveWorker(o.removeActiveWorker)
 
-	// Worker registry (daemon-owned SQLite truth; PRD worker-park-and-resume
-	// Part 4) and Pan, the shepherd. Fail-open: if the registry cannot be
-	// opened, the daemon runs without it exactly as before, and Pan (which
-	// reads it) is not started either.
-	if regStore, err := registry.Open(registryPath()); err != nil {
-		log.Printf("[Overseer] Warning: registry unavailable, running without it: %v", err)
-	} else {
-		o.registryStore = regStore
-		log.Printf("[Registry] Initialized")
-		panCfg := config.Shepherd.Pan
-		o.panShepherd = pan.New(pan.Config{
-			Enabled:          panCfg.Enabled,
-			Interval:         time.Duration(panCfg.IntervalSeconds) * time.Second,
-			HungAfter:        time.Duration(panCfg.HungAfterSeconds) * time.Second,
-			ParkOverdueGrace: time.Duration(panCfg.ParkOverdueGraceSeconds) * time.Second,
-			NudgeCap:         panCfg.NudgeCap,
-			Provider:         panCfg.Provider,
-			Model:            panCfg.Model,
-			Thinking:         panCfg.Thinking,
-			APIKeyName:       panCfg.APIKeyName,
-		}, o.registryStore, nil)
-	}
-
 	// Initialize worker lifecycle manager
 	o.workerLifecycle = NewWorkerLifecycle(
 		o.retryManager,

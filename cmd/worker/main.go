@@ -22,6 +22,7 @@ import (
 	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/internal/pi"
+	"github.com/haulmatic-dev/hydra/internal/registry"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -36,6 +37,7 @@ type WorkerConfig struct {
 	BeadDescription string
 	Hindsight       *HindsightContext
 	HindsightClient HindsightClientConfig
+	APIURL          string // daemon registry API (HYDRA_API_URL); empty = disabled
 	Pi              PiConfig
 	MCP             struct {
 		Enabled bool
@@ -269,6 +271,12 @@ func main() {
 	log.Printf("   Project: %s (path: %s), Repo: %s, Agent: %s", config.Project, projectPath, config.Repo, config.AgentType)
 	log.Printf("   Agent ID: %s", agentID)
 
+	// Registry reporter: heartbeat state to the daemon and drain shepherd
+	// commands. Fail-open: no HYDRA_API_URL → no reporting, worker behaves
+	// exactly as before.
+	reporter := newStateReporter(registry.NewClient(config.APIURL), config.BeadID, config.Project)
+	reporter.Start()
+
 	// Log Hindsight context if available
 	if config.Hindsight != nil {
 		logHindsightContext(config.Hindsight)
@@ -416,6 +424,10 @@ func main() {
 	log.Printf("✅ Worker completed for bead: %s (status: %s, duration: %v, attempts: %d)",
 		beadID, status, duration, attempts)
 
+	// Report terminal state before exiting so the daemon registry reflects
+	// the outcome even if the scheduler misses the process exit.
+	reporter.Stop(exitCode)
+
 	// Exit with appropriate code
 	os.Exit(exitCode)
 }
@@ -461,6 +473,9 @@ func parseConfig() WorkerConfig {
 	}
 	if v := os.Getenv("HYDRA_REPO"); v != "" {
 		config.Repo = v
+	}
+	if v := os.Getenv("HYDRA_API_URL"); v != "" {
+		config.APIURL = v
 	}
 	// Only use legacy AGENT_TYPE if JSON wasn't parsed or bead.Type was empty
 	if v := os.Getenv("HYDRA_AGENT_TYPE"); v != "" && config.AgentType == "" {
