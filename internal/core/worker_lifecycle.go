@@ -26,6 +26,11 @@ type WorkerLifecycle struct {
 	notifyMCP       func(worker *types.Worker, success bool, exitCode int, duration time.Duration)
 	getMaxRetries   func() int
 	providerBreaker *ProviderBreaker // rate-limit failover; may be nil
+	// releaseProviderSlot returns this worker's slot to the shared provider pool
+	// (Shepherd B3). Tied to completion rather than to spawn returning: the
+	// worker holds the provider connection for its whole life, so freeing the
+	// slot at spawn time would let the pool over-admit.
+	releaseProviderSlot func(workerID string)
 	// concurrencyGovernor adapts effective concurrency based on observed outcomes.
 	concurrencyGovernor *ConcurrencyGovernor // may be nil
 }
@@ -65,6 +70,13 @@ func NewWorkerLifecycle(
 
 // Monitor watches a worker process until completion.
 func (wl *WorkerLifecycle) Monitor(worker *types.Worker, cmd *exec.Cmd) {
+	// Deferred, not called at the end of the happy path: a panic or an early
+	// return here would otherwise leak a provider slot permanently, and a leaked
+	// slot is worse than a refused request — it shrinks the budget silently and
+	// forever.
+	if wl.releaseProviderSlot != nil {
+		defer wl.releaseProviderSlot(worker.ID)
+	}
 	completion := wl.Wait(worker, cmd)
 	wl.HandleCompletion(completion)
 }

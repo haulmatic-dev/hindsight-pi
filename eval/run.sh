@@ -18,6 +18,13 @@
 set -euo pipefail
 
 PRD="${1:?prd path required}"
+# Declare ownership of the daemon for this run's duration, so the nightly matrix
+# and any deploy refuse to restart it out from under us.
+LOCK_SH="$(dirname "$0")/../scripts/run-lock.sh"
+if [ -x "$LOCK_SH" ]; then
+  "$LOCK_SH" acquire dogfood "$PRD" || exit 1
+  trap '"$LOCK_SH" release >/dev/null 2>&1' EXIT
+fi
 BRANCH="${2:-development}"
 TIMEOUT_MIN="${3:-240}"
 TARGET="/home/buddhi/projects/source-to-pay/hydra-dogfood"
