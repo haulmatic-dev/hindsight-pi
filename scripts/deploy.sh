@@ -99,12 +99,15 @@ build_binaries() {
         fi
     fi
 
-    # Build hydra
-    go build -o "$HYDRA_HOME/bin/hydra" cmd/hydra/main.go
+    # Build the PACKAGES, not single files. `go build cmd/worker/main.go` compiles
+    # main.go alone as "command-line-arguments" and silently ignores its siblings
+    # (pi_agent_dir.go, pi_extensions.go, pi_rpc_turn.go), so the deploy died on
+    # 2026-07-31 with eight "undefined:" errors for symbols that were right there
+    # in the same package. Any file added beside main.go breaks a file-list build.
+    go build -o "$HYDRA_HOME/bin/hydra" ./cmd/hydra
     print_status "Built hydra binary"
-    
-    # Build worker
-    go build -o "$HYDRA_HOME/bin/worker" cmd/worker/main.go
+
+    go build -o "$HYDRA_HOME/bin/worker" ./cmd/worker
     print_status "Built worker binary"
     
     # Set permissions
