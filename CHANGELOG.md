@@ -42,6 +42,15 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   `~/.pi/agent` points at it, and no retired copy is still referenced.
 
 ### Fixed
+- **`deploy.sh` no longer overwrites live configuration.** `create_config`,
+  `create_systemd_service`, `setup_logrotate` and `setup_firewall` wrote canned
+  templates on every run. On 2026-07-31 an ordinary deploy replaced the tuned
+  `/etc/hydra/hydra.yaml` with a 749-byte template — losing `max_workers`, the
+  provider pool, the governor, the shared Pi config, hindsight and the project
+  list — and replaced the systemd unit with one missing
+  `EnvironmentFile=/etc/hydra/api-keys.env` and the beads binaries on `PATH`. All
+  four steps are now no-ops when the target exists, and require
+  `HYDRA_PROVISION=1` on a genuinely fresh box.
 - **Per-bead worker logs are capped at 32 MB per stream.** `logs/workers/` had
   reached 30 GB across 1,590 files in two days, with single beads writing 853 MB
   of pi stream JSON. A capped log says so in the file, so it cannot be mistaken
