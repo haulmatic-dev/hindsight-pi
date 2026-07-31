@@ -109,9 +109,18 @@ func (wl *WorkerLifecycle) Wait(worker *types.Worker, cmd *exec.Cmd) workerCompl
 	// Feed observed provider-shaped outcomes to the adaptive concurrency governor.
 	// Code-level failures (exit 1, 5, ...) are intentionally not recorded because
 	// they describe bead defects, not provider health.
+	//
+	// Exit 7 is excluded for the same reason it is kept away from the circuit
+	// breaker: it is a capacity blip that clears in seconds, not a signal about
+	// our concurrency. Counting it made the governor and the provider pool two
+	// controllers fighting over one actuator — on 2026-07-31 the pool was already
+	// serializing the fleet to a single slot and the governor still walked the
+	// worker limit 4 -> 2 -> 1 chasing a ceiling it could not see, so decreasing
+	// could not possibly have helped. Sustained pressure still reaches the
+	// governor through exit 2 (429) and exit 3 (timeout).
 	if success {
 		wl.concurrencyGovernor.RecordOutcome(true)
-	} else if exitCode == 2 || exitCode == 3 || exitCode == 7 {
+	} else if isConcurrencyPressureExitCode(exitCode) {
 		wl.concurrencyGovernor.RecordOutcome(false)
 	}
 
@@ -257,6 +266,16 @@ func (wl *WorkerLifecycle) HandleFailure(worker *types.Worker, exitCode int, dur
 	if err := wl.dag.MarkFailed(worker.ID); err != nil {
 		wl.errorLogger.Error("DAG", "MarkFailed", worker.ID, err, "warn")
 	}
+}
+
+// isConcurrencyPressureExitCode reports whether a failure is evidence that we
+// are asking the provider for too much at once, and therefore whether the
+// adaptive concurrency governor should react to it.
+//
+// Only sustained pressure qualifies: 2 (429 rate limit) and 3 (timeout). Exit 7
+// (transient overload) does not — see the reasoning at the call site.
+func isConcurrencyPressureExitCode(code int) bool {
+	return code == 2 || code == 3
 }
 
 // isInfrastructureExitCode returns true for exit codes that indicate transient

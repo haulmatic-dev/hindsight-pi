@@ -3,7 +3,6 @@ package core
 import (
 	"fmt"
 	"log"
-	"math"
 	"sync"
 	"time"
 )
@@ -16,6 +15,10 @@ type GovernorConfig struct {
 	IncreaseThreshold float64 `yaml:"increase_threshold"`
 	// CooldownSeconds is the minimum seconds between limit changes. Default 120.
 	CooldownSeconds int `yaml:"cooldown_seconds"`
+	// RecoveryIntervalSeconds is how long the fleet must go without a
+	// provider-pressure failure before the limit climbs by one, independently of
+	// how many outcomes have been observed. Default 300.
+	RecoveryIntervalSeconds int `yaml:"recovery_interval_seconds"`
 }
 
 // applyGovernorDefaults fills in zero values with the documented defaults.
@@ -32,6 +35,9 @@ func applyGovernorDefaults(cfg *GovernorConfig) {
 	if cfg.CooldownSeconds <= 0 {
 		cfg.CooldownSeconds = 120
 	}
+	if cfg.RecoveryIntervalSeconds <= 0 {
+		cfg.RecoveryIntervalSeconds = 300
+	}
 }
 
 // ConcurrencyGovernor implements AIMD (additive-increase/multiplicative-decrease)
@@ -46,9 +52,14 @@ type ConcurrencyGovernor struct {
 	decThreshold float64
 	incThreshold float64
 	cooldown     time.Duration
+	recovery     time.Duration
 	lastChange   time.Time
-	onChange     func(old, new int, reason string)
-	now          func() time.Time
+	// lastFailure is when we last saw provider pressure. Recovery is timed from
+	// this rather than from outcome volume, because outcome volume is exactly
+	// what a lowered limit suppresses.
+	lastFailure time.Time
+	onChange    func(old, new int, reason string)
+	now         func() time.Time
 }
 
 // NewConcurrencyGovernor creates a governor with the supplied configuration.
@@ -64,6 +75,7 @@ func NewConcurrencyGovernor(maxWorkers int, cfg GovernorConfig) *ConcurrencyGove
 		decThreshold: cfg.DecreaseThreshold,
 		incThreshold: cfg.IncreaseThreshold,
 		cooldown:     time.Duration(cfg.CooldownSeconds) * time.Second,
+		recovery:     time.Duration(cfg.RecoveryIntervalSeconds) * time.Second,
 		lastChange:   time.Time{},
 		onChange:     nil,
 		now:          time.Now,
@@ -117,6 +129,10 @@ func (g *ConcurrencyGovernor) RecordOutcome(success bool) {
 		g.window = g.window[len(g.window)-g.windowSize:]
 	}
 
+	if !success {
+		g.lastFailure = g.now()
+	}
+
 	if len(g.window) < g.windowSize {
 		return
 	}
@@ -132,7 +148,12 @@ func (g *ConcurrencyGovernor) RecordOutcome(success bool) {
 
 	if fraction >= g.decThreshold {
 		old := g.limit
-		newLimit := int(math.Ceil(float64(old) / 2.0))
+		// Step down by one, not by half. Halving overshoots at the small limits we
+		// actually run at: on 2026-07-31 a single one-hour provider capacity window
+		// took the limit 4 -> 2 -> 1, and one is barely distinguishable from
+		// stopped. Walking down one at a time finds the real ceiling instead of
+		// diving past it.
+		newLimit := old - 1
 		if newLimit < 1 {
 			newLimit = 1
 		}
@@ -140,7 +161,7 @@ func (g *ConcurrencyGovernor) RecordOutcome(success bool) {
 			g.limit = newLimit
 			g.lastChange = now
 			g.window = g.window[:0]
-			g.emitChangeLocked(old, newLimit, "multiplicative_decrease")
+			g.emitChangeLocked(old, newLimit, "additive_decrease")
 		}
 		return
 	}
@@ -163,6 +184,49 @@ func (g *ConcurrencyGovernor) RecordOutcome(success bool) {
 	}
 }
 
+// MaybeRecover raises the limit by one when the fleet has gone quiet — no
+// provider-pressure failure for a full recovery interval — regardless of how
+// many outcomes have been observed. Safe on a nil receiver. Returns true when
+// the limit changed.
+//
+// This exists because AIMD recovery gated purely on a full outcome window cannot
+// recover from a deep cut: a lower limit produces fewer completions, so the
+// window never refills, so the limit never rises. Measured on 2026-07-31 — one
+// provider capacity window at 02:00 took the limit to 1, and it stayed there for
+// the remaining 2.5 hours on a single completion, having no way to learn that
+// the provider had recovered. The caller drives this from the scheduler tick,
+// because when the fleet is starved there is no outcome to drive it from.
+func (g *ConcurrencyGovernor) MaybeRecover() bool {
+	if g == nil || g.maxWorkers <= 0 {
+		return false
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.limit >= g.maxWorkers {
+		return false
+	}
+
+	now := g.now()
+	// Time the quiet period from the later of the last failure and the last
+	// change, so recovery never stacks two steps inside one interval.
+	since := g.lastFailure
+	if g.lastChange.After(since) {
+		since = g.lastChange
+	}
+	if since.IsZero() || now.Sub(since) < g.recovery {
+		return false
+	}
+
+	old := g.limit
+	g.limit = old + 1
+	g.lastChange = now
+	g.window = g.window[:0]
+	g.emitChangeLocked(old, g.limit, "quiet_recovery")
+	return true
+}
+
 func (g *ConcurrencyGovernor) emitChangeLocked(old, new int, reason string) {
 	if g.onChange != nil {
 		g.onChange(old, new, reason)
@@ -183,6 +247,6 @@ func (g *ConcurrencyGovernor) Describe() string {
 	if g.maxWorkers <= 0 {
 		return "disabled (unlimited max_workers)"
 	}
-	return fmt.Sprintf("limit=%d/%d window=%d decrease=%.3f increase=%.3f cooldown=%s",
-		g.limit, g.maxWorkers, g.windowSize, g.decThreshold, g.incThreshold, g.cooldown)
+	return fmt.Sprintf("limit=%d/%d window=%d decrease=%.3f increase=%.3f cooldown=%s recovery=%s",
+		g.limit, g.maxWorkers, g.windowSize, g.decThreshold, g.incThreshold, g.cooldown, g.recovery)
 }

@@ -130,6 +130,11 @@ func (s *Scheduler) Tick() error {
 		return nil
 	}
 
+	// Give a lowered concurrency limit a way back up. A cut made during a provider
+	// outage cannot be undone by outcome volume alone, because the cut is what
+	// suppresses outcome volume — so the clock has to drive it.
+	o.concurrencyGovernor.MaybeRecover()
+
 	// Get active worker count
 	o.workerMutex.RLock()
 	activeCount := len(o.activeWorkers)

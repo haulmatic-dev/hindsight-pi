@@ -64,3 +64,24 @@ func TestScheduler_RetryStateSurvivesUntilCompletion(t *testing.T) {
 		t.Error("bead should be eligible again after its state was cleared on completion")
 	}
 }
+
+// TestGovernorPressureCodes pins which failures the concurrency governor is
+// allowed to react to. Exit 7 is the one that matters: it is a capacity blip
+// that clears in seconds, and feeding it to the governor made the governor and
+// the provider pool two controllers fighting over one actuator.
+func TestGovernorPressureCodes(t *testing.T) {
+	pressure := map[int]bool{
+		2: true,  // 429 rate limit — sustained pressure
+		3: true,  // timeout — sustained pressure
+		7: false, // transient overload — clears in seconds, not our concurrency
+		6: false, // quota exhausted — no amount of slowing down helps
+		4: false, // infra
+		1: false, // code fault
+		5: false, // stub
+	}
+	for code, want := range pressure {
+		if got := isConcurrencyPressureExitCode(code); got != want {
+			t.Errorf("isConcurrencyPressureExitCode(%d) = %v, want %v", code, got, want)
+		}
+	}
+}
