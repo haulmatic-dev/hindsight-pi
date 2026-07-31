@@ -200,3 +200,21 @@ agents:
     #     model: kimi-coding-128k
     #   green:
     #     model: kimi-for-coding
+
+# Pan, the shepherd: a pi-agent that watches the worker registry and decides
+# the ambiguous tail (parked-overdue, hung, verdict-missing past nudge cap).
+# Fail-open by contract: disabled or failing, deterministic rules (backoff,
+# nudge cap, lifetime cap, Charon hung-kill) still run.
+# Provider/key MUST be separate from the worker fleet's so Pan stays lucid
+# during congestion storms.
+shepherd:
+  pan:
+    enabled: false
+    interval_seconds: 60
+    hung_after_seconds: 300
+    park_overdue_grace_seconds: 600
+    nudge_cap: 3
+    provider: kimi-coding
+    model: kimi-for-coding
+    thinking: high
+    api_key_name: PAN_API_KEY   # env var holding Pan's own key

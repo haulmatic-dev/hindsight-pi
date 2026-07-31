@@ -8,6 +8,16 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- **Worker registry + Pan, the shepherd (PRD parts 4 & 6).**
+  `internal/registry`: daemon-owned SQLite store replacing `workers.json` —
+  worker records (state, pi session id, error triple, token progress, park
+  fields, nudge count) and a per-worker command queue (`continue`, `steer`,
+  `compact-and-continue`, `abandon-with-summary`). Completed workers are
+  never resurrected by late upserts. `internal/pan`: fail-open shepherd
+  pi-agent with its own provider key (`shepherd.pan` config) that reads the
+  registry and queues decisions for the ambiguous tail — parked-overdue,
+  hung, and verdict-missing-past-nudge-cap workers. Everything else stays on
+  deterministic rules, which run with or without Pan.
 - **PRD: worker park-and-resume on provider congestion**
   (`docs/PRDs/worker-park-and-resume-20260731.md`). Workers whose session is
   interrupted by provider-capacity errors (403 concurrency, 429, overload)

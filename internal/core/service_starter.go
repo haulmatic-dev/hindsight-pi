@@ -25,6 +25,12 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 		log.Println("🧹 Orphan janitor started")
 	}
 
+	// Start Pan, the shepherd (fail-open; nil when the registry is unavailable)
+	if o.panShepherd != nil {
+		o.panShepherd.Start()
+		log.Println("🐐 Pan shepherd started")
+	}
+
 	// Run Pi ecosystem setup
 	if err := o.runPiSetup(); err != nil {
 		log.Printf("[Overseer] Pi setup warning: %v", err)
