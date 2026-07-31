@@ -140,19 +140,29 @@ win() { awk -v d="$START_TS" '$0 >= d' "$DAEMON_LOG" 2>/dev/null; }
 # earlier metrics were wrong for a week.
 daemon() { win | grep -E '^[0-9/]+ [0-9:]+ (\[|⏸️|📊|🚀)'; }
 
-CLOSED=$(grep -c '"status":"closed"' "$BEADS" 2>/dev/null || echo 0)
-FIX_BEADS=$(grep -c '"issue_type":"fix"' "$BEADS" 2>/dev/null || echo 0)
-NESTED=$(grep -c 'Fix: Fix:' "$BEADS" 2>/dev/null || echo 0)
-CAPPED=$(grep -c 'fix-recursion-capped' "$BEADS" 2>/dev/null || echo 0)
-FAILED_CLOSES=$(grep -c 'closed-failed' "$BEADS" 2>/dev/null || echo 0)
-GAP_CYCLES=$(daemon | grep -c 'Running gap-to-prd' || echo 0)
-QUARANTINED=$(sudo -u hydra bash -lc "cd '$TESTBED' && git branch --list 'hydra/quarantine/*'" 2>/dev/null | grep -c . || echo 0)
-WORKER_TURNS=$(daemon | grep -c 'closeBead' || echo 0)
-QUOTA_PAUSES=$(daemon | grep -c 'quota exhausted' || echo 0)
+# one_int normalizes a count to exactly one integer on stdout.
+#
+# `grep -c` prints 0 AND exits 1 when nothing matches, so the obvious
+# `$(grep -c ... || echo 0)` appends a SECOND zero and yields "0\n0". Every
+# comparison below then dies with "integer expression expected", and a failing
+# `[` is falsy — which silently disabled the WORKER_TURNS guard on 2026-07-31,
+# the one thing meant to stop a provider-starved night from blocking deploys.
+# It reported 6 of 7 assertions failed on a run that had barely executed.
+one_int() { awk 'NR==1 { print ($0 ~ /^[0-9]+$/) ? $0 : 0; found=1 } END { if (!found) print 0 }'; }
+
+CLOSED=$(grep -c '"status":"closed"' "$BEADS" 2>/dev/null | one_int)
+FIX_BEADS=$(grep -c '"issue_type":"fix"' "$BEADS" 2>/dev/null | one_int)
+NESTED=$(grep -c 'Fix: Fix:' "$BEADS" 2>/dev/null | one_int)
+CAPPED=$(grep -c 'fix-recursion-capped' "$BEADS" 2>/dev/null | one_int)
+FAILED_CLOSES=$(grep -c 'closed-failed' "$BEADS" 2>/dev/null | one_int)
+GAP_CYCLES=$(daemon | grep -c 'Running gap-to-prd' | one_int)
+QUARANTINED=$(sudo -u hydra bash -lc "cd '$TESTBED' && git branch --list 'hydra/quarantine/*'" 2>/dev/null | grep -c . | one_int)
+WORKER_TURNS=$(daemon | grep -c 'closeBead' | one_int)
+QUOTA_PAUSES=$(daemon | grep -c 'quota exhausted' | one_int)
 
 # Did the seeded-impossible FR-003 stay unsolved? Its pinned file must still
 # carry no persistence imports — a run that "fixed" it cheated the scenario.
-STORE_CLEAN=$(grep -cE '"(os|database/sql|encoding/json)"' "$TESTBED/internal/notes/store.go" 2>/dev/null || echo 0)
+STORE_CLEAN=$(grep -cE '"(os|database/sql|encoding/json)"' "$TESTBED/internal/notes/store.go" 2>/dev/null | one_int)
 
 METRICS=$(printf '{"run_minutes":%s,"closed":%s,"fix_beads":%s,"failed_closes":%s,"quarantined":%s,"gap_cycles":%s,"worker_closes":%s,"quota_pauses":%s}' \
   "$RUN_MIN" "$CLOSED" "$FIX_BEADS" "$FAILED_CLOSES" "$QUARANTINED" "$GAP_CYCLES" "$WORKER_TURNS" "$QUOTA_PAUSES")
@@ -192,7 +202,7 @@ assert C5 "$([ "$STORE_CLEAN" -eq 0 ] && echo 0 || echo 1)" \
 assert A1 "$([ "$FAILED_CLOSES" -eq 0 ] || [ "$QUARANTINED" -gt 0 ] && echo 0 || echo 1)" \
   "$FAILED_CLOSES failed closes but no hydra/quarantine branch — failed work may have merged"
 # A2: every fix bead should carry its predecessor's cause block.
-CAUSELESS=$(grep '"issue_type":"fix"' "$BEADS" 2>/dev/null | grep -vc 'What failed last time' || echo 0)
+CAUSELESS=$(grep '"issue_type":"fix"' "$BEADS" 2>/dev/null | grep -vc 'What failed last time' | one_int)
 assert A2 "$([ "$FIX_BEADS" -eq 0 ] || [ "$CAUSELESS" -eq 0 ] && echo 0 || echo 1)" \
   "$CAUSELESS of $FIX_BEADS fix beads carry no failure cause"
 
