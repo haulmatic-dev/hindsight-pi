@@ -10,11 +10,24 @@ import (
 
 // beadRetryInfo tracks retry state for a single bead (matches Overseer's original struct)
 type beadRetryInfo struct {
-	count     int
-	lastError time.Time
-	lastErr   error
-	isInfra   bool // true when the last failure was an infrastructure problem
+	// count is the number of genuine bead faults — the only failures that
+	// consume the retry budget. A bead is abandoned when this reaches maxRetries.
+	count int
+	// infraCount is the number of failures caused by the provider or the host
+	// (429, timeout, overload, quota). These say nothing about the bead, so they
+	// pace retries but never exhaust them.
+	infraCount int
+	lastError  time.Time
+	lastErr    error
+	isInfra    bool // true when the last failure was an infrastructure problem
 }
+
+// maxInfraRetries bounds how many times a bead is retried through provider
+// failures at the normal exponential pace before it drops to hourly checks.
+// It is not a give-up threshold: an overloaded provider must not permanently
+// fail work that was never broken. It exists so that a provider outage lasting
+// days costs one attempt an hour instead of one every few minutes.
+const maxInfraRetries = 20
 
 // RetryManager encapsulates bead retry and validation-retry tracking.
 // Extracted from Overseer to reduce god-object size.
@@ -51,20 +64,27 @@ func (rm *RetryManager) ShouldRetry(beadID string, maxRetries int) bool {
 		maxRetries = defaultMaxRetries
 	}
 
+	// Only genuine bead faults exhaust the budget. Counting a 429 or a provider
+	// overload against the bead means a busy provider permanently fails work that
+	// was never broken — on 2026-07-31, 30 of 39 worker failures were exit 7.
 	if info.count >= maxRetries {
-		if info.isInfra {
-			// Infra-exhausted: retry every 1 hour regardless of maxRetries.
-			if time.Since(info.lastError) >= time.Hour {
-				return true
-			}
-			log.Printf("[Retry] Bead %s infra-exhausted, %v until next hourly retry", beadID, time.Hour-time.Since(info.lastError))
-			return false
-		}
-		log.Printf("[Retry] Bead %s exhausted all %d retry attempts", beadID, maxRetries)
+		log.Printf("[Retry] Bead %s exhausted all %d retry attempts (%d infra failures were not counted)",
+			beadID, maxRetries, info.infraCount)
 		return false
 	}
 
-	backoff := calculateBackoff(info.count, rm.baseDelay, rm.maxDelay)
+	if info.infraCount >= maxInfraRetries {
+		if time.Since(info.lastError) >= time.Hour {
+			return true
+		}
+		log.Printf("[Retry] Bead %s infra-throttled after %d provider failures, %v until next hourly retry",
+			beadID, info.infraCount, (time.Hour - time.Since(info.lastError)).Round(time.Second))
+		return false
+	}
+
+	// Backoff grows with total attempts, so a provider outage costs one attempt
+	// per backoff window rather than one per ten-second tick.
+	backoff := calculateBackoff(info.count+info.infraCount, rm.baseDelay, rm.maxDelay)
 	minInterval := defaultRetryCooldown + backoff
 	elapsed := time.Since(info.lastError)
 
@@ -86,13 +106,18 @@ func (rm *RetryManager) RecordRetry(beadID string, err error) time.Duration {
 		info = &beadRetryInfo{}
 		rm.retries[beadID] = info
 	}
-	info.count++
 	info.lastError = time.Now()
 	info.lastErr = err
 	info.isInfra = isInfrastructureError(err)
+	if info.isInfra {
+		info.infraCount++
+	} else {
+		info.count++
+	}
 
-	backoff := calculateBackoff(info.count, rm.baseDelay, rm.maxDelay)
-	log.Printf("[Retry] Bead %s retry attempt %d recorded (infra=%v): %v", beadID, info.count, info.isInfra, err)
+	backoff := calculateBackoff(info.count+info.infraCount, rm.baseDelay, rm.maxDelay)
+	log.Printf("[Retry] Bead %s failure recorded (faults=%d, infra=%d, isInfra=%v, next backoff %v): %v",
+		beadID, info.count, info.infraCount, info.isInfra, backoff, err)
 	return backoff
 }
 
@@ -112,6 +137,18 @@ func (rm *RetryManager) GetRetryCount(beadID string) int {
 	defer rm.retriesMu.RUnlock()
 	if info, exists := rm.retries[beadID]; exists {
 		return info.count
+	}
+	return 0
+}
+
+// GetInfraRetryCount returns how many times a bead failed for provider or host
+// reasons. These do not consume the retry budget, so callers deciding whether a
+// bead is making progress must look at this as well as GetRetryCount.
+func (rm *RetryManager) GetInfraRetryCount(beadID string) int {
+	rm.retriesMu.RLock()
+	defer rm.retriesMu.RUnlock()
+	if info, exists := rm.retries[beadID]; exists {
+		return info.infraCount
 	}
 	return 0
 }
