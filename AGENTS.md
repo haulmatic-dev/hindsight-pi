@@ -89,6 +89,21 @@ After implementation:
 
 ---
 
+## Picking Up Development
+
+Read `docs/operations/handoff-20260731.md` first. It records the current state of
+the box, what changed most recently, the open work in priority order, and — most
+importantly — the measurement traps that produced wrong conclusions repeatedly.
+Two you will hit within your first hour:
+
+- **Anchor log greps on the daemon's own prefix.** Worker output is echoed into the
+  same file as `[Worker:<bead>] [stderr] {...}`, which also starts with a bracket.
+  An unanchored grep reported 473 `infra-exhausted` events that never happened and
+  20 gap-to-prd cycles the daemon never logged. Run every count twice, with and
+  without `grep -vE '^[0-9/]+ [0-9:]+ \[Worker:'`; if they differ, it is contaminated.
+- **`grep -c` exits 1 on no match**, so `$(grep -c x f || echo 0)` yields `"0\n0"`
+  and every `[ ... -eq ]` on it dies — falsy, so guards built that way never fire.
+
 ## Hydra-Specific Patterns (Quick Reference)
 
 ### Shepherd Layer (read before touching close/chain/fix/scheduler code)

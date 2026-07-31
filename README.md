@@ -243,6 +243,7 @@ Hydra's Collective Unconscious is a cross-project pattern learning system that e
 - [Monitoring & Metrics](docs/operations/monitoring-metrics-20260309.md) - Observability and alerting
 - [Hindsight Memory Optimization](docs/HINDSIGHT_MEMORY_OPTIMIZATION.md) - Reduce memory usage from 10GB to 3-6GB using cloud providers
 - [Hindsight Memory Management](docs/HINDSIGHT_MEMORY_MANAGEMENT.md) - Understanding and managing Hindsight memory usage
+- [Handoff 2026-07-31](docs/operations/handoff-20260731.md) - **Start here if picking up development**: how not to be wrong about this system, what changed, open work in priority order
 - [Troubleshooting](docs/operations/troubleshooting-20260309.md) - Common issues and solutions
 
 ### 💻 Development
