@@ -15,7 +15,6 @@ var extensionAliases = map[string]string{
 	"caveman":      "@tomooshi/caveman-milk-pi",
 	"context-mode": "context-mode",
 	"guardrails":   "@aliou/pi-guardrails",
-	"gograph":      "pi-gograph",
 	"subagents":    "pi-subagents",
 	"web-access":   "pi-web-access",
 }

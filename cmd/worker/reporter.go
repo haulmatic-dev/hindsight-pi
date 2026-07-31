@@ -29,6 +29,11 @@ type stateReporter struct {
 
 const reporterInterval = 30 * time.Second
 
+// activeReporter is the process-global reporter for code paths (like the
+// rpc scanner goroutine) that do not receive it via the call chain. The
+// worker is a single-bead process, so one global is exact.
+var activeReporter *stateReporter
+
 func newStateReporter(client *registry.Client, beadID, project string) *stateReporter {
 	pid := os.Getpid()
 	pgid, _ := syscall.Getpgid(pid)
@@ -145,6 +150,16 @@ func (r *stateReporter) SetSessionID(id string) {
 	}
 	r.mu.Lock()
 	r.rep.PiSessionID = id
+	r.mu.Unlock()
+}
+
+// SetNudges updates the reported verdict-nudge count.
+func (r *stateReporter) SetNudges(n int) {
+	if !r.Enabled() {
+		return
+	}
+	r.mu.Lock()
+	r.rep.NudgeCount = n
 	r.mu.Unlock()
 }
 

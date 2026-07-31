@@ -18,6 +18,18 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   registry and queues decisions for the ambiguous tail — parked-overdue,
   hung, and verdict-missing-past-nudge-cap workers. Everything else stays on
   deterministic rules, which run with or without Pan.
+- **Worker registry API + worker state reporter (PRD parts 2 & 4).**
+  Daemon endpoints `POST /api/v1/workers/report`, `/workers/completed` and
+  `GET /api/v1/workers/commands` (consume-on-read). Workers self-register,
+  heartbeat state every 30 s, drain shepherd commands, and report their
+  terminal state before exit; `HYDRA_API_URL` is passed at spawn and an
+  unreachable registry degrades to pre-registry behavior (fail-open).
+- **Verdict closure protocol (PRD part 3).** Worker prompts now demand a
+  final `HYDRA_VERDICT` JSON block; an rpc turn that ends without a valid
+  done/abandon verdict is re-prompted in the same live pi session (cap 3)
+  instead of being torn down — pi is no longer killed merely because it
+  stopped talking. Hard kills remain reserved for hung processes and are
+  system failures, not bead failures.
 - **PRD: worker park-and-resume on provider congestion**
   (`docs/PRDs/worker-park-and-resume-20260731.md`). Workers whose session is
   interrupted by provider-capacity errors (403 concurrency, 429, overload)

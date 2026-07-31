@@ -51,12 +51,11 @@ func RegisterWorkerRegistryRoutes(v1 *gin.RouterGroup, store *registry.Store) {
 			ParkSince:     rep.ParkSince,
 			ParkWakeAt:    rep.ParkWakeAt,
 			ParkReason:    rep.ParkReason,
+			NudgeCount:    rep.NudgeCount,
 		}
-		// Upsert preserves the original StartedAt for known workers: fetch and
-		// reuse it when present.
+		// Upsert preserves the original StartedAt for known workers.
 		if prev, ok, err := store.GetWorker(rep.BeadID); err == nil && ok && !prev.StartedAt.IsZero() {
 			rec.StartedAt = prev.StartedAt
-			rec.NudgeCount = prev.NudgeCount
 		}
 		if err := store.UpsertWorker(rec); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

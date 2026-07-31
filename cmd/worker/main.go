@@ -276,6 +276,7 @@ func main() {
 	// exactly as before.
 	reporter := newStateReporter(registry.NewClient(config.APIURL), config.BeadID, config.Project)
 	reporter.Start()
+	activeReporter = reporter
 
 	// Log Hindsight context if available
 	if config.Hindsight != nil {
@@ -1374,6 +1375,12 @@ func executeWithPi(
 	var stdoutBuf, stderrBuf bytes.Buffer
 	var wg sync.WaitGroup
 
+	// Verdict-nudge state (rpc mode only): a turn that ends without a valid
+	// HYDRA_VERDICT is re-prompted in the same live session instead of being
+	// torn down. Capped; past the cap the turn closes and Pan sees the
+	// nudge-capped worker in the registry.
+	nudgeCount := 0
+
 	// Monitor stdout
 	wg.Add(1)
 	go func() {
@@ -1389,11 +1396,27 @@ func executeWithPi(
 			// tears it down — otherwise the worker would wait out the full
 			// activity timeout on every bead.
 			if turn != nil && turn.handleLine(line, stdinPipe) {
-				pid := 0
-				if cmd.Process != nil {
-					pid = cmd.Process.Pid
+				v := parseVerdict(turn.Text())
+				if nudge, reason := decideTurnEnd(v, nudgeCount, verdictNudgeCap); nudge {
+					nudgeCount++
+					if activeReporter != nil {
+						activeReporter.SetNudges(nudgeCount)
+					}
+					log.Printf("[Worker:rpc] turn ended without closure (%s) — nudging session %d/%d", reason, nudgeCount, verdictNudgeCap)
+					if nudgeLine, err := rpcPromptLine(buildNudgePrompt(reason)); err == nil {
+						if _, err := stdinPipe.Write(append(nudgeLine, '\n')); err != nil {
+							log.Printf("[Worker:rpc] nudge write failed, finishing turn: %v", err)
+							turn.finish(cmdPid(cmd), stdinPipe)
+							continue
+						}
+						turn.reset()
+						continue
+					}
 				}
-				turn.finish(pid, stdinPipe)
+				if v != nil && !v.Done && v.Summary != "" {
+					log.Printf("[Worker:rpc] agent abandoned with summary: %s", truncateLog(v.Summary, 200))
+				}
+				turn.finish(cmdPid(cmd), stdinPipe)
 			}
 			// Also stream to MCP for real-time monitoring
 			if mcpClient != nil {
@@ -1813,6 +1836,17 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 		promptParts = append(promptParts,
 			"DELIVERABLE CONTRACT: this task is complete only when the required file edits exist on disk and verification commands ran. A plan or analysis without edits will be rejected as an empty diff.")
 	}
+
+	// Closure protocol (PRD worker-park-and-resume Part 3): the turn does not
+	// end when the agent stops talking — it ends with a machine-readable
+	// verdict. Without one the worker re-prompts the live session.
+	promptParts = append(promptParts,
+		`CLOSURE PROTOCOL: end your final message with exactly one verdict block.
+When done:
+HYDRA_VERDICT: {"done": true, "ac_met": [...], "ac_unmet": [], "files_changed": [...], "verification": [{"cmd": "...", "result": "..."}]}
+When you cannot complete it:
+HYDRA_VERDICT: {"done": false, "summary": "what was done and what remains"}
+A turn ending without this block is treated as unfinished and you will be re-prompted.`)
 
 	// Add target files if available
 	targetFiles := extractTargetFiles(bead)

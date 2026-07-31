@@ -18,6 +18,7 @@ type WorkerReport struct {
 	ParkSince   time.Time `json:"park_since"`
 	ParkWakeAt  time.Time `json:"park_wake_at"`
 	ParkReason  string    `json:"park_reason"`
+	NudgeCount  int       `json:"nudge_count"`
 }
 
 // CompletionReport marks a worker terminal.
