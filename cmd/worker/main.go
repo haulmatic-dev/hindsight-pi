@@ -1381,6 +1381,10 @@ func executeWithPi(
 	// nudge-capped worker in the registry.
 	nudgeCount := 0
 
+	// Park state (rpc mode only): Tier A provider-capacity failures park the
+	// live session instead of killing it (PRD Part 2).
+	park := newParkState(0)
+
 	// Monitor stdout
 	wg.Add(1)
 	go func() {
@@ -1396,6 +1400,21 @@ func executeWithPi(
 			// tears it down — otherwise the worker would wait out the full
 			// activity timeout on every bead.
 			if turn != nil && turn.handleLine(line, stdinPipe) {
+				// Failed turn: park on Tier A provider-capacity errors instead of
+				// tearing the session down (PRD Part 2). Park cap reached or
+				// non-parkable → the turn closes and the failure propagates.
+				if turn.Failed() {
+					if parkable, reason := decideParkClass(turn.ErrMsg()); parkable {
+						if wait, ok := park.nextWait(reason); ok {
+							parkSession(park, wait, reason, stdinPipe, turn,
+								"The provider rejected the previous request for capacity reasons. It should accept requests again now — continue your task from where you stopped.")
+							continue
+						}
+						log.Printf("[Worker:rpc] park cap reached (%v) — closing failed turn (%s)", park.totalParked(), reason)
+					}
+					turn.finish(cmdPid(cmd), stdinPipe)
+					continue
+				}
 				v := parseVerdict(turn.Text())
 				if nudge, reason := decideTurnEnd(v, nudgeCount, verdictNudgeCap); nudge {
 					nudgeCount++
@@ -1459,7 +1478,10 @@ monitorLoop:
 		case cmdErr = <-done:
 			break monitorLoop
 		case <-timeoutTicker.C:
-			if activityMonitor.IsTimedOut() {
+			// Parked workers are exempt from the activity timeout: parking
+			// produces no output by design. Liveness of a parked worker is the
+			// daemon's job (heartbeat + Pan), not this monitor's.
+			if activityMonitor.IsTimedOut() && !park.isActive() {
 				log.Printf("⏰ Activity timeout reached (no output for %v)", activityTimeout)
 				streamLog(mcpClient, "warn", fmt.Sprintf("Activity timeout after %v of inactivity", activityTimeout))
 
@@ -1474,8 +1496,9 @@ monitorLoop:
 				break monitorLoop
 			}
 
-			// Max total runtime check — kills Pi even if it produces sporadic output
-			if time.Since(startTime) > maxTotalRuntime {
+			// Max total runtime check — kills Pi even if it produces sporadic
+			// output. Parked time is excluded: parking is waiting, not running.
+			if time.Since(startTime)-park.totalParked() > maxTotalRuntime {
 				log.Printf("⏰ Max total runtime reached (%v). Forcing Pi termination.", maxTotalRuntime)
 				streamLog(mcpClient, "warn", fmt.Sprintf("Max total runtime %v reached, terminating Pi", maxTotalRuntime))
 

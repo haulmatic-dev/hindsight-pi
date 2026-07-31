@@ -30,6 +30,15 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   instead of being torn down — pi is no longer killed merely because it
   stopped talking. Hard kills remain reserved for hung processes and are
   system failures, not bead failures.
+- **Park-and-resume on provider congestion (PRD part 2, Tier A).** A failed
+  rpc turn classified as provider capacity (concurrency limit, engine
+  overload, 429 — marker-first because Kimi's error `type` field lies) now
+  parks the live pi session: state reported as `parked` with wake time,
+  backoff 30 s→5 min with jitter, park cap 60 min (`HYDRA_MAX_PARK_MINUTES`),
+  then the same session is re-prompted. Parked workers are exempt from the
+  activity timeout, and parked time is excluded from the max-total-runtime
+  budget. Zombie-park guard: if pi died while parked the wake write fails
+  and the normal failure path takes over.
 - **PRD: worker park-and-resume on provider congestion**
   (`docs/PRDs/worker-park-and-resume-20260731.md`). Workers whose session is
   interrupted by provider-capacity errors (403 concurrency, 429, overload)
