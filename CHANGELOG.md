@@ -14,8 +14,13 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   should park the live pi rpc session and resume it after backoff instead of
   terminating and losing all context — the root cause of repeated rework seen
   in the 2026-07-31 `hydra-testbed-y05` autopsy (~50 min compute, zero merged
-  output). Includes parked-aware timeouts, a new provider-congestion class,
-  and scheduler spawn-pausing during congestion storms.
+  output). Rewritten after design review: 3-tier error classification
+  (auto-park / escalation-park on credential errors / close), worker control
+  loop with named session files (parked workers survive daemon restarts),
+  verdict-based closure (`HYDRA_VERDICT` required before pi is killed),
+  daemon-owned SQLite registry + command queue, a four-knob timeout hierarchy
+  with a monotonic lifetime cap, and "Pan" — a pi-agent shepherd with its own
+  provider key that handles the ambiguous tail and is fail-open by contract.
 
 ### Changed
 - **Runtime state moved out of `/opt/hydra` into `/opt/dev-tools/var/hydra`.**
