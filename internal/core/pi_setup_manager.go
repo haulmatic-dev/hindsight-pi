@@ -18,7 +18,20 @@ func NewPiSetupManager(config *Config) *PiSetupManager {
 }
 
 // RunSetup initializes and runs the Pi ecosystem setup.
+//
+// Setup MUTATES ConfigDir: it creates the directory structure, installs Pi,
+// installs LSP servers and writes skills-installed.json. That is only
+// acceptable for a directory hydra owns. Since 2026-07-31 ConfigDir is the
+// shared /opt/dev-tools/config/pi — a git repo that the worker fleet and every
+// interactive shell resolve through ~/.pi/agent — so it is skipped unless
+// pi.manage_config is explicitly true.
 func (m *PiSetupManager) RunSetup() error {
+	if !m.config.Pi.ManageConfig {
+		log.Printf("[Overseer] Pi setup skipped: %s is shared and pi.manage_config is false (reading it, not managing it)",
+			m.config.Pi.ConfigDir)
+		return nil
+	}
+
 	log.Println("[Overseer] Initializing Pi ecosystem setup...")
 
 	configDir := m.config.Pi.ConfigDir

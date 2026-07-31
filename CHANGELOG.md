@@ -7,6 +7,42 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Changed
+- **Pi config consolidated to one shared directory.** `pi.worker_config_dir` now
+  equals `pi.config_dir` (`/opt/dev-tools/config/pi`), so hydra workers and human
+  shells resolve the same skills and extensions. The old generated copy at
+  `/opt/dev-tools/config/pi-worker` had drifted to 239 npm packages against the
+  canonical 242 with nothing detecting it, and both of its stated purposes were
+  obsolete. `scripts/setup-pi-worker.sh` is removed. Operators: see
+  `docs/architecture/pi-config.md`.
+- **Concurrency governor steps down by one instead of halving**, and gains
+  clock-driven recovery (`recovery_interval_seconds`, default 300). A single
+  one-hour provider outage previously took the limit 4 -> 2 -> 1 and left it at 1
+  for 2.5 hours, because recovery required a full outcome window and a low limit
+  suppresses outcomes. Exit 7 no longer feeds the governor.
+
+### Added
+- **`pi.manage_config`** (default `false`): whether the daemon may WRITE to
+  `pi.config_dir` — create structure, install Pi/LSP, refresh skills on a timer.
+  Must stay false whenever the directory is shared with human shells, or daemon
+  startup reshapes the team's environment.
+- **`scripts/verify-pi-config.sh`**: asserts the two config dirs match, the
+  directory is a Pi package root, every allowlisted extension resolves, each
+  `~/.pi/agent` points at it, and no retired copy is still referenced.
+
+### Fixed
+- **Retry cap had never fired.** Retry state was cleared on successful *spawn*
+  rather than completion, so the count could never reach 2. Provider failures
+  (429/timeout/overload/quota) now pace retries without consuming the budget;
+  only genuine bead faults exhaust it.
+- **Daemon log no longer receives pi's JSON stream** (1.56 GB in 4h50m), which
+  also made unanchored log greps report failures that never happened.
+- **`deploy.sh` builds packages, not single files** — `go build cmd/worker/main.go`
+  ignored sibling files and broke the worker build.
+- **Nightly testbed matrix counted `"0\n0"`** from `$(grep -c ... || echo 0)`,
+  which disabled its own starvation guard, and its daemon-log filter counted
+  worker passthrough (reporting 20 gap-to-prd cycles where the daemon logged 0).
+
 ### Removed
 - **llm-tldr, entirely.** It went unmaintained, returned zero semantic units on
   Go (silently degrading to grep), and its service on :8787 was not running in

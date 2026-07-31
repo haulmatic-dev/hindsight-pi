@@ -76,16 +76,11 @@ else
 	log "⚠️  $PI_CONFIG_DIR/skills missing — skipping skill install"
 fi
 
-# The worker config is a generated rsync copy of the canonical config, so the
-# skill must be propagated by re-running the generator rather than hand-copied,
-# or the next regeneration silently reverts it.
-echo "==> propagate to the worker config"
-GEN="$(dirname "$0")/../scripts/setup-pi-worker.sh"
-if [ -x "$GEN" ] || [ -f "$GEN" ]; then
-	bash "$GEN" >/dev/null 2>&1 && log "regenerated worker config" || log "⚠️  generator failed — run scripts/setup-pi-worker.sh manually"
-else
-	log "⚠️  scripts/setup-pi-worker.sh not found — worker config not refreshed"
-fi
+# No propagation step: workers read the canonical config directly. There used
+# to be a generated rsync copy at /opt/dev-tools/config/pi-worker that every
+# skill install had to be pushed into; it was retired on 2026-07-31 after it
+# drifted behind the canonical tree unnoticed. Installing into
+# $PI_CONFIG_DIR/skills is now the whole job.
 
 echo "==> verify as the daemon user ($DAEMON_USER)"
 # This is the check that matters: the daemon, not root, runs graphify inside

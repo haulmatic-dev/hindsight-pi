@@ -176,6 +176,54 @@ ls <dev-tools-checkout>/config/pi/skills/
 # Should show: angular-component, golang-patterns, test-driven-development, tdd-chain-validation, ...
 ```
 
+### 1a. One Pi config, shared with humans (CRITICAL)
+
+`config_dir` and `worker_config_dir` MUST be the same directory, and hydra MUST
+NOT write to it:
+
+```yaml
+pi:
+  config_dir: /opt/dev-tools/config/pi
+  worker_config_dir: /opt/dev-tools/config/pi   # same value, deliberately
+  manage_config: false                          # read-only: never write here
+```
+
+That directory is also every human's Pi config — each user's `~/.pi/agent` is a
+symlink to it — so a skill or extension added once is used by the worker fleet
+and by interactive shells alike.
+
+**Never split them again.** They were split until 2026-07-31:
+`/opt/dev-tools/config/pi-worker` was a generated `rsync` copy, and it drifted
+to 239 npm packages against the canonical 242 with nothing detecting it. Its two
+original purposes are both obsolete — the "remove context-mode for faster
+startup" edit had stopped applying (the copy still listed
+`npm:context-mode@1.0.169`), and workers bypass `settings.json` discovery anyway
+via `--no-extensions`; and "keep sessions separate" is unnecessary because Pi
+namespaces `sessions/` by working directory, which is already unique per worker
+worktree.
+
+**`manage_config: false` is the default and must stay false for a shared
+directory.** When true, daemon startup creates the directory structure, installs
+Pi and LSP servers, and refreshes skills on a timer — i.e. it edits the team's
+environment as a side effect of starting. Set it true only for a config
+directory hydra alone owns.
+
+**Extensions are chosen by hydra, not discovered.** The daemon passes a per-phase
+allowlist (`agents.pi.extensions`, default `[rtk, context-mode]`, overridable per
+phase via `phase_extensions`); the worker turns that into `--no-extensions` plus
+explicit `-e <abs path>` resolved from `{config_dir}/npm/node_modules`. This is
+why sharing the config does not drag in the interactive extras: loading
+everything measured 48,315 tokens against 12,059 for rtk alone, and themes and
+editor widgets are unusable by a headless worker.
+
+**Verify before trusting any of the above:**
+```bash
+scripts/verify-pi-config.sh
+# asserts: the two dirs match, it is a Pi package root, every allowlisted
+# extension resolves, each ~/.pi/agent points at it, and no retired copy is
+# still referenced
+```
+
 **Verify local fallback:**
 ```bash
 ls <hydra-repo>/.pi/skills/

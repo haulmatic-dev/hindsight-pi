@@ -168,7 +168,19 @@ pi:
   config_dir: /opt/dev-tools/config/pi
   # Lightweight Pi config for Hydra workers. This copy excludes the
   # context-mode package so each worker starts ~5-10x faster.
-  worker_config_dir: /opt/dev-tools/config/pi-worker
+  # Workers and interactive shells MUST resolve the same directory, so a skill
+  # or extension added once is used by both. These were split until 2026-07-31
+  # (pi-worker was a 278 MB rsync copy) and had drifted to 239 npm packages
+  # against 242, with nothing detecting it. scripts/verify-pi-config.sh asserts
+  # they stay equal.
+  worker_config_dir: /opt/dev-tools/config/pi
+
+  # false = hydra READS this directory and never writes to it. Required whenever
+  # config_dir is shared with human shells (via ~/.pi/agent), because setup
+  # otherwise creates structure, installs Pi/LSP and rewrites skills on a timer
+  # — reshaping the team's environment as a side effect of daemon startup.
+  # Set true only for a config directory hydra alone owns.
+  manage_config: false
 
   standard-agent:
     enabled: true

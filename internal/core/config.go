@@ -194,6 +194,17 @@ type PiRootConfig struct {
 	WorkerConfigDir string         `yaml:"worker_config_dir"`
 	Skills          PiSkillsConfig `yaml:"skills"`
 	StandardAgent   PiAgentConfig  `yaml:"standard-agent"`
+
+	// ManageConfig grants the daemon permission to WRITE to ConfigDir —
+	// creating the directory structure, installing Pi, installing LSP servers
+	// and refreshing skills on a timer.
+	//
+	// Default false, because ConfigDir is shared: since 2026-07-31 the worker
+	// fleet and every interactive shell resolve the same
+	// /opt/dev-tools/config/pi (a git repo), so a daemon that reshapes it is
+	// editing the team's environment as a side effect of starting up. Set true
+	// only for a config directory hydra genuinely owns.
+	ManageConfig bool `yaml:"manage_config"`
 }
 
 // PiAgentConfig contains a Pi agent sub-configuration (standard-agent, validation-agent)
@@ -753,6 +764,7 @@ func LoadConfig(path string) (*Config, error) {
 		ConfigDir:       raw.Pi.ConfigDir,
 		PiConfigDir:     raw.Pi.PiConfigDir,
 		WorkerConfigDir: raw.Pi.WorkerConfigDir,
+		ManageConfig:    raw.Pi.ManageConfig,
 		Skills:          raw.Pi.Skills,
 		StandardAgent:   raw.Pi.StandardAgent,
 	}
@@ -815,6 +827,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 		ConfigDir:       raw.Pi.ConfigDir,
 		PiConfigDir:     raw.Pi.PiConfigDir,
 		WorkerConfigDir: raw.Pi.WorkerConfigDir,
+		ManageConfig:    raw.Pi.ManageConfig,
 		Skills:          raw.Pi.Skills,
 		StandardAgent:   raw.Pi.StandardAgent,
 	}
