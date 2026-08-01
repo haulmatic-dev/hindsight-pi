@@ -47,6 +47,13 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
 	)
 
+	// Daemon registry API: workers self-report state and poll shepherd
+	// commands (PRD worker-park-and-resume Part 4). Loopback only; the worker
+	// treats an unreachable registry as disabled (fail-open).
+	if b.config.API.Enabled && b.config.API.Port > 0 {
+		env = append(env, fmt.Sprintf("HYDRA_API_URL=http://127.0.0.1:%d", b.config.API.Port))
+	}
+
 	// Add full bead JSON for enhanced worker context
 	if bead.ID != "" {
 		cleanBead := bead

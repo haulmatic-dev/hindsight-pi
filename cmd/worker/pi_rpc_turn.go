@@ -58,6 +58,19 @@ func newRPCTurn(autoConfirm bool) *rpcTurn {
 	return &rpcTurn{autoConfirm: autoConfirm}
 }
 
+// reset re-arms the turn for a nudge: the session stays alive and receives
+// another prompt, so end-of-turn state and accumulated text are cleared and
+// the next agent_end is evaluated fresh. finishOnce is deliberately NOT
+// reset: a turn that was already finished must stay finished.
+func (t *rpcTurn) reset() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.ended = false
+	t.failed = false
+	t.errMsg = ""
+	t.text.Reset()
+}
+
 // rpcPromptLine builds the JSONL command that starts a turn.
 func rpcPromptLine(prompt string) ([]byte, error) {
 	return json.Marshal(map[string]any{"type": "prompt", "message": prompt})

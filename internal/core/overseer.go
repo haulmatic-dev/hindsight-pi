@@ -12,7 +12,9 @@ import (
 	"github.com/haulmatic-dev/hydra/internal/bv"
 	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
+	"github.com/haulmatic-dev/hydra/internal/pan"
 	"github.com/haulmatic-dev/hydra/internal/pi"
+	"github.com/haulmatic-dev/hydra/internal/registry"
 	"github.com/haulmatic-dev/hydra/internal/services"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -102,6 +104,12 @@ type Overseer struct {
 
 	// Orphan process janitor for cleaning up orphaned worker processes
 	orphanJanitor *Charon // Cleans up orphaned worker processes
+
+	// Worker registry (daemon-owned SQLite truth) and Pan, the shepherd that
+	// decides the ambiguous tail of worker states. Both fail-open: a registry
+	// open failure or a disabled Pan leaves deterministic rules in force.
+	registryStore *registry.Store
+	panShepherd   *pan.Shepherd
 
 	// Chain completion detector for end-of-chain pattern extraction
 	chainCompletionDetector *ChainCompletionDetector // Detects chain completion and triggers pattern extraction
