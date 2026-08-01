@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/beads"
+	"github.com/haulmatic-dev/hydra/internal/registry"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -29,6 +30,8 @@ type Charon struct {
 	activeWorkersSnapshot func() map[string]int
 	onStaleActiveWorker   func(beadID string)
 	lastWorktreeGC        time.Time // throttles the stale-worktree sweep
+	registryStore         *registry.Store
+	heartbeatHungAfter    time.Duration // stale registry heartbeat → hung worker
 }
 
 // JanitorStats tracks cleanup statistics
@@ -50,14 +53,21 @@ type JanitorStats struct {
 // NewCharon creates a new orphan process janitor with timeout for stuck worker detection
 func NewCharon(beadsClient *beads.Client, workerTracker *WorkerTracker, workerTimeout time.Duration) *Charon {
 	return &Charon{
-		beadsClient:     beadsClient,
-		workerTracker:   workerTracker,
-		workerTimeout:   workerTimeout,
-		checkInterval:   60 * time.Second, // Check every minute
-		orphanBeadGrace: 5 * time.Minute,  // Recover in_progress beads with no live worker after this long
-		stopChan:        make(chan struct{}),
-		stats:           JanitorStats{},
+		beadsClient:        beadsClient,
+		workerTracker:      workerTracker,
+		workerTimeout:      workerTimeout,
+		checkInterval:      60 * time.Second, // Check every minute
+		orphanBeadGrace:    5 * time.Minute,  // Recover in_progress beads with no live worker after this long
+		heartbeatHungAfter: 5 * time.Minute,  // Stale registry heartbeat → hung worker
+		stopChan:           make(chan struct{}),
+		stats:              JanitorStats{},
 	}
+}
+
+// SetRegistry injects the worker registry for liveness-based stuck detection.
+// Nil is valid: Charon then falls back to the legacy wall-clock timeout.
+func (j *Charon) SetRegistry(st *registry.Store) {
+	j.registryStore = st
 }
 
 // SetProjectsProvider lets the caller inject a function that returns the current
@@ -229,41 +239,41 @@ func (j *Charon) performCleanup() {
 			continue
 		}
 
-		// Check for stuck workers (IN_PROGRESS but running too long)
-		if j.workerTimeout > 0 {
+		// Check for stuck workers. With a registry, liveness is the
+		// heartbeat: parked and actively-reporting workers are never killed
+		// on wall time; only a stale heartbeat (hung) kills. Without a
+		// registry row, the legacy wall-clock timeout applies.
+		if kill, reason := j.shouldKillAsStuck(record, time.Now()); kill {
 			runtime := time.Since(record.StartedAt)
-			if runtime > j.workerTimeout {
-				// Worker has exceeded timeout - it's stuck!
-				j.stats.StuckFound++
-				j.stats.LastStuckTime = time.Now()
-				log.Printf("[Charon] 😵 STUCK WORKER DETECTED: PID %d (bead %s) has been running for %v (exceeds timeout %v)",
-					pid, beadID, runtime, j.workerTimeout)
+			j.stats.StuckFound++
+			j.stats.LastStuckTime = time.Now()
+			log.Printf("[Charon] 😵 STUCK WORKER DETECTED: PID %d (bead %s) %s (running %v)",
+				pid, beadID, reason, runtime)
 
-				// Get PGID for process group cleanup
-				pgid := record.PGID
-				if pgid == 0 {
-					pgid = pid
-				}
-
-				// Kill entire process group
-				if err := j.killProcessGroupForce(pgid); err != nil {
-					log.Printf("[Charon] ❌ Failed to kill stuck worker process group PGID %d: %v", pgid, err)
-					// Fallback to single process kill
-					if err := j.killProcess(pid); err != nil {
-						log.Printf("[Charon] ❌ Failed to kill stuck worker PID %d: %v", pid, err)
-						continue
-					}
-				}
-
-				killCount++
-				j.stats.ProcessesKilled++
-				j.stats.ProcessGroupsCleaned++
-				// Mark as completed with timeout exit code
-				j.workerTracker.MarkWorkerCompleted(pid, -2) // -2 indicates timeout
-				// Mark bead as failed so it can be retried
-				j.markBeadFailed(beadID, fmt.Sprintf("Worker timed out after %v", runtime))
-				log.Printf("[Charon] ✅ Killed stuck worker process group PGID %d, marked bead %s as failed for retry", pgid, beadID)
+			// Get PGID for process group cleanup
+			pgid := record.PGID
+			if pgid == 0 {
+				pgid = pid
 			}
+
+			// Kill entire process group
+			if err := j.killProcessGroupForce(pgid); err != nil {
+				log.Printf("[Charon] ❌ Failed to kill stuck worker process group PGID %d: %v", pgid, err)
+				// Fallback to single process kill
+				if err := j.killProcess(pid); err != nil {
+					log.Printf("[Charon] ❌ Failed to kill stuck worker PID %d: %v", pid, err)
+					continue
+				}
+			}
+
+			killCount++
+			j.stats.ProcessesKilled++
+			j.stats.ProcessGroupsCleaned++
+			// Mark as completed with timeout exit code
+			j.workerTracker.MarkWorkerCompleted(pid, -2) // -2 indicates timeout
+			// Mark bead as failed so it can be retried
+			j.markBeadFailed(beadID, fmt.Sprintf("Worker timed out after %v", runtime))
+			log.Printf("[Charon] ✅ Killed stuck worker process group PGID %d, marked bead %s as failed for retry", pgid, beadID)
 		}
 	}
 
@@ -319,6 +329,37 @@ func (j *Charon) getOpenBeads() (map[string]bool, map[string]bool) {
 	}
 
 	return openBeads, failedProjects
+}
+
+// shouldKillAsStuck decides whether a live tracked worker must be killed
+// as stuck (PRD worker-park-and-resume Parts 4–5).
+//
+// With a registry row the decision is liveness-based: parked workers and
+// workers with a fresh heartbeat are alive by definition — the reporter
+// heartbeats every 30s even while the worker waits out provider congestion —
+// so only a stale heartbeat means hung. Without a row (old worker,
+// pre-registry daemon) the legacy wall-clock worker_timeout applies.
+//
+// This replaces the wall-clock sweep that on 2026-08-01 killed every worker
+// at 15m: parked-on-403 workers, and one worker while it was emitting its
+// closing verdict.
+func (j *Charon) shouldKillAsStuck(record *WorkerRecord, now time.Time) (kill bool, reason string) {
+	if j.registryStore != nil {
+		row, ok, err := j.registryStore.GetWorker(record.BeadID)
+		if err == nil && ok {
+			age := now.Sub(row.LastHeartbeat)
+			if age > j.heartbeatHungAfter {
+				return true, fmt.Sprintf("registry heartbeat stale for %v (threshold %v), state=%s — hung", age, j.heartbeatHungAfter, row.State)
+			}
+			return false, fmt.Sprintf("registry heartbeat fresh (%v ago), state=%s", age, row.State)
+		}
+	}
+
+	// Legacy: no registry data to judge liveness by.
+	if j.workerTimeout > 0 && now.Sub(record.StartedAt) > j.workerTimeout {
+		return true, fmt.Sprintf("no registry row and exceeds timeout %v", j.workerTimeout)
+	}
+	return false, ""
 }
 
 // markBeadFailed marks a bead as failed with a reason
