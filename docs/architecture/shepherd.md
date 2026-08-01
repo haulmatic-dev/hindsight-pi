@@ -191,7 +191,10 @@ nine worker processes, zero merged output. Design:
 (`:8089`): `POST /api/v1/workers/report` (register + heartbeat + state
 transitions), `POST /api/v1/workers/completed` (terminal), and poll
 `GET /api/v1/workers/commands?bead=...` (consume-on-read steering commands:
-`nudge`, `steer`, `abandon`). The daemon sets `HYDRA_API_URL` when spawning;
+`continue`, `steer`, `compact-and-continue`, `abandon-with-summary`). The
+worker honors them at park wake: steer/continue reshape the wake prompt,
+abandon-with-summary fails the turn (`abandoned by shepherd: …`) and closes
+the session instead of resuming. The daemon sets `HYDRA_API_URL` when spawning;
 without it the worker never reports and behaves exactly as before (fail-open).
 The store opens in the service starter, not in `NewOverseer`, so tests never
 touch the filesystem. Route handlers resolve the store **per request** — a

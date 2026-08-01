@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/haulmatic-dev/hydra/internal/registry"
 )
 
 // parkState tracks Tier A provider-capacity parking for one pi session (PRD
@@ -136,7 +138,11 @@ func decideParkClass(errMsg string) (park bool, reason string) {
 // the backoff without blocking the scanner, then re-prompts the same session.
 // If pi died while parked, the reprompt write fails and the turn is finished
 // so the normal failure path takes over (zombie-park guard).
-func parkSession(ps *parkState, wait time.Duration, reason string, stdin io.Writer, turn *rpcTurn, reprompt string) {
+//
+// At wake the worker drains shepherd commands queued while it was parked
+// (PRD Part 3): steer/continue reshape the wake prompt, abandon-with-summary
+// closes the turn and the session instead of resuming.
+func parkSession(ps *parkState, wait time.Duration, reason string, stdin io.WriteCloser, turn *rpcTurn, reprompt string) {
 	ps.begin(wait, reason)
 	since, wake, parkReason := ps.parkInfo()
 	if activeReporter != nil {
@@ -153,6 +159,25 @@ func parkSession(ps *parkState, wait time.Duration, reason string, stdin io.Writ
 		if activeReporter != nil {
 			activeReporter.SetState("working")
 			activeReporter.SetPark(time.Time{}, time.Time{}, "")
+			// Honor shepherd commands queued while parked.
+			for _, qc := range activeReporter.DrainCommands() {
+				switch qc.Kind {
+				case registry.CmdSteer:
+					reprompt = "Shepherd steering instruction (follow it, then continue your task): " + qc.Payload + "\n\n" + reprompt
+					log.Printf("[Worker:rpc] honoring steer command: %s", truncateLog(qc.Payload, 120))
+				case registry.CmdContinue, registry.CmdCompactAndContinue:
+					if qc.Payload != "" {
+						reprompt += "\n\nShepherd note: " + qc.Payload
+					}
+					log.Printf("[Worker:rpc] honoring %s command", qc.Kind)
+				case registry.CmdAbandonWithSummary:
+					log.Printf("[Worker:rpc] 🛑 abandon-with-summary from shepherd: %s", truncateLog(qc.Payload, 200))
+					turn.abandon("abandoned by shepherd: "+qc.Payload, stdin)
+					return
+				default:
+					log.Printf("[Worker:rpc] ignoring unknown command kind %q", qc.Kind)
+				}
+			}
 		}
 		line, err := rpcPromptLine(reprompt)
 		if err != nil {
