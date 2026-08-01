@@ -87,6 +87,12 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   directory is a Pi package root, every allowlisted extension resolves, each
   `~/.pi/agent` points at it, and no retired copy is still referenced.
 
+### Documentation
+- `docs/architecture/shepherd.md` gained a section on the worker registry,
+  park-and-resume, the verdict protocol, Pan, liveness-based Charon, and the
+  timeout hierarchy with its env knobs (`HYDRA_API_URL`, `HYDRA_MAX_NUDGES`,
+  `HYDRA_MAX_PARK_MINUTES`, `HYDRA_WORKER_LIFETIME_MINUTES`).
+
 ### Fixed
 - **Charon no longer kills live workers on wall-clock time.** The stuck-worker
   sweep used a 15m wall timeout and on 2026-08-01 killed every fleet worker
