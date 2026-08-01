@@ -40,6 +40,12 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	} else {
 		o.registryStore = regStore
 		log.Printf("[Registry] Initialized")
+		// Charon's stuck-worker sweep judges liveness from the registry
+		// (heartbeat), not the wall clock: parked and actively-reporting
+		// workers are never killed on time alone.
+		if o.orphanJanitor != nil {
+			o.orphanJanitor.SetRegistry(regStore)
+		}
 		panCfg := o.config.Shepherd.Pan
 		o.panShepherd = pan.New(pan.Config{
 			Enabled:          panCfg.Enabled,

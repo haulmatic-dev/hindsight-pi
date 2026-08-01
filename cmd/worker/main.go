@@ -1304,9 +1304,17 @@ func executeWithPi(
 	}
 	activityMonitor := NewActivityMonitor(activityTimeout)
 
-	// Max total runtime: 15 minutes regardless of activity.
-	// Prevents Pi from running indefinitely with sporadic output.
-	maxTotalRuntime := 15 * time.Minute
+	// Max total runtime: the lifetime cap (PRD Part 5) — monotonic, nothing
+	// resets it, parked time excluded (parking is waiting, not running).
+	// Default 2h; HYDRA_WORKER_LIFETIME_MINUTES overrides. The 4-minute
+	// activity timeout remains the real hang detector; the registry
+	// heartbeat is the daemon's.
+	maxTotalRuntime := 2 * time.Hour
+	if v := os.Getenv("HYDRA_WORKER_LIFETIME_MINUTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxTotalRuntime = time.Duration(n) * time.Minute
+		}
+	}
 	startTime := time.Now()
 
 	// Build pi command

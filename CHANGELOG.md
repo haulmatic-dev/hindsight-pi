@@ -87,7 +87,26 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   directory is a Pi package root, every allowlisted extension resolves, each
   `~/.pi/agent` points at it, and no retired copy is still referenced.
 
+### Documentation
+- `docs/architecture/shepherd.md` gained a section on the worker registry,
+  park-and-resume, the verdict protocol, Pan, liveness-based Charon, and the
+  timeout hierarchy with its env knobs (`HYDRA_API_URL`, `HYDRA_MAX_NUDGES`,
+  `HYDRA_MAX_PARK_MINUTES`, `HYDRA_WORKER_LIFETIME_MINUTES`).
+
 ### Fixed
+- **Charon no longer kills live workers on wall-clock time.** The stuck-worker
+  sweep used a 15m wall timeout and on 2026-08-01 killed every fleet worker
+  at ~15m: workers parked on provider 403s, and one worker while it was
+  emitting its closing `HYDRA_VERDICT`. The sweep is now registry-aware
+  (PRD parts 4–5): parked workers and workers with a fresh heartbeat (30s
+  reporter) are alive by definition and never killed on time alone; only a
+  stale heartbeat (>5m) means hung. Workers without a registry row keep the
+  legacy wall-clock behavior.
+- **Worker lifetime cap replaces the 15m total-runtime kill.** The worker's
+  internal max-runtime (15m) could fire mid-verdict on long TDD chains; it
+  is now a 2h monotonic lifetime cap (`HYDRA_WORKER_LIFETIME_MINUTES`),
+  parked time excluded. The 4m activity timeout stays the real hang
+  detector.
 - **Charon fleet deadlock: phantom worker records blocked orphan-bead recovery
   forever.** A worker that died without cleanup left a `running` record in
   `workers.json`; `recoverOrphanInProgressBeads` then believed a live worker

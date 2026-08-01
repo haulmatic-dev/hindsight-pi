@@ -1,6 +1,6 @@
 # The Shepherd Layer — Events, Quarantine, Fix Beads, Governor, Verdict Memory
 
-**Status:** living document · **Updated:** 2026-07-30 · shipped tracks: A1 A2 B1 C1 C2 D3
+**Status:** living document · **Updated:** 2026-08-01 · shipped tracks: A1 A2 B1 C1 C2 D3 + worker registry / park-and-resume / verdict protocol / liveness-based Charon
 
 The Shepherd layer is the set of mechanisms that keep an autonomous fleet
 honest and observable: every significant decision leaves a durable record,
@@ -178,7 +178,90 @@ Composes with the provider circuit breaker: the breaker pauses spawns for a
 
 ---
 
-## 5. Verdict memory (D3) — `verdict_memory.go`, `gap_adjudicator.go`
+## 5. Worker registry, park-and-resume, verdict protocol (2026-08-01) — `internal/registry`, `cmd/worker/reporter.go`, `cmd/worker/park.go`, `cmd/worker/verdict.go`, `internal/pan`
+
+Built to stop the failure that autopsied as `hydra-testbed-y05`: provider
+congestion (Kimi 403/429) killed workers mid-turn, the work was rejected as
+`empty-diff`, and the fleet re-did it from zero — ~50 minutes of compute,
+nine worker processes, zero merged output. Design:
+[`docs/PRDs/worker-park-and-resume-20260731.md`](../PRDs/worker-park-and-resume-20260731.md).
+
+**Worker registry (daemon-owned, single writer).** SQLite at
+`$HYDRA_HOME/.hydra/registry.db`. Workers report over the existing API
+(`:8089`): `POST /api/v1/workers/report` (register + heartbeat + state
+transitions), `POST /api/v1/workers/completed` (terminal), and poll
+`GET /api/v1/workers/commands?bead=...` (consume-on-read steering commands:
+`nudge`, `steer`, `abandon`). The daemon sets `HYDRA_API_URL` when spawning;
+without it the worker never reports and behaves exactly as before (fail-open).
+The store opens in the service starter, not in `NewOverseer`, so tests never
+touch the filesystem. Route handlers resolve the store **per request** — a
+store captured at route-registration time is nil because the store opens
+later; that bug shipped and returned 503s until fixed.
+
+**Worker reporter.** `cmd/worker/reporter.go`: registers on start, heartbeats
+every 30s, mirrors every park/nudge state change, reports terminal state on
+exit. Every failure is logged-and-continue — the reporter must never break
+the worker it observes.
+
+**Verdict protocol.** Workers are instructed (prompt) to end with exactly one
+```HYDRA_VERDICT fenced JSON block (`done`, `ac_met`, `ac_unmet`,
+`files_changed`, `verification`). `cmd/worker/verdict.go` parses it. No
+verdict by turn end → the **worker** nudges in-session
+(`HYDRA_MAX_NUDGES`, default 3), not a kill. The old behavior — judge
+completion by exit code and `git diff` alone — is how finished work got
+rejected as `empty-diff`.
+
+**Park-and-resume.** Error classification is **marker-first** (`park.go`
+`decideParkClass`): Kimi's error `type` field lies — overload arrives as
+`429 rate_limit_error`, concurrency and quota both as `403
+permission_error/access_terminated` — so the message text decides:
+`concurrent request limit` / `organizational concurrency` → Tier C
+provider-capacity (park); `usage limit` / `quota` → Tier B credential (park
++ alert); 5xx / `overloaded` → Tier A transient (park). A parked worker keeps
+its pi session alive and waits with capped exponential backoff (25s → 5m);
+on wake it re-enters the turn where it left off. Monotonic park budget:
+`HYDRA_MAX_PARK_MINUTES` (default 60); exceeding it abandons-with-summary
+rather than hanging forever. Parked time is exempt from the worker's
+activity timeout and lifetime cap.
+
+**Pan, the shepherd.** `internal/pan`: a pi-agent run every 60s against a
+snapshot of the registry that may place steering commands (parked worker
+that overslept, working-but-stalled worker, zombie with a dead PID).
+Fail-open: Pan down or unparseable advice → the deterministic rules below
+still run. **Disabled** until configured with its own provider key
+(`shepherd.pan` in config; see `hydra-config.yaml.example`) — it must not
+share the fleet's Kimi account.
+
+**Charon is liveness-based now.** The stuck-worker sweep used to kill on
+wall-clock time alone and on 2026-08-01 killed every fleet worker at ~15m —
+including parked workers and one worker while it was emitting its closing
+verdict. `shouldKillAsStuck` now consults the registry: a fresh heartbeat
+(30s reporter) or the `parked` state means alive, regardless of age; only a
+stale heartbeat (>5m) means hung and earns the kill. No registry row (old
+worker, pre-registry daemon) falls back to the legacy wall-clock timeout.
+
+**Timeout hierarchy (PRD Part 5):**
+
+| Bound | Value | Reset by | Owner |
+|---|---|---|---|
+| Activity (silence) | 4m | any session/token activity | worker |
+| Nudges | 3 (`HYDRA_MAX_NUDGES`) | — | worker |
+| Park budget | 60m monotonic (`HYDRA_MAX_PARK_MINUTES`) | never | worker |
+| Lifetime cap | 2h monotonic (`HYDRA_WORKER_LIFETIME_MINUTES`) | never, parked time excluded | worker |
+| Daemon liveness | heartbeat stale >5m | each heartbeat | Charon |
+
+**Environment knobs (set by the daemon or the operator):**
+
+| Var | Default | Meaning |
+|---|---|---|
+| `HYDRA_API_URL` | unset | daemon API base; unset → worker never reports |
+| `HYDRA_MAX_NUDGES` | 3 | in-session verdict reminders before give-up |
+| `HYDRA_MAX_PARK_MINUTES` | 60 | monotonic parked-time budget |
+| `HYDRA_WORKER_LIFETIME_MINUTES` | 120 | monotonic lifetime cap |
+
+---
+
+## 6. Verdict memory (D3) — `verdict_memory.go`, `gap_adjudicator.go`
 
 The system's most expensive judgments used to evaporate after use. Now:
 
@@ -198,12 +281,16 @@ runs. Each actual retain emits `verdict_retained`.
 
 ---
 
-## 6. What's next (planned tracks)
+## 7. What's next (planned tracks)
 
 - **State-based gate truth** — run D3 closed all gates clean on a branch with
   zero integrated code; the compliance verdict must derive from repo state.
 - **B2 pathology brake** — signature-triggered, self-releasing slowdown on
   known failure patterns; never a hard cap.
-- **D1 shepherd cron** — a never-sleeping watchdog reading the central event
-  DB, escalating into per-repo `.hydra/` and the central store.
+- **Pan enablement** — the shepherd exists (`internal/pan`) and the registry
+  it watches is live; pending a dedicated provider key and `shepherd.pan`
+  config.
+- **Registry migration tail** — Charon still sweeps `workers.json` phantoms
+  (fixed 2026-07-31, sweep-first); the tracker itself migrates to the
+  registry in a later PRD part.
 - **D2 nightly testbed matrix** — known-answer runs on cron, gating deploys.
