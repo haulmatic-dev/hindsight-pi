@@ -16,7 +16,7 @@ func setupRegistryRouter(t *testing.T, store *registry.Store) *httptest.Server {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	v1 := r.Group("/api/v1")
-	RegisterWorkerRegistryRoutes(v1, store)
+	RegisterWorkerRegistryRoutes(v1, func() *registry.Store { return store })
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	return srv

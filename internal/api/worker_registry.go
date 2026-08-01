@@ -9,10 +9,12 @@ import (
 )
 
 // RegisterWorkerRegistryRoutes wires the worker-facing registry endpoints.
-// store may be nil (registry unavailable): routes then answer 503 so workers
-// fall back to pre-registry behavior.
-func RegisterWorkerRegistryRoutes(v1 *gin.RouterGroup, store *registry.Store) {
+// getStore is resolved per request (the registry opens in the service
+// starter, after the API server is built). Nil store (registry unavailable)
+// answers 503 so workers fall back to pre-registry behavior.
+func RegisterWorkerRegistryRoutes(v1 *gin.RouterGroup, getStore func() *registry.Store) {
 	v1.POST("/workers/report", func(c *gin.Context) {
+		store := getStore()
 		if store == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "registry unavailable"})
 			return
@@ -65,6 +67,7 @@ func RegisterWorkerRegistryRoutes(v1 *gin.RouterGroup, store *registry.Store) {
 	})
 
 	v1.POST("/workers/completed", func(c *gin.Context) {
+		store := getStore()
 		if store == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "registry unavailable"})
 			return
@@ -88,6 +91,7 @@ func RegisterWorkerRegistryRoutes(v1 *gin.RouterGroup, store *registry.Store) {
 	// Commands are consumed on read: a worker polling gets each command
 	// exactly once.
 	v1.GET("/workers/commands", func(c *gin.Context) {
+		store := getStore()
 		if store == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "registry unavailable"})
 			return
