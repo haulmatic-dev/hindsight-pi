@@ -22,6 +22,29 @@ type Config struct {
 	Output          OutputConfig          `yaml:"output"`
 	Validation      ValidationConfig      `yaml:"validation"`
 	ComplianceCycle ComplianceCycleConfig `yaml:"compliance_cycle"`
+	Shepherd        ShepherdConfig       `yaml:"shepherd"`
+}
+
+// ShepherdConfig configures Pan, the shepherd that decides the ambiguous
+// tail of worker states (PRD worker-park-and-resume-20260731 Part 6).
+// Pan is fail-open: disabled or failing, deterministic rules still run.
+type ShepherdConfig struct {
+	Pan PanConfig `yaml:"pan"`
+}
+
+// PanConfig configures the Pan shepherd agent. Provider/Model/APIKeyName are
+// deliberately separate from the worker fleet's: Pan must stay lucid during
+// the congestion storms it manages.
+type PanConfig struct {
+	Enabled                 bool   `yaml:"enabled"`
+	IntervalSeconds         int    `yaml:"interval_seconds"`
+	HungAfterSeconds        int    `yaml:"hung_after_seconds"`
+	ParkOverdueGraceSeconds int    `yaml:"park_overdue_grace_seconds"`
+	NudgeCap                int    `yaml:"nudge_cap"`
+	Provider                string `yaml:"provider"`
+	Model                   string `yaml:"model"`
+	Thinking                string `yaml:"thinking"`
+	APIKeyName              string `yaml:"api_key_name"`
 }
 
 // AgentsConfig contains agent connector settings

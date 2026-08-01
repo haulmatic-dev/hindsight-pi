@@ -22,6 +22,7 @@ import (
 	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/internal/pi"
+	"github.com/haulmatic-dev/hydra/internal/registry"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -36,6 +37,7 @@ type WorkerConfig struct {
 	BeadDescription string
 	Hindsight       *HindsightContext
 	HindsightClient HindsightClientConfig
+	APIURL          string // daemon registry API (HYDRA_API_URL); empty = disabled
 	Pi              PiConfig
 	MCP             struct {
 		Enabled bool
@@ -269,6 +271,13 @@ func main() {
 	log.Printf("   Project: %s (path: %s), Repo: %s, Agent: %s", config.Project, projectPath, config.Repo, config.AgentType)
 	log.Printf("   Agent ID: %s", agentID)
 
+	// Registry reporter: heartbeat state to the daemon and drain shepherd
+	// commands. Fail-open: no HYDRA_API_URL → no reporting, worker behaves
+	// exactly as before.
+	reporter := newStateReporter(registry.NewClient(config.APIURL), config.BeadID, config.Project)
+	reporter.Start()
+	activeReporter = reporter
+
 	// Log Hindsight context if available
 	if config.Hindsight != nil {
 		logHindsightContext(config.Hindsight)
@@ -416,6 +425,10 @@ func main() {
 	log.Printf("✅ Worker completed for bead: %s (status: %s, duration: %v, attempts: %d)",
 		beadID, status, duration, attempts)
 
+	// Report terminal state before exiting so the daemon registry reflects
+	// the outcome even if the scheduler misses the process exit.
+	reporter.Stop(exitCode)
+
 	// Exit with appropriate code
 	os.Exit(exitCode)
 }
@@ -461,6 +474,9 @@ func parseConfig() WorkerConfig {
 	}
 	if v := os.Getenv("HYDRA_REPO"); v != "" {
 		config.Repo = v
+	}
+	if v := os.Getenv("HYDRA_API_URL"); v != "" {
+		config.APIURL = v
 	}
 	// Only use legacy AGENT_TYPE if JSON wasn't parsed or bead.Type was empty
 	if v := os.Getenv("HYDRA_AGENT_TYPE"); v != "" && config.AgentType == "" {
@@ -1359,6 +1375,16 @@ func executeWithPi(
 	var stdoutBuf, stderrBuf bytes.Buffer
 	var wg sync.WaitGroup
 
+	// Verdict-nudge state (rpc mode only): a turn that ends without a valid
+	// HYDRA_VERDICT is re-prompted in the same live session instead of being
+	// torn down. Capped; past the cap the turn closes and Pan sees the
+	// nudge-capped worker in the registry.
+	nudgeCount := 0
+
+	// Park state (rpc mode only): Tier A provider-capacity failures park the
+	// live session instead of killing it (PRD Part 2).
+	park := newParkState(0)
+
 	// Monitor stdout
 	wg.Add(1)
 	go func() {
@@ -1374,11 +1400,42 @@ func executeWithPi(
 			// tears it down — otherwise the worker would wait out the full
 			// activity timeout on every bead.
 			if turn != nil && turn.handleLine(line, stdinPipe) {
-				pid := 0
-				if cmd.Process != nil {
-					pid = cmd.Process.Pid
+				// Failed turn: park on Tier A provider-capacity errors instead of
+				// tearing the session down (PRD Part 2). Park cap reached or
+				// non-parkable → the turn closes and the failure propagates.
+				if turn.Failed() {
+					if parkable, reason := decideParkClass(turn.ErrMsg()); parkable {
+						if wait, ok := park.nextWait(reason); ok {
+							parkSession(park, wait, reason, stdinPipe, turn,
+								"The provider rejected the previous request for capacity reasons. It should accept requests again now — continue your task from where you stopped.")
+							continue
+						}
+						log.Printf("[Worker:rpc] park cap reached (%v) — closing failed turn (%s)", park.totalParked(), reason)
+					}
+					turn.finish(cmdPid(cmd), stdinPipe)
+					continue
 				}
-				turn.finish(pid, stdinPipe)
+				v := parseVerdict(turn.Text())
+				if nudge, reason := decideTurnEnd(v, nudgeCount, verdictNudgeCap); nudge {
+					nudgeCount++
+					if activeReporter != nil {
+						activeReporter.SetNudges(nudgeCount)
+					}
+					log.Printf("[Worker:rpc] turn ended without closure (%s) — nudging session %d/%d", reason, nudgeCount, verdictNudgeCap)
+					if nudgeLine, err := rpcPromptLine(buildNudgePrompt(reason)); err == nil {
+						if _, err := stdinPipe.Write(append(nudgeLine, '\n')); err != nil {
+							log.Printf("[Worker:rpc] nudge write failed, finishing turn: %v", err)
+							turn.finish(cmdPid(cmd), stdinPipe)
+							continue
+						}
+						turn.reset()
+						continue
+					}
+				}
+				if v != nil && !v.Done && v.Summary != "" {
+					log.Printf("[Worker:rpc] agent abandoned with summary: %s", truncateLog(v.Summary, 200))
+				}
+				turn.finish(cmdPid(cmd), stdinPipe)
 			}
 			// Also stream to MCP for real-time monitoring
 			if mcpClient != nil {
@@ -1421,7 +1478,10 @@ monitorLoop:
 		case cmdErr = <-done:
 			break monitorLoop
 		case <-timeoutTicker.C:
-			if activityMonitor.IsTimedOut() {
+			// Parked workers are exempt from the activity timeout: parking
+			// produces no output by design. Liveness of a parked worker is the
+			// daemon's job (heartbeat + Pan), not this monitor's.
+			if activityMonitor.IsTimedOut() && !park.isActive() {
 				log.Printf("⏰ Activity timeout reached (no output for %v)", activityTimeout)
 				streamLog(mcpClient, "warn", fmt.Sprintf("Activity timeout after %v of inactivity", activityTimeout))
 
@@ -1436,8 +1496,9 @@ monitorLoop:
 				break monitorLoop
 			}
 
-			// Max total runtime check — kills Pi even if it produces sporadic output
-			if time.Since(startTime) > maxTotalRuntime {
+			// Max total runtime check — kills Pi even if it produces sporadic
+			// output. Parked time is excluded: parking is waiting, not running.
+			if time.Since(startTime)-park.totalParked() > maxTotalRuntime {
 				log.Printf("⏰ Max total runtime reached (%v). Forcing Pi termination.", maxTotalRuntime)
 				streamLog(mcpClient, "warn", fmt.Sprintf("Max total runtime %v reached, terminating Pi", maxTotalRuntime))
 
@@ -1798,6 +1859,17 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 		promptParts = append(promptParts,
 			"DELIVERABLE CONTRACT: this task is complete only when the required file edits exist on disk and verification commands ran. A plan or analysis without edits will be rejected as an empty diff.")
 	}
+
+	// Closure protocol (PRD worker-park-and-resume Part 3): the turn does not
+	// end when the agent stops talking — it ends with a machine-readable
+	// verdict. Without one the worker re-prompts the live session.
+	promptParts = append(promptParts,
+		`CLOSURE PROTOCOL: end your final message with exactly one verdict block.
+When done:
+HYDRA_VERDICT: {"done": true, "ac_met": [...], "ac_unmet": [], "files_changed": [...], "verification": [{"cmd": "...", "result": "..."}]}
+When you cannot complete it:
+HYDRA_VERDICT: {"done": false, "summary": "what was done and what remains"}
+A turn ending without this block is treated as unfinished and you will be re-prompted.`)
 
 	// Add target files if available
 	targetFiles := extractTargetFiles(bead)
