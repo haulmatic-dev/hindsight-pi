@@ -87,7 +87,7 @@ func (s *Server) setupRoutes() {
 	// Worker registry endpoints (PRD worker-park-and-resume Part 4): workers
 	// report state and poll commands; the daemon is the single writer. Nil
 	// store (registry unavailable) answers 503 so workers fall back.
-	RegisterWorkerRegistryRoutes(v1, s.overseer.Registry())
+	RegisterWorkerRegistryRoutes(v1, s.overseer.Registry)
 
 	// TODO: Add GraphQL endpoint in Phase 1
 	// TODO: Add WebSocket endpoint for real-time updates
