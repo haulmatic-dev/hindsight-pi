@@ -94,6 +94,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   `HYDRA_MAX_PARK_MINUTES`, `HYDRA_WORKER_LIFETIME_MINUTES`).
 
 ### Fixed
+- **`shepherd.pan` config silently parsed to zero values.** `LoadConfig`
+  copies `rawConfig` fields one by one; `Shepherd` (and in
+  `LoadConfigUncached`, also `Validation`/`ComplianceCycle`) was declared on
+  `Config` but never copied, so Pan stayed disabled in production with no
+  error. Added the missing copies plus a load-survival regression test.
 - **Charon no longer kills live workers on wall-clock time.** The stuck-worker
   sweep used a 15m wall timeout and on 2026-08-01 killed every fleet worker
   at ~15m: workers parked on provider 403s, and one worker while it was
