@@ -288,6 +288,7 @@ type rawConfig struct {
 	Output          OutputConfig          `yaml:"output"`
 	Validation      ValidationConfig      `yaml:"validation"`
 	ComplianceCycle ComplianceCycleConfig `yaml:"compliance_cycle"`
+	Shepherd        ShepherdConfig        `yaml:"shepherd"`
 }
 
 // projectsListConfig handles the case where projects is an object with 'list' field
@@ -783,6 +784,7 @@ func LoadConfig(path string) (*Config, error) {
 	config.applyPiDefaults()
 	config.Validation = raw.Validation
 	config.ComplianceCycle = raw.ComplianceCycle
+	config.Shepherd = raw.Shepherd
 	config.Pi = PiRootConfig{
 		ConfigDir:       raw.Pi.ConfigDir,
 		PiConfigDir:     raw.Pi.PiConfigDir,
@@ -855,6 +857,9 @@ func LoadConfigUncached(path string) (*Config, error) {
 		StandardAgent:   raw.Pi.StandardAgent,
 	}
 	config.Output = raw.Output
+	config.Validation = raw.Validation
+	config.ComplianceCycle = raw.ComplianceCycle
+	config.Shepherd = raw.Shepherd
 	// Handle projects field
 	if !isZeroNode(raw.Projects) {
 		if raw.Projects.Kind == yaml.SequenceNode {
