@@ -282,6 +282,15 @@ an unsure judgment is noise, not memory. All paths are fail-open
 (`VerdictRetainer` swallows errors): a Hindsight outage costs memories, never
 runs. Each actual retain emits `verdict_retained`.
 
+**Worker-run retention** (what Hindsight's extraction LLM sees per bead):
+the parsed `HYDRA_VERDICT` when one exists (~200 tokens of distilled
+outcome), sanitized output otherwise — thinkingSignature/base64 runs
+stripped, 4KB tail-biased cap, failure evidence kept. The raw turn text
+never reaches the extraction LLM (2026-08-01, Sink A). Recall itself makes
+**no LLM calls**: local embeddings (bge-small) + local cross-encoder
+reranker; the only read-side cost is fleet prompt tokens from context
+injection.
+
 ---
 
 ## 7. What's next (planned tracks)
