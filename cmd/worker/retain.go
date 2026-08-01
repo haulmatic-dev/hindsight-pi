@@ -19,9 +19,9 @@ import (
 //     failure evidence (errors, failing tests) lives at the tail.
 
 const (
-	retainVerdictCap    = 2048 // verdict path: structured summary cap
-	retainSanitizedCap  = 4096 // fallback path: sanitized output cap
-	base64RunMinLength  = 120  // strip base64-ish runs at least this long
+	retainVerdictCap   = 2048 // verdict path: structured summary cap
+	retainSanitizedCap = 4096 // fallback path: sanitized output cap
+	base64RunMinLength = 120  // strip base64-ish runs at least this long
 )
 
 var (

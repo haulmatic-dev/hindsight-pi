@@ -173,13 +173,13 @@ func DefaultRetryPolicy() RetryPolicy {
 
 // ExecutionResult represents the outcome of executing a bead
 type ExecutionResult struct {
-	Success      bool
-	ExitCode     int
-	Output       string
-	Error        string
-	Duration     time.Duration
-	Attempts     int
-	AgentType    string
+	Success   bool
+	ExitCode  int
+	Output    string
+	Error     string
+	Duration  time.Duration
+	Attempts  int
+	AgentType string
 	// Verdict is the parsed HYDRA_VERDICT closure block, when the agent
 	// emitted one. Retention prefers it over raw output: it is the
 	// distilled outcome, ~200 tokens, and exactly what future runs need.

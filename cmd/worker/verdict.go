@@ -22,12 +22,12 @@ type VerificationEntry struct {
 }
 
 type Verdict struct {
-	Done          bool                `json:"done"`
-	ACMet         []string            `json:"ac_met"`
-	ACUnmet       []string            `json:"ac_unmet"`
-	FilesChanged  []string            `json:"files_changed"`
-	Verification  []VerificationEntry `json:"verification"`
-	Summary       string              `json:"summary"`
+	Done         bool                `json:"done"`
+	ACMet        []string            `json:"ac_met"`
+	ACUnmet      []string            `json:"ac_unmet"`
+	FilesChanged []string            `json:"files_changed"`
+	Verification []VerificationEntry `json:"verification"`
+	Summary      string              `json:"summary"`
 }
 
 const verdictMarker = "HYDRA_VERDICT:"

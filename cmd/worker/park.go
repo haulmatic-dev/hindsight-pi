@@ -19,12 +19,12 @@ import (
 // Parked time is excluded from the max-total-runtime budget; the park cap is
 // the monotonic bound.
 type parkState struct {
-	mu    sync.Mutex
-	cap   time.Duration
-	count int           // park episodes so far (drives backoff)
-	total time.Duration // accumulated parked time
-	since time.Time    // zero when not parked
-	wake  time.Time
+	mu     sync.Mutex
+	cap    time.Duration
+	count  int           // park episodes so far (drives backoff)
+	total  time.Duration // accumulated parked time
+	since  time.Time     // zero when not parked
+	wake   time.Time
 	reason string
 }
 
