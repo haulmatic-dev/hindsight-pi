@@ -7,6 +7,21 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- **PRD: worker park-and-resume on provider congestion**
+  (`docs/PRDs/worker-park-and-resume-20260731.md`). Workers whose session is
+  interrupted by provider-capacity errors (403 concurrency, 429, overload)
+  should park the live pi rpc session and resume it after backoff instead of
+  terminating and losing all context — the root cause of repeated rework seen
+  in the 2026-07-31 `hydra-testbed-y05` autopsy (~50 min compute, zero merged
+  output). Rewritten after design review: 3-tier error classification
+  (auto-park / escalation-park on credential errors / close), worker control
+  loop with named session files (parked workers survive daemon restarts),
+  verdict-based closure (`HYDRA_VERDICT` required before pi is killed),
+  daemon-owned SQLite registry + command queue, a four-knob timeout hierarchy
+  with a monotonic lifetime cap, and "Pan" — a pi-agent shepherd with its own
+  provider key that handles the ambiguous tail and is fail-open by contract.
+
 ### Changed
 - **Runtime state moved out of `/opt/hydra` into `/opt/dev-tools/var/hydra`.**
   Code (`components/hydra`), shared config (`config/pi`) and runtime state
@@ -42,6 +57,17 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   `~/.pi/agent` points at it, and no retired copy is still referenced.
 
 ### Fixed
+- **Charon fleet deadlock: phantom worker records blocked orphan-bead recovery
+  forever.** A worker that died without cleanup left a `running` record in
+  `workers.json`; `recoverOrphanInProgressBeads` then believed a live worker
+  existed and skipped the bead, while the dead-PID sweep that would clear the
+  phantom sat behind `getOpenBeads`, which aborted the whole scan whenever any
+  one project's `br list` failed (lib-nestjs/demo exit 2). Result on
+  2026-07-31: 11 beads stuck `in_progress`, `ReadyNodes:0 BlockedNodes:14`,
+  fleet idle for hours. The dead-PID sweep now runs first, before any br
+  dependency; `getOpenBeads` skips failing projects instead of aborting; and
+  the orphan-kill decision is fail-closed per project — a worker whose project
+  cannot be listed is never killed on the strength of a partial open-bead map.
 - **`deploy.sh` no longer overwrites live configuration.** `create_config`,
   `create_systemd_service`, `setup_logrotate` and `setup_firewall` wrote canned
   templates on every run. On 2026-07-31 an ordinary deploy replaced the tuned

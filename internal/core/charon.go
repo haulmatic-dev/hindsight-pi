@@ -148,6 +148,21 @@ func (j *Charon) performCleanup() {
 	trackedWorkers := j.workerTracker.GetRunningWorkerRecords()
 	log.Printf("[Charon] 📊 Found %d tracked Hydra workers in database", len(trackedWorkers))
 
+	// Sweep dead records FIRST. This must not depend on br: a worker that died
+	// without cleanup leaves a phantom "running" record, and phantom records
+	// make orphan-bead recovery believe a live worker exists. When this sweep
+	// sat behind a failing getOpenBeads, phantoms were never cleared and
+	// in_progress beads stayed stuck forever (fleet deadlock, 2026-07-31).
+	liveWorkers := make(map[int]*WorkerRecord, len(trackedWorkers))
+	for pid, record := range trackedWorkers {
+		if !j.isProcessRunning(pid) {
+			log.Printf("[Charon] ⚠️  Worker PID %d (bead %s) died without cleanup", pid, record.BeadID)
+			j.workerTracker.MarkWorkerCompleted(pid, -1)
+			continue
+		}
+		liveWorkers[pid] = record
+	}
+
 	// Recover orphan in_progress beads BEFORE the no-tracked-workers early return.
 	// A worker crash mid-execution leaves beads in_progress with no live worker
 	// and no tracked PID; the only way to unblock the swarm is to reopen them.
@@ -156,34 +171,29 @@ func (j *Charon) performCleanup() {
 		log.Printf("[Charon] 🔧 Recovered %d orphan in_progress beads (reopened orphan bead for retry)", recovered)
 	}
 
-	if len(trackedWorkers) == 0 {
+	if len(liveWorkers) == 0 {
 		log.Printf("[Charon] ✅ No tracked workers to check")
 		return
 	}
 
-	// Get open beads
-	openBeads, err := j.getOpenBeads()
-	if err != nil {
-		log.Printf("[Charon] ❌ Failed to get open beads: %v", err)
-		return
-	}
+	// Get open beads. Projects whose bead list fails are skipped rather than
+	// aborting the whole scan; the orphan-kill decision below is fail-closed
+	// per project, so a worker whose project could not be listed is never
+	// killed (its bead is absent from the open map only due to the failure).
+	openBeads, failedProjects := j.getOpenBeads()
 
 	killCount := 0
 
-	// Check each tracked worker
-	for pid, record := range trackedWorkers {
+	// Check each live tracked worker
+	for pid, record := range liveWorkers {
 		beadID := record.BeadID
-
-		// Check if process is still running
-		if !j.isProcessRunning(pid) {
-			// Process died but wasn't marked completed - update tracker
-			log.Printf("[Charon] ⚠️  Worker PID %d (bead %s) died without cleanup", pid, beadID)
-			j.workerTracker.MarkWorkerCompleted(pid, -1)
-			continue
-		}
 
 		// Check if bead is still open
 		if !openBeads[beadID] {
+			if failedProjects[record.ProjectPath] {
+				log.Printf("[Charon] ⚠️  Skipping orphan decision for PID %d (bead %s): bead list unavailable for project path %s", pid, beadID, record.ProjectPath)
+				continue
+			}
 			// Bead is closed but process still running = orphan!
 			j.stats.OrphansFound++
 			j.stats.LastOrphanTime = time.Now()
@@ -281,21 +291,22 @@ func (j *Charon) performCleanup() {
 	}
 }
 
-// getOpenBeads returns a map of open bead IDs across every configured project.
-// Iterating over projects (instead of just ".") lets Charon run from any working
-// directory and still detect orphan beads across the full swarm.
-func (j *Charon) getOpenBeads() (map[string]bool, error) {
+// getOpenBeads returns the set of open bead IDs across every configured
+// project plus the set of project paths whose bead list could not be read.
+// Iterating over projects (instead of just ".") lets Charon run from any
+// working directory and still detect orphan beads across the full swarm. A
+// failing project never aborts the scan: callers use the failed set to make
+// fail-closed decisions for workers in those projects.
+func (j *Charon) getOpenBeads() (map[string]bool, map[string]bool) {
 	openBeads := make(map[string]bool)
+	failedProjects := make(map[string]bool)
 
 	projects := j.collectProjects()
-	var firstErr error
 	for _, project := range projects {
 		beadList, err := j.beadsClient.ListBeads(project.Path, "")
 		if err != nil {
 			log.Printf("[Charon] Failed to list beads for project %s (path: %s): %v", project.Name, project.Path, err)
-			if firstErr == nil {
-				firstErr = fmt.Errorf("failed to list beads for project %s: %w", project.Name, err)
-			}
+			failedProjects[project.Path] = true
 			continue
 		}
 
@@ -307,7 +318,7 @@ func (j *Charon) getOpenBeads() (map[string]bool, error) {
 		}
 	}
 
-	return openBeads, firstErr
+	return openBeads, failedProjects
 }
 
 // markBeadFailed marks a bead as failed with a reason
