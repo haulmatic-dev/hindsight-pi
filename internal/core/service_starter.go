@@ -46,6 +46,15 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 		if o.orphanJanitor != nil {
 			o.orphanJanitor.SetRegistry(regStore)
 		}
+
+		// Reap stale terminal rows and dead worker records on startup so
+		// Pan and the scheduler never act on zombie state from prior runs.
+		if n, err := regStore.ReapStale(time.Now().UTC().Add(-24 * time.Hour)); err != nil {
+			log.Printf("[Registry] ReapStale warning: %v", err)
+		} else if n > 0 {
+			log.Printf("[Registry] Reaped %d stale worker row(s)", n)
+		}
+
 		panCfg := o.config.Shepherd.Pan
 		o.panShepherd = pan.New(pan.Config{
 			Enabled:          panCfg.Enabled,

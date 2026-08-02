@@ -209,3 +209,85 @@ func TestParkFieldsRoundTrip(t *testing.T) {
 		t.Errorf("park reason = %q", got.ParkReason)
 	}
 }
+
+func staleRecord(beadID string, heartbeatAge time.Duration) WorkerRecord {
+	now := time.Now()
+	return WorkerRecord{
+		BeadID:        beadID,
+		PID:           1234,
+		PGID:          1234,
+		Project:       "test-project",
+		StartedAt:     now.Add(-heartbeatAge),
+		LastHeartbeat: now.Add(-heartbeatAge),
+		State:         StateWorking,
+		PiSessionID:   "sess-1",
+	}
+}
+
+func TestReapStale_RemovesTerminalAndStaleButNotFresh(t *testing.T) {
+	st := openTest(t)
+
+	// Terminal: should be reaped regardless of heartbeat age.
+	term := liveRecord("bead-terminal")
+	term.State = StateCompleted
+
+	// Stale working: heartbeat older than cutoff.
+	stale := staleRecord("bead-stale", 2*time.Hour)
+
+	// Fresh working: heartbeat newer than cutoff.
+	fresh := liveRecord("bead-fresh")
+
+	for _, rec := range []WorkerRecord{term, stale, fresh} {
+		if err := st.UpsertWorker(rec); err != nil {
+			t.Fatalf("UpsertWorker %s: %v", rec.BeadID, err)
+		}
+	}
+
+	// Queue a command for the stale worker; it should be cleaned up too.
+	if err := st.EnqueueCommand("bead-stale", CmdSteer, "go faster"); err != nil {
+		t.Fatalf("EnqueueCommand: %v", err)
+	}
+
+	cutoff := time.Now().Add(-30 * time.Minute)
+	n, err := st.ReapStale(cutoff)
+	if err != nil {
+		t.Fatalf("ReapStale: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 reaped, got %d", n)
+	}
+
+	for _, id := range []string{"bead-terminal", "bead-stale"} {
+		_, ok, _ := st.GetWorker(id)
+		if ok {
+			t.Errorf("%s should have been reaped", id)
+		}
+	}
+	_, ok, _ := st.GetWorker("bead-fresh")
+	if !ok {
+		t.Errorf("bead-fresh should survive reap")
+	}
+
+	cmds, err := st.PendingCommands("bead-stale")
+	if err != nil {
+		t.Fatalf("PendingCommands: %v", err)
+	}
+	if len(cmds) != 0 {
+		t.Errorf("commands for reaped worker should be removed, got %d", len(cmds))
+	}
+}
+
+func TestReapStale_NoCandidates(t *testing.T) {
+	st := openTest(t)
+	fresh := liveRecord("bead-fresh")
+	if err := st.UpsertWorker(fresh); err != nil {
+		t.Fatalf("UpsertWorker: %v", err)
+	}
+	n, err := st.ReapStale(time.Now().Add(-30 * time.Minute))
+	if err != nil {
+		t.Fatalf("ReapStale: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 reaped, got %d", n)
+	}
+}
