@@ -197,9 +197,12 @@ abandon-with-summary fails the turn (`abandoned by shepherd: …`) and closes
 the session instead of resuming. The daemon sets `HYDRA_API_URL` when spawning;
 without it the worker never reports and behaves exactly as before (fail-open).
 The store opens in the service starter, not in `NewOverseer`, so tests never
-touch the filesystem. Route handlers resolve the store **per request** — a
-store captured at route-registration time is nil because the store opens
-later; that bug shipped and returned 503s until fixed.
+touch the filesystem. On startup it reaps terminal rows and rows whose last
+heartbeat is older than 24 h (`Store.ReapStale`), plus their queued commands,
+so Pan and the scheduler never act on zombie state from prior runs. Route
+handlers resolve the store **per request** — a store captured at
+route-registration time is nil because the store opens later; that bug shipped
+and returned 503s until fixed.
 
 **Worker reporter.** `cmd/worker/reporter.go`: registers on start, heartbeats
 every 30s, mirrors every park/nudge state change, reports terminal state on
