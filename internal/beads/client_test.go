@@ -588,7 +588,7 @@ func TestListBeads_Success(t *testing.T) {
 		t.Fatalf("Failed to marshal test data: %v", err)
 	}
 
-	mockExec.AddResponse("br", []string{"list", "--json"}, jsonData, nil)
+	mockExec.AddResponse("br", []string{"list", "--json", "--limit", "500", "--offset", "0"}, jsonData, nil)
 
 	beads, err := client.ListBeads("hydra", "")
 	if err != nil {
@@ -661,8 +661,8 @@ func TestListBeads_Success(t *testing.T) {
 	if calls[0].Name != "br" {
 		t.Errorf("Expected command 'br', got '%s'", calls[0].Name)
 	}
-	if len(calls[0].Args) != 2 || calls[0].Args[0] != "list" || calls[0].Args[1] != "--json" {
-		t.Errorf("Expected args ['list', '--json'], got %v", calls[0].Args)
+	if len(calls[0].Args) != 6 || calls[0].Args[0] != "list" || calls[0].Args[1] != "--json" {
+		t.Errorf("Expected args ['list', '--json', '--limit', '500', '--offset', '0'], got %v", calls[0].Args)
 	}
 }
 
@@ -671,7 +671,7 @@ func TestListBeads_CLIError(t *testing.T) {
 	client := NewClientWithExecutor(mockExec)
 
 	cliErr := errors.New("exit status 1: database locked")
-	mockExec.AddResponse("br", []string{"list", "--json"}, []byte{}, cliErr)
+	mockExec.AddResponse("br", []string{"list", "--json", "--limit", "500", "--offset", "0"}, []byte{}, cliErr)
 
 	beads, err := client.ListBeads("hydra", "")
 
@@ -679,7 +679,7 @@ func TestListBeads_CLIError(t *testing.T) {
 		t.Fatal("Expected error, got nil")
 	}
 
-	expectedMsg := "br list --json failed: exit status 1: database locked"
+	expectedMsg := "br list --json --limit 500 --offset 0 failed: exit status 1: database locked"
 	if err.Error() != expectedMsg {
 		t.Errorf("Expected error '%s', got '%s'", expectedMsg, err.Error())
 	}
@@ -693,7 +693,7 @@ func TestListBeads_EmptyResult(t *testing.T) {
 	mockExec := NewMockExecutor()
 	client := NewClientWithExecutor(mockExec)
 
-	mockExec.AddResponse("br", []string{"list", "--json"}, []byte("[]"), nil)
+	mockExec.AddResponse("br", []string{"list", "--json", "--limit", "500", "--offset", "0"}, []byte("[]"), nil)
 
 	beads, err := client.ListBeads("hydra", "")
 	if err != nil {
