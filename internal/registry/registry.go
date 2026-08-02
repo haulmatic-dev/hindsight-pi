@@ -7,6 +7,7 @@ package registry
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -214,6 +215,66 @@ func (s *Store) MarkCompleted(beadID string, exitCode int) error {
 		return fmt.Errorf("mark completed %s: %w", beadID, err)
 	}
 	return nil
+}
+
+// ReapStale deletes worker registry rows that are terminal (completed) or
+// whose last heartbeat is older than cutoff, plus any queued commands for
+// those beads. It returns the number of worker rows removed.
+func (s *Store) ReapStale(cutoff time.Time) (int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("reap begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(
+		`SELECT bead_id FROM workers WHERE state=? OR last_heartbeat < ?`,
+		StateCompleted, cutoff.Format(timeFmt))
+	if err != nil {
+		return 0, fmt.Errorf("reap select: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("reap scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("reap rows: %w", err)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, 0, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	inClause := strings.Join(placeholders, ",")
+
+	if _, err := tx.Exec(
+		`DELETE FROM commands WHERE bead_id IN (`+inClause+`)`,
+		args...); err != nil {
+		return 0, fmt.Errorf("reap commands: %w", err)
+	}
+
+	res, err := tx.Exec(
+		`DELETE FROM workers WHERE bead_id IN (`+inClause+`)`,
+		args...)
+	if err != nil {
+		return 0, fmt.Errorf("reap workers: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("reap commit: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 const workerCols = `bead_id, pid, pgid, project, started_at, last_heartbeat,

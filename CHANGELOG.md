@@ -8,6 +8,13 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- **Registry GC: reap stale worker rows on daemon startup.** `Store.ReapStale`
+  removes terminal (`completed`) rows and rows whose last heartbeat is older
+  than the cutoff, plus any queued commands for those beads. Wired into
+  `internal/core/service_starter.go` with a 24-hour cutoff so Pan and the
+  scheduler never act on zombie registry state left by prior runs.
+
+### Added
 - **Worker registry + Pan, the shepherd (PRD parts 4 & 6).**
   `internal/registry`: daemon-owned SQLite store replacing `workers.json` —
   worker records (state, pi session id, error triple, token progress, park
