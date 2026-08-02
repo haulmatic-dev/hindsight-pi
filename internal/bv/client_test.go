@@ -258,19 +258,23 @@ func TestGetInsights_GracefulDegradation(t *testing.T) {
 func TestGetTriage_Success(t *testing.T) {
 	mockExec := NewMockExecutor()
 
-	triage := TriageResponse{
-		Recommendations: []TriageRecommendation{
-			{
-				BeadID:     "hydra-001",
-				Title:      "High priority task",
-				Type:       "implement",
-				Priority:   1,
-				Confidence: 0.95,
-				Reason:     "Critical path dependency",
+	triage := TriageWrapper{
+		GeneratedAt: "2025-01-15T00:00:00Z",
+		DataHash:    "abc123",
+		Triage: TriageResponse{
+			Recommendations: []TriageRecommendation{
+				{
+					BeadID:     "hydra-001",
+					Title:      "High priority task",
+					Type:       "implement",
+					Priority:   1,
+					Confidence: 0.95,
+					Reason:     "Critical path dependency",
+				},
 			},
+			ReadyCount:   10,
+			BlockedCount: 5,
 		},
-		ReadyCount:   10,
-		BlockedCount: 5,
 	}
 
 	jsonData, _ := json.Marshal(triage)
@@ -296,27 +300,29 @@ func TestGetTriage_Success(t *testing.T) {
 func TestGetPlan_Success(t *testing.T) {
 	mockExec := NewMockExecutor()
 
-	plan := PlanResponse{
-		TotalBeads:  10,
-		TotalPhases: 3,
-		Phases: []PlanPhase{
-			{
-				PhaseNumber: 1,
-				Parallel:    true,
-				Beads: []PlanBead{
-					{BeadID: "hydra-001", Title: "Task 1", Type: "implement"},
-					{BeadID: "hydra-002", Title: "Task 2", Type: "implement"},
+	plan := PlanWrapper{
+		GeneratedAt: "2025-01-15T00:00:00Z",
+		DataHash:    "abc123",
+		Plan: PlanData{
+			Tracks: []PlanTrack{
+				{
+					TrackID: "track-1",
+					Items: []PlanItem{
+						{ID: "hydra-001", Title: "Task 1", Priority: 1, Status: "open"},
+						{ID: "hydra-002", Title: "Task 2", Priority: 1, Status: "open"},
+					},
+				},
+				{
+					TrackID: "track-2",
+					Items: []PlanItem{
+						{ID: "hydra-003", Title: "Task 3", Priority: 2, Status: "in_progress"},
+					},
 				},
 			},
-			{
-				PhaseNumber: 2,
-				Parallel:    false,
-				Beads: []PlanBead{
-					{BeadID: "hydra-003", Title: "Task 3", Type: "review"},
-				},
-			},
+			TotalActionable: 3,
+			TotalBlocked:    0,
+			Summary:         PlanSummary{HighestImpact: "execute tracks", ImpactReason: "all items unblocked", UnblocksCount: 3},
 		},
-		CriticalPath: []string{"hydra-001", "hydra-003"},
 	}
 
 	jsonData, _ := json.Marshal(plan)
@@ -330,16 +336,20 @@ func TestGetPlan_Success(t *testing.T) {
 		t.Fatalf("GetPlan failed: %v", err)
 	}
 
-	if result.TotalPhases != 3 {
-		t.Errorf("Expected 3 phases, got %d", result.TotalPhases)
+	if len(result.Tracks) != 2 {
+		t.Errorf("Expected 2 tracks, got %d", len(result.Tracks))
 	}
 
-	if len(result.Phases) != 2 {
-		t.Errorf("Expected 2 phases, got %d", len(result.Phases))
+	totalItems := 0
+	for _, track := range result.Tracks {
+		totalItems += len(track.Items)
+	}
+	if totalItems != 3 {
+		t.Errorf("Expected 3 items across tracks, got %d", totalItems)
 	}
 
-	if len(result.CriticalPath) != 2 {
-		t.Errorf("Expected 2 critical path items, got %d", len(result.CriticalPath))
+	if result.TotalActionable != 3 {
+		t.Errorf("Expected 3 actionable, got %d", result.TotalActionable)
 	}
 }
 
@@ -776,7 +786,7 @@ func TestGracefulDegradation_MultipleCalls(t *testing.T) {
 	if len(triage.Recommendations) != 0 {
 		t.Error("Expected empty triage")
 	}
-	if plan.TotalBeads != 0 {
+	if len(plan.Tracks) != 0 {
 		t.Error("Expected empty plan")
 	}
 	if len(alerts.Alerts) != 0 {
