@@ -319,7 +319,7 @@ func (c *Client) closeBeadOnce(projectPath, repoName string, beadID types.BeadID
 
 // ListBeads lists all beads in a project/repo with pagination support.
 func (c *Client) ListBeads(projectPath, repoName string) ([]types.Bead, error) {
-	var allBeads []types.Bead
+	allBeads := make([]types.Bead, 0)
 	offset := 0
 	limit := 500
 	ctx := c.newContext(projectPath, repoName)
