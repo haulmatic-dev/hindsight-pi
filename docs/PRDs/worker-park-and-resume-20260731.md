@@ -1,7 +1,7 @@
 # PRD: Worker Park-and-Resume, Verdict Closure, and Pan the Shepherd
 
 **Date:** 2026-07-31 (rewritten 2026-07-31 after design review)
-**Status:** proposed
+**Status:** partially implemented in production as of 2026-08-02 (see As-built deltas below)
 **Origin:** production autopsy of bead `hydra-testbed-y05` (see Evidence) plus
 three rounds of operator design review.
 **Related:** `docs/PRDs/shepherd-d1-cron-20260730.md` (Pan's cron home),
@@ -13,6 +13,36 @@ Supersedes the first draft of this PRD (per-bead JSON state files,
 observer-talks-to-workers-directly). Changes from review: daemon-owned SQLite
 registry, verdict-based closure, Pan as the decision-maker, session-file
 continuity.
+
+## As-built deltas (2026-08-02)
+
+What is live in `development` and production:
+
+- **Part 1 — Tiered classification:** implemented as marker-first in
+  `cmd/worker/park.go` (`decideParkClass`). Tier A auto-park and Tier C close
+  are active; Tier B credential-park was deprioritized to a later credential
+  rotation story.
+- **Part 2 — Park-and-resume:** parking in the same pi process is live.
+  The named-session-file continuity (surviving a daemon restart) is **not yet**
+  implemented; workers still use `--no-session`, so a daemon restart kills
+  parked work.
+- **Part 3 — Verdict closure:** `HYDRA_VERDICT` parsing, in-session nudging,
+  and `abandon-with-summary` are live.
+- **Part 4 — Registry + command queue:** daemon-owned SQLite registry, worker
+  reporter, HTTP command queue, and Charon liveness integration are live.
+  Registry GC (`Store.ReapStale`) was added later to clean zombie rows on
+  startup.
+- **Part 5 — Timeout hierarchy:** live. Worker lifetime cap is 2 h
+  (`HYDRA_WORKER_LIFETIME_MINUTES`); activity timeout 4 m; park cap 60 m;
+  Charon hung-kill uses stale heartbeat (>5 m), not wall time.
+- **Part 6 — Pan:** component exists and is configurable, but is disabled in
+  production until a dedicated provider key is supplied.
+
+Additional live changes not in the original PRD:
+
+- **Hindsight verdict-first retention** (2026-08-02): workers now retain the
+  parsed `HYDRA_VERDICT` instead of raw turn text, dramatically cutting
+  Hindsight extraction LLM tokens while improving memory quality.
 
 ## Problem
 
