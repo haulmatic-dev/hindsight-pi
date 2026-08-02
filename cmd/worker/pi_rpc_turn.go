@@ -237,6 +237,23 @@ func (t *rpcTurn) finish(pid int, stdin io.WriteCloser) {
 	})
 }
 
+// abandon marks the turn failed with an external reason and closes stdin so
+// pi exits. Used when the shepherd orders abandon-with-summary while the
+// worker is parked (PRD Part 3): the reason must not match any park marker,
+// so the failure path classifies and propagates instead of re-parking.
+func (t *rpcTurn) abandon(reason string, stdin io.Closer) {
+	t.mu.Lock()
+	t.ended = true
+	t.failed = true
+	t.errMsg = reason
+	t.mu.Unlock()
+	if stdin != nil {
+		if err := stdin.Close(); err != nil {
+			log.Printf("[Worker:rpc] abandon: stdin close failed: %v", err)
+		}
+	}
+}
+
 func (t *rpcTurn) Ended() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()

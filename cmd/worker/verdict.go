@@ -14,16 +14,20 @@ const verdictNudgeCap = 3
 // Verdict is the structured closure block every worker prompt demands as the
 // agent's final output (HYDRA_VERDICT). Pi is never treated as done without
 // one; a hard kill is reserved for hung processes and is a system failure.
+// VerificationEntry is one command+result pair the agent ran to prove its
+// acceptance criteria.
+type VerificationEntry struct {
+	Cmd    string `json:"cmd"`
+	Result string `json:"result"`
+}
+
 type Verdict struct {
-	Done          bool     `json:"done"`
-	ACMet         []string `json:"ac_met"`
-	ACUnmet       []string `json:"ac_unmet"`
-	FilesChanged  []string `json:"files_changed"`
-	Verification  []struct {
-		Cmd    string `json:"cmd"`
-		Result string `json:"result"`
-	} `json:"verification"`
-	Summary string `json:"summary"`
+	Done         bool                `json:"done"`
+	ACMet        []string            `json:"ac_met"`
+	ACUnmet      []string            `json:"ac_unmet"`
+	FilesChanged []string            `json:"files_changed"`
+	Verification []VerificationEntry `json:"verification"`
+	Summary      string              `json:"summary"`
 }
 
 const verdictMarker = "HYDRA_VERDICT:"

@@ -173,13 +173,17 @@ func DefaultRetryPolicy() RetryPolicy {
 
 // ExecutionResult represents the outcome of executing a bead
 type ExecutionResult struct {
-	Success      bool
-	ExitCode     int
-	Output       string
-	Error        string
-	Duration     time.Duration
-	Attempts     int
-	AgentType    string
+	Success   bool
+	ExitCode  int
+	Output    string
+	Error     string
+	Duration  time.Duration
+	Attempts  int
+	AgentType string
+	// Verdict is the parsed HYDRA_VERDICT closure block, when the agent
+	// emitted one. Retention prefers it over raw output: it is the
+	// distilled outcome, ~200 tokens, and exactly what future runs need.
+	Verdict      *Verdict
 	Intelligence *IntelligenceContext
 }
 
@@ -1424,6 +1428,9 @@ func executeWithPi(
 					continue
 				}
 				v := parseVerdict(turn.Text())
+				if v != nil {
+					result.Verdict = v
+				}
 				if nudge, reason := decideTurnEnd(v, nudgeCount, verdictNudgeCap); nudge {
 					nudgeCount++
 					if activeReporter != nil {
@@ -2017,7 +2024,7 @@ func recordExecutionResult(
 		WithOutcome(
 			result.Success,
 			result.ExitCode,
-			result.Output,
+			buildRetainContent(result),
 			result.Error,
 			result.Duration,
 			result.Attempts,
@@ -2075,7 +2082,7 @@ func recordExecutionResultSync(
 		WithOutcome(
 			result.Success,
 			result.ExitCode,
-			result.Output,
+			buildRetainContent(result),
 			result.Error,
 			result.Duration,
 			result.Attempts,

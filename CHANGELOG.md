@@ -93,6 +93,25 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   timeout hierarchy with its env knobs (`HYDRA_API_URL`, `HYDRA_MAX_NUDGES`,
   `HYDRA_MAX_PARK_MINUTES`, `HYDRA_WORKER_LIFETIME_MINUTES`).
 
+### Changed
+- **Retention stores the HYDRA_VERDICT, not raw run output** (Hindsight LLM
+  Sink A). The extraction LLM (MiniMax) used to receive the full turn text —
+  tens of KB including thinkingSignature blobs — per run. Retain now sends
+  the parsed verdict (~200 tokens: done, ac_met/ac_unmet, files_changed,
+  verification) when one exists, and sanitized output (thinkingSignature and
+  base64 runs stripped, 4KB tail-biased cap) otherwise. Memory quality
+  improves because extraction sees distilled signal; failure evidence is
+  preserved (sanitized tail + the A2 cause extractor reads the worker log
+  separately and is untouched).
+
+### Added
+- **Workers honor shepherd commands at park wake** (PRD Part 3 consumer).
+  Commands were polled over the registry API but never drained — a steer or
+  abandon from Pan had no effect. The park-wake path now drains: `steer` and
+  `continue`/`compact-and-continue` reshape the wake prompt;
+  `abandon-with-summary` fails the turn with `abandoned by shepherd: …`
+  (deliberately un-parkable) and closes stdin so pi exits.
+
 ### Fixed
 - **`shepherd.pan` config silently parsed to zero values.** `LoadConfig`
   copies `rawConfig` fields one by one; `Shepherd` (and in
