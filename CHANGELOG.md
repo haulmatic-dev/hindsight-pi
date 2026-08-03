@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- **Close-time pattern extraction (verdict → pattern store).** When a worker emits a `HYDRA_VERDICT`, the worker now stores patterns locally at bead completion (outcome + files changed, confidence-gated) instead of waiting for settled-state detection — which stays disabled. Wired via `HYDRA_PATTERNS_*` env vars from `intelligence.patterns` config; fail-open. Also fixes `FilePatternStorage` filename collisions (same-second timestamps overwrote sibling patterns). Graphify indexer: a project with no code files (`No code files found - nothing to rebuild`) is now logged as a skip, not an error.
 - **Scheduler congestion pause.** When the registry shows 3+ live parked
   workers (heartbeat within 10 min), the scheduler pauses new spawns for 5 min
   so the park-and-resume loop can drain the backlog before the fleet piles onto

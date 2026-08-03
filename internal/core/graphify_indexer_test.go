@@ -274,3 +274,14 @@ func TestGraphifyIndexer_GitignoreIsIdempotent(t *testing.T) {
 		t.Error("existing .gitignore content must be preserved")
 	}
 }
+
+// TestGraphifyIndexer_NoCodeFilesIsBenign: a docs-only project makes graphify
+// exit 1 with "No code files found". That must surface as a skip, not an error.
+func TestGraphifyIndexer_NoCodeFilesIsBenign(t *testing.T) {
+	bin, _ := fakeGraphify(t, "echo 'Re-extracting code files in . (no LLM needed)...'\necho '[graphify watch] No code files found - nothing to rebuild.'\necho 'Nothing to update or rebuild failed' >&2\nexit 1\n")
+	idx := NewGraphifyIndexer(GraphifyConfig{Enabled: true, Binary: bin})
+	err := idx.build(t.TempDir())
+	if err != errNoCodeFiles {
+		t.Errorf("build err = %v, want errNoCodeFiles", err)
+	}
+}

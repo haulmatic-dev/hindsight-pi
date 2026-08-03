@@ -74,7 +74,7 @@ func NewFilePatternStorage(basePath string) (*FilePatternStorage, error) {
 
 // Store saves a pattern to disk
 func (s *FilePatternStorage) Store(pattern *ExtractedPattern) error {
-	filename := fmt.Sprintf("%s_%d.json", pattern.BeadID, pattern.ExtractedAt.Unix())
+	filename := fmt.Sprintf("%s_%d.json", pattern.ID, time.Now().UnixNano())
 	filepath := filepath.Join(s.basePath, filename)
 
 	data, err := json.MarshalIndent(pattern, "", "  ")
@@ -325,6 +325,95 @@ func (e *BeadPatternExtractor) generatePatterns(beadID types.BeadID, info *types
 				"immutability_hash": info.ImmutabilityHash,
 			},
 			ExtractedAt: time.Now(),
+		})
+	}
+
+	return patterns
+}
+
+// VerdictPatternInput is the distilled HYDRA_VERDICT used for close-time
+// pattern extraction (PRD worker-park-and-resume Sink A complement). It
+// carries the same signal that Hindsight retention sees.
+type VerdictPatternInput struct {
+	Done         bool
+	ACMet        []string
+	ACUnmet      []string
+	FilesChanged []string
+	Summary      string
+}
+
+// ExtractVerdict extracts close-time patterns from a worker verdict and stores
+// them. Unlike settle-time extraction (metadata-only), these patterns are
+// grounded in the bead's declared outcome: done/abandon, acceptance criteria
+// met/unmet, files changed, and the agent's summary.
+//
+// Only done verdicts with at least one met AC clear the default confidence
+// bar; abandoned work and unmet-AC outcomes are deliberately not stored —
+// failures belong in Hindsight, not the pattern store.
+func (e *BeadPatternExtractor) ExtractVerdict(beadID types.BeadID, in VerdictPatternInput) error {
+	if !e.enabled {
+		return nil
+	}
+	patterns := generateVerdictPatterns(beadID, in)
+
+	var valid []*ExtractedPattern
+	for _, p := range patterns {
+		if p.Confidence >= e.config.MinConfidence {
+			valid = append(valid, p)
+		}
+	}
+	if len(valid) > e.config.MaxPatternsPerBead {
+		valid = valid[:e.config.MaxPatternsPerBead]
+	}
+	for _, p := range valid {
+		if err := e.storage.Store(p); err != nil {
+			log.Printf("[PatternExtractor] Failed to store verdict pattern: %v", err)
+		}
+	}
+	if len(valid) > 0 {
+		log.Printf("[PatternExtractor] Extracted %d verdict patterns from bead %s", len(valid), beadID)
+	}
+	return nil
+}
+
+// generateVerdictPatterns builds candidate patterns from a verdict. Confidence
+// is set so only grounded, successful outcomes clear the 0.7 default bar.
+func generateVerdictPatterns(beadID types.BeadID, in VerdictPatternInput) []*ExtractedPattern {
+	patterns := make([]*ExtractedPattern, 0, 3)
+	now := time.Now()
+
+	if in.Done && len(in.ACMet) > 0 {
+		patterns = append(patterns, &ExtractedPattern{
+			ID:          fmt.Sprintf("%s_outcome_%d", beadID, now.Unix()),
+			BeadID:      beadID,
+			PatternType: "task_outcome",
+			Title:       fmt.Sprintf("%s: done with %d acceptance criteria met", beadID.Project(), len(in.ACMet)),
+			Description: in.Summary,
+			Confidence:  0.9,
+			Files:       in.FilesChanged,
+			Tags:        []string{"verdict", "done", string(beadID.Project())},
+			Metadata: map[string]interface{}{
+				"ac_met": in.ACMet,
+			},
+			ExtractedAt: now,
+		})
+	}
+
+	if len(in.FilesChanged) > 0 {
+		conf := 0.85
+		if !in.Done {
+			conf = 0.6 // files changed but task not done: filtered by default bar
+		}
+		patterns = append(patterns, &ExtractedPattern{
+			ID:          fmt.Sprintf("%s_files_%d", beadID, now.Unix()),
+			BeadID:      beadID,
+			PatternType: "files_changed",
+			Title:       fmt.Sprintf("%s: %d file(s) changed", beadID.Project(), len(in.FilesChanged)),
+			Description: fmt.Sprintf("Files changed by bead %s", beadID),
+			Confidence:  conf,
+			Files:       in.FilesChanged,
+			Tags:        []string{"verdict", "files", string(beadID.Project())},
+			ExtractedAt: now,
 		})
 	}
 
