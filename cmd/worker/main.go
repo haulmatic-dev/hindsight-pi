@@ -40,10 +40,19 @@ type WorkerConfig struct {
 	HindsightClient HindsightClientConfig
 	APIURL          string // daemon registry API (HYDRA_API_URL); empty = disabled
 	Pi              PiConfig
+	Patterns        PatternsConfig
 	MCP             struct {
 		Enabled bool
 		URL     string
 	}
+}
+
+// PatternsConfig holds close-time pattern-extraction settings (HYDRA_PATTERNS_*).
+type PatternsConfig struct {
+	Enabled            bool
+	StoragePath        string
+	MinConfidence      float64
+	MaxPatternsPerBead int
 }
 
 // PiConfig holds Pi agent configuration
@@ -382,6 +391,10 @@ func main() {
 		}
 	}
 
+	// Close-time pattern extraction from the verdict (compounding knowledge).
+	// Independent of Hindsight: stores locally even when the recall service is down.
+	extractPatternsAtClose(config, bead, result)
+
 	// STEP 5: Close the bead using beads CLI (best-effort)
 	// Auto-close guard: even if Pi exited with error, check if the work is actually done.
 	workComplete := false
@@ -522,6 +535,21 @@ func parseConfig() WorkerConfig {
 			enabledStr != "0" &&
 			enabledStr != "no" &&
 			enabledStr != "off"
+	}
+
+	// Close-time pattern extraction (HYDRA_PATTERNS_*). Fail-open: absent or
+	// "false" disables; extractor errors never affect bead completion.
+	config.Patterns.Enabled = strings.EqualFold(os.Getenv("HYDRA_PATTERNS_ENABLED"), "true")
+	config.Patterns.StoragePath = os.Getenv("HYDRA_PATTERNS_STORAGE_PATH")
+	if v := os.Getenv("HYDRA_PATTERNS_MIN_CONFIDENCE"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			config.Patterns.MinConfidence = f
+		}
+	}
+	if v := os.Getenv("HYDRA_PATTERNS_MAX_PATTERNS_PER_BEAD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			config.Patterns.MaxPatternsPerBead = n
+		}
 	}
 
 	return config

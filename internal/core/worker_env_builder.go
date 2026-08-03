@@ -97,6 +97,17 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 		log.Printf("[Worker] Hindsight config passed to worker (baseURL: %s)", h.BaseURL)
 	}
 
+	// Close-time pattern extraction: verdict → pattern store (fail-open).
+	if b.config != nil && b.config.Intelligence.Patterns.Enabled {
+		p := b.config.Intelligence.Patterns
+		env = append(env,
+			"HYDRA_PATTERNS_ENABLED=true",
+			fmt.Sprintf("HYDRA_PATTERNS_STORAGE_PATH=%s", p.StoragePath),
+			fmt.Sprintf("HYDRA_PATTERNS_MIN_CONFIDENCE=%g", p.MinConfidence),
+			fmt.Sprintf("HYDRA_PATTERNS_MAX_PATTERNS_PER_BEAD=%d", p.MaxPatternsPerBead),
+		)
+	}
+
 	// Add Pi configuration
 	env = append(env, b.buildPiEnv(bead)...)
 

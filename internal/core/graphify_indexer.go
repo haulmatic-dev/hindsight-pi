@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os/exec"
@@ -114,6 +115,10 @@ func (g *GraphifyIndexer) Refresh(projectPath string) bool {
 		defer func() { <-g.sem }()
 
 		if err := g.build(abs); err != nil {
+			if errors.Is(err, errNoCodeFiles) {
+				log.Printf("[Graphify] no code files in %s; graph refresh skipped", abs)
+				return
+			}
 			// Fail-open: a graph is an optimisation, not a dependency.
 			log.Printf("[Graphify] update failed for %s: %v", abs, err)
 			return
@@ -183,7 +188,25 @@ func (g *GraphifyIndexer) build(abs string) error {
 		return fmt.Errorf("timed out after %s (graph too large? see graphify issue #341)", g.timeout)
 	}
 	if err != nil {
+		if errNoCode := asNoCodeFilesError(out); errNoCode != nil {
+			return errNoCode
+		}
 		return fmt.Errorf("%w: %s", err, tailOutput(out, 300))
+	}
+	return nil
+}
+
+// errNoCodeFiles marks a docs-only/empty project: graphify exits 1 with
+// "No code files found - nothing to rebuild". Not a failure for hydra —
+// the graphify skill simply has nothing to query for that project.
+var errNoCodeFiles = errors.New("graphify: no code files to rebuild")
+
+// asNoCodeFilesError returns errNoCodeFiles when the combined output shows
+// graphify found no code files, else nil.
+func asNoCodeFilesError(out []byte) error {
+	s := string(out)
+	if strings.Contains(s, "No code files found") && strings.Contains(s, "nothing to rebuild") {
+		return errNoCodeFiles
 	}
 	return nil
 }
