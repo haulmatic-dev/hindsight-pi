@@ -28,10 +28,10 @@ shepherd:
     hung_after_seconds: 300
     park_overdue_grace_seconds: 600
     nudge_cap: 3
-    provider: kimi-coding-plan
-    model: kimi-k2.7-code
+    provider: minimax
+    model: MiniMax-M2.7
     thinking: high
-    api_key_name: KIMI_API_KEY
+    api_key_name: MINIMAX_API_KEY
 `
 	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
 		t.Fatal(err)
@@ -45,10 +45,10 @@ shepherd:
 	if !p.Enabled {
 		t.Errorf("shepherd.pan.enabled=true in yaml but false after load")
 	}
-	if p.Provider != "kimi-coding-plan" || p.Model != "kimi-k2.7-code" {
+	if p.Provider != "minimax" || p.Model != "MiniMax-M2.7" {
 		t.Errorf("provider/model lost: %+v", p)
 	}
-	if p.IntervalSeconds != 60 || p.HungAfterSeconds != 300 || p.NudgeCap != 3 || p.APIKeyName != "KIMI_API_KEY" {
+	if p.IntervalSeconds != 60 || p.HungAfterSeconds != 300 || p.NudgeCap != 3 || p.APIKeyName != "MINIMAX_API_KEY" {
 		t.Errorf("fields lost: %+v", p)
 	}
 }

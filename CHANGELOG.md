@@ -61,6 +61,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   provider key that handles the ambiguous tail and is fail-open by contract.
 
 ### Changed
+- **Pan defaults to a dedicated MiniMax key.** `hydra-config.yaml.example` and the shepherd config regression test now use `provider: minimax`, `model: MiniMax-M2.7`, and `api_key_name: MINIMAX_API_KEY`.
 - **Runtime state moved out of `/opt/hydra` into `/opt/dev-tools/var/hydra`.**
   Code (`components/hydra`), shared config (`config/pi`) and runtime state
   (`var/hydra`) now sit side by side under `/opt/dev-tools`, split by what changes
