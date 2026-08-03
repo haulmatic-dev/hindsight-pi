@@ -8,6 +8,12 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- **Scheduler congestion pause.** When the registry shows 3+ live parked
+  workers (heartbeat within 10 min), the scheduler pauses new spawns for 5 min
+  so the park-and-resume loop can drain the backlog before the fleet piles onto
+  the same saturated provider slots. The gate is fail-open: a missing registry or
+  counter error never blocks the scheduler. See `internal/core/scheduler.go` and
+  `docs/architecture/shepherd.md`.
 - **Named pi session files for park-and-resume across daemon restarts.** Workers now build a deterministic, file-name-safe session id from the bead id, create a directory under `$HYDRA_HOME/sessions`, and pass `--session` and `--session-dir` to pi. The session directory is exported as `PI_CODING_AGENT_SESSION_DIR` and the session id is reported to the daemon registry so a replacement worker can resume the same context after a restart.
 - **Registry GC: reap stale worker rows on daemon startup.** `Store.ReapStale`
   removes terminal (`completed`) rows and rows whose last heartbeat is older
@@ -122,7 +128,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   `abandon-with-summary` fails the turn with `abandoned by shepherd: …`
   (deliberately un-parkable) and closes stdin so pi exits.
 
-### Fixed
+### Fixed- **Pan example config no longer sets `thinking: high` for the MiniMax provider.** The `pi` CLI rejects `--thinking-level` for the `minimax` provider, causing Pan invocations to fail on startup; the example config and the shepherd load test now omit the field. Live `/etc/hydra/hydra.yaml` updated.
+
 - **`shepherd.pan` config silently parsed to zero values.** `LoadConfig`
   copies `rawConfig` fields one by one; `Shepherd` (and in
   `LoadConfigUncached`, also `Validation`/`ComplianceCycle`) was declared on

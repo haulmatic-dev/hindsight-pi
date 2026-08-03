@@ -1,6 +1,6 @@
 # The Shepherd Layer — Events, Quarantine, Fix Beads, Governor, Verdict Memory
 
-**Status:** living document · **Updated:** 2026-08-01 · shipped tracks: A1 A2 B1 C1 C2 D3 + worker registry / park-and-resume / verdict protocol / liveness-based Charon
+**Status:** living document · **Updated:** 2026-08-03 · shipped tracks: A1 A2 B1 C1 C2 D3 + worker registry / park-and-resume / named sessions / verdict protocol / liveness-based Charon / scheduler congestion pause / Pan
 
 The Shepherd layer is the set of mechanisms that keep an autonomous fleet
 honest and observable: every significant decision leaves a durable record,
@@ -229,6 +229,13 @@ on wake it re-enters the turn where it left off. Monotonic park budget:
 `HYDRA_MAX_PARK_MINUTES` (default 60); exceeding it abandons-with-summary
 rather than hanging forever. Parked time is exempt from the worker's
 activity timeout and lifetime cap.
+
+**Scheduler congestion pause.** When the registry shows 3+ live parked
+workers (heartbeat within 10 min), the scheduler pauses new spawns for 5 min
+so the park-and-resume loop can drain the backlog before the fleet piles onto
+the same saturated provider slots. The gate is fail-open: a missing registry or
+counter error never blocks the scheduler. Implemented in
+`internal/core/scheduler.go` (`Scheduler.shouldPauseForCongestion`).
 
 **Pan, the shepherd.** `internal/pan`: a pi-agent run every 60s against a
 snapshot of the registry that may place steering commands (parked worker
