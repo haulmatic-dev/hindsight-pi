@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/haulmatic-dev/hydra/agents"
+	"github.com/haulmatic-dev/hydra/internal/beads"
 	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/internal/pi"
@@ -2373,6 +2374,15 @@ func closeBeadFromWorker(bead types.Bead, projectPath, repoName, reason string) 
 		log.Printf("   [WARN] Project path does not exist: %s", projectPath)
 		// Don't fail - the overseer will handle this asynchronously
 		return fmt.Errorf("project path not found: %s", projectPath)
+	}
+
+	// Skip if the directory is not actually a beads workspace. This can happen
+	// for testbed/synthetic beads or when the worktree has already been cleaned
+	// up. Invoking br close in that directory produces the noisy
+	// "Beads not initialized" exit-2 warning.
+	if !beads.IsWorkspace(projectPath) {
+		log.Printf("   [DEBUG] Not a beads workspace, skipping br close: %s", projectPath)
+		return nil
 	}
 
 	// Try to close using br CLI directly

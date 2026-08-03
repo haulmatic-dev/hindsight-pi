@@ -381,6 +381,11 @@ func (j *Charon) markBeadFailed(beadID string, reason string) {
 		projectPath = "."
 	}
 
+	if !beads.IsWorkspace(projectPath) {
+		log.Printf("[Charon] Skipping mark failed for bead %s: no beads workspace at %s", beadID, projectPath)
+		return
+	}
+
 	if err := j.beadsClient.CloseBead(projectPath, "", types.BeadID(beadID), reason); err != nil {
 		log.Printf("[Charon] Failed to mark bead %s as failed: %v", beadID, err)
 		return
