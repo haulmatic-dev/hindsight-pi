@@ -67,6 +67,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ### Fixed
 - **Noisy `br close` exit 2 failures when the target directory is not a beads workspace.** The worker and Charon now check for a `.beads` directory before invoking `br close`; if the workspace is missing (testbed beads, cleaned worktrees, or unconfigured project paths), the close is skipped at debug level instead of logging a warning/error.
+- **`go test ./...` now passes by default.** Environment-dependent integration tests in `internal/integration` and `internal/pi` are gated behind the `integration` build tag; a stale hard-coded skill count in `TestSkillUpdater_PerformanceTarget` is now dynamic; and the `fmt.Println` vet warning in `docs/collective-unconscious/examples` is fixed.
 
 ### Changed
 - **Pan defaults to a dedicated MiniMax key.** `hydra-config.yaml.example` and the shepherd config regression test now use `provider: minimax`, `model: MiniMax-M2.7`, and `api_key_name: MINIMAX_API_KEY`.

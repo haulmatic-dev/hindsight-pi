@@ -1,3 +1,5 @@
+//go:build integration
+
 package integration
 
 import (
@@ -60,21 +62,13 @@ func setupTestProject(t *testing.T) (string, string) {
 	err = cmd.Run()
 	require.NoError(t, err, "Failed to initialize git repo")
 
-	// Create .beads/ directory structure
-	beadsDir := filepath.Join(projectPath, ".beads")
-	err = os.MkdirAll(beadsDir, 0755)
-	require.NoError(t, err, "Failed to create .beads directory")
-
-	// Initialize beads database by running br init
+	// Initialize beads database by running br init. Let br create the
+	// .beads directory itself; pre-creating it can cause br init to fail, and
+	// a hand-rolled beads.db is not a valid SQLite database.
 	cmd = exec.Command("br", "init")
 	cmd.Dir = projectPath
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// If br is not installed, create minimal structure
-		t.Logf("br command not available, creating minimal beads structure: %s", string(output))
-		err = os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte("{}"), 0644)
-		require.NoError(t, err, "Failed to create beads.db")
-	}
+	require.NoError(t, err, "Failed to initialize beads workspace: %s", string(output))
 
 	return tempDir, projectPath
 }
@@ -588,13 +582,13 @@ func TestParallelExecution(t *testing.T) {
 	ts.StartOverseer(t)
 
 	// Create 5 independent beads
-	beadIDs := make([]types.BeadID, 2)
+	beadIDs := make([]types.BeadID, 5)
 	for i := 0; i < 5; i++ {
 		beadIDs[i] = ts.CreateBead(t,
 			fmt.Sprintf("Parallel Bead %d", i),
 			"Independent bead",
 			"implement",
-			10-i)
+			4-i)
 	}
 
 	// Trigger tick
@@ -612,7 +606,7 @@ func TestParallelExecution(t *testing.T) {
 
 	// Verify DAG stats
 	stats := ts.Overseer.GetDAGStats()
-	assert.GreaterOrEqual(t, stats.TotalNodes, int32(5), "DAG should have at least 5 nodes")
+	assert.GreaterOrEqual(t, stats.TotalNodes, 5, "DAG should have at least 5 nodes")
 
 	t.Log("✅ Parallel execution test passed")
 }
@@ -897,9 +891,9 @@ func TestDAGStats(t *testing.T) {
 	// Get stats
 	stats := ts.Overseer.GetDAGStats()
 
-	assert.GreaterOrEqual(t, stats.TotalNodes, int32(3), "Should have at least 3 nodes")
-	assert.GreaterOrEqual(t, stats.ReadyNodes, int32(2), "Should have at least 2 ready nodes")
-	assert.GreaterOrEqual(t, stats.BlockedNodes, int32(1), "Should have at least 1 blocked node")
+	assert.GreaterOrEqual(t, stats.TotalNodes, 3, "Should have at least 3 nodes")
+	assert.GreaterOrEqual(t, stats.ReadyNodes, 2, "Should have at least 2 ready nodes")
+	assert.GreaterOrEqual(t, stats.BlockedNodes, 1, "Should have at least 1 blocked node")
 
 	t.Logf("DAG Stats: Total=%d, Ready=%d, Blocked=%d, Completed=%d, Failed=%d",
 		stats.TotalNodes, stats.ReadyNodes, stats.BlockedNodes, stats.CompletedNodes, stats.FailedNodes)
@@ -924,7 +918,7 @@ func TestWorkerTracking(t *testing.T) {
 
 	// Verify DAG has beads
 	stats := ts.Overseer.GetDAGStats()
-	assert.GreaterOrEqual(t, stats.TotalNodes, int32(3), "DAG should have beads")
+	assert.GreaterOrEqual(t, stats.TotalNodes, 3, "DAG should have beads")
 
 	// Get active workers (may be 0 if workers haven't spawned yet)
 	workers := ts.Overseer.GetActiveWorkers()
@@ -946,7 +940,7 @@ func TestBeadFiltering(t *testing.T) {
 	ts.CreateBead(t, "Implement Bead", "Implementation task", "implement", 1)
 	ts.CreateBead(t, "Test Bead", "Test task", "test", 2)
 	ts.CreateBead(t, "Review Bead", "Review task", "review", 3)
-	ts.CreateBead(t, "Approval Gate", "Approval required", "approval-gate", 7)
+	ts.CreateBead(t, "Approval Gate", "Approval required", "approval-gate", 4)
 
 	// Build DAG
 	ts.TriggerTick(t)
@@ -1026,7 +1020,7 @@ func TestConcurrentOperations(t *testing.T) {
 
 	// Verify no race conditions occurred
 	stats := ts.Overseer.GetDAGStats()
-	assert.GreaterOrEqual(t, stats.TotalNodes, int32(10), "Should have all beads")
+	assert.GreaterOrEqual(t, stats.TotalNodes, 10, "Should have all beads")
 
 	t.Log("✅ Concurrent operations test passed")
 }
