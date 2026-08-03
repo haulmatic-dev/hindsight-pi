@@ -67,6 +67,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   provider key that handles the ambiguous tail and is fail-open by contract.
 
 ### Fixed
+- **Graphify indexer test flake fixed.** `TestGraphifyIndexer_*` tests that start a background build now wait for it to drain (`waitIdle` polling `inFlight`) before returning; previously teardown intermittently raced the goroutine's `.gitignore` write and failed `t.TempDir` cleanup with "directory not empty" (~20% of runs).
 - **Noisy `br close` exit 2 failures when the target directory is not a beads workspace.** The worker and Charon now check for a `.beads` directory before invoking `br close`; if the workspace is missing (testbed beads, cleaned worktrees, or unconfigured project paths), the close is skipped at debug level instead of logging a warning/error.
 - **`go test ./...` now passes by default.** Environment-dependent integration tests in `internal/integration` and `internal/pi` are gated behind the `integration` build tag; a stale hard-coded skill count in `TestSkillUpdater_PerformanceTarget` is now dynamic; and the `fmt.Println` vet warning in `docs/collective-unconscious/examples` is fixed.
 

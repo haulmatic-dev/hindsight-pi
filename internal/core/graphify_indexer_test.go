@@ -35,6 +35,26 @@ func waitForFile(t *testing.T, path string, timeout time.Duration) string {
 	return ""
 }
 
+// waitIdle blocks until no graphify build is in flight. Refresh builds run in
+// a background goroutine that writes into the project dir (.gitignore); a test
+// that returns before the goroutine finishes intermittently fails t.TempDir
+// cleanup with "directory not empty". Same-package helper, so it polls the
+// unexported inFlight map under its mutex.
+func waitIdle(t *testing.T, idx *GraphifyIndexer, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		idx.mu.Lock()
+		idle := len(idx.inFlight) == 0
+		idx.mu.Unlock()
+		if idle {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Log("waitIdle: build still in flight at timeout")
+}
+
 // TestGraphifyIndexer_RunsUpdateNotExtract pins the command choice, which is the
 // whole cost argument: `update` is deterministic tree-sitter work with no model
 // call, while `extract` performs semantic extraction through an LLM backend.
@@ -77,7 +97,7 @@ func TestGraphifyIndexer_SkipClusteringFlag(t *testing.T) {
 // TestGraphifyIndexer_HonoursRefreshInterval: graphs are refreshed per project on
 // an interval. Without this a busy run would rebuild continuously.
 func TestGraphifyIndexer_HonoursRefreshInterval(t *testing.T) {
-	bin, _ := fakeGraphify(t, "exit 0\n")
+	bin, calls := fakeGraphify(t, "exit 0\n")
 	project := t.TempDir()
 
 	idx := NewGraphifyIndexer(GraphifyConfig{
@@ -86,12 +106,19 @@ func TestGraphifyIndexer_HonoursRefreshInterval(t *testing.T) {
 	if !idx.Refresh(project) {
 		t.Fatal("first Refresh should start a build")
 	}
+	// Wait for the background build to finish writing into the project dir
+	// (.gitignore) before the test ends — otherwise t.TempDir cleanup races
+	// the goroutine and intermittently fails with "directory not empty".
+	if got := waitForFile(t, calls, 3*time.Second); got == "" {
+		t.Fatal("graphify was never invoked")
+	}
 	if idx.Refresh(project) {
 		t.Error("second Refresh inside the interval must be skipped")
 	}
 	if _, ok := idx.LastBuilt(project); !ok {
 		t.Error("LastBuilt should record the build")
 	}
+	waitIdle(t, idx, 5*time.Second)
 }
 
 // TestGraphifyIndexer_ZeroIntervalAlwaysAllows: interval 0 means "no periodic
@@ -104,14 +131,19 @@ func TestGraphifyIndexer_ZeroIntervalAlwaysAllows(t *testing.T) {
 	idx.Refresh(project)
 	waitForFile(t, calls, 3*time.Second)
 	// Wait for the in-flight flag to clear before asking again.
+	allowed := false
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if idx.Refresh(project) {
-			return
+			allowed = true
+			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Error("a later Refresh with no interval should be allowed once the build finished")
+	if !allowed {
+		t.Error("a later Refresh with no interval should be allowed once the build finished")
+	}
+	waitIdle(t, idx, 5*time.Second)
 }
 
 // TestGraphifyIndexer_FailingBuildIsSwallowed is the fail-open contract: a broken
@@ -182,6 +214,9 @@ func TestGraphifyIndexer_RefreshNeverBlocks(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("Refresh blocked for %s — it must return immediately", elapsed)
 	}
+	// The build sleeps 10s with a 2s timeout; wait for the kill so the
+	// goroutine cannot write into the removed TempDir.
+	waitIdle(t, idx, 15*time.Second)
 }
 
 func TestGraphifyIndexer_MissingBinaryIsNoOp(t *testing.T) {
