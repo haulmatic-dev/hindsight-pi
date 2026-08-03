@@ -214,7 +214,7 @@ shepherd:
     hung_after_seconds: 300
     park_overdue_grace_seconds: 600
     nudge_cap: 3
-    provider: kimi-coding
-    model: kimi-for-coding
+    provider: minimax
+    model: MiniMax-M2.7
     thinking: high
-    api_key_name: PAN_API_KEY   # env var holding Pan's own key
+    api_key_name: MINIMAX_API_KEY   # env var holding Pan's own key (NOT the fleet key)

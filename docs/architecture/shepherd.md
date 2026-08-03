@@ -235,7 +235,7 @@ snapshot of the registry that may place steering commands (parked worker
 that overslept, working-but-stalled worker, zombie with a dead PID).
 Fail-open: Pan down or unparseable advice → the deterministic rules below
 still run. **Disabled** until configured with its own provider key
-(`shepherd.pan` in config; see `hydra-config.yaml.example`) — it must not
+(`shepherd.pan` in config; see `hydra-config.yaml.example` for a `minimax` / `MiniMax-M2.7` configuration) — it must not
 share the fleet's Kimi account.
 
 **Charon is liveness-based now.** The stuck-worker sweep used to kill on
