@@ -30,7 +30,6 @@ shepherd:
     nudge_cap: 3
     provider: minimax
     model: MiniMax-M2.7
-    thinking: high
     api_key_name: MINIMAX_API_KEY
 `
 	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {

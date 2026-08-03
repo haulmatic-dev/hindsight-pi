@@ -216,5 +216,4 @@ shepherd:
     nudge_cap: 3
     provider: minimax
     model: MiniMax-M2.7
-    thinking: high
     api_key_name: MINIMAX_API_KEY   # env var holding Pan's own key (NOT the fleet key)
