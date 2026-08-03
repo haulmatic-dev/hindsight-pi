@@ -189,3 +189,15 @@ func TestBeadJSONWithAllFields(t *testing.T) {
 		t.Errorf("BeadTitle = %q, want %q", config.BeadTitle, bead.Title)
 	}
 }
+
+func TestCloseBeadFromWorker_SkipsNonWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	bead := types.Bead{ID: "hydra-test-123", Project: "hydra"}
+
+	// A directory that exists but is not a beads workspace should be skipped
+	// without invoking br, not return an error.
+	if err := closeBeadFromWorker(bead, dir, "", "completed"); err != nil {
+		t.Errorf("expected nil for non-workspace, got %v", err)
+	}
+}
+

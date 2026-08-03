@@ -65,6 +65,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   with a monotonic lifetime cap, and "Pan" — a pi-agent shepherd with its own
   provider key that handles the ambiguous tail and is fail-open by contract.
 
+### Fixed
+- **Noisy `br close` exit 2 failures when the target directory is not a beads workspace.** The worker and Charon now check for a `.beads` directory before invoking `br close`; if the workspace is missing (testbed beads, cleaned worktrees, or unconfigured project paths), the close is skipped at debug level instead of logging a warning/error.
+
 ### Changed
 - **Pan defaults to a dedicated MiniMax key.** `hydra-config.yaml.example` and the shepherd config regression test now use `provider: minimax`, `model: MiniMax-M2.7`, and `api_key_name: MINIMAX_API_KEY`.
 - **Runtime state moved out of `/opt/hydra` into `/opt/dev-tools/var/hydra`.**
