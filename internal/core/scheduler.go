@@ -8,17 +8,81 @@ import (
 	"strings"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/registry"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // Scheduler orchestrates the main scheduling loop.
 type Scheduler struct {
 	overseer *Overseer
+
+	// congestionCounter returns the number of currently-parked workers; if nil
+	// congestion pausing is disabled. Kept as a field so tests can inject a
+	// fake counter without building a full overseer/registry.
+	congestionCounter func() (int, error)
+
+	// congestionPausedUntil is non-zero while a congestion pause is in effect.
+	congestionPausedUntil time.Time
 }
 
 // NewScheduler creates a new scheduler.
 func NewScheduler(overseer *Overseer) *Scheduler {
-	return &Scheduler{overseer: overseer}
+	s := &Scheduler{overseer: overseer}
+	if overseer != nil && overseer.registryStore != nil {
+		store := overseer.registryStore
+		s.congestionCounter = func() (int, error) {
+			recs, err := store.ListWorkers(registry.StateParked)
+			if err != nil {
+				return 0, err
+			}
+			cutoff := time.Now().UTC().Add(-congestionParkedMaxAge)
+			n := 0
+			for _, r := range recs {
+				if r.LastHeartbeat.After(cutoff) {
+					n++
+				}
+			}
+			return n, nil
+		}
+	}
+	return s
+}
+
+const (
+	congestionPauseThreshold  = 3
+	congestionPauseDuration   = 5 * time.Minute
+	congestionParkedMaxAge    = 10 * time.Minute
+	congestionEventLogThrottle = 5 * time.Minute
+)
+
+// shouldPauseForCongestion returns true when the fleet has enough live parked
+// workers that spawning more would just pile onto a saturated provider.
+// It is fail-open: no counter or counter error means do not pause.
+func (s *Scheduler) shouldPauseForCongestion() (bool, error) {
+	if s.congestionCounter == nil {
+		return false, nil
+	}
+
+	now := time.Now().UTC()
+	if !s.congestionPausedUntil.IsZero() && now.Before(s.congestionPausedUntil) {
+		return true, nil
+	}
+	// Expired pause; clear it before re-evaluating so a stale pause cannot
+	// outlive the recovery logic.
+	s.congestionPausedUntil = time.Time{}
+
+	parked, err := s.congestionCounter()
+	if err != nil {
+		log.Printf("[Scheduler] congestion counter failed (continuing): %v", err)
+		return false, nil
+	}
+	if parked >= congestionPauseThreshold {
+		s.congestionPausedUntil = now.Add(congestionPauseDuration)
+		log.Printf("[Scheduler] 🚧 Congestion pause: %d live parked workers (threshold %d). Spawns paused until %v",
+			parked, congestionPauseThreshold, s.congestionPausedUntil)
+		return true, nil
+	}
+	return false, nil
 }
 
 // effectiveMaxWorkers returns the configured maxWorkers capped by the
@@ -166,6 +230,15 @@ func (s *Scheduler) Tick() error {
 			log.Printf("⏸️  Provider cooldown active — skipping spawns for %s", remaining.Round(time.Second))
 			return nil
 		}
+	}
+
+	// Congestion pause: when the fleet is already backed up with live parked
+	// workers, spawning more workers just creates a larger pile that competes
+	// for the same provider slots. Pause for a cooldown instead.
+	if paused, err := s.shouldPauseForCongestion(); err != nil {
+		log.Printf("[Scheduler] congestion check error (continuing): %v", err)
+	} else if paused {
+		return nil
 	}
 
 	// Build/refresh DAG from all beads
