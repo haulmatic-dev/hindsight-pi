@@ -23,9 +23,11 @@ What is live in `development` and production:
   are active; Tier B credential-park was deprioritized to a later credential
   rotation story.
 - **Part 2 — Park-and-resume:** parking in the same pi process is live.
-  The named-session-file continuity (surviving a daemon restart) is **not yet**
-  implemented; workers still use `--no-session`, so a daemon restart kills
-  parked work.
+  Named session files are also live: the worker builds a deterministic
+  session id from the bead id, creates a directory under `$HYDRA_HOME/sessions`,
+  and passes `--session` and `--session-dir` to pi. A replacement worker (or a
+  daemon restart) uses the same id/directory and resumes the session file
+  instead of starting from zero.
 - **Part 3 — Verdict closure:** `HYDRA_VERDICT` parsing, in-session nudging,
   and `abandon-with-summary` are live.
 - **Part 4 — Registry + command queue:** daemon-owned SQLite registry, worker

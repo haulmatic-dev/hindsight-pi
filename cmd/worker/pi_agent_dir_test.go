@@ -107,7 +107,7 @@ func TestBuildPiCommand_ExportsResolvedAgentDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := buildPiCommand(types.Bead{ID: types.BeadID("b1"), Title: "t", Type: "task"}, PiConfig{ConfigDir: cfg, Provider: "p", Model: "m"}, t.TempDir(), nil)
+	cmd, _, _ := buildPiCommand(types.Bead{ID: types.BeadID("b1"), Title: "t", Type: "task"}, PiConfig{ConfigDir: cfg, Provider: "p", Model: "m"}, t.TempDir(), nil)
 
 	want := "PI_CODING_AGENT_DIR=" + absOrSelf(cfg)
 	var found bool

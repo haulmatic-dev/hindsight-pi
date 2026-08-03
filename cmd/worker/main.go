@@ -1322,10 +1322,16 @@ func executeWithPi(
 	startTime := time.Now()
 
 	// Build pi command
-	cmd := buildPiCommand(bead, piConfig, projectPath, hindsightContext)
+	cmd, piSessionID, piSessionDir := buildPiCommand(bead, piConfig, projectPath, hindsightContext)
+	if piSessionID != "" && activeReporter != nil {
+		activeReporter.SetSessionID(piSessionID)
+	}
 
 	log.Printf("🔧 Executing Pi: %s %s", cmd.Path, strings.Join(cmd.Args[1:], " "))
 	log.Printf("📁 Working directory: %s", cmd.Dir)
+	if piSessionDir != "" {
+		log.Printf("🗂️  Pi session directory: %s", piSessionDir)
+	}
 	log.Printf("⏱️  Activity timeout: %v (resets on any output)", activityTimeout)
 	streamLog(mcpClient, "info", fmt.Sprintf("Executing Pi agent in %s with activity monitoring", cmd.Dir))
 
@@ -1696,7 +1702,7 @@ func readExecutionOutputFromFile(filepath string) (*ExecutionResult, error) {
 }
 
 // buildPiCommand builds the Pi agent CLI command
-func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hindsightContext *agents.ContextEnrichment) *exec.Cmd {
+func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hindsightContext *agents.ContextEnrichment) (*exec.Cmd, string, string) {
 	// Find pi binary
 	piPath := os.Getenv("HYDRA_PI_PATH")
 	if piPath == "" {
@@ -1709,6 +1715,21 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 		path = bead.Project
 	}
 
+	// Named pi session: deterministic per bead so a respawned worker (or a
+	// daemon restart) can resume the same context instead of starting from
+	// zero. The session directory lives under $HYDRA_HOME/sessions.
+	sessionID, sessionDir, err := buildPiSession(bead, os.Getenv("HYDRA_HOME"))
+	if err != nil {
+		log.Printf("[Worker] Warning: could not build pi session: %v", err)
+		sessionID, sessionDir = "", ""
+	}
+	if sessionDir != "" {
+		if err := os.MkdirAll(sessionDir, 0750); err != nil {
+			log.Printf("[Worker] Warning: could not create session dir %s: %v", sessionDir, err)
+			sessionID, sessionDir = "", ""
+		}
+	}
+
 	// Build base args — default text mode reads prompt from stdin.
 	// --offline skips Pi's startup provider-list network fetch (which flakes
 	// under concurrent worker launches → spurious "Unknown provider") and uses
@@ -1716,7 +1737,9 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 	// be lost in env propagation.
 	args := []string{
 		"--offline",
-		"--no-session",
+	}
+	if sessionID != "" && sessionDir != "" {
+		args = append(args, "--session", sessionID, "--session-dir", sessionDir)
 	}
 
 	// RPC mode is what makes Pi initialise its extensions (rtk command
@@ -1784,6 +1807,12 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 		}
 	}
 
+	// Set PI_CODING_AGENT_SESSION_DIR if we have a stable session dir so that
+	// sub-processes and the park/resume path agree on where the session lives.
+	if sessionDir != "" {
+		envVars = append(envVars, fmt.Sprintf("PI_CODING_AGENT_SESSION_DIR=%s", sessionDir))
+	}
+
 	// Set API key from environment if configured
 	if piConfig.APIKeyName != "" {
 		apiKey := os.Getenv(piConfig.APIKeyName)
@@ -1806,7 +1835,40 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 
 	cmd.Env = envVars
 
-	return cmd
+	// Report the session id to the daemon so a replacement worker can resume it.
+	if sessionID != "" && activeReporter != nil {
+		activeReporter.SetSessionID(sessionID)
+	}
+
+	return cmd, sessionID, sessionDir
+}
+
+// buildPiSession returns a deterministic session id and directory for a bead.
+// The id is safe to use as a file name and the directory is under HYDRA_HOME
+// so it survives the worker process and can be reused after a daemon restart.
+func buildPiSession(bead types.Bead, hydraHome string) (string, string, error) {
+	if hydraHome == "" {
+		return "", "", fmt.Errorf("HYDRA_HOME not set")
+	}
+	sessionID := sanitizeSessionID(string(bead.ID))
+	if sessionID == "" {
+		sessionID = "bead"
+	}
+	sessionDir := filepath.Join(hydraHome, "sessions", sessionID)
+	return sessionID, sessionDir, nil
+}
+
+func sanitizeSessionID(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	return b.String()
 }
 
 // buildPiPrompt builds the prompt message for Pi agent

@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- **Named pi session files for park-and-resume across daemon restarts.** Workers now build a deterministic, file-name-safe session id from the bead id, create a directory under `$HYDRA_HOME/sessions`, and pass `--session` and `--session-dir` to pi. The session directory is exported as `PI_CODING_AGENT_SESSION_DIR` and the session id is reported to the daemon registry so a replacement worker can resume the same context after a restart.
 - **Registry GC: reap stale worker rows on daemon startup.** `Store.ReapStale`
   removes terminal (`completed`) rows and rows whose last heartbeat is older
   than the cutoff, plus any queued commands for those beads. Wired into

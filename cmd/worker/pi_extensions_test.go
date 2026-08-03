@@ -141,7 +141,7 @@ func TestBuildPiCommand_ExtensionsOnlyInRPCMode(t *testing.T) {
 
 	bead := types.Bead{ID: types.BeadID("b1"), Title: "t", Type: "task"}
 
-	rpcCmd := buildPiCommand(bead, PiConfig{
+	rpcCmd, _, _ := buildPiCommand(bead, PiConfig{
 		Mode: "rpc", Provider: "p", Model: "m", ConfigDir: agent, Extensions: []string{"rtk"},
 	}, t.TempDir(), nil)
 	rpcArgs := strings.Join(rpcCmd.Args, " ")
@@ -149,7 +149,7 @@ func TestBuildPiCommand_ExtensionsOnlyInRPCMode(t *testing.T) {
 		t.Errorf("rpc mode must load the allowlist, got: %s", rpcArgs)
 	}
 
-	textCmd := buildPiCommand(bead, PiConfig{
+	textCmd, _, _ := buildPiCommand(bead, PiConfig{
 		Provider: "p", Model: "m", ConfigDir: agent, Extensions: []string{"rtk"},
 	}, t.TempDir(), nil)
 	if strings.Contains(strings.Join(textCmd.Args, " "), "--no-extensions") {

@@ -80,13 +80,13 @@ func TestBuildPiCommand_ModeFlag(t *testing.T) {
 		return "", false
 	}
 
-	rpcCmd := buildPiCommand(bead, PiConfig{Mode: "rpc", Provider: "p", Model: "m"}, t.TempDir(), nil)
+	rpcCmd, _, _ := buildPiCommand(bead, PiConfig{Mode: "rpc", Provider: "p", Model: "m"}, t.TempDir(), nil)
 	got, present := modeValue(rpcCmd.Args)
 	if !present || got != "rpc" {
 		t.Errorf("rpc mode must pass --mode rpc, got args: %v", rpcCmd.Args)
 	}
 
-	textCmd := buildPiCommand(bead, PiConfig{Provider: "p", Model: "m"}, t.TempDir(), nil)
+	textCmd, _, _ := buildPiCommand(bead, PiConfig{Provider: "p", Model: "m"}, t.TempDir(), nil)
 	if _, present := modeValue(textCmd.Args); present {
 		t.Errorf("text mode must not pass --mode at all, got args: %v", textCmd.Args)
 	}
