@@ -44,6 +44,35 @@ type EventSubscriber struct {
 	Channel  chan SubscriptionEvent
 	Filter   func(event SubscriptionEvent) bool
 	WorkerID *string // For log stream filtering
+
+	mu     sync.Mutex
+	closed bool
+}
+
+// close marks the subscriber closed and closes its channel. Idempotent — safe
+// to call from both the broadcaster's shutdown path and removeSubscriber.
+func (s *EventSubscriber) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.closed = true
+		close(s.Channel)
+	}
+}
+
+// send delivers an event to the subscriber with a timeout. It is a no-op once
+// the subscriber is closed, so a send racing shutdown never panics.
+func (s *EventSubscriber) send(event SubscriptionEvent, timeout time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	select {
+	case s.Channel <- event:
+	case <-time.After(timeout):
+		// Channel is full or subscriber is slow, drop the event
+	}
 }
 
 // NewResolver creates a new Resolver with the given dependencies.
@@ -70,7 +99,9 @@ func NewResolver(overseer *core.Overseer) *Resolver {
 func (r *Resolver) Stop() {
 	r.cancel()
 	r.wg.Wait()
-	close(r.eventChannel)
+	// eventChannel is deliberately NOT closed: Broadcast* calls select-send and
+	// a concurrent Stop would otherwise make a send panic on a closed channel.
+	// Once the broadcaster has exited (wg.Wait), no one reads it — GC reclaims.
 }
 
 // eventBroadcaster listens for events and broadcasts them to all subscribers
@@ -83,7 +114,7 @@ func (r *Resolver) eventBroadcaster() {
 			// Close all subscriber channels on shutdown
 			r.subscribersMu.Lock()
 			for _, sub := range r.subscribers {
-				close(sub.Channel)
+				sub.close()
 			}
 			r.subscribers = make(map[string]*EventSubscriber)
 			r.subscribersMu.Unlock()
@@ -111,13 +142,7 @@ func (r *Resolver) broadcastEvent(event SubscriptionEvent) {
 			if sub.Filter != nil && !sub.Filter(event) {
 				return
 			}
-
-			// Non-blocking send with timeout to prevent slow subscribers from blocking
-			select {
-			case sub.Channel <- event:
-			case <-time.After(100 * time.Millisecond):
-				// Channel is full or subscriber is slow, drop the event
-			}
+			sub.send(event, 100*time.Millisecond)
 		}(sub)
 	}
 }
@@ -135,7 +160,7 @@ func (r *Resolver) removeSubscriber(id string) {
 	defer r.subscribersMu.Unlock()
 
 	if sub, exists := r.subscribers[id]; exists {
-		close(sub.Channel)
+		sub.close()
 		delete(r.subscribers, id)
 	}
 }
