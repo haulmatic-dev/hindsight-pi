@@ -105,6 +105,10 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   `~/.pi/agent` points at it, and no retired copy is still referenced.
 
 ### Documentation
+- **Updated `docs/operations/handoff-20260731.md`** to the 2026-08-03 state:
+  `development` now at `b47b527`, `go test ./...` and `go vet ./...` green,
+  integration tests gated behind the `integration` build tag, and open work
+  trimmed to the remaining runtime/dogfood items.
 - **Rewrote `docs/operations/handoff-20260731.md`** for the 2026-08-02 state
   of the box: live park-and-resume, registry GC, Charon liveness, timeout
   hierarchy, Pan status, verification commands, and the remaining open work.
