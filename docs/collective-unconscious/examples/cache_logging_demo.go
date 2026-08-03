@@ -33,7 +33,7 @@ func (m *MockPatternStore) SearchPatterns(ctx context.Context, query string, tag
 }
 
 func main() {
-	fmt.Println("=== Collective Unconscious Cache Logging Demo ===\n")
+	fmt.Println("=== Collective Unconscious Cache Logging Demo ===")
 
 	// Create pattern store with sample patterns
 	store := &MockPatternStore{
