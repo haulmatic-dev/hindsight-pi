@@ -240,3 +240,56 @@ verification, write-back). Step 5 turns on by itself.
 - Whether auto-revert on blocker severity is safe for the dev branch
   protection rules we run.
 - Sentinel hosting: sidecar on the dev-env box vs. scheduled runner in CI.
+
+## 10. Tool stack (consolidated)
+
+### Already in Hydra (reuse — zero new dependencies)
+
+| Tool | Role |
+|------|------|
+| `br` (beads-rust) | Ticket ↔ work-item graph; `bug`/`fix`/`repro` types, dep chains |
+| `pi` | Worker runtime (LLM execution), session resume |
+| Shepherd + Pan | Close/fix loop, fix-bead auto-spawn, recursion cap |
+| graphify | Blast-radius (god-nodes) for auto-merge gate; worker code context |
+| Hindsight | Pattern memory, fast-lane confidence, cross-run correlation |
+| tdd-chain-validation | RED-gate enforcement |
+| Registry (SQLite) | Fleet state, congestion pause |
+
+### Intake / close plumbing (new)
+
+| Component | Tool |
+|-----------|------|
+| JIRA intake | **JIRA REST API + webhooks** — Go service inside Hydra |
+| GitHub Issues alternative | `gh` CLI / GitHub REST |
+| Status write-back | Same adapter, reverse path (comments, transitions) |
+| PR + merge ops | `gh` CLI + GitHub branch protection + auto-merge flag |
+
+### Repro + verification
+
+| Need | Tool |
+|------|------|
+| Regression tests | Native per repo: `go test`, Vitest, pytest — whatever the project runs |
+| UI repro (no steps given) | **Playwright** (MCP or CLI) |
+| API repro / replay | **Schemathesis** (OpenAPI property-based) or plain curl replay |
+| Mutation testing (hot paths, later) | go-mutesting / Stryker |
+
+### Sentinel (dev-env, standalone)
+
+| Need | Tool |
+|------|------|
+| Browser smoke | **Playwright** — screenshots, console capture |
+| API contract probes | **Schemathesis** (spec-driven), Dredd as alternative |
+| Error fingerprinting | **Sentry** if already deployed (webhook + dedup); else custom log diff (exception type + top frames) |
+| Deploy trigger | CI webhook (GitHub Actions `deployment_status` or pipeline-native hook) |
+| Self-healing selectors (later) | Mabl / QA Wolf patterns, or worker-regenerated selectors |
+| Canary (later — not v1) | Kayenta-style metric comparison |
+
+### Comms (optional)
+
+- JIRA comments/transitions via the adapter — primary channel.
+- Slack webhook for blocker-tier alerts — nice-to-have.
+
+**Minimal viable set:** rollout steps 1–2 (RED gate + tiered auto-merge) need
+*no new tools* — all existing Hydra machinery. The first new component is the
+JIRA adapter (step 3); Playwright + Schemathesis + Sentry arrive with the
+sentinel (step 4).
