@@ -293,3 +293,50 @@ verification, write-back). Step 5 turns on by itself.
 *no new tools* — all existing Hydra machinery. The first new component is the
 JIRA adapter (step 3); Playwright + Schemathesis + Sentry arrive with the
 sentinel (step 4).
+
+## 11. Industry references — what we steal vs. what we integrate
+
+Two categories: **idea references** (steal the technique, build it in Hydra)
+and **direct integrations** (adopt the tool, don't rebuild it).
+
+### Idea references (steal the technique)
+
+| Source | What it does | What we steal | Where it lands |
+|--------|--------------|---------------|----------------|
+| **Meta SapFix** | Auto-generates patches for crash reports; never deploys without test validation | (a) *Multi-candidate patches* — generate 2–3 candidate fixes, let the regression test + suite select the winner, instead of one patch judged once. (b) *Fix-vs-revert duality* — at the review gate, "revert the offending merge" is a legitimate candidate alongside the proper fix for high-risk, time-critical bugs | §3.1 fix worker; §3.3 review gate |
+| **Meta Sapienz** | Search-based test generation designed *for the diff* ("motive"), run on every change | *Diff-targeted probe generation* — the sentinel generates probes scoped to what the merge touched (new endpoint → contract probe; touched UI flow → Playwright path), not just replays of known repros | §4 sentinel |
+| **Meta Getafix** | Learns fix patterns from historical *human* fix commits | *Mine human git history* — seed the pattern store with `git log --grep=fix` from dogfood repos instead of cold-starting on Hydra's own verdicts | §3.4 pattern fast lane |
+| **AutoCodeRover** | Issue → reproduction test → fix, with the repro test as oracle | Already incorporated: repro-first RED gate (§3.1) | — |
+| **SWE-agent / SWE-bench** | Agent trajectories + benchmark resolve rates on real issues | Benchmark yardstick: SWE-bench-class resolve rates (50–70% on scoped issues) calibrate the 80% target and give us an offline eval harness shape | §9 open questions → add eval harness |
+| **Meta TestGen-LLM** | "Assured offline" — only land generated tests that pass reliably | Filter rule for worker-generated tests: a generated test that flakes or was never observed failing pre-fix is discarded, not merged | §3.1 RED gate |
+| **Kayenta (Netflix)** | Automated canary analysis on metrics | Canary tier (deferred — not needed for the 80% target) | §5 |
+
+### Direct integrations (adopt, don't rebuild)
+
+| Tool | Integrate for | Why not build it |
+|------|---------------|------------------|
+| **Sentry** | Error fingerprinting + dedup as sentinel ticket source | Fingerprinting/dedup is its core job; reuse its webhook instead of log scraping |
+| **Playwright** | UI repro + browser smoke probes | Mature browser automation; nothing to gain by rebuilding |
+| **Schemathesis** | OpenAPI contract probes (property-based) | Spec-driven API fuzzing is solved |
+| **JIRA REST + webhooks** | Intake + write-back | Official API; the adapter is the only thing we build |
+| **`gh` CLI + branch protection** | PR/merge ops, auto-merge flags | Native GitHub mechanics |
+| **Static analyzers** (`govulncheck`, `staticcheck` via security-scan) | Static findings as a *ticket source* — bugs filed before they crash (SapFix consumed Infer the same way) | Scanners exist; we only wire findings → bead creation |
+
+### Cross-cutting pick: human feedback as patterns
+
+SapFix's accept/reject decisions trained the fixer. Our review gate records
+verdicts on closes, but **human PR reject reasons are not captured**. Steal:
+PR review comments → Hindsight patterns ("rejected: symptom fix, widened
+timeout"). Directly attacks the root-cause-discipline risk — the biggest
+known failure mode of worker-written fixes.
+
+### Priority
+
+| Rank | Pick | Why |
+|------|------|-----|
+| 1 | Multi-candidate patches (SapFix) | Biggest single quality lift on the fix step |
+| 2 | Human reject reasons → patterns | Closes the learning loop; attacks the worst failure mode |
+| 3 | Mine human git history (Getafix) | Bootstraps pattern store cold-start |
+| 4 | Diff-targeted probes (Sapienz) | Sentinel depth |
+| 5 | Static analyzers as ticket source | Bugs before they crash |
+| 6 | Fix-vs-revert duality | Cheap gate option |
