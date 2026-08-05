@@ -281,7 +281,7 @@ verification, write-back). Step 5 turns on by itself.
 | API contract probes | **Schemathesis** (spec-driven), Dredd as alternative |
 | Error fingerprinting | **Sentry** if already deployed (webhook + dedup); else custom log diff (exception type + top frames) |
 | Deploy trigger | CI webhook (GitHub Actions `deployment_status` or pipeline-native hook) |
-| Self-healing selectors (later) | Mabl / QA Wolf patterns, or worker-regenerated selectors |
+| Self-healing selectors (later) | **Passmark** (candidate — §13), else Mabl / QA Wolf patterns, or worker-regenerated selectors |
 | Canary (later — not v1) | Kayenta-style metric comparison |
 
 ### Comms (optional)
@@ -405,3 +405,54 @@ Security-specific adjustments:
 1. Install into shared pi config; run `/piolium-lite` on the hydra repo.
 2. Judge: finding quality + measured token cost.
 3. Only then consider Tier 1 on one dogfood project.
+
+## 13. Under consideration (NOT committed): Passmark for browser regression probes
+
+**Status: candidate only.** Reviewed 2026-08-03; no decision to implement.
+
+[Passmark](https://github.com/bug0inc/passmark) is an open-source Playwright
+library for AI regression testing (Bug0; FSL-1.1 license, converts to
+Apache-2.0 after 2 years — internal use fine). Natural-language browser
+steps executed via Playwright, Redis step caching with AI fallback,
+auto-healing when cached steps break, multi-model assertion consensus
+(Claude + Gemini + arbiter), video assertions for ephemeral UI, optional
+OpenAI computer-use (CUA) mode.
+
+**Why it fits:** the roadmap's sentinel browser smoke (§4) needs self-healing
+selectors; Passmark *is* that, as an embeddable library instead of a SaaS
+(QA Wolf / Mabl). It also closes a second gap: QA repro steps are natural
+language — they map directly onto `runSteps({steps: [...]})` with no
+selector authoring.
+
+### Where it would slot in
+
+| Loop stage | Fit |
+|------------|-----|
+| Sentinel browser smoke (§4) | ★ Strongest. NL steps + auto-healing survive UI drift; Redis cache makes repeat runs near-deterministic and cheap |
+| QA-verify repro replay | ★ Ticket repro text → executable `runSteps` directly |
+| RED gate for UI bugs | Repro steps + consensus assertion "bug not present" as the regression oracle |
+| Untested-feature verification | AC text → browser assertions for UI-facing features |
+| API / backend layer | ✗ None — Schemathesis stays |
+| PR-time probe tier | Weak — AI execution latency/cost doesn't fit fast PR gates; raw Playwright stays there |
+
+### Caveats (from the review)
+
+- **Keys:** consensus assertions want Anthropic + Google keys (or an AI
+  gateway: OpenRouter / Vercel / OpenCode Zen / Cloudflare). Our fleet runs
+  Kimi/MiniMax — new key dependency. CUA mode hard-requires direct OpenAI.
+- **Redis** in the sentinel environment — new infra dependency.
+- **Determinism trade:** cached steps ≈ deterministic; cache-miss steps are
+  LLM-driven (nondeterministic latency, per-heal token cost). Fine for
+  sentinel / QA-verify; wrong for PR gates.
+- **Flaky oracle risk:** a flaky PASS/FAIL in the FAIL→Fix loop spawns
+  phantom fix beads → requires the sentinel shadow-mode + retry/quarantine
+  discipline already specified in §4.
+- **License:** FSL-1.1 — internal use OK, Apache-2.0 after the 2-year
+  conversion window.
+
+### If adopted
+
+Browser-probe layer of the sentinel = Passmark; raw Playwright for PR-time
+gates; Schemathesis for API contract probes. Evaluation gate: one pilot
+spec replaying a real QA repro on a dogfood project's dev-env — judge
+healing rate, assertion reliability, and per-run token cost.
