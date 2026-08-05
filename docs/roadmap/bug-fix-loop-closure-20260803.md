@@ -340,3 +340,68 @@ known failure mode of worker-written fixes.
 | 4 | Diff-targeted probes (Sapienz) | Sentinel depth |
 | 5 | Static analyzers as ticket source | Bugs before they crash |
 | 6 | Fix-vs-revert duality | Cheap gate option |
+
+## 12. Under consideration (NOT committed): Piolium security-audit integration
+
+**Status: candidate only.** Reviewed 2026-08-03; no decision to implement.
+Recorded here so the evaluation is not lost.
+
+[Piolium](https://github.com/vigolium/piolium) is a Pi-native security audit
+agent (Pi extension): 17-phase deep audits with ~35 specialist sub-agents
+(static analysis, authz, concurrency, cross-service dataflow, adversarial
+chamber, FP verification, variant hunting, PoC generation). Modes from
+`/piolium-lite` (4 phases) to `/piolium-deep` (17 phases, hours).
+
+**Verdict from the review: complement, never replace** the existing
+security-review skill (gitleaks + govulncheck + checklist → gap-report JSON).
+That skill is the fast, cheap, per-PR gate; Piolium is the deep, expensive,
+agentic audit. Different gears.
+
+### If adopted — three tiers
+
+1. **Per-PR (diff mode).** `/piolium-diff --since=<base>` in the worktree as
+   an optional validation phase; findings exported as JSON → converted to the
+   existing gap-report JSON → compliance adjudicator. Zero new downstream
+   plumbing.
+2. **Scheduled deep audits.** Pan-scheduled `/piolium-balanced`/`deep` per
+   project; confirmed findings → auto-created `bug`/`security` beads. This is
+   the §11 "static analyzers as ticket source" pick at agentic grade.
+3. **FP adjudication.** `/piolium-confirm` as escalation when the adjudicator
+   is unsure about a scanner finding.
+
+### Findings feed this roadmap's fix loop directly
+
+Piolium findings ship `report.md` + `poc.*` + `evidence/` — **the PoC is the
+repro step**, the highest-quality intake in this whole design (better than
+most human QA tickets). Flow: findings → beads → RED gate codifies the PoC
+as a failing test → fix worker → review gate → verify by rerunning the PoC.
+
+Security-specific adjustments:
+
+- The regression test must assert the *attack class is blocked* (e.g.
+  parameterized query), not "this probe string is rejected" — otherwise
+  workers patch the probe, not the hole.
+- Authz/dataflow findings skew high blast radius → expect ~50% auto-merge
+  (vs ~80% for regular bugs); more human review.
+- P12 variant lists → follow-up beads per variant cluster.
+- Findings that don't survive a fix attempt → "can't reproduce" exit, tag
+  unconfirmed.
+
+### Known costs and frictions (from the review)
+
+- **No published token-cost data.** Structural estimate: deep = 5M–30M tokens
+  on a hydra-sized repo; the file-by-file longshot phase is the budget bomb
+  (`--limit=N` caps it). Measure empirically with `/piolium-lite` before any
+  commitment.
+- Workers run `--no-extensions` + allowlist (`rtk`, `context-mode`); Piolium
+  would be a per-phase `phase_extensions` entry only, never fleet-wide.
+- Deep audits would saturate the shared worker provider key → dedicated
+  provider (Pan/MiniMax precedent).
+- Piolium's own README warns it runs shell on target repos → same sandbox
+  posture as workers required.
+
+### Evaluation gate (if ever picked up)
+
+1. Install into shared pi config; run `/piolium-lite` on the hydra repo.
+2. Judge: finding quality + measured token cost.
+3. Only then consider Tier 1 on one dogfood project.
