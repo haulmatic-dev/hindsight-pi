@@ -620,6 +620,15 @@ func (d *DAG) CloseReadyEpics() []string {
 					allTaskChildrenClosed = false
 					break
 				}
+				// completed != success: a closed-failed child must not satisfy
+				// the epic unless its fix bead ("Fix: <title>") closed
+				// successfully. Observed live 2026-08-06: srv-smart-engine phase
+				// epics auto-closed over children that were closed-failed, so
+				// whole phases reported done with no working code.
+				if beadHasLabel(child.Bead, closedFailedLabel) && !d.fixBeadSucceeded(child.Bead) {
+					allTaskChildrenClosed = false
+					break
+				}
 			}
 			if !allTaskChildrenClosed {
 				continue
@@ -1091,4 +1100,30 @@ func (d *DAG) Clear() {
 	defer d.mu.Unlock()
 
 	d.nodes = make(map[string]*Node)
+}
+
+// beadHasLabel reports whether the bead carries the given label.
+func beadHasLabel(b types.Bead, label string) bool {
+	for _, l := range b.Labels {
+		if l == label {
+			return true
+		}
+	}
+	return false
+}
+
+// fixBeadSucceeded reports whether a closed-failed bead has a fix bead
+// (titled "Fix: <original title>", per createFixBeadForFailedClose) that
+// closed WITHOUT the closed-failed label — i.e. the fix actually landed.
+func (d *DAG) fixBeadSucceeded(original types.Bead) bool {
+	want := "Fix: " + original.Title
+	for _, n := range d.nodes {
+		if n.Bead.Title != want {
+			continue
+		}
+		if n.Bead.Status == types.StatusClosed && !beadHasLabel(n.Bead, closedFailedLabel) {
+			return true
+		}
+	}
+	return false
 }
