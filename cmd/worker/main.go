@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/haulmatic-dev/hydra/agents"
+	piagents "github.com/haulmatic-dev/hydra/internal/agents"
 	"github.com/haulmatic-dev/hydra/internal/beads"
 	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
@@ -1578,20 +1579,7 @@ monitorLoop:
 	result.Output = stdoutBuf.String()
 	result.Error = stderrBuf.String()
 
-	// reportTurnTokens forwards pi's session token stats to the registry.
-// Absolute, not incremental: get_session_stats is cumulative for the named
-// session, and TokensSoFar is the registry's running total. Without this the
-// registry always showed tokens_so_far = 0 (pi emits usage on every message;
-// the worker parsed it into turn stats and then only logged it), which made
-// Pan's zero-token stuck heuristics fire on healthy workers.
-func reportTurnTokens(s *piagents.SessionStats) {
-	if s == nil || activeReporter == nil {
-		return
-	}
-	activeReporter.SetTokens(int64(s.Total))
-}
-
-// Determine success. In rpc mode the exit code is meaningless: the worker
+	// Determine success. In rpc mode the exit code is meaningless: the worker
 	// itself kills Pi after agent_end (Pi would otherwise sit waiting for
 	// another prompt), so the process always dies by signal even on a perfect
 	// run. The event stream is the only honest verdict — and it must be read
@@ -2585,4 +2573,17 @@ func checkWorkComplete(bead types.Bead, projectPath string) bool {
 	}
 
 	return allTestsPass
+}
+
+// reportTurnTokens forwards pi's session token stats to the registry.
+// Absolute, not incremental: get_session_stats is cumulative for the named
+// session, and TokensSoFar is the registry's running total. Without this the
+// registry always showed tokens_so_far = 0 (pi emits usage on every message;
+// the worker parsed it into turn stats and then only logged it), which made
+// Pan's zero-token stuck heuristics fire on healthy workers.
+func reportTurnTokens(s *piagents.SessionStats) {
+	if s == nil || activeReporter == nil {
+		return
+	}
+	activeReporter.SetTokens(int64(s.Total))
 }
