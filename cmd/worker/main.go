@@ -1578,7 +1578,20 @@ monitorLoop:
 	result.Output = stdoutBuf.String()
 	result.Error = stderrBuf.String()
 
-	// Determine success. In rpc mode the exit code is meaningless: the worker
+	// reportTurnTokens forwards pi's session token stats to the registry.
+// Absolute, not incremental: get_session_stats is cumulative for the named
+// session, and TokensSoFar is the registry's running total. Without this the
+// registry always showed tokens_so_far = 0 (pi emits usage on every message;
+// the worker parsed it into turn stats and then only logged it), which made
+// Pan's zero-token stuck heuristics fire on healthy workers.
+func reportTurnTokens(s *piagents.SessionStats) {
+	if s == nil || activeReporter == nil {
+		return
+	}
+	activeReporter.SetTokens(int64(s.Total))
+}
+
+// Determine success. In rpc mode the exit code is meaningless: the worker
 	// itself kills Pi after agent_end (Pi would otherwise sit waiting for
 	// another prompt), so the process always dies by signal even on a perfect
 	// run. The event stream is the only honest verdict — and it must be read
@@ -1591,6 +1604,7 @@ monitorLoop:
 		if s := turn.Stats(); s != nil {
 			log.Printf("📊 rpc session tokens: input=%d output=%d cacheRead=%d total=%d",
 				s.Input, s.Output, s.CacheRead, s.Total)
+			reportTurnTokens(s)
 		}
 		if n := turn.Notifications(); n != "" {
 			log.Printf("[Worker:rpc] extension UI notifications: %s", n)
