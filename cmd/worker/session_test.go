@@ -54,9 +54,18 @@ func TestBuildPiCommand_UsesNamedSession(t *testing.T) {
 		t.Fatalf("expected session id/dir, got %q/%q", sid, sdir)
 	}
 	got := strings.Join(cmd.Args, " ")
-	for _, want := range []string{"--session", "--session-dir", sid, sdir} {
+	for _, want := range []string{"--session-id", "--session-dir", sid, sdir} {
 		if !strings.Contains(got, want) {
 			t.Errorf("command missing %q; got %q", want, got)
+		}
+	}
+	// --session resumes an EXISTING session and pi exits 1 with
+	// "No session found matching" for a fresh bead. --session-id creates the
+	// named session when missing. Assert the exact token, not a substring:
+	// "--session-id" itself contains "--session".
+	for _, a := range cmd.Args {
+		if a == "--session" {
+			t.Errorf("must not use --session (resume-only); use --session-id so fresh beads create the session")
 		}
 	}
 	if strings.Contains(got, "--no-session") {
