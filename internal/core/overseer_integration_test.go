@@ -677,6 +677,40 @@ func TestOverseer_ApprovalGateFiltering(t *testing.T) {
 	}
 }
 
+// TestOverseer_OpenApprovalBeadFiltered reproduces the srv-smart-engine-56z
+// leak: task-breakdown emits human-gate beads with Type "approval" (not
+// "approval-gate"), and an OPEN approval bead fell through every filter and
+// got a worker spawned for it. Approval beads are human gates regardless of
+// status — workers must never execute them.
+func TestOverseer_OpenApprovalBeadFiltered(t *testing.T) {
+	test := setupTestOverseer(t)
+
+	beads := []types.Bead{
+		{ID: "test-project-normal", Title: "Normal Bead", Status: types.StatusOpen, Project: "test-project", Type: "implement"},
+		{ID: "test-project-approval-open", Title: "APPROVE: plan", Status: types.StatusOpen, Project: "test-project", Type: "approval"},
+		{ID: "test-project-approval-wip", Title: "APPROVE: plan", Status: types.StatusInProgress, Project: "test-project", Type: "approval"},
+	}
+
+	for _, bead := range beads {
+		test.mockBeads.addBead(bead)
+	}
+
+	if err := test.overseer.buildDAG(); err != nil {
+		t.Fatalf("buildDAG() error = %v", err)
+	}
+
+	ready := test.overseer.GetReadyBeadsFromDAG()
+
+	if len(ready) != 1 {
+		t.Errorf("Expected 1 ready bead (both approval beads excluded), got %d", len(ready))
+	}
+	for _, bead := range ready {
+		if bead.Type == "approval" {
+			t.Errorf("Open approval bead %s must never be worker-executed (human gate)", bead.ID)
+		}
+	}
+}
+
 // TestOverseer_ConcurrentAccess tests thread safety of overseer operations
 func TestOverseer_ConcurrentAccess(t *testing.T) {
 	test := setupTestOverseer(t)

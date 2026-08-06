@@ -7,6 +7,12 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Fixed
+- **Approval-bead gate leak.** Beads with `Type: approval` (emitted by task-breakdown as human approval gates) were worker-executed whenever they were `open` — only `approval-gate` and in-progress `approval` beads were skipped. Observed live: a worker spent a full turn reviewing `srv-smart-engine-56z`. Approval beads are now skipped at all four gate sites (`dag_navigator`, `overseer.shouldSpawnWorker`, `scheduler` ×2) regardless of status, and route to `AgentHuman`.
+
+### Changed
+- **Pattern storage path (ops).** Live `/etc/hydra/hydra.yaml` `intelligence.patterns.storage_path` moved from the code checkout (`/opt/dev-tools/components/hydra/.hydra/patterns`, unwritable by the `hydra` user — every close-time verdict pattern failed with `Failed to store verdict pattern`) to `$HYDRA_HOME/.hydra/patterns`.
+
 ### Documentation
 - **Roadmap: closing the bug-fix loop end-to-end.** New `docs/roadmap/bug-fix-loop-closure-20260803.md` — the agreed plan for ~80% automation of the QA→JIRA→fix→deploy→verify cycle: repro-first RED gate, confidence-tiered auto-merge, JIRA adapter, dev-env sentinel (Playwright/OpenAPI/log-fingerprint probes), pattern fast lane, and reuse for untested features. Mermaid workflows, actor/tooling tables, rollout order, industry references, plus two explicitly non-committed candidates: Piolium security-audit integration and Passmark AI browser regression probes. Planning only; nothing scheduled.
 

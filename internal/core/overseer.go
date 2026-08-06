@@ -890,7 +890,7 @@ func (o *Overseer) shouldSpawnWorker(node *Node) bool {
 	if node.Bead.Type == "approval-gate" || node.Bead.Type == "epic" {
 		return false
 	}
-	if node.Bead.Type == "approval" && node.Bead.Status == types.StatusInProgress {
+	if node.Bead.Type == "approval" {
 		return false
 	}
 	return true
