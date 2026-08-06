@@ -1768,7 +1768,10 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 		"--offline",
 	}
 	if sessionID != "" && sessionDir != "" {
-		args = append(args, "--session", sessionID, "--session-dir", sessionDir)
+		// --session-id (not --session): pi exits 1 with "No session found
+		// matching" when --session names a session that does not exist yet —
+		// i.e. every fresh bead. --session-id creates it if missing.
+		args = append(args, "--session-id", sessionID, "--session-dir", sessionDir)
 	}
 
 	// RPC mode is what makes Pi initialise its extensions (rtk command
