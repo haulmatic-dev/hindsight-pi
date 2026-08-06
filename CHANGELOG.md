@@ -8,6 +8,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Documentation
+- **PRD: park canary — coordinated congestion probing.** `docs/PRDs/park-canary-coordination-20260806.md`: when N workers are parked on provider-capacity, the oldest-parked real worker becomes the canary (probes every 30–60s via its own resumed turn — no synthetic pinger), followers extend to ceiling backoff, and a capacity-available signal wakes followers staggered. Fail-open to today's independent backoff. Proposed, not scheduled.
+
+### Documentation
 - **Roadmap: closing the bug-fix loop end-to-end.** New `docs/roadmap/bug-fix-loop-closure-20260803.md` — the agreed plan for ~80% automation of the QA→JIRA→fix→deploy→verify cycle: repro-first RED gate, confidence-tiered auto-merge, JIRA adapter, dev-env sentinel (Playwright/OpenAPI/log-fingerprint probes), pattern fast lane, and reuse for untested features. Mermaid workflows, actor/tooling tables, rollout order, industry references, plus two explicitly non-committed candidates: Piolium security-audit integration and Passmark AI browser regression probes. Planning only; nothing scheduled.
 
 ### Added
