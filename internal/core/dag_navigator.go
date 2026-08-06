@@ -94,7 +94,8 @@ func (n *DAGNavigator) GetReadyBeads(completed map[string]bool) []types.Bead {
 	readyNodes := n.dag.GetReadyNodes()
 	var beads []types.Bead
 	for _, node := range readyNodes {
-		if node.Bead.Type == "approval-gate" {
+		if node.Bead.Type == "approval-gate" || node.Bead.Type == "approval" {
+			// Human gates are never worker-executed, whatever their status.
 			continue
 		}
 		if completed != nil && completed[string(node.Bead.ID)] {

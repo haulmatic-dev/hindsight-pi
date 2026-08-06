@@ -133,10 +133,10 @@ func TestShouldSpawnWorker_ExistingFilters(t *testing.T) {
 			want:     false,
 		},
 		{
-			name:     "allows approval open",
+			name:     "skips approval open (human gate, any status)",
 			beadType: "approval",
 			status:   types.StatusOpen,
-			want:     true,
+			want:     false,
 		},
 		{
 			name:     "allows regular task",

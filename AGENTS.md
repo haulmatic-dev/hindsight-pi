@@ -123,7 +123,7 @@ Two you will hit within your first hour:
 
 ### Scheduling
 - `GetReadyBeadsFromDAG` must:
-  1. Filter approval-gates
+  1. Filter approval-gates (both `approval-gate` and `approval` types, any status)
   2. Exclude session-completed beads (`o.completed`)
   3. Sort by priority descending
 

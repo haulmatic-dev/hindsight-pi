@@ -231,6 +231,7 @@ var AgentTypeMap = map[string][]AgentType{
 	"fix":           {AgentFixSpecialist},
 	"bug":           {AgentFixSpecialist},
 	"approval-gate": {AgentHuman},
+	"approval":      {AgentHuman},
 }
 
 // DetermineAgentTypes returns the agent types for a given bead type.

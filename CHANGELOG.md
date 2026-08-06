@@ -7,6 +7,12 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Fixed
+- **Approval-bead gate leak.** Beads with `Type: approval` (emitted by task-breakdown as human approval gates) were worker-executed whenever they were `open` — only `approval-gate` and in-progress `approval` beads were skipped. Observed live: a worker spent a full turn reviewing `srv-smart-engine-56z`. Approval beads are now skipped at all four gate sites (`dag_navigator`, `overseer.shouldSpawnWorker`, `scheduler` ×2) regardless of status, and route to `AgentHuman`.
+
+### Changed
+- **Pattern storage path (ops).** Live `/etc/hydra/hydra.yaml` `intelligence.patterns.storage_path` moved from the code checkout (`/opt/dev-tools/components/hydra/.hydra/patterns`, unwritable by the `hydra` user — every close-time verdict pattern failed with `Failed to store verdict pattern`) to `$HYDRA_HOME/.hydra/patterns`.
+
 ### Documentation
 - **PRD: park canary — coordinated congestion probing.** `docs/PRDs/park-canary-coordination-20260806.md`: when N workers are parked on provider-capacity, the oldest-parked real worker becomes the canary (probes every 30–60s via its own resumed turn — no synthetic pinger), followers extend to ceiling backoff, and a capacity-available signal wakes followers staggered. Fail-open to today's independent backoff. Proposed, not scheduled.
 

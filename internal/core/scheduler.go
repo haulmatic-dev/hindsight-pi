@@ -329,7 +329,7 @@ func (s *Scheduler) Tick() error {
 		}
 
 		// Skip approval beads that are in progress
-		if bead.Type == "approval" && bead.Status == types.StatusInProgress {
+		if bead.Type == "approval" {
 			log.Printf("⏸️  Skipping approval bead (waiting for user approval): %s", bead.ID)
 			continue
 		}
@@ -535,7 +535,7 @@ func (s *Scheduler) ShouldSpawnWorker(node *Node) bool {
 		log.Printf("Skipping approval gate: %s", beadID)
 		return false
 	}
-	if node.Bead.Type == "approval" && node.Bead.Status == types.StatusInProgress {
+	if node.Bead.Type == "approval" {
 		log.Printf("Skipping approval bead (waiting for user approval): %s", beadID)
 		return false
 	}
