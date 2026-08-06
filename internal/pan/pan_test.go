@@ -38,6 +38,16 @@ func (f *fakeStore) ListWorkers(states ...registry.WorkerState) ([]registry.Work
 	return out, nil
 }
 
+func (f *fakeStore) PendingCommands(beadID string) ([]registry.Command, error) {
+	var out []registry.Command
+	for _, e := range f.enqueued {
+		if e.bead == beadID {
+			out = append(out, registry.Command{BeadID: e.bead, Kind: e.kind, Payload: e.payload})
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeStore) EnqueueCommand(beadID string, kind registry.CommandKind, payload string) error {
 	f.enqueued = append(f.enqueued, struct {
 		bead    string
@@ -181,5 +191,27 @@ func TestParseDecisionsToleratesFencesAndProse(t *testing.T) {
 
 	if _, err := ParseDecisions("no json at all"); err == nil {
 		t.Errorf("expected error for missing array")
+	}
+}
+
+// TestTickDeduplicatesPendingCommands reproduces the 2026-08-06 live spam:
+// Pan queued 511 identical abandon-with-summary commands for one dead bead
+// (srv-smart-engine-g1m) because a dead worker never consumes its queue and
+// Pan re-decided the same verdict every tick. Before enqueueing, Pan must
+// skip any decision whose kind already sits unconsumed in the worker's queue.
+func TestTickDeduplicatesPendingCommands(t *testing.T) {
+	store := &fakeStore{workers: []registry.WorkerRecord{hungWorker("bead-dead")}}
+	runner := func(ctx context.Context, cfg Config, prompt string) (string, error) {
+		return `[{"bead_id": "bead-dead", "action": "abandon-with-summary", "message": "dead worker"}]`, nil
+	}
+
+	s := New(Config{Enabled: true}, store, runner)
+
+	// Tick twice with the same decision: the second must be a no-op.
+	s.Tick(context.Background())
+	s.Tick(context.Background())
+
+	if len(store.enqueued) != 1 {
+		t.Fatalf("enqueued %d commands across 2 ticks, want 1 (dedup): %+v", len(store.enqueued), store.enqueued)
 	}
 }
