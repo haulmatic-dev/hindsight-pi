@@ -456,3 +456,85 @@ Browser-probe layer of the sentinel = Passmark; raw Playwright for PR-time
 gates; Schemathesis for API contract probes. Evaluation gate: one pilot
 spec replaying a real QA repro on a dogfood project's dev-env — judge
 healing rate, assertion reliability, and per-run token cost.
+
+---
+
+## 14. Under consideration (NOT committed): Pan as the self-healing / self-improving loop driver
+
+**Status: candidate only.** Emerged from 2026-08-06 live dogfood. No
+decision to implement. Recorded here because Pan is the natural owner for
+the diagnose→fix→deploy→diagnose loop we are already running manually.
+
+Pan today is a **per-worker shepherd**: it watches the registry and decides
+what to do with ambiguous workers (parked too long, hung, missing verdicts).
+That is exactly the vantage point a fleet self-healer needs, but Pan has
+no memory, no log access, and no ability to file its own beads or PRs. The
+2026-08-06 session built those pieces by hand (`hydra-code-fku` watchdog)
+and confirmed the value. Extending Pan to own the loop is the next
+architectural step.
+
+### What Pan does today (works)
+
+| Capability | Evidence |
+|---|---|
+| Parked-overdue detection | `internal/pan/pan.go` `Candidates()` — `parked` + `wake_at` overdue |
+| Hung-worker detection | heartbeat stale > threshold → steer/nudge, then abandon |
+| Verdict-missing nudge cap | counts nudges, escalates after cap |
+| Advisory command queue | enqueues `continue`, `steer`, `abandon-with-summary` to registry `commands` |
+| Per-tick LLM judgment | MiniMax prompt with worker context, JSON decisions |
+| Fail-open advisory | never gates the pipeline; workers/Charon keep hard bounds |
+
+### What Pan does not do today (gaps found live)
+
+| Gap | Damage seen |
+|---|---|
+| No decision memory | flipped `abandon`/`continue` every tick for the same dead worker; #129 added queue dedup but not reasoning memory |
+| No log access | missed `permission denied` and `activity timeout` patterns; only saw registry rows |
+| No self-improvement | cannot file fix beads or open PRs; just re-decides the same stuck worker |
+| Advisory commands ignored by dead workers | `abandon-with-summary` queued but never consumed; #129 dedups, doesn't route |
+| No bead-type awareness | spawned a worker for `srv-smart-engine-56z`, a human `approval` gate |
+| Tokens=0 false positives | "stuck" heuristic misreads workers before token flush; #130 fixes flush side |
+| No anomaly-rate detection | 511 duplicate commands, 5,450 perm errors — invisible until manual grep |
+
+### Proposed extension: Pan as the loop driver
+
+Pan would gain a **fleet-health pass** each tick:
+
+1. **Deterministic log scanner** — count known signatures from `hydra-error.log`
+   since the last tick: `permission denied`, `activity timeout`, `Failed to
+   store`, gate spawns, `closed-failed` storms. This is the machinery already
+   prototyped in `hydra-code-fku`.
+2. **Anomaly → bead** — when a signature crosses a threshold, emit a typed
+   `fleet_anomaly` shepherd event and auto-create a `bug`/`fix` bead with the
+   exact log lines and suspected files. Use the existing fix-bead dedup/cap
+   machinery; fingerprints prevent storms from creating duplicate beads.
+3. **Decision memory** — record the last Pan decision per bead in the registry
+   or Hindsight. Only re-decide a worker if its state/heartbeat actually
+   changed. Ends the abandon/continue flip-flop.
+4. **Log-aware diagnosis** — give Pan read access to worker logs and
+   `hydra-error.log`. Use the LLM only for novel patterns; deterministic
+   counters for known ones.
+5. **Self-perpetuating watchdog** — the bead we are already running: diagnose
+   → file fix beads → operator deploys → re-diagnose → break if clean. Pan
+   would own the "re-arm until clean" decision instead of a standalone
+   worker bead.
+6. **Escalation cap** — after N loops or a fix-recursion cap, stop burning
+   tokens and hand off to a human.
+
+### Where it slots in the bug-fix loop
+
+- **Before §3.1 (repro-first RED gate):** Pan's anomaly detector is the
+  ticket source for systemic issues, replacing or augmenting QA intake.
+- **Inside §4 (sentinel):** Pan runs the post-deploy verification by checking
+  that the same anomaly signatures no longer fire.
+- **Inside §7 (rollout):** step 0 becomes "Pan anomaly detection → bead".
+
+### Evaluation gate
+
+1. Add the deterministic scanner to Pan as an optional flag (no LLM calls).
+2. Run it for 24h on the live fleet; compare its anomaly findings to manual
+   grep results.
+3. Only if precision/recall is high, wire anomaly → bead creation and let
+   Pan re-arm a watchdog pass.
+4. Human operator remains the deploy step until workers can safely restart
+   the daemon under policy (probably never — `systemctl` stays operator).
