@@ -282,6 +282,13 @@ func isConcurrencyPressureExitCode(code int) bool {
 // infrastructure problems (rate limits, timeouts, network issues, daemon locks)
 // rather than code-level problems.
 func isInfrastructureExitCode(code int) bool {
+	// Negative codes are signal deaths of the WORKER process itself (Charon's
+	// hung-kill, OOM killer, operator kill). The worker's own code only ever
+	// exits deliberately with 1/2/3/5/6/7, so a signal death is always an
+	// external event — never a bead code fault.
+	if code < 0 {
+		return true
+	}
 	// 6 = quota exhausted: infrastructure, never a code defect, so it must not
 	// spawn a fix bead.
 	// 7 = transient provider overload: same reasoning, and deliberately NOT fed
