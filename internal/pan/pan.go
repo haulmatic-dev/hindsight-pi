@@ -229,7 +229,12 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 			out = append(out, Candidate{Record: w, Reason: fmt.Sprintf(
 				"parked past wake_at + %v grace (reason: %s)", s.cfg.ParkOverdueGrace, w.ParkReason)})
 		case w.State == registry.StateWorking && !w.LastHeartbeat.IsZero() &&
-			now.Sub(w.LastHeartbeat) > s.cfg.HungAfter:
+			now.Sub(w.LastHeartbeat) > s.cfg.HungAfter &&
+			now.Sub(w.StartedAt) >= 2*s.cfg.HungAfter:
+			// Young-worker grace: a worker younger than 2×HungAfter is mid-first-
+			// turn — tokens legitimately 0 (they land at turn end) and its
+			// heartbeat can predate it in the registration race. Pan abandoned
+			// exactly such a worker live (srv-smart-engine-pes, 2026-08-07).
 			out = append(out, Candidate{Record: w, Reason: fmt.Sprintf(
 				"no heartbeat for %v (threshold %v)", now.Sub(w.LastHeartbeat), s.cfg.HungAfter)})
 		}
