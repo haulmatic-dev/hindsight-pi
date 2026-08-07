@@ -12,6 +12,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ### Fixed
 - **Final token flush on worker exit.** Workers exit <30s after the last turn and `Stop()` posted only a bare completion marker (bead id + exit code), so parsed token totals never reached the registry — observed on hydra-code-zuo: worker logged `total=616789`, registry showed `tokens_so_far=0`, feeding Pan's false zero-token stuck verdicts. `Stop` now flushes a full final heartbeat (state + tokens) before the completion marker.
+- **Final token flush on worker exit.** Workers exit <30s after the last turn and `Stop()` posted only a bare completion marker (bead id + exit code), so parsed token totals never reached the registry — observed on hydra-code-zuo: worker logged `total=616789`, registry showed `tokens_so_far=0`, feeding Pan's false zero-token stuck verdicts. `Stop` now flushes a full final heartbeat (state + tokens) before the completion marker.
+- **Pan command-queue dedup.** Pan re-queued the same verdict every tick for dead workers that never consume their queue — observed live: 511 duplicate `abandon-with-summary` commands on one dead bead, MiniMax tokens burned per tick. Before enqueueing, Pan now skips a decision whose kind is already pending for that worker (fail-open on lookup error).
 
 ### Fixed
 - **Human-gate close-path guard.** `BeadCloser.Close` now refuses to system-close `approval`/`approval-gate` beads — observed live: the daemon closed `srv-smart-engine-56z` with verdict `accepted` after a worker review, bypassing the human gate (the worker-side `br close` guard held; the daemon path did not). Human gates require an explicit human `br close`.
@@ -21,6 +23,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 - **Pattern storage path (ops).** Live `/etc/hydra/hydra.yaml` `intelligence.patterns.storage_path` moved from the code checkout (`/opt/dev-tools/components/hydra/.hydra/patterns`, unwritable by the `hydra` user — every close-time verdict pattern failed with `Failed to store verdict pattern`) to `$HYDRA_HOME/.hydra/patterns`.
 
 ### Documentation
+- **Roadmap: Pan as the self-healing/self-improving loop driver.** Added `docs/roadmap/bug-fix-loop-closure-20260803.md` §14: Pan's current functions (works/doesn't/planned), fleet-health pass, anomaly→bead, decision memory, and escalation cap. Status remains "under consideration (NOT committed)". Derived from the live 2026-08-06 dogfood session (`hydra-code-fku` watchdog).
+
 - **PRD: park canary — coordinated congestion probing.** `docs/PRDs/park-canary-coordination-20260806.md`: when N workers are parked on provider-capacity, the oldest-parked real worker becomes the canary (probes every 30–60s via its own resumed turn — no synthetic pinger), followers extend to ceiling backoff, and a capacity-available signal wakes followers staggered. Fail-open to today's independent backoff. Proposed, not scheduled.
 
 ### Documentation
