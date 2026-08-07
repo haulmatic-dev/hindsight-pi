@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- **Human-gate close-path guard.** `BeadCloser.Close` now refuses to system-close `approval`/`approval-gate` beads — observed live: the daemon closed `srv-smart-engine-56z` with verdict `accepted` after a worker review, bypassing the human gate (the worker-side `br close` guard held; the daemon path did not). Human gates require an explicit human `br close`.
 - **Approval-bead gate leak.** Beads with `Type: approval` (emitted by task-breakdown as human approval gates) were worker-executed whenever they were `open` — only `approval-gate` and in-progress `approval` beads were skipped. Observed live: a worker spent a full turn reviewing `srv-smart-engine-56z`. Approval beads are now skipped at all four gate sites (`dag_navigator`, `overseer.shouldSpawnWorker`, `scheduler` ×2) regardless of status, and route to `AgentHuman`.
 
 ### Changed
