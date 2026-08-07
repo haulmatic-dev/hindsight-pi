@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -1620,6 +1621,9 @@ monitorLoop:
 	} else {
 		result.Success = false
 		log.Printf("❌ Pi failed with exit code %d", result.ExitCode)
+		// The watchdog's kill reason lives in cmdErr, not in pi's stderr —
+		// surface it so classifyFailure can route it to an infra exit code.
+		appendForcedKillReason(result, cmdErr)
 		if stdoutStr := stdoutBuf.String(); stdoutStr != "" {
 			log.Printf("📤 STDOUT:\n%s", stdoutStr)
 		}
@@ -2448,6 +2452,27 @@ func closeBeadFromWorker(bead types.Bead, projectPath, repoName, reason string) 
 //	4 – infrastructure (network, daemon lock, permissions, etc.)
 //	5 – stub / placeholder detected
 //	6 – quota / billing limit exhausted (long cooldown, not a failover)
+// appendForcedKillReason surfaces the worker watchdog's kill reason into
+// result.Error. The reason (activity timeout, max total runtime) is built in
+// the monitor loop as a plain error and never reaches pi's stderr — without
+// this, classifyFailure saw only the stalled stream's stderr and the death
+// classified as exit -1/1, a bead fault, spawning fix beads that died the same
+// way (hydra-code-x77, 2026-08-07). Real process exits (exec.ExitError) are
+// skipped: their stderr already carries the cause.
+func appendForcedKillReason(result *ExecutionResult, cmdErr error) {
+	if cmdErr == nil {
+		return
+	}
+	var exitErr *exec.ExitError
+	if errors.As(cmdErr, &exitErr) {
+		return
+	}
+	if result.Error != "" {
+		result.Error += "\n"
+	}
+	result.Error += cmdErr.Error()
+}
+
 func classifyFailure(result *ExecutionResult) int {
 	if result == nil || result.Success {
 		return 0
@@ -2478,7 +2503,8 @@ func classifyFailure(result *ExecutionResult) int {
 		strings.Contains(err, "429"):
 		return 2
 	case strings.Contains(err, "timeout") ||
-		strings.Contains(err, "deadline exceeded"):
+		strings.Contains(err, "deadline exceeded") ||
+		strings.Contains(err, "max total runtime"):
 		return 3
 	case strings.Contains(err, "stub") ||
 		strings.Contains(err, "placeholder") ||
