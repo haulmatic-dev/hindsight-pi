@@ -24,6 +24,7 @@ import (
 type Store interface {
 	ListWorkers(states ...registry.WorkerState) ([]registry.WorkerRecord, error)
 	EnqueueCommand(beadID string, kind registry.CommandKind, payload string) error
+	PendingCommands(beadID string) ([]registry.Command, error)
 }
 
 // Config tunes Pan. A zero Config is valid and disabled.
@@ -177,6 +178,24 @@ func (s *Shepherd) Tick(ctx context.Context) {
 		if d.BeadID == "" {
 			log.Printf("[Pan] rejecting decision with empty bead_id")
 			continue
+		}
+		// Dedup against the pending queue: a dead worker never consumes its
+		// commands, so without this Pan re-queues the same verdict every tick
+		// (observed live 2026-08-06: 511 duplicate abandon-with-summary
+		// commands on srv-smart-engine-g1m). Fail-open: a pending-list error
+		// still enqueues — duplicates are cheaper than a lost decision.
+		if pending, perr := s.store.PendingCommands(d.BeadID); perr == nil {
+			dup := false
+			for _, pc := range pending {
+				if pc.Kind == kind {
+					log.Printf("[Pan] skipping duplicate %s for %s (already pending)", kind, d.BeadID)
+					dup = true
+					break
+				}
+			}
+			if dup {
+				continue
+			}
 		}
 		if err := s.store.EnqueueCommand(d.BeadID, kind, d.Message); err != nil {
 			log.Printf("[Pan] enqueue %s for %s failed: %v", kind, d.BeadID, err)
