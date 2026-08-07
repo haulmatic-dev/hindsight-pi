@@ -105,18 +105,28 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 	reason := statusReason(success)
 	log.Printf("[closeBead] Closing with reason: %s (path: %s)", reason, projectPath)
 
+	bead, err := c.beadsClient.GetBead(projectPath, repoName, worker.BeadID)
+	if err == nil && bead.Status.IsTerminal() {
+		log.Printf("[closeBead] Bead %s already closed (status: %s), skipping", worker.BeadID.String(), bead.Status)
+		return nil
+	}
+
+	// Human gates are never system-closed: approval beads require an
+	// explicit human `br close`. Observed live 2026-08-06: this path
+	// closed srv-smart-engine-56z with verdict "accepted" after a worker
+	// review, bypassing the human gate.
+	if bead != nil && (bead.Type == "approval" || bead.Type == "approval-gate") {
+		log.Printf("[closeBead] REFUSING to close human gate %s (type %s) — requires explicit human br close",
+			worker.BeadID.String(), bead.Type)
+		return nil
+	}
+
 	// Queue TLDR indexing on successful completion
 	if success {
 		repoPath := c.projectResolver.ResolveRepoPath(projectName, repoName, projectPath)
 		if repoPath != "" {
 			c.intelligenceHub.QueueRepoIndexing(projectName, repoPath)
 		}
-	}
-
-	bead, err := c.beadsClient.GetBead(projectPath, repoName, worker.BeadID)
-	if err == nil && bead.Status.IsTerminal() {
-		log.Printf("[closeBead] Bead %s already closed (status: %s), skipping", worker.BeadID.String(), bead.Status)
-		return nil
 	}
 
 	// Run TDD validation for TDD-phase beads before closing. The
