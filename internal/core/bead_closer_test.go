@@ -183,3 +183,44 @@ func TestBeadCloser_ShouldRunTDDValidation_Label(t *testing.T) {
 		})
 	}
 }
+
+// TestBeadCloser_NeverClosesHumanGates reproduces the 2026-08-06 live
+// incident: the daemon's close path closed srv-smart-engine-56z (Type
+// "approval") with verdict "accepted" after a worker review — human gates
+// must require an explicit human `br close`. Spawn-side filtering (PR
+// approval-bead-gate) is not enough; the close path needs the same guard.
+func TestBeadCloser_NeverClosesHumanGates(t *testing.T) {
+	for _, gateType := range []string{"approval", "approval-gate"} {
+		t.Run(gateType, func(t *testing.T) {
+			mockBeads := newMockBeadsClient()
+			mockBeads.addBead(types.Bead{
+				ID:       "test-bead-1",
+				Title:    "APPROVE: plan",
+				Project:  "test-bead",
+				Type:     gateType,
+				Priority: 1,
+				Status:   types.StatusOpen,
+			})
+
+			cfg := DefaultConfig()
+			projectPath := t.TempDir()
+			resolver := setupTestProjectResolver(t, "test-bead", projectPath)
+			closer := NewBeadCloser(
+				mockBeads,
+				nil,
+				resolver,
+				NewValidationService(cfg, NewRetryManager(5*time.Second, 5*time.Minute), mockBeads),
+				cfg,
+			)
+
+			worker := &types.Worker{BeadID: types.BeadID("test-bead-1")}
+			if err := closer.Close(worker, true, 0); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+
+			if len(mockBeads.closeCalls) != 0 {
+				t.Fatalf("human gate (type %s) must never be system-closed, got close calls: %+v", gateType, mockBeads.closeCalls)
+			}
+		})
+	}
+}

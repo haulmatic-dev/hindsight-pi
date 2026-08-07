@@ -14,6 +14,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 - **Final token flush on worker exit.** Workers exit <30s after the last turn and `Stop()` posted only a bare completion marker (bead id + exit code), so parsed token totals never reached the registry — observed on hydra-code-zuo: worker logged `total=616789`, registry showed `tokens_so_far=0`, feeding Pan's false zero-token stuck verdicts. `Stop` now flushes a full final heartbeat (state + tokens) before the completion marker.
 
 ### Fixed
+- **Human-gate close-path guard.** `BeadCloser.Close` now refuses to system-close `approval`/`approval-gate` beads — observed live: the daemon closed `srv-smart-engine-56z` with verdict `accepted` after a worker review, bypassing the human gate (the worker-side `br close` guard held; the daemon path did not). Human gates require an explicit human `br close`.
 - **Approval-bead gate leak.** Beads with `Type: approval` (emitted by task-breakdown as human approval gates) were worker-executed whenever they were `open` — only `approval-gate` and in-progress `approval` beads were skipped. Observed live: a worker spent a full turn reviewing `srv-smart-engine-56z`. Approval beads are now skipped at all four gate sites (`dag_navigator`, `overseer.shouldSpawnWorker`, `scheduler` ×2) regardless of status, and route to `AgentHuman`.
 
 ### Changed
