@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- **Watchdog-forced kills classified as bead faults.** When the activity-timeout or max-runtime watchdog killed Pi, the kill reason lived only in `cmdErr` while `classifyFailure` reads `result.Error` (pi's stderr) — so these provider-side hangs exited `-1`/`1`, recorded as bead faults, closed-failed beads, and spawned fix beads that died the same way (watchdog-found: `hydra-code-x77`). `appendForcedKillReason` now surfaces the kill reason into `result.Error` so the existing timeout markers classify it as exit 3 (infrastructure); `max total runtime` added as a timeout marker. Operators see fewer phantom `closed-failed` beads and no more fix-bead recursion from congested-provider stalls.
 - **Epic auto-close no longer counts failed children.** `CloseReadyEpics` treated any `closed` task child as done — including `closed-failed` ones — so phase epics (`srv-smart-engine-757/tml/m5q`) auto-closed over failed work, reporting whole phases complete with no working code. A `closed-failed` child now blocks the epic unless its `Fix: <title>` bead closed without the failed label. The three wrongly-closed epics were reopened live.
 
 ### Fixed
