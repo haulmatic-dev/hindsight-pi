@@ -386,3 +386,57 @@ func TestDAG_CloseReadyEpics(t *testing.T) {
 		t.Errorf("expected both epics to close in one pass, got %v", closed)
 	}
 }
+
+// TestDAG_CloseReadyEpics_SkipsFailedChildren reproduces the 2026-08-06
+// srv-smart-engine incident: epics (757, tml, m5q) auto-closed over children
+// that were closed-failed — "all children closed" counted failure as done,
+// so whole phases were marked complete with no working code. A closed-failed
+// child must block epic auto-close unless its fix bead closed successfully.
+func TestDAG_CloseReadyEpics_SkipsFailedChildren(t *testing.T) {
+	build := func(children []types.Bead) *DAG {
+		dag := NewDAG()
+		epic := types.Bead{ID: "epic-1", Type: "epic", Status: types.StatusOpen}
+		if err := dag.AddNode(epic); err != nil {
+			t.Fatalf("AddNode epic: %v", err)
+		}
+		for _, c := range children {
+			if err := dag.AddNode(c); err != nil {
+				t.Fatalf("AddNode %s: %v", c.ID, err)
+			}
+			if err := dag.AddEdge(string(c.ID), "epic-1"); err != nil {
+				t.Fatalf("AddEdge %s->epic: %v", c.ID, err)
+			}
+		}
+		return dag
+	}
+
+	t.Run("closed-failed child blocks epic", func(t *testing.T) {
+		dag := build([]types.Bead{
+			{ID: "child-ok", Type: "task", Status: types.StatusClosed},
+			{ID: "child-fail", Type: "task", Title: "do thing", Status: types.StatusClosed, Labels: []string{"closed-failed"}},
+		})
+		if closed := dag.CloseReadyEpics(); len(closed) != 0 {
+			t.Errorf("epic must not close over a closed-failed child, got %v", closed)
+		}
+	})
+
+	t.Run("failed child with successful fix bead allows epic", func(t *testing.T) {
+		dag := build([]types.Bead{
+			{ID: "child-fail", Type: "task", Title: "do thing", Status: types.StatusClosed, Labels: []string{"closed-failed"}},
+			{ID: "child-fix", Type: "fix", Title: "Fix: do thing", Status: types.StatusClosed},
+		})
+		if closed := dag.CloseReadyEpics(); len(closed) != 1 || closed[0] != "epic-1" {
+			t.Errorf("epic should close when the failed child's fix bead succeeded, got %v", closed)
+		}
+	})
+
+	t.Run("failed child with failed fix bead blocks epic", func(t *testing.T) {
+		dag := build([]types.Bead{
+			{ID: "child-fail", Type: "task", Title: "do thing", Status: types.StatusClosed, Labels: []string{"closed-failed"}},
+			{ID: "child-fix", Type: "fix", Title: "Fix: do thing", Status: types.StatusClosed, Labels: []string{"closed-failed"}},
+		})
+		if closed := dag.CloseReadyEpics(); len(closed) != 0 {
+			t.Errorf("epic must not close when the fix bead also failed, got %v", closed)
+		}
+	})
+}
