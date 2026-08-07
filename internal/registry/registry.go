@@ -149,8 +149,22 @@ func scanTime(v interface{}) time.Time {
 
 // UpsertWorker inserts or replaces a worker record. Completed records are
 // never resurrected: an upsert for a completed bead keeps it completed.
+// A PID change means a NEW worker instance for the same bead; shepherd
+// commands queued against the previous instance are void and cleared
+// (they were judged on the old row's heartbeat/tokens — live incident
+// 2026-08-07: srv-smart-engine-pes self-aborted on its predecessor's
+// abandon-with-summary 2m20s into a healthy turn).
 func (s *Store) UpsertWorker(rec WorkerRecord) error {
-	_, err := s.db.Exec(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin upsert worker %s: %w", rec.BeadID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var prevPID int
+	_ = tx.QueryRow(`SELECT pid FROM workers WHERE bead_id=?`, rec.BeadID).Scan(&prevPID)
+
+	_, err = tx.Exec(`
 INSERT INTO workers (bead_id, pid, pgid, project, started_at, last_heartbeat,
   state, pi_session_id, err_status, err_type, err_message, tokens_so_far,
   park_since, park_wake_at, park_reason, nudge_count, exit_code, completed_at)
@@ -174,7 +188,13 @@ ON CONFLICT(bead_id) DO UPDATE SET
 	if err != nil {
 		return fmt.Errorf("upsert worker %s: %w", rec.BeadID, err)
 	}
-	return nil
+
+	if prevPID != 0 && prevPID != rec.PID {
+		if _, err := tx.Exec(`DELETE FROM commands WHERE bead_id=? AND consumed_at IS NULL`, rec.BeadID); err != nil {
+			return fmt.Errorf("clear stale commands for %s: %w", rec.BeadID, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // Heartbeat updates liveness and token progress for a worker.
