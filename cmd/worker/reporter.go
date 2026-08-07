@@ -179,6 +179,16 @@ func (r *stateReporter) Stop(exitCode int) {
 		return
 	}
 	r.stopOnce.Do(func() {
+		// Flush a final full heartbeat BEFORE the bare completion marker:
+		// the completion endpoint carries only the exit code, and workers
+		// typically exit <30s after the last turn — without this, the parsed
+		// token total (SetTokens) never reaches the registry. Observed live
+		// on hydra-code-zuo: worker logged total=616789, registry showed 0.
+		// Fail-open per reporter contract: beat errors only log.
+		if exitCode == 0 {
+			r.SetState(registry.StateCompleted)
+		}
+		r.beat()
 		if err := r.client.Complete(r.rep.BeadID, exitCode); err != nil {
 			log.Printf("[Registry] completion report failed: %v", err)
 		}

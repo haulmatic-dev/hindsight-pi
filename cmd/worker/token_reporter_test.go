@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	piagents "github.com/haulmatic-dev/hydra/internal/agents"
 	"github.com/haulmatic-dev/hydra/internal/registry"
@@ -30,4 +31,29 @@ func TestReportTurnTokens_ForwardsSessionTotal(t *testing.T) {
 	}
 	activeReporter = nil
 	reportTurnTokens(&piagents.SessionStats{Total: 1})
+}
+
+// Stop must flush a final full heartbeat BEFORE the bare completion marker:
+// workers exit <30s after the last turn, so without the flush the parsed
+// token total (SetTokens) never reaches the registry — observed live on
+// hydra-code-zuo: worker logged total=616789, registry showed 0.
+func TestReporterStop_FlushesFinalState(t *testing.T) {
+	rep := newStateReporter(registry.NewClient("http://127.0.0.1:1"), "bead-flush", "proj")
+	rep.rep.TokensSoFar = 616789
+	rep.Start() // Stop waits on the Start goroutine's stopped channel
+
+	done := make(chan struct{})
+	go func() { rep.Stop(0); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Stop hung (fail-open violated)")
+	}
+
+	if rep.rep.State != string(registry.StateCompleted) {
+		t.Errorf("State = %q, want %q after Stop(0)", rep.rep.State, registry.StateCompleted)
+	}
+	if rep.rep.TokensSoFar != 616789 {
+		t.Errorf("TokensSoFar = %d, want 616789 preserved for the final flush", rep.rep.TokensSoFar)
+	}
 }
