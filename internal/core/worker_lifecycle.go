@@ -33,6 +33,15 @@ type WorkerLifecycle struct {
 	releaseProviderSlot func(workerID string)
 	// concurrencyGovernor adapts effective concurrency based on observed outcomes.
 	concurrencyGovernor *ConcurrencyGovernor // may be nil
+	// workerTimeout caps ACTIVE (non-parked) wall time; defaults to 30m.
+	// Set from config.Overseer.WorkerTimeout at the construction site.
+	workerTimeout time.Duration
+	// parkedLookup reports whether the worker is currently parked (provider
+	// congestion). Parked time never counts against workerTimeout — the
+	// worker's internal maxTotalRuntime already excludes it, and a blind
+	// wall clock killed healthy workers mid-turn after long parks
+	// (hydra-code-9p7, 2026-08-07). Nil lookup counts all time.
+	parkedLookup func(beadID string) bool
 }
 
 // NewWorkerLifecycle creates a new worker lifecycle manager.
@@ -82,6 +91,8 @@ func (wl *WorkerLifecycle) Monitor(worker *types.Worker, cmd *exec.Cmd) {
 }
 
 // Wait waits for a worker process to complete and returns completion details.
+// The timeout clock counts only ACTIVE time: while the worker is parked
+// (provider congestion) the budget does not advance.
 func (wl *WorkerLifecycle) Wait(worker *types.Worker, cmd *exec.Cmd) workerCompletion {
 	log.Printf("[DEBUG] waitForWorker: waiting for worker %s (PID %d)", worker.ID, worker.PID)
 
@@ -90,15 +101,45 @@ func (wl *WorkerLifecycle) Wait(worker *types.Worker, cmd *exec.Cmd) workerCompl
 		done <- cmd.Wait()
 	}()
 
+	timeout := wl.workerTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Minute
+	}
+
+	var active time.Duration
+	last := time.Now()
+	// Tick granularity follows the budget: fine enough to honor small
+	// timeouts (and tests), capped so production (30m) ticks cheaply.
+	tick := timeout / 10
+	if tick < 50*time.Millisecond {
+		tick = 50 * time.Millisecond
+	}
+	if tick > 5*time.Second {
+		tick = 5 * time.Second
+	}
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+
 	var err error
-	select {
-	case err = <-done:
-	case <-time.After(30 * time.Minute):
-		log.Printf("[Overseer] Worker %s timed out, killing process", worker.ID)
-		if err := cmd.Process.Kill(); err != nil {
-			log.Printf("[Overseer] Failed to kill timed out worker: %v", err)
+waitLoop:
+	for {
+		select {
+		case err = <-done:
+			break waitLoop
+		case now := <-ticker.C:
+			if wl.parkedLookup == nil || !wl.parkedLookup(worker.ID) {
+				active += now.Sub(last)
+			}
+			last = now
+			if active > timeout {
+				log.Printf("[Overseer] Worker %s timed out after %v active (parked time excluded), killing process", worker.ID, active.Round(time.Second))
+				if kerr := cmd.Process.Kill(); kerr != nil {
+					log.Printf("[Overseer] Failed to kill timed out worker: %v", kerr)
+				}
+				err = fmt.Errorf("worker timeout")
+				break waitLoop
+			}
 		}
-		err = fmt.Errorf("worker timeout")
 	}
 
 	exitCode := extractExitCode(err)
