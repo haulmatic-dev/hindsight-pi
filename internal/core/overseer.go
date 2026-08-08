@@ -340,6 +340,16 @@ func NewOverseer(config *Config) *Overseer {
 	)
 	o.workerLifecycle.providerBreaker = o.providerBreaker
 	o.workerLifecycle.releaseProviderSlot = o.releaseProviderSlot
+	o.workerLifecycle.workerTimeout = config.Overseer.WorkerTimeout
+	// Park-aware timeout: read the worker's live state from the registry so
+	// parked (congestion) time never counts against the wall clock.
+	o.workerLifecycle.parkedLookup = func(beadID string) bool {
+		if o.registryStore == nil {
+			return false
+		}
+		rec, ok, err := o.registryStore.GetWorker(beadID)
+		return err == nil && ok && rec.State == registry.StateParked
+	}
 
 	// Initialize bead analyzer (projects will be updated after discovery)
 	o.beadAnalyzer = NewBeadAnalyzer(o.projects)
