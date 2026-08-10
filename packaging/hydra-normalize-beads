@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# hydra-normalize-beads [--check] <project-dir> [<project-dir> ...]
+#
+# Make each project's .beads shareable by the `beads` group, and report whether
+# the hydra daemon can actually use it.
+#
+# This is the backstop to packaging/br (the shim that repairs modes inside the
+# same br invocation). The shim depends on PATH; anything calling the real binary
+# by absolute path bypasses it. This script is called from hydra-onboard and the
+# onboard sweep so a bypassed write is repaired on the next cycle rather than
+# rotting — two projects were invisible to the daemon for a month and three days
+# because nothing ever checked.
+#
+# --check reports without changing anything (exit 1 if any project is unusable),
+# which is what makes a locked-out project loud instead of costing thousands of
+# silent retries.
+#
+# Idempotent. Needs root (or ownership) to chgrp another user's files.
+
+set -uo pipefail
+
+HYDRA_USER="${HYDRA_DAEMON_USER:-hydra}"
+BEADS_GROUP="${BR_BEADS_GROUP:-beads}"
+CHECK_ONLY=0
+rc=0
+
+usage() {
+	echo "usage: hydra-normalize-beads [--check] <project-dir> [...]" >&2
+	exit 2
+}
+
+[ $# -ge 1 ] || usage
+if [ "$1" = "--check" ]; then
+	CHECK_ONLY=1
+	shift
+fi
+[ $# -ge 1 ] || usage
+
+ok()   { printf '  \033[0;32m✓\033[0m %s\n' "$*"; }
+bad()  { printf '  \033[0;31m✗\033[0m %s\n' "$*"; rc=1; }
+info() { printf '  %s\n' "$*"; }
+
+# Can the daemon actually use this project's beads? Ownership and modes are only
+# proxies; this is the property we care about. `br list --status` is included
+# deliberately — it reads issues.jsonl, so it fails where `br list --json`
+# (SQLite only) still succeeds, which is exactly how the outage stayed hidden.
+daemon_can_use() {
+	local proj="$1" jsonl="$1/.beads/issues.jsonl"
+
+	[ -e "$jsonl" ] || return 0 # nothing exported yet — not a fault
+
+	sudo -u "$HYDRA_USER" test -r "$jsonl" 2>/dev/null || return 1
+	sudo -u "$HYDRA_USER" test -w "$jsonl" 2>/dev/null || return 1
+	return 0
+}
+
+for proj in "$@"; do
+	case "$proj" in -*) usage ;; esac
+
+	if [ ! -d "$proj" ]; then
+		info "skipped (not a directory): $proj"
+		continue
+	fi
+	beads="$proj/.beads"
+	if [ ! -d "$beads" ]; then
+		info "skipped (no .beads): $proj"
+		continue
+	fi
+
+	if [ "$CHECK_ONLY" = 1 ]; then
+		if daemon_can_use "$proj"; then
+			ok "$proj"
+		else
+			bad "$proj — $HYDRA_USER cannot read/write .beads/issues.jsonl ($(stat -c '%U:%G %a' "$beads/issues.jsonl" 2>/dev/null || echo '?'))"
+		fi
+		continue
+	fi
+
+	# Repair. Each step is guarded: a project we cannot fix must not abort the
+	# sweep for the projects after it — that abort-on-first-failure behaviour is
+	# its own open bug (Charon, task #11).
+	chgrp -R "$BEADS_GROUP" "$beads" 2>/dev/null ||
+		info "chgrp $BEADS_GROUP failed (need root?): $beads"
+
+	# Group mirrors the owner; world stays shut out (bead text is project
+	# content). setgid makes new files inherit the group regardless of the
+	# creating process's primary group — every human's primary group is their own
+	# username, so without this the inheritance does not happen.
+	chmod -R g+rwX,o-rwx "$beads" 2>/dev/null ||
+		info "chmod g+rwX,o-rwx failed: $beads"
+	chmod g+s "$beads" 2>/dev/null ||
+		info "chmod g+s failed: $beads"
+
+	if daemon_can_use "$proj"; then
+		ok "$proj"
+	else
+		bad "$proj — still unusable by $HYDRA_USER after repair ($(stat -c '%U:%G %a' "$beads/issues.jsonl" 2>/dev/null || echo '?'))"
+	fi
+done
+
+exit $rc
