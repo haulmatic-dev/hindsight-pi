@@ -86,10 +86,43 @@ func parseBeadFromRaw(raw map[string]interface{}) types.Bead {
 	if repo, ok := raw["source_repo"].(string); ok {
 		bead.Repo = repo
 	}
+	// Dependencies arrive in more than one shape and only one of them was
+	// handled, silently. `br` writes issues.jsonl entries as OBJECTS:
+	//
+	//   "dependencies": [{"issue_id":"a","depends_on_id":"b","type":"blocks"}]
+	//
+	// while this only accepted plain strings, so `dep.(string)` failed on every
+	// element and Dependencies came back empty for every bead. Nothing errored.
+	//
+	// The cost was the entire chain layer. ChainRegistrar treats a bead with no
+	// dependencies as a chain root, so on 2026-08-10 it logged "Found 1450 root
+	// beads" and "Registered 0 chains from 1450 total beads" — and with zero
+	// chains registered the completion callback can never fire. Everything
+	// hanging off it has therefore never run in production: A1 quarantine of
+	// failed chains, IntegrateAndRemove for clean ones, RunPRDValidation, and
+	// ExtractPatterns. `Chain completed:` has literally never appeared in a log.
+	//
+	// `depends_on_id` is the direction to follow: the record lives on the
+	// depending bead (issue_id == the owning bead in 12/12 records checked) and
+	// points at what it waits for — a `Fix: X` bead depends_on `X`.
 	if deps, ok := raw["dependencies"].([]interface{}); ok {
 		for _, dep := range deps {
-			if depStr, ok := dep.(string); ok {
-				bead.Dependencies = append(bead.Dependencies, types.BeadID(depStr))
+			switch d := dep.(type) {
+			case string:
+				// Legacy/simple shape, still accepted.
+				if d != "" {
+					bead.Dependencies = append(bead.Dependencies, types.BeadID(d))
+				}
+			case map[string]interface{}:
+				// `depends_on_id` is issues.jsonl; `id` is what `br show --json`
+				// emits for the same relationship. Take whichever is present so
+				// one parser covers both files and command output.
+				for _, key := range []string{"depends_on_id", "id"} {
+					if s, ok := d[key].(string); ok && s != "" {
+						bead.Dependencies = append(bead.Dependencies, types.BeadID(s))
+						break
+					}
+				}
 			}
 		}
 	}
