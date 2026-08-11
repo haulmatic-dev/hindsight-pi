@@ -88,19 +88,24 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	o.projects = projectScanner.Projects()
 	log.Printf("📁 Discovered %d projects from config", len(o.projects))
 
-	// Discover multi-user projects
-	multiUserDiscovery := NewMultiUserDiscovery()
-	if err := multiUserDiscovery.Discover(); err != nil {
-		log.Printf("[MultiUser] Discovery error: %v", err)
-	} else {
-		userProjects := multiUserDiscovery.Projects()
-		if len(userProjects) > 0 {
-			o.projects = append(o.projects, userProjects...)
-			log.Printf("👥 Discovered %d user projects from %d users", len(userProjects), len(multiUserDiscovery.Users()))
+	// Discover multi-user projects (gated: projects.multi_user_discovery,
+	// default true). Disabled narrows execution to projects.list only.
+	if o.config.MultiUserDiscovery {
+		multiUserDiscovery := NewMultiUserDiscovery()
+		if err := multiUserDiscovery.Discover(); err != nil {
+			log.Printf("[MultiUser] Discovery error: %v", err)
+		} else {
+			userProjects := multiUserDiscovery.Projects()
+			if len(userProjects) > 0 {
+				o.projects = append(o.projects, userProjects...)
+				log.Printf("👥 Discovered %d user projects from %d users", len(userProjects), len(multiUserDiscovery.Users()))
+			}
+			// Store user contexts on overseer and worker spawner for per-user attribution
+			o.userContexts = multiUserDiscovery.Users()
+			o.workerSpawner.SetUserContexts(o.userContexts)
 		}
-		// Store user contexts on overseer and worker spawner for per-user attribution
-		o.userContexts = multiUserDiscovery.Users()
-		o.workerSpawner.SetUserContexts(o.userContexts)
+	} else {
+		log.Printf("👥 Multi-user discovery disabled (projects.multi_user_discovery: false) — projects.list only")
 	}
 
 	// Initialize bead file reader and analyzer

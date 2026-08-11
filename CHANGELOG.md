@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- **`projects.multi_user_discovery` config gate.** The multi-user project scan (`~/projects` across all users) previously ran unconditionally at daemon startup. Set `multi_user_discovery: false` to restrict execution to `projects.list` only. Default stays `true` so existing deployments are unaffected. Operators can now focus the fleet on a single user's project without code changes.
+
 ### Fixed
 - **Overseer worker timeout was park-blind and killed healthy workers mid-turn.** `WorkerLifecycle.Wait` used a hardcoded 30m wall clock that counted time the worker spent **parked** waiting out provider congestion. Live incident: `hydra-code-9p7` spent ~20m parked, woke at 07:43:58Z, was doing real work (tool calls at 07:58/08:00) when `[Overseer] Worker hydra-code-9p7 timed out, killing process` fired at 30m0.004s. The worker's own `maxTotalRuntime` already excludes parked time; the daemon-side clock now does too, using a ticker loop that accrues only active time and reads `parked` state from the registry. Also honors `config.Overseer.WorkerTimeout` instead of ignoring it.
 - **Pan's stale judgments killed healthy young workers.** Two linked holes, one live incident (`srv-smart-engine-pes`, 2026-08-07: self-aborted 2m20s into a healthy turn → exit 1 → bead fault): (a) shepherd commands are queued per *bead* but judged per *worker instance* — a new worker registering for a retried bead drained the `abandon-with-summary` judged against its dead predecessor; `UpsertWorker` now clears pending commands on PID change (new instance = stale judgments void). (b) Pan hung-judged workers younger than its own 5m threshold (tokens legitimately 0 mid-first-turn, heartbeat predating the worker in the registration race); `Candidates` now grants a 2×`HungAfter` young-worker grace.
