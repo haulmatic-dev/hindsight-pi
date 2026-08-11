@@ -14,6 +14,8 @@ set -uo pipefail
 HOME_BASE="${HYDRA_HOME_BASE:-/home}"
 ONBOARD="$(dirname "$0")/hydra-onboard"
 [ -x "$ONBOARD" ] || ONBOARD="hydra-onboard"
+NORMALIZE_BEADS="$(dirname "$0")/hydra-normalize-beads"
+HYDRA_CONFIG="${HYDRA_CONFIG:-/etc/hydra/hydra.yaml}"
 
 onboarded=0 skipped=0 failed=0
 for cfg in "$HOME_BASE"/*/.hydra/config.yaml; do
@@ -40,4 +42,43 @@ for cfg in "$HOME_BASE"/*/.hydra/config.yaml; do
   fi
 done
 
-echo "[sweep] done: onboarded=$onboarded skipped=$skipped failed=$failed"
+# --- The daemon's OWN project list -------------------------------------------
+# The loop above walks per-user ~/.hydra/config.yaml. The daemon runs the
+# projects in /etc/hydra/hydra.yaml, and the two drift: a project outside
+# $HOME_BASE is swept only if some user happens to list it. That is exactly how
+# /opt/outreach-workflow sat root-owned from 2026-06-03 onwards while 15-minute
+# sweeps ran past it, and how /opt/dev-tools/var/hydra/dogfood/hydra-code is
+# covered by nobody.
+#
+# Reconcile from the daemon's config too, so the authority for "which projects
+# matter" is the same file the daemon reads.
+normalized=0 unusable=0
+if [ -r "$HYDRA_CONFIG" ] && [ -x "$NORMALIZE_BEADS" ]; then
+  in_projects=0
+  while IFS= read -r line; do
+    case "$line" in
+      projects:*) in_projects=1; continue ;;
+    esac
+    [ "$in_projects" = 1 ] || continue
+    # A new top-level key (no leading space) ends the projects block.
+    case "$line" in
+      [![:space:]]*) in_projects=0; continue ;;
+    esac
+    case "$line" in
+      *path:*)
+        p="${line#*path:}"
+        p="$(printf '%s' "$p" | sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")"
+        [ -n "$p" ] || continue
+        [ -d "$p/.beads" ] || continue
+        if "$NORMALIZE_BEADS" "$p" >/dev/null 2>&1; then
+          normalized=$((normalized+1))
+        else
+          echo "[sweep] .beads UNUSABLE by the daemon after repair: $p" >&2
+          unusable=$((unusable+1))
+        fi
+        ;;
+    esac
+  done < "$HYDRA_CONFIG"
+fi
+
+echo "[sweep] done: onboarded=$onboarded skipped=$skipped failed=$failed beads_normalized=$normalized beads_unusable=$unusable"

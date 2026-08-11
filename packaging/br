@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# br — transparent shim around the real `br` that keeps a project's .beads
+# shareable between its human owner, that owner's pi session, and the hydra
+# daemon.
+#
+# WHY THIS EXISTS
+#
+# `br` writes .beads/issues.jsonl with mode 0600 (deliberately: bead text is
+# project content and must not be world-readable). 0600 makes access depend on
+# *whoever ran br last*. One `sudo br` in a project therefore locks the daemon
+# out of it permanently, and nothing notices:
+#
+#   /home/ajantha/projects/srv-smart-engine/.beads/issues.jsonl  root:hydra 600
+#
+# Measured 2026-08-09: two projects had been invisible to the daemon for a month
+# and three days. One accumulated 16,609 failed `br update` calls, 20,293
+# duplicate scheduler decisions and 1,096 pointless worker spawns while closing
+# zero beads. `br list --json` kept working (it reads SQLite), so the projects
+# looked alive.
+#
+# Group ACLs granting the daemon access were present the entire time and had no
+# effect: `chmod 0600` zeroes the ACL mask, which cancels every named entry
+# (`user:hydra:rwx  #effective:---`). So ACLs cannot be the mechanism, and
+# ownership must not be load-bearing — group membership is.
+#
+# beads_rust is third-party, so the mode is fixed here instead of upstream: run
+# the real br, then hand the group its bits back. The repair lands inside the
+# same invocation, so there is no window in which the daemon is locked out.
+#
+# CONTRACT: this must be indistinguishable from the real br.
+#   - every argument forwarded verbatim, stdin/stdout/stderr untouched
+#   - the real br's exit status is this script's exit status, always
+#   - normalisation is best-effort and NEVER changes the exit status or prints
+#     to stdout; failures go to stderr only when BR_SHIM_DEBUG=1
+#
+# Env:
+#   BR_REAL        absolute path to the real br (default: first PATH br that is
+#                  not this script)
+#   BR_BEADS_GROUP group that must own .beads contents (default: beads)
+#   BR_SHIM_DEBUG  1 = report what normalisation did/failed to do
+#   BR_SHIM_OFF    1 = pure passthrough, no normalisation
+
+set -uo pipefail
+
+BEADS_GROUP="${BR_BEADS_GROUP:-beads}"
+
+debug() { [ "${BR_SHIM_DEBUG:-0}" = "1" ] && printf 'br-shim: %s\n' "$*" >&2; return 0; }
+
+# --- locate the real br -------------------------------------------------------
+# Resolve this script's identity so PATH scanning cannot pick itself and fork
+# bomb. `readlink -f` is coreutils-only but this ships on Linux; fall back to the
+# raw path elsewhere.
+self="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+
+find_real_br() {
+	if [ -n "${BR_REAL:-}" ]; then
+		printf '%s' "$BR_REAL"
+		return 0
+	fi
+	local IFS=: dir cand
+	for dir in $PATH; do
+		[ -n "$dir" ] || dir=.
+		cand="$dir/br"
+		[ -x "$cand" ] && [ ! -d "$cand" ] || continue
+		# Skip ourselves, however we were invoked.
+		[ "$(readlink -f "$cand" 2>/dev/null || printf '%s' "$cand")" = "$self" ] && continue
+		printf '%s' "$cand"
+		return 0
+	done
+	return 1
+}
+
+REAL_BR="$(find_real_br || true)"
+if [ -z "$REAL_BR" ]; then
+	echo "br-shim: cannot find the real br on PATH (set BR_REAL)" >&2
+	exit 127
+fi
+
+# --- decide whether this invocation can change .beads -------------------------
+# Read-only subcommands are the overwhelming majority (the daemon polls `ready`
+# and `list` on every tick), and normalising after them would be pure syscall
+# overhead. Anything not known to be read-only is treated as mutating: the cost
+# of a needless chmod is nothing, the cost of a missed one is a dead project.
+is_readonly_subcommand() {
+	case "${1:-}" in
+	list | show | ready | blocked | stats | health | doctor | version | --version | -V | help | --help | -h | "")
+		return 0
+		;;
+	*) return 1 ;;
+	esac
+}
+
+# First non-flag argument is the subcommand.
+subcommand=""
+for arg in "$@"; do
+	case "$arg" in
+	-*) continue ;;
+	*)
+		subcommand="$arg"
+		break
+		;;
+	esac
+done
+
+# --- run the real br ----------------------------------------------------------
+# No `exec`: we must survive to normalise. stdio is inherited, so streaming and
+# interactivity behave exactly as before.
+"$REAL_BR" "$@"
+status=$?
+
+if [ "${BR_SHIM_OFF:-0}" = "1" ] || is_readonly_subcommand "$subcommand"; then
+	exit $status
+fi
+
+# --- normalise .beads ---------------------------------------------------------
+# Find the .beads directory the same way br does: nearest one at or above cwd.
+find_beads_dir() {
+	local dir="$PWD"
+	while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+		[ -d "$dir/.beads" ] && {
+			printf '%s' "$dir/.beads"
+			return 0
+		}
+		dir="$(dirname "$dir")"
+	done
+	[ -d "/.beads" ] && {
+		printf '%s'  "/.beads"
+		return 0
+	}
+	return 1
+}
+
+beads_dir="$(find_beads_dir || true)"
+if [ -z "$beads_dir" ]; then
+	debug "no .beads at or above $PWD — nothing to normalise"
+	exit $status
+fi
+
+# Everything below is best-effort. A failure here must not turn a successful br
+# into a failure, so every command is guarded and the exit status is untouched.
+#
+# setgid on the directory makes future files inherit the group even when created
+# by a process whose primary group is something else — which is the case for
+# every human here (their primary group is their own username).
+normalise() {
+	local target="$1"
+
+	chgrp -R "$BEADS_GROUP" "$target" 2>/dev/null ||
+		debug "chgrp $BEADS_GROUP failed on $target (not a member, or not owner)"
+
+	# Group gets what the owner already has, minus execute on plain files.
+	# Never touches the world bits: keeping bead content off world-readable is
+	# the original reason br sets a restrictive mode at all.
+	chmod -R g+rwX,o-rwx "$target" 2>/dev/null ||
+		debug "chmod g+rwX,o-rwx failed on $target"
+
+	chmod g+s "$target" 2>/dev/null ||
+		debug "chmod g+s failed on $target"
+}
+
+normalise "$beads_dir"
+
+if [ "${BR_SHIM_DEBUG:-0}" = "1" ]; then
+	debug "normalised $beads_dir (group=$BEADS_GROUP) after '$subcommand'"
+	ls -la "$beads_dir" >&2 2>/dev/null || true
+fi
+
+exit $status

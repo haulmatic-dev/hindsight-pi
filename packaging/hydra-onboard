@@ -15,6 +15,7 @@
 set -euo pipefail
 
 HYDRA_USER="${HYDRA_DAEMON_USER:-hydra}"
+NORMALIZE_BEADS="$(dirname "$0")/hydra-normalize-beads"
 
 usage() { echo "usage: hydra-onboard <username>" >&2; exit 2; }
 
@@ -75,6 +76,17 @@ grant_project() {
   fi
   setfacl -R  -m "u:${HYDRA_USER}:rwX" "$path"
   setfacl -dR -m "u:${HYDRA_USER}:rwX" "$path"
+
+  # ACLs alone are not enough for .beads. `br` writes issues.jsonl mode 0600,
+  # and chmod 0600 zeroes the ACL mask — which cancels the entry we just
+  # granted (`user:hydra:rwx  #effective:---`). Two projects were invisible to
+  # the daemon for a month and three days while these ACLs were being re-applied
+  # every 15 minutes with no effect. Group ownership survives chmod; ACLs do not.
+  if [ -x "$NORMALIZE_BEADS" ]; then
+    "$NORMALIZE_BEADS" "$path" >/dev/null 2>&1 ||
+      echo "hydra-onboard: $USER_NAME — .beads normalisation reported a problem for $path" >&2
+  fi
+
   if sudo -u "$HYDRA_USER" test -w "$path"; then
     echo "hydra-onboard: $USER_NAME OK — $HYDRA_USER can write $path"
   else
