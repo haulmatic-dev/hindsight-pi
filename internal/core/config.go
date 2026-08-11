@@ -14,6 +14,10 @@ import (
 type Config struct {
 	Overseer        OverseerConfig        `yaml:"overseer"`
 	Projects        []ProjectConfig       `yaml:"projects"`
+	// MultiUserDiscovery enables the multi-user project scan
+	// (projects.multi_user_discovery, default true). Not decoded directly —
+	// it lives inside the projects object and is resolved during parsing.
+	MultiUserDiscovery bool `yaml:"-"`
 	MCP             MCPConfig             `yaml:"mcp"`
 	API             APIConfig             `yaml:"api"`
 	Intelligence    IntelligenceConfig    `yaml:"intelligence"`
@@ -293,8 +297,9 @@ type rawConfig struct {
 
 // projectsListConfig handles the case where projects is an object with 'list' field
 type projectsListConfig struct {
-	AutoDiscover bool            `yaml:"auto_discover"`
-	List         []ProjectConfig `yaml:"list"`
+	AutoDiscover       bool            `yaml:"auto_discover"`
+	MultiUserDiscovery *bool           `yaml:"multi_user_discovery"`
+	List               []ProjectConfig `yaml:"list"`
 }
 
 // IntelligenceConfig contains configuration for intelligence services
@@ -555,6 +560,7 @@ type APIConfig struct {
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{
+		MultiUserDiscovery: true,
 		Overseer: OverseerConfig{
 			BeadDiscoveryInterval: 5 * time.Second,
 			MaxWorkers:            6,
@@ -810,6 +816,9 @@ func LoadConfig(path string) (*Config, error) {
 			if err := raw.Projects.Decode(&projectsObj); err == nil && len(projectsObj.List) > 0 {
 				// It's the object format with list
 				config.Projects = projectsObj.List
+				if projectsObj.MultiUserDiscovery != nil {
+					config.MultiUserDiscovery = *projectsObj.MultiUserDiscovery
+				}
 			} else {
 				// Try parsing as direct array anyway
 				if err := raw.Projects.Decode(&config.Projects); err != nil {
@@ -870,6 +879,9 @@ func LoadConfigUncached(path string) (*Config, error) {
 			var projectsObj projectsListConfig
 			if err := raw.Projects.Decode(&projectsObj); err == nil && len(projectsObj.List) > 0 {
 				config.Projects = projectsObj.List
+				if projectsObj.MultiUserDiscovery != nil {
+					config.MultiUserDiscovery = *projectsObj.MultiUserDiscovery
+				}
 			} else {
 				if err := raw.Projects.Decode(&config.Projects); err != nil {
 					return nil, fmt.Errorf("failed to parse projects: %w", err)
