@@ -216,6 +216,7 @@ type ActivityMonitor struct {
 	lastActivity time.Time
 	timeout      time.Duration
 	mu           sync.RWMutex
+	sessionDir   string // optional: pi session dir; file mtime = secondary liveness
 }
 
 // NewActivityMonitor creates a new activity monitor
@@ -226,6 +227,16 @@ func NewActivityMonitor(timeout time.Duration) *ActivityMonitor {
 	}
 }
 
+// SetSessionDir registers pi's session directory as a secondary liveness
+// source. Pi persists every agent event to its session file regardless of
+// RPC stdout health; a fresh mtime proves the turn is alive even when the
+// stream stalls (observed: kill 75s after the last session-recorded event).
+func (am *ActivityMonitor) SetSessionDir(dir string) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	am.sessionDir = dir
+}
+
 // RecordActivity records that activity occurred
 func (am *ActivityMonitor) RecordActivity() {
 	am.mu.Lock()
@@ -233,11 +244,44 @@ func (am *ActivityMonitor) RecordActivity() {
 	am.lastActivity = time.Now()
 }
 
-// IsTimedOut checks if timeout has elapsed since last activity
+// IsTimedOut checks if timeout has elapsed since last activity. When a
+// session dir is registered, a session file written after lastActivity
+// counts as activity (RPC-stall fallback) and refreshes the clock.
 func (am *ActivityMonitor) IsTimedOut() bool {
 	am.mu.RLock()
-	defer am.mu.RUnlock()
-	return time.Since(am.lastActivity) > am.timeout
+	last := am.lastActivity
+	dir := am.sessionDir
+	am.mu.RUnlock()
+	if time.Since(last) <= am.timeout {
+		return false
+	}
+	if dir != "" {
+		if mtime := latestFileMtime(dir); mtime.After(last) {
+			am.RecordActivity()
+			return false
+		}
+	}
+	return true
+}
+
+// latestFileMtime returns the newest mtime among files directly inside dir.
+// Best-effort: any error yields the zero time (no liveness claim).
+func latestFileMtime(dir string) time.Time {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return time.Time{}
+	}
+	var latest time.Time
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+	}
+	return latest
 }
 
 // TimeSinceActivity returns time since last activity
@@ -1356,6 +1400,9 @@ func executeWithPi(
 	cmd, piSessionID, piSessionDir := buildPiCommand(bead, piConfig, projectPath, hindsightContext)
 	if piSessionID != "" && activeReporter != nil {
 		activeReporter.SetSessionID(piSessionID)
+	}
+	if piSessionDir != "" {
+		activityMonitor.SetSessionDir(piSessionDir)
 	}
 
 	log.Printf("🔧 Executing Pi: %s %s", cmd.Path, strings.Join(cmd.Args[1:], " "))
