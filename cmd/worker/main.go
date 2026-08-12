@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bufio"
+
 	"bytes"
 	"context"
 	"encoding/json"
@@ -1438,7 +1438,7 @@ func executeWithPi(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		scanner := bufio.NewScanner(stdoutPipe)
+		scanner := newPiScanner(stdoutPipe)
 		for scanner.Scan() {
 			line := scanner.Text()
 			stdoutBuf.WriteString(line + "\n")
@@ -1494,13 +1494,16 @@ func executeWithPi(
 				streamLog(mcpClient, "info", fmt.Sprintf("[pi-stdout] %s", line))
 			}
 		}
+		if err := scanner.Err(); err != nil {
+			log.Printf("[Worker] pi stdout scanner stopped early: %v (activity monitor blind from here — a healthy pi may be watchdog-killed)", err)
+		}
 	}()
 
 	// Monitor stderr
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		scanner := bufio.NewScanner(stderrPipe)
+		scanner := newPiScanner(stderrPipe)
 		for scanner.Scan() {
 			line := scanner.Text()
 			stderrBuf.WriteString(line + "\n")
@@ -1509,6 +1512,9 @@ func executeWithPi(
 			if mcpClient != nil {
 				streamLog(mcpClient, "warn", fmt.Sprintf("[pi-stderr] %s", line))
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			log.Printf("[Worker] pi stderr scanner stopped early: %v", err)
 		}
 	}()
 

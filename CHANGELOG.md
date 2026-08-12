@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Fixed
+- Worker no longer watchdog-kills healthy pi mid-turn: pi RPC event lines (tool results carrying file reads/jest output, 71KB observed) exceeded bufio's 64KB scanner default, silently killing the stdout scanner and freezing the activity monitor. New `newPiScanner` (8MiB bound) used for both pi pipes, plus fail-loud post-loop scanner error logs. Root cause of chronic zero completions on tool-heavy beads.
+
 ### Added
 - **`projects.multi_user_discovery` config gate.** The multi-user project scan (`~/projects` across all users) previously ran unconditionally at daemon startup. Set `multi_user_discovery: false` to restrict execution to `projects.list` only. Default stays `true` so existing deployments are unaffected. Operators can now focus the fleet on a single user's project without code changes.
 
