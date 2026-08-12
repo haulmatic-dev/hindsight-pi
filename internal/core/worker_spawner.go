@@ -202,6 +202,12 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 		if wt, wtErr := s.worktreeManager.EnsureWorktree(projectPath, s.chainKeyFn(bead)); wtErr != nil {
 			log.Printf("[Worktree] setup failed for %s (using shared checkout): %v", bead.ID, wtErr)
 		} else {
+			// Fail-early dependency gate (bead hydra-code-jwrh): never spawn a
+			// worker into an environment it cannot succeed in. A preflight
+			// failure aborts the spawn; the bead stays open for retry.
+			if pfErr := s.worktreeManager.Preflight(wt); pfErr != nil {
+				return nil, fmt.Errorf("preflight failed for %s: %w", bead.ID, pfErr)
+			}
 			runDir = wt
 		}
 	}
