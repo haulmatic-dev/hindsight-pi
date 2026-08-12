@@ -563,7 +563,7 @@ func DefaultConfig() *Config {
 		MultiUserDiscovery: true,
 		Overseer: OverseerConfig{
 			BeadDiscoveryInterval: 5 * time.Second,
-			MaxWorkers:            6,
+			MaxWorkers:            2,
 			DefaultRetries:        3,
 			WorkerTimeout:         30 * time.Minute,
 			ChainDetection: ChainDetectionConfig{

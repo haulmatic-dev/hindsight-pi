@@ -155,6 +155,18 @@ Before marking any task complete:
 
 When running Hydra end-to-end on a real project, the following configuration MUST be correct. Getting any of these wrong causes silent failures (0 skills loaded, stub workers, malformed beads).
 
+### 0. Operating knobs (live tuning)
+
+| Knob | Where | Proven value | Why |
+|---|---|---|---|
+| `overseer.max_workers` | yaml | 2 | spawn ceiling; AIMD scales within it; restart to apply |
+| `overseer.worker_timeout` | yaml | 45m | active-time cap (parked excluded); 15m = zero completions |
+| `HYDRA_WORKER_ACTIVITY_TIMEOUT` | systemd drop-in | 10m | watchdog horizon; provider queue waits >4m killed turns at the default |
+| `output.push` | yaml | true | pushes integration branch to origin; off = finished work invisible |
+
+Full table with semantics: `hydra-operator` skill §6 ("Operating knobs").
+
+
 ### 1. Pi Config Directory (CRITICAL)
 
 `hydra.yaml` MUST point `pi.config_dir` to the **centralized Pi config** (not a temp directory):

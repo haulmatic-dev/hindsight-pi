@@ -7,6 +7,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Changed
+- Default `overseer.max_workers` is now 2 (code default was 6, example was 5) — matches the operator-tuned production value; the AIMD governor scales within the ceiling under provider congestion.
 ### Added
 - Worktree preflight gate (fail-early): before spawning, the daemon verifies a Node worktree has resolvable dependencies — node_modules present, no broken dependency symlinks (the `@haulmatic/common → ../../../lib-nestjs` class), lockfile-keyed success sentinel; missing/broken deps trigger a bounded deterministic install (npm ci/pnpm/yarn, 10m cap). An unrecoverable environment aborts the spawn (bead stays open) instead of burning a worker's lifetime on npm install.
 
