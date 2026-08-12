@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Worktree preflight gate (fail-early): before spawning, the daemon verifies a Node worktree has resolvable dependencies — node_modules present, no broken dependency symlinks (the `@haulmatic/common → ../../../lib-nestjs` class), lockfile-keyed success sentinel; missing/broken deps trigger a bounded deterministic install (npm ci/pnpm/yarn, 10m cap). An unrecoverable environment aborts the spawn (bead stays open) instead of burning a worker's lifetime on npm install.
+
 ### Fixed
 - Activity watchdog no longer kills healthy turns when pi's RPC stdout stalls: pi session-file mtime is now a secondary liveness signal (`ActivityMonitor.SetSessionDir`) — a session write refreshes the activity clock. Closes the RPC-stall blindness found in the 3a4 chain walk (kill 75s after the last session-recorded event).
 
