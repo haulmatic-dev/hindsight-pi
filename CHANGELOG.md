@@ -8,6 +8,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- Activity watchdog no longer kills healthy turns when pi's RPC stdout stalls: pi session-file mtime is now a secondary liveness signal (`ActivityMonitor.SetSessionDir`) — a session write refreshes the activity clock. Closes the RPC-stall blindness found in the 3a4 chain walk (kill 75s after the last session-recorded event).
+
+### Fixed
 - Worker no longer watchdog-kills healthy pi mid-turn: pi RPC event lines (tool results carrying file reads/jest output, 71KB observed) exceeded bufio's 64KB scanner default, silently killing the stdout scanner and freezing the activity monitor. New `newPiScanner` (8MiB bound) used for both pi pipes, plus fail-loud post-loop scanner error logs. Root cause of chronic zero completions on tool-heavy beads.
 
 ### Added
