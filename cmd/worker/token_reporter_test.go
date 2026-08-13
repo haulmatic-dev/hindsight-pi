@@ -37,6 +37,14 @@ func TestReportTurnTokens_ForwardsSessionTotal(t *testing.T) {
 // workers exit <30s after the last turn, so without the flush the parsed
 // token total (SetTokens) never reaches the registry — observed live on
 // hydra-code-zuo: worker logged total=616789, registry showed 0.
+//
+// The final beat must carry a REPORTABLE state. The daemon's report endpoint
+// only accepts working/parked/hung and answers 400 for anything else — so
+// setting state=completed before the flush makes the daemon reject the very
+// beat that carries the token total (observed live: every exit-0 row showed
+// tokens_so_far=0 while exit-1 rows recorded tokens, because their final
+// beat still said "working"). Terminal state is MarkCompleted's job via the
+// completion marker, not the liveness report's.
 func TestReporterStop_FlushesFinalState(t *testing.T) {
 	rep := newStateReporter(registry.NewClient("http://127.0.0.1:1"), "bead-flush", "proj")
 	rep.rep.TokensSoFar = 616789
@@ -50,8 +58,8 @@ func TestReporterStop_FlushesFinalState(t *testing.T) {
 		t.Fatal("Stop hung (fail-open violated)")
 	}
 
-	if rep.rep.State != string(registry.StateCompleted) {
-		t.Errorf("State = %q, want %q after Stop(0)", rep.rep.State, registry.StateCompleted)
+	if rep.rep.State != string(registry.StateWorking) {
+		t.Errorf("State = %q, want %q: the final beat must pass daemon report validation (400 on 'completed' drops the token flush)", rep.rep.State, registry.StateWorking)
 	}
 	if rep.rep.TokensSoFar != 616789 {
 		t.Errorf("TokensSoFar = %d, want 616789 preserved for the final flush", rep.rep.TokensSoFar)

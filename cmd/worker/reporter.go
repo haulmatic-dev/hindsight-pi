@@ -184,10 +184,14 @@ func (r *stateReporter) Stop(exitCode int) {
 		// typically exit <30s after the last turn — without this, the parsed
 		// token total (SetTokens) never reaches the registry. Observed live
 		// on hydra-code-zuo: worker logged total=616789, registry showed 0.
-		// Fail-open per reporter contract: beat errors only log.
-		if exitCode == 0 {
-			r.SetState(registry.StateCompleted)
-		}
+		//
+		// The beat must NOT claim state=completed: the daemon's report
+		// endpoint accepts only working/parked/hung and answers 400 for
+		// anything else, silently dropping the flush (observed live: every
+		// exit-0 row had tokens_so_far=0; exit-1 rows recorded tokens
+		// because their final beat still said "working"). Terminal state is
+		// the completion marker's job (MarkCompleted), not the liveness
+		// report's. Fail-open per reporter contract: beat errors only log.
 		r.beat()
 		if err := r.client.Complete(r.rep.BeadID, exitCode); err != nil {
 			log.Printf("[Registry] completion report failed: %v", err)

@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Fixed
+- Worker token accounting now lands for successful completions: `stateReporter.Stop` no longer claims `state=completed` in its final liveness beat — the daemon report endpoint only accepts working/parked/hung and answered 400, silently dropping the token flush. Every exit-0 row recorded `tokens_so_far=0` while failures recorded correctly; terminal state is now left to the completion marker (`MarkCompleted`).
+
 ### Changed
 - Default `overseer.max_workers` is now 2 (code default was 6, example was 5) — matches the operator-tuned production value; the AIMD governor scales within the ceiling under provider congestion.
 ### Added
