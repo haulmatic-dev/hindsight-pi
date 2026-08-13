@@ -41,6 +41,24 @@ func (v *ValidationService) CloseBead(projectPath, repoName string, beadID types
 	return v.beadsClient.CloseBead(projectPath, repoName, beadID, reason)
 }
 
+// validationFixDecision decides whether a validation gap warrants a fix
+// bead, and at what priority. Warning gaps (e.g. "Missing Acceptance
+// Criteria" — fires whenever the root bead lacks AC text) are advisory:
+// logged, never a worker-burning fix bead. Spawned fix beads are floored at
+// P3 so validation meta-work never queue-jumps fresh PRD beads — on
+// srv-smart-engine these fix beads inherited P0-P2 parents and ~25% of a
+// day's commits were validation-round churn while the open board grew.
+func validationFixDecision(severity validation.ErrorSeverity, parentPriority int) (bool, int) {
+	if severity == validation.SeverityWarning {
+		return false, 0
+	}
+	p := parentPriority
+	if p < 3 {
+		p = 3
+	}
+	return true, p
+}
+
 // RunTDDValidation validates a REFACTOR bead's TDD chain and creates fix beads on failure.
 func (v *ValidationService) RunTDDValidation(refactorBead types.Bead, projectPath string) error {
 	if !v.config.Validation.Enabled || !v.config.Validation.TDDValidationEnabled {
@@ -86,6 +104,11 @@ func (v *ValidationService) RunTDDValidation(refactorBead types.Bead, projectPat
 	log.Printf("[TDDValidation] FAILED for %s (round %d/%d), creating fix beads for %d gaps", beadID, retryCount+1, maxRounds, len(result.Gaps))
 
 	for _, gap := range result.Gaps {
+		spawn, fixPriority := validationFixDecision(gap.Severity, refactorBead.Priority)
+		if !spawn {
+			log.Printf("[TDDValidation] advisory gap (warning, no fix bead): %s", gap.Description)
+			continue
+		}
 		fixType := "fix"
 		if gap.Type == "red" {
 			fixType = "test"
@@ -98,7 +121,7 @@ func (v *ValidationService) RunTDDValidation(refactorBead types.Bead, projectPat
 			Title:        fixTitle,
 			Description:  fixDesc,
 			Type:         fixType,
-			Priority:     refactorBead.Priority,
+			Priority:     fixPriority,
 			Dependencies: []types.BeadID{refactorBead.ID},
 			Labels:       []string{"auto-fix", fmt.Sprintf("tdd-validate-round-%d", retryCount+1)},
 		}
@@ -200,6 +223,11 @@ func (v *ValidationService) RunPRDValidation(chainInfo *ChainInfo, projectPath s
 
 	fixBeadIDs := make([]types.BeadID, 0, len(result.Gaps))
 	for _, gap := range result.Gaps {
+		spawn, fixPriority := validationFixDecision(gap.Severity, rootBead.Priority)
+		if !spawn {
+			log.Printf("[PRDValidation] advisory gap (warning, no fix bead): %s", gap.Description)
+			continue
+		}
 		fixTitle := fmt.Sprintf("Fix: %s (validation round %d)", gap.Title, retryCount+1)
 		fixDesc := fmt.Sprintf("PRD validation gap: %s\n\nRoot bead: %s", gap.Description, rootBeadID)
 
@@ -207,7 +235,7 @@ func (v *ValidationService) RunPRDValidation(chainInfo *ChainInfo, projectPath s
 			Title:        fixTitle,
 			Description:  fixDesc,
 			Type:         "fix",
-			Priority:     rootBead.Priority,
+			Priority:     fixPriority,
 			Dependencies: []types.BeadID{},
 			Labels:       []string{"auto-fix", fmt.Sprintf("prd-validate-round-%d", retryCount+1)},
 		}
@@ -225,11 +253,12 @@ func (v *ValidationService) RunPRDValidation(chainInfo *ChainInfo, projectPath s
 		validateTitle := fmt.Sprintf("Re-validate: %s (round %d)", rootBead.Title, retryCount+1)
 		validateDesc := fmt.Sprintf("Re-validate chain against PRD after fixes\n\nRoot bead: %s", rootBeadID)
 
+		_, validatePriority := validationFixDecision(validation.SeverityError, rootBead.Priority)
 		req := types.CreateBeadRequest{
 			Title:        validateTitle,
 			Description:  validateDesc,
 			Type:         "validation",
-			Priority:     rootBead.Priority,
+			Priority:     validatePriority,
 			Dependencies: fixBeadIDs,
 			Labels:       []string{"auto-validate", fmt.Sprintf("prd-validate-round-%d", retryCount+1)},
 		}

@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- Validation fix beads no longer churn the board: Warning-severity gaps (e.g. "Missing Acceptance Criteria" — fires on any root bead without AC text) are now advisory log lines instead of worker-spawning fix beads, and all spawned fix/re-validation beads are priority-floored at P3 so validation meta-work never queue-jumps fresh PRD beads. On srv-smart-engine these beads inherited P0-P2 parents; ~25% of a day's commits were validation-round churn while the open board grew instead of draining.
 - Charon now reaps ghost registry rows at runtime: workers that die without posting a completion marker (SIGKILL, OOM, daemon kill) left `working`/`parked` rows with frozen heartbeats that only the 24h startup sweep cleared — 19 accumulated in one day, poisoning fleet metrics. New `ReapGhosts` store method runs in Charon's scan cycle (10-minute throttle, 1h heartbeat cutoff) and deliberately spares `completed` rows so completion history survives for metrics. Placed before the no-tracked-workers early return — ghosts accumulate exactly when the fleet is idle.
 - Worker token accounting now lands for successful completions: `stateReporter.Stop` no longer claims `state=completed` in its final liveness beat — the daemon report endpoint only accepts working/parked/hung and answered 400, silently dropping the token flush. Every exit-0 row recorded `tokens_so_far=0` while failures recorded correctly; terminal state is now left to the completion marker (`MarkCompleted`).
 
