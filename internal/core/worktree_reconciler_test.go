@@ -28,7 +28,7 @@ func TestReconcileOrphanedWorktrees_IntegratesBothBranches(t *testing.T) {
 		}
 	}
 
-	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil)
+	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
 	if integrated != 2 {
 		t.Fatalf("integrated = %d, want 2", integrated)
 	}
@@ -66,7 +66,7 @@ func TestReconcileOrphanedWorktrees_SkipsActiveKey(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, map[string]bool{key: true})
+	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, map[string]bool{key: true}, func(string) bool { return true })
 	if integrated != 0 {
 		t.Fatalf("integrated = %d, want 0", integrated)
 	}
@@ -106,15 +106,20 @@ func TestReconcileOrphanedWorktrees_CountsConflict(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil)
+	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
 	if integrated != 0 {
 		t.Fatalf("integrated = %d, want 0", integrated)
 	}
 	if conflicts != 1 {
 		t.Fatalf("conflicts = %d, want 1", conflicts)
 	}
-	if !branchExists(projectPath, m.branchName(key)) {
-		t.Fatal("conflicting branch should remain for inspection")
+	// Terminal + conflict: branch is quarantined (hydra/quarantine/<key>),
+	// not left to retry forever. Work preserved, retry loop ends.
+	if branchExists(projectPath, m.branchName(key)) {
+		t.Fatal("conflicting terminal branch should be consumed by quarantine")
+	}
+	if !branchExists(projectPath, "hydra/quarantine/"+key) {
+		t.Fatal("conflicting work should be preserved on the quarantine branch")
 	}
 
 	got, err := os.ReadFile(filepath.Join(projectPath, "shared.txt"))
@@ -129,7 +134,7 @@ func TestReconcileOrphanedWorktrees_CountsConflict(t *testing.T) {
 func TestReconcileOrphanedWorktrees_NonGitReturnsZero(t *testing.T) {
 	projectPath := t.TempDir()
 	m := NewWorktreeManager()
-	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil)
+	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
 	if integrated != 0 || conflicts != 0 {
 		t.Fatalf("non-git project should return (0, 0), got (%d, %d)", integrated, conflicts)
 	}

@@ -49,7 +49,7 @@ func TestBranchAheadOfRemote(t *testing.T) {
 }
 
 func TestPublishRepo_NilManager(t *testing.T) {
-	if ok, reason := PublishRepo(nil, "/x", "tok", nil); ok || reason != "no worktree manager" {
+	if ok, reason := PublishRepo(nil, "/x", "tok", nil, nil); ok || reason != "no worktree manager" {
 		t.Errorf("nil manager: got (%v,%q)", ok, reason)
 	}
 }
@@ -67,7 +67,7 @@ func TestPublishRepo_PushesAheadBranch(t *testing.T) {
 	gitRun(t, repo, "config", "user.name", "T")
 	gitRun(t, repo, "commit", "--allow-empty", "-m", "c1")
 
-	pushed, reason := PublishRepo(NewWorktreeManager(), repo, "", nil)
+	pushed, reason := PublishRepo(NewWorktreeManager(), repo, "", nil, func(string) bool { return true })
 	if !pushed {
 		t.Fatalf("expected push, got (false, %q)", reason)
 	}

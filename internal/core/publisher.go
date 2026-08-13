@@ -39,12 +39,12 @@ func branchAheadOfRemote(repoPath, branch string) bool {
 // Fail-open and SILENT: never errors/panics; returns (pushed, reason). A
 // missing worktree manager or empty branch is a no-op. The token is the
 // project owner's PAT so commits are attributed to and pushed as that user.
-func PublishRepo(m *WorktreeManager, projectPath, token string, activeKeys map[string]bool) (bool, string) {
+func PublishRepo(m *WorktreeManager, projectPath, token string, activeKeys map[string]bool, isTerminal func(key string) bool) (bool, string) {
 	if m == nil || projectPath == "" {
 		return false, "no worktree manager"
 	}
 	// 1. Land any completed worktree work on the working branch.
-	ReconcileOrphanedWorktrees(m, projectPath, activeKeys)
+	ReconcileOrphanedWorktrees(m, projectPath, activeKeys, isTerminal)
 
 	branch, err := m.WorkingBranch(projectPath)
 	if err != nil || branch == "" {

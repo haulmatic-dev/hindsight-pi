@@ -568,7 +568,20 @@ func (o *Overseer) publishProjects() {
 		if uc := o.getUserContextForProject(project.Path); uc != nil {
 			token = uc.Token
 		}
-		PublishRepo(o.worktreeManager, project.Path, token, active)
+		PublishRepo(o.worktreeManager, project.Path, token, active, o.terminalBeadChecker(project.Path))
+	}
+}
+
+// terminalBeadChecker reports whether a worktree key's bead is terminal.
+// Lookup errors fail closed (nil) — publish must never touch work it cannot
+// prove is done.
+func (o *Overseer) terminalBeadChecker(projectPath string) func(string) bool {
+	if o.beadsClient == nil {
+		return nil
+	}
+	return func(key string) bool {
+		b, err := o.beadsClient.GetBead(projectPath, "", types.BeadID(key))
+		return err == nil && b != nil && b.Status.IsTerminal()
 	}
 }
 

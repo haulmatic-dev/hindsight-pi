@@ -128,6 +128,19 @@ func (j *Charon) run() {
 	}
 }
 
+// terminalBeadChecker reports whether a worktree key's bead is terminal
+// (closed/completed/failed). Nil beads client or lookup error fails closed
+// (nil predicate) — reconcile must never touch work it cannot prove is done.
+func (j *Charon) terminalBeadChecker(projectPath string) func(string) bool {
+	if j.beadsClient == nil {
+		return nil
+	}
+	return func(key string) bool {
+		b, err := j.beadsClient.GetBead(projectPath, "", types.BeadID(key))
+		return err == nil && b != nil && b.Status.IsTerminal()
+	}
+}
+
 // performCleanup scans for and kills orphaned and stuck processes
 func (j *Charon) performCleanup() {
 	j.stats.TotalScans++
@@ -148,7 +161,7 @@ func (j *Charon) performCleanup() {
 		go func() {
 			if j.getProjects != nil {
 				for _, project := range j.getProjects() {
-					ReconcileOrphanedWorktrees(NewWorktreeManager(), project.Path, active)
+					ReconcileOrphanedWorktrees(NewWorktreeManager(), project.Path, active, j.terminalBeadChecker(project.Path))
 				}
 			}
 			CleanupStaleWorktrees(24*time.Hour, active)
