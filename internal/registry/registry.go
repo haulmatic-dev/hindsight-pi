@@ -211,6 +211,51 @@ func (s *Store) Heartbeat(beadID string, tokens int64) error {
 	return nil
 }
 
+// ReapGhosts deletes non-terminal worker rows whose heartbeat is stale
+// (worker died without posting its completion marker — SIGKILL, OOM, daemon
+// kill), plus any queued commands for those beads. Completed rows are NOT
+// touched: they are the completion history behind fleet metrics and belong
+// to the startup ReapStale sweep. Returns the number of rows removed.
+func (s *Store) ReapGhosts(cutoff time.Time) (int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("reap ghosts begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(
+		`SELECT bead_id FROM workers WHERE state != ? AND last_heartbeat < ?`,
+		StateCompleted, cutoff.Format(timeFmt))
+	if err != nil {
+		return 0, fmt.Errorf("reap ghosts select: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("reap ghosts scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("reap ghosts rows: %w", err)
+	}
+	if len(ids) == 0 {
+		return 0, tx.Commit()
+	}
+	for _, id := range ids {
+		if _, err := tx.Exec(`DELETE FROM workers WHERE bead_id=?`, id); err != nil {
+			return 0, fmt.Errorf("reap ghosts delete %s: %w", id, err)
+		}
+		if _, err := tx.Exec(`DELETE FROM commands WHERE bead_id=?`, id); err != nil {
+			return 0, fmt.Errorf("reap ghosts commands %s: %w", id, err)
+		}
+	}
+	return len(ids), tx.Commit()
+}
+
 // SetState transitions a worker's state. Park fields are set only when
 // entering StateParked.
 func (s *Store) SetState(beadID string, state WorkerState) error {

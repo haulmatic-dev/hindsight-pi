@@ -291,3 +291,56 @@ func TestReapStale_NoCandidates(t *testing.T) {
 		t.Errorf("expected 0 reaped, got %d", n)
 	}
 }
+
+// Ghost rows (non-terminal, heartbeat frozen) must be reaped by the runtime
+// sweep without touching completed rows — those are fleet-metric history and
+// belong to the startup ReapStale sweep.
+func TestReapGhosts(t *testing.T) {
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	now := time.Now()
+	mk := func(id string, state WorkerState, hbAge time.Duration) WorkerRecord {
+		return WorkerRecord{BeadID: id, PID: 1, State: state,
+			StartedAt: now.Add(-4 * time.Hour), LastHeartbeat: now.Add(-hbAge)}
+	}
+	for _, rec := range []WorkerRecord{
+		mk("g-working", StateWorking, 3*time.Hour),
+		mk("g-parked", StateParked, 3*time.Hour),
+		mk("g-hung", StateHung, 3*time.Hour),
+		mk("k-fresh", StateWorking, 30*time.Second),
+		mk("k-done", StateCompleted, 3*time.Hour),
+	} {
+		if err := st.UpsertWorker(rec); err != nil {
+			t.Fatalf("UpsertWorker %s: %v", rec.BeadID, err)
+		}
+	}
+	if err := st.EnqueueCommand("g-working", CmdSteer, "x"); err != nil {
+		t.Fatalf("EnqueueCommand: %v", err)
+	}
+
+	n, err := st.ReapGhosts(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ReapGhosts: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("reaped %d, want 3 ghosts", n)
+	}
+	for _, id := range []string{"g-working", "g-parked", "g-hung"} {
+		if _, ok, _ := st.GetWorker(id); ok {
+			t.Errorf("%s must be reaped", id)
+		}
+	}
+	for _, id := range []string{"k-fresh", "k-done"} {
+		if _, ok, _ := st.GetWorker(id); !ok {
+			t.Errorf("%s must survive", id)
+		}
+	}
+	cmds, _ := st.PendingCommands("g-working")
+	if len(cmds) != 0 {
+		t.Errorf("ghost's queued commands must be reaped too, got %d", len(cmds))
+	}
+}

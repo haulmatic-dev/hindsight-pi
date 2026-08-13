@@ -30,6 +30,7 @@ type Charon struct {
 	activeWorkersSnapshot func() map[string]int
 	onStaleActiveWorker   func(beadID string)
 	lastWorktreeGC        time.Time // throttles the stale-worktree sweep
+	lastRegistryReap      time.Time // throttles the ghost-registry-row sweep
 	registryStore         *registry.Store
 	heartbeatHungAfter    time.Duration // stale registry heartbeat → hung worker
 }
@@ -152,6 +153,24 @@ func (j *Charon) performCleanup() {
 			}
 			CleanupStaleWorktrees(24*time.Hour, active)
 		}()
+	}
+
+	// Reap ghost registry rows at most every 10 minutes: a worker that dies
+	// without posting its completion marker (SIGKILL, OOM, daemon kill)
+	// leaves a working/parked row whose heartbeat freezes, poisoning fleet
+	// metrics (observed live: 19 stale "working" rows in one day). Rows 1h+
+	// heartbeat-stale are dead — live workers beat every 30s, live parks too.
+	// Completed rows are left to the startup ReapStale sweep (metrics history).
+	// This sweep must run BEFORE the no-tracked-workers early return below:
+	// ghosts are registry rows, not PID-tracker records — an idle daemon has
+	// zero tracked workers and is exactly where ghosts accumulate.
+	if j.registryStore != nil && time.Since(j.lastRegistryReap) > 10*time.Minute {
+		j.lastRegistryReap = time.Now()
+		if n, err := j.registryStore.ReapGhosts(time.Now().UTC().Add(-time.Hour)); err != nil {
+			log.Printf("[Charon] registry ghost reap warning: %v", err)
+		} else if n > 0 {
+			log.Printf("[Charon] 🧹 Reaped %d ghost registry rows (heartbeat stale > 1h)", n)
+		}
 	}
 
 	// Get tracked workers from PID database (full records with start times)
