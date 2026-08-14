@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Documentation
+- Two planning PRDs from the srv-smart-engine campaign analysis: `docs/PRDs/typed-workflow-templates-daemon-gates-20260813.md` (bead-type workflow templates + daemon-owned deterministic gates + verification consolidation) and `docs/PRDs/memory-recall-quality-20260813.md` (recall telemetry, golden probes, bank hygiene). Planning artifacts only — no behavior change; the legacy chain stays default behind config flags.
+
 ### Fixed
 - Worktree reconcile is now terminal-gated and quarantine-bounded: it only integrates `hydra/wt-*` branches whose bead is closed/completed/failed (open, in_progress, parked-with-stale-heartbeat, and unverifiable beads are skipped — a parked worker's live worktree and an open bead's 1,356-line worktree were previously treated as orphans and merged prematurely), and a terminal bead whose merge conflicts is quarantined to `hydra/quarantine/<key>` instead of retry-failing every sweep forever (observed: `conflicts=23` every 10 minutes for weeks). Nil status predicate fails closed.
 
