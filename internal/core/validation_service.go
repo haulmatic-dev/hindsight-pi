@@ -60,6 +60,36 @@ func validationFixDecision(severity validation.ErrorSeverity, parentPriority int
 }
 
 // RunTDDValidation validates a REFACTOR bead's TDD chain and creates fix beads on failure.
+// hasOpenBeadWithPrefix reports whether an OPEN or IN_PROGRESS bead already
+// exists whose title starts with prefix. Validation fix titles embed the round
+// number ("Fix: X (validation round 2)"), so dedup must compare on the
+// round-insensitive prefix — otherwise every round spawns a fresh duplicate
+// for the same gap. On srv-smart-engine this churn factory accumulated 355
+// open machinery beads against 36 real chain beads. CLOSED duplicates do not
+// block respawn: if the gap persists past a closed fix, the retry loop (capped
+// by max_rounds) is the intended escalation.
+func hasOpenBeadWithPrefix(beads []types.Bead, prefix string) bool {
+	for _, b := range beads {
+		if (b.Status == types.StatusOpen || b.Status == types.StatusInProgress) &&
+			strings.HasPrefix(b.Title, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// listForDedup snapshots the project's beads for duplicate detection. Listing
+// failure is fail-closed for creation: skip this round's fix-bead pass (logged)
+// rather than risk recreating the churn factory on a transient br error.
+func (v *ValidationService) listForDedup(projectPath string) ([]types.Bead, bool) {
+	beads, err := v.beadsClient.ListBeads(projectPath, "")
+	if err != nil {
+		log.Printf("[Validation] dedup listing failed, skipping fix-bead creation this round: %v", err)
+		return nil, false
+	}
+	return beads, true
+}
+
 func (v *ValidationService) RunTDDValidation(refactorBead types.Bead, projectPath string) error {
 	if !v.config.Validation.Enabled || !v.config.Validation.TDDValidationEnabled {
 		return nil
@@ -103,10 +133,20 @@ func (v *ValidationService) RunTDDValidation(refactorBead types.Bead, projectPat
 
 	log.Printf("[TDDValidation] FAILED for %s (round %d/%d), creating fix beads for %d gaps", beadID, retryCount+1, maxRounds, len(result.Gaps))
 
+	existing, ok := v.listForDedup(projectPath)
+	if !ok {
+		return nil
+	}
+	fixPrefix := "Fix: " + refactorBead.Title
+
 	for _, gap := range result.Gaps {
 		spawn, fixPriority := validationFixDecision(gap.Severity, refactorBead.Priority)
 		if !spawn {
 			log.Printf("[TDDValidation] advisory gap (warning, no fix bead): %s", gap.Description)
+			continue
+		}
+		if hasOpenBeadWithPrefix(existing, fixPrefix) {
+			log.Printf("[TDDValidation] dedup: open fix bead already covers %q, skipping", refactorBead.Title)
 			continue
 		}
 		fixType := "fix"
@@ -131,6 +171,9 @@ func (v *ValidationService) RunTDDValidation(refactorBead types.Bead, projectPat
 			log.Printf("[TDDValidation] Failed to create fix bead for %s: %v", beadID, err)
 			continue
 		}
+		// Within-run dedup: multiple gaps share one fix title, so record the
+		// creation in the snapshot to avoid N identical beads in one round.
+		existing = append(existing, types.Bead{Title: fixTitle, Status: types.StatusOpen})
 		log.Printf("[TDDValidation] Created fix bead %s for gap in %s", fixBeadID, beadID)
 	}
 
@@ -222,10 +265,20 @@ func (v *ValidationService) RunPRDValidation(chainInfo *ChainInfo, projectPath s
 	log.Printf("[PRDValidation] FAILED for chain %s (round %d/%d), creating fix beads for %d gaps", rootBeadID, retryCount+1, maxRounds, len(result.Gaps))
 
 	fixBeadIDs := make([]types.BeadID, 0, len(result.Gaps))
+	existing, ok := v.listForDedup(projectPath)
+	if !ok {
+		return nil
+	}
+
 	for _, gap := range result.Gaps {
 		spawn, fixPriority := validationFixDecision(gap.Severity, rootBead.Priority)
 		if !spawn {
 			log.Printf("[PRDValidation] advisory gap (warning, no fix bead): %s", gap.Description)
+			continue
+		}
+		fixPrefix := "Fix: " + gap.Title
+		if hasOpenBeadWithPrefix(existing, fixPrefix) {
+			log.Printf("[PRDValidation] dedup: open fix bead already covers gap %q, skipping", gap.Title)
 			continue
 		}
 		fixTitle := fmt.Sprintf("Fix: %s (validation round %d)", gap.Title, retryCount+1)
@@ -246,6 +299,9 @@ func (v *ValidationService) RunPRDValidation(chainInfo *ChainInfo, projectPath s
 			continue
 		}
 		fixBeadIDs = append(fixBeadIDs, fixBeadID)
+		// Within-run dedup: record the creation so a repeated gap title in the
+		// same round does not spawn a second identical bead.
+		existing = append(existing, types.Bead{Title: fixTitle, Status: types.StatusOpen})
 		log.Printf("[PRDValidation] Created fix bead %s for gap in chain %s", fixBeadID, rootBeadID)
 	}
 

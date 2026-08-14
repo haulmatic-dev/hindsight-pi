@@ -10,6 +10,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ### Added
 - Worker extension resolver now supports git-installed Pi packages (`git/<host>/<org>/<repo>`, matched by repo segment to tolerate org drift/forks) and directory entry points (resolved to `index.ts`/`index.js` per pi convention). This unblocks the Hindsight pi extension (`hindsight` alias → `@walodayeet/hindsight-pi`) for workers — the first recall channel on the daemon path; npm installs still take precedence.
 
+### Fixed
+- Validation fix-bead churn factory: `RunPRDValidation`/`RunTDDValidation` now dedup against open/in-progress beads by round-insensitive title prefix before creating fix or re-validation beads, and dedup within a single round. Previously every validation round spawned fresh duplicates for unresolved gaps — on srv-smart-engine 355 open machinery beads accumulated against 36 real chain beads, burning ~8M tokens per churn worker. Closed fix beads do not block respawn, so the max-rounds retry escalation still works.
+
 ### Documentation
 - Two planning PRDs from the srv-smart-engine campaign analysis: `docs/PRDs/typed-workflow-templates-daemon-gates-20260813.md` (bead-type workflow templates + daemon-owned deterministic gates + verification consolidation) and `docs/PRDs/memory-recall-quality-20260813.md` (recall telemetry, golden probes, bank hygiene). Planning artifacts only — no behavior change; the legacy chain stays default behind config flags.
 
