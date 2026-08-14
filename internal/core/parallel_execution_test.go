@@ -391,13 +391,13 @@ func TestParallelExecution_PrioritySelection(t *testing.T) {
 		{
 			name: "should_process_highest_priority_first",
 			beads: []types.Bead{
-				{ID: "test-low", Title: "Low", Priority: 1},
-				{ID: "test-high", Title: "High", Priority: 10},
-				{ID: "test-med", Title: "Medium", Priority: 5},
+				{ID: "test-low", Title: "Low", Priority: 3},
+				{ID: "test-high", Title: "High", Priority: 1},
+				{ID: "test-med", Title: "Medium", Priority: 2},
 			},
 			maxWorkers:    2,
 			expectedOrder: []string{"test-high", "test-med"}, // High priority first
-			description:   "Beads with higher priority values should be processed first",
+			description:   "Beads with lower priority numbers run first (beads convention: P0=highest)",
 		},
 		{
 			name: "should_handle_equal_priorities",
@@ -419,7 +419,7 @@ func TestParallelExecution_PrioritySelection(t *testing.T) {
 				{ID: "test-2", Title: "2", Priority: 2},
 			},
 			maxWorkers:    10,
-			expectedOrder: []string{"test-5", "test-3", "test-2", "test-1"}, // All sorted by priority
+			expectedOrder: []string{"test-1", "test-2", "test-3", "test-5"}, // Beads convention: P0=highest, ascending numeric
 			description:   "All beads should be processed when slots available",
 		},
 		{
@@ -432,7 +432,7 @@ func TestParallelExecution_PrioritySelection(t *testing.T) {
 				{ID: "test-5", Title: "5", Priority: 5},
 			},
 			maxWorkers:    2,
-			expectedOrder: []string{"test-5", "test-4"}, // Top 2 priorities only
+			expectedOrder: []string{"test-1", "test-2"}, // Top 2 priorities only (P0=highest, lowest number first)
 			description:   "Only top 2 priority beads should be processed when max_workers=2",
 		},
 		{
@@ -785,13 +785,14 @@ func TestParallelExecution_AvailableSlotsCalculation(t *testing.T) {
 	}
 }
 
-// Helper function to sort beads by priority (high to low)
+// Helper function to sort beads by priority (highest first = lowest number,
+// beads convention P0=highest)
 func sortBeadsByPriority(beads []types.Bead) {
 	// Simple bubble sort for testing
 	n := len(beads)
 	for i := 0; i < n; i++ {
 		for j := 0; j < n-i-1; j++ {
-			if beads[j].Priority < beads[j+1].Priority {
+			if beads[j].Priority > beads[j+1].Priority {
 				beads[j], beads[j+1] = beads[j+1], beads[j]
 			}
 		}

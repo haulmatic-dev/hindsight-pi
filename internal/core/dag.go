@@ -972,8 +972,8 @@ func (d *DAG) TopologicalSortWithPriority() ([]string, error) {
 		}
 
 		// Sort by priority (highest first)
-		sort.Slice(ready, func(i, j int) bool {
-			return ready[i].Bead.Priority > ready[j].Bead.Priority
+		sort.SliceStable(ready, func(i, j int) bool {
+			return ready[i].Bead.Priority < ready[j].Bead.Priority
 		})
 
 		// Process highest priority

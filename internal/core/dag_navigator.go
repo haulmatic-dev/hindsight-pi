@@ -104,8 +104,8 @@ func (n *DAGNavigator) GetReadyBeads(completed map[string]bool) []types.Bead {
 		beads = append(beads, node.Bead)
 	}
 
-	sort.Slice(beads, func(i, j int) bool {
-		return beads[i].Priority > beads[j].Priority
+	sort.SliceStable(beads, func(i, j int) bool {
+		return beads[i].Priority < beads[j].Priority
 	})
 
 	return beads

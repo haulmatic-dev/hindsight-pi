@@ -133,8 +133,8 @@ func (d *BeadDiscovery) findFromBR(activeWorkers map[string]bool) ([]types.Bead,
 			filteredCounts["approvalInProgress"])
 	}
 
-	sort.Slice(readyBeads, func(i, j int) bool {
-		return readyBeads[i].Priority > readyBeads[j].Priority
+	sort.SliceStable(readyBeads, func(i, j int) bool {
+		return readyBeads[i].Priority < readyBeads[j].Priority
 	})
 
 	log.Printf("📋 Found %d ready beads from 'br ready' (after filtering)", len(readyBeads))
@@ -287,7 +287,7 @@ func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead,
 		}
 	}
 
-	sort.Slice(allReadyBeads, func(i, j int) bool {
+	sort.SliceStable(allReadyBeads, func(i, j int) bool {
 		confI := 0.0
 		confJ := 0.0
 		fmt.Sscanf(allReadyBeads[i].Metadata["bv_confidence"], "%f", &confI)
@@ -295,7 +295,7 @@ func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead,
 		if confI != confJ {
 			return confI > confJ
 		}
-		return allReadyBeads[i].Priority > allReadyBeads[j].Priority
+		return allReadyBeads[i].Priority < allReadyBeads[j].Priority
 	})
 
 	log.Printf("📋 [BV] Found %d ready beads from triage (after filtering)", len(allReadyBeads))
@@ -372,7 +372,7 @@ func (d *BeadDiscovery) findFromBVPlan(activeWorkers map[string]bool) ([]types.B
 		}
 	}
 
-	sort.Slice(allReadyBeads, func(i, j int) bool {
+	sort.SliceStable(allReadyBeads, func(i, j int) bool {
 		priorityI := 0.0
 		priorityJ := 0.0
 		fmt.Sscanf(allReadyBeads[i].Metadata["bv_plan_priority"], "%f", &priorityI)
@@ -380,7 +380,7 @@ func (d *BeadDiscovery) findFromBVPlan(activeWorkers map[string]bool) ([]types.B
 		if priorityI != priorityJ {
 			return priorityI > priorityJ
 		}
-		return allReadyBeads[i].Priority > allReadyBeads[j].Priority
+		return allReadyBeads[i].Priority < allReadyBeads[j].Priority
 	})
 
 	log.Printf("📋 [BV-Plan] Found %d ready beads from plan (after filtering)", len(allReadyBeads))

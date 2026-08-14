@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,9 +50,9 @@ func NewScheduler(overseer *Overseer) *Scheduler {
 }
 
 const (
-	congestionPauseThreshold  = 3
-	congestionPauseDuration   = 5 * time.Minute
-	congestionParkedMaxAge    = 10 * time.Minute
+	congestionPauseThreshold   = 3
+	congestionPauseDuration    = 5 * time.Minute
+	congestionParkedMaxAge     = 10 * time.Minute
 	congestionEventLogThrottle = 5 * time.Minute
 )
 
@@ -482,11 +483,20 @@ func (s *Scheduler) GetAvailableWorkerSlots() int {
 }
 
 // GetReadyNodes returns nodes that are ready for execution.
+// GetReadyNodes returns ready nodes sorted by bead priority descending.
+// DAG.GetReadyNodes iterates a map (random order); the event-driven
+// TriggerImmediateSchedule path spawns from this list directly, so without
+// the sort a P3 churn bead can take a slot ahead of ready P1 chain work
+// (observed on srv-smart-engine 2026-08-14: tftg/0mt2j/yvvc).
 func (s *Scheduler) GetReadyNodes() []*Node {
 	o := s.overseer
 	o.dagMu.RLock()
 	defer o.dagMu.RUnlock()
-	return o.dag.GetReadyNodes()
+	nodes := o.dag.GetReadyNodes()
+	sort.SliceStable(nodes, func(i, j int) bool {
+		return nodes[i].Bead.Priority < nodes[j].Bead.Priority
+	})
+	return nodes
 }
 
 // SpawnWorkersForNodes spawns workers for the given nodes up to available slots.

@@ -166,11 +166,13 @@ func TestOverseer_PriorityOrdering(t *testing.T) {
 	test := setupTestOverseer(t)
 
 	// Create multiple ready beads with different priorities
+	// Beads convention: P0 = highest (Priority::CRITICAL(0) < HIGH(1) < ...
+	// < BACKLOG(4) in beads-rust). Lower number = more urgent.
 	beads := []types.Bead{
-		{ID: "test-project-low", Title: "Low Priority", Status: types.StatusOpen, Project: "test-project", Type: "implement", Priority: 1},
-		{ID: "test-project-med", Title: "Medium Priority", Status: types.StatusOpen, Project: "test-project", Type: "implement", Priority: 5},
-		{ID: "test-project-high", Title: "High Priority", Status: types.StatusOpen, Project: "test-project", Type: "implement", Priority: 10},
-		{ID: "test-project-crit", Title: "Critical Priority", Status: types.StatusOpen, Project: "test-project", Type: "implement", Priority: 20},
+		{ID: "test-project-low", Title: "Low Priority", Status: types.StatusOpen, Project: "test-project", Type: "implement", Priority: 3},
+		{ID: "test-project-med", Title: "Medium Priority", Status: types.StatusOpen, Project: "test-project", Type: "implement", Priority: 2},
+		{ID: "test-project-high", Title: "High Priority", Status: types.StatusOpen, Project: "test-project", Type: "implement", Priority: 1},
+		{ID: "test-project-crit", Title: "Critical Priority", Status: types.StatusOpen, Project: "test-project", Type: "implement", Priority: 0},
 	}
 
 	// Add beads to mock client
@@ -199,10 +201,11 @@ func TestOverseer_PriorityOrdering(t *testing.T) {
 		}
 	}
 
-	// Verify priorities are in descending order
+	// Verify priorities are in ascending numeric order (P0 = highest, per
+	// beads convention: Priority::CRITICAL(0) < HIGH(1) < ... < BACKLOG(4))
 	for i := 1; i < len(ready); i++ {
-		if ready[i].Priority > ready[i-1].Priority {
-			t.Errorf("Priority ordering failed at position %d: %d > %d",
+		if ready[i].Priority < ready[i-1].Priority {
+			t.Errorf("Priority ordering failed at position %d: %d < %d",
 				i, ready[i].Priority, ready[i-1].Priority)
 		}
 	}
