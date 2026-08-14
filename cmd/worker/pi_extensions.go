@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -17,6 +20,7 @@ var extensionAliases = map[string]string{
 	"guardrails":   "@aliou/pi-guardrails",
 	"subagents":    "pi-subagents",
 	"web-access":   "pi-web-access",
+	"hindsight":    "@walodayeet/hindsight-pi",
 }
 
 // parseExtensionList splits the comma-separated HYDRA_PI_EXTENSIONS value.
@@ -52,12 +56,38 @@ func resolveExtensionPaths(agentDir string, names []string) []string {
 		}
 		entry, err := extensionEntryPoint(filepath.Join(modules, filepath.FromSlash(pkg)))
 		if err != nil {
-			log.Printf("[Worker:rpc] skipping extension %q: %v", name, err)
-			continue
+			// Git-installed packages live at git/<host>/<org>/<repo>, not in
+			// npm/node_modules. Match by repo segment so an org rename or fork
+			// (haulmatic-dev/hindsight-pi vs walodayeet/hindsight-pi) does not
+			// silently unload the extension.
+			entry, err = gitExtensionEntryPoint(agentDir, path.Base(pkg))
+			if err != nil {
+				log.Printf("[Worker:rpc] skipping extension %q: %v", name, err)
+				continue
+			}
 		}
 		paths = append(paths, entry)
 	}
 	return paths
+}
+
+// gitExtensionEntryPoint resolves a git-installed Pi package by repo name.
+// Sorted glob = deterministic; first match with a valid entry point wins.
+func gitExtensionEntryPoint(agentDir, repo string) (string, error) {
+	matches, err := filepath.Glob(filepath.Join(agentDir, "git", "*", "*", repo))
+	if err != nil || len(matches) == 0 {
+		return "", fmt.Errorf("no git-installed package named %s", repo)
+	}
+	sort.Strings(matches)
+	for _, dir := range matches {
+		if entry, err := extensionEntryPoint(dir); err == nil {
+			if len(matches) > 1 {
+				log.Printf("[Worker:rpc] extension %q: multiple git installs, using %s", repo, dir)
+			}
+			return entry, nil
+		}
+	}
+	return "", fmt.Errorf("git-installed package %s has no valid entry point", repo)
 }
 
 // extensionEntryPoint reads a package's declared Pi extension entry file.
@@ -85,8 +115,20 @@ func extensionEntryPoint(pkgDir string) (string, error) {
 	}
 
 	entry := filepath.Clean(filepath.Join(pkgDir, filepath.FromSlash(rel)))
-	if _, err := os.Stat(entry); err != nil {
+	info, err := os.Stat(entry)
+	if err != nil {
 		return "", err
+	}
+	// A declared entry may be a directory (pi convention: extensions/*/index.ts).
+	// Pi's -e wants a file, so resolve directories to their index file.
+	if info.IsDir() {
+		for _, idx := range []string{"index.ts", "index.js"} {
+			cand := filepath.Join(entry, idx)
+			if _, err := os.Stat(cand); err == nil {
+				return absOrSelf(cand), nil
+			}
+		}
+		return "", fmt.Errorf("declared entry %s is a directory without index.ts/index.js", entry)
 	}
 	return absOrSelf(entry), nil
 }

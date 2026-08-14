@@ -156,3 +156,99 @@ func TestBuildPiCommand_ExtensionsOnlyInRPCMode(t *testing.T) {
 		t.Errorf("text mode has no extension host; flags must be omitted, got: %s", strings.Join(textCmd.Args, " "))
 	}
 }
+
+// git-installed packages land at <agentDir>/git/<host>/<org>/<repo>, NOT in
+// npm/node_modules — the resolver only searched npm, so the Hindsight
+// extension (git-installed) could never load for workers: zero recall on the
+// daemon path (audit 2026-08-13). The fallback matches by repo segment to
+// tolerate org drift (settings.json referenced haulmatic-dev/hindsight-pi
+// while the installed copy was walodayeet/hindsight-pi).
+func writeGitPkg(t *testing.T, agentDir, org, repo, manifest, entryFile string) string {
+	t.Helper()
+	dir := filepath.Join(agentDir, "git", "github.com", org, repo)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	entry := ""
+	if entryFile != "" {
+		entry = filepath.Join(dir, filepath.FromSlash(entryFile))
+		if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+			t.Fatalf("mkdir entry: %v", err)
+		}
+		if err := os.WriteFile(entry, []byte("// ext"), 0o644); err != nil {
+			t.Fatalf("write entry: %v", err)
+		}
+	}
+	return entry
+}
+
+func TestResolveExtensionPaths_GitInstalledPackage(t *testing.T) {
+	agent := t.TempDir()
+	want := writeGitPkg(t, agent, "walodayeet", "hindsight-pi",
+		`{"pi":{"extensions":["./extensions/index.ts"]}}`, "extensions/index.ts")
+
+	got := resolveExtensionPaths(agent, []string{"hindsight"})
+	if len(got) != 1 || got[0] != absOrSelf(want) {
+		t.Errorf("git-installed package must resolve, got %v want [%s]", got, absOrSelf(want))
+	}
+}
+
+func TestResolveExtensionPaths_NpmWinsOverGit(t *testing.T) {
+	agent := t.TempDir()
+	npmWant := writePkg(t, agent, "@walodayeet/hindsight-pi",
+		`{"pi":{"extensions":["./dist/main.js"]}}`, "dist/main.js")
+	writeGitPkg(t, agent, "walodayeet", "hindsight-pi",
+		`{"pi":{"extensions":["./extensions/index.ts"]}}`, "extensions/index.ts")
+
+	got := resolveExtensionPaths(agent, []string{"hindsight"})
+	if len(got) != 1 || got[0] != absOrSelf(npmWant) {
+		t.Errorf("npm install must win over git copy, got %v want [%s]", got, absOrSelf(npmWant))
+	}
+}
+
+func TestResolveExtensionPaths_GitOrgDriftTolerated(t *testing.T) {
+	agent := t.TempDir()
+	// Same repo name under a different org (fork rename) must still resolve.
+	want := writeGitPkg(t, agent, "haulmatic-dev", "hindsight-pi",
+		`{"pi":{"extensions":["./extensions/index.ts"]}}`, "extensions/index.ts")
+
+	got := resolveExtensionPaths(agent, []string{"hindsight"})
+	if len(got) != 1 || got[0] != absOrSelf(want) {
+		t.Errorf("org drift must not break resolution, got %v want [%s]", got, absOrSelf(want))
+	}
+}
+
+func TestResolveExtensionPaths_GitMissStillSkips(t *testing.T) {
+	agent := t.TempDir()
+	if got := resolveExtensionPaths(agent, []string{"hindsight"}); len(got) != 0 {
+		t.Errorf("uninstalled extension must skip fail-open, got %v", got)
+	}
+}
+
+// A package may declare a directory as its entry (pi convention:
+// extensions/*/index.ts) — os.Stat passes on directories, but pi -e needs a
+// file. hindsight-pi declares exactly this ("./extensions" containing
+// index.ts).
+func TestResolveExtensionPaths_DirectoryEntryResolvesIndex(t *testing.T) {
+	agent := t.TempDir()
+	gitDir := filepath.Join(agent, "git", "github.com", "walodayeet", "hindsight-pi")
+	if err := os.MkdirAll(filepath.Join(gitDir, "extensions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "package.json"),
+		[]byte(`{"pi":{"extensions":["./extensions"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	idx := filepath.Join(gitDir, "extensions", "index.ts")
+	if err := os.WriteFile(idx, []byte("// ext"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := resolveExtensionPaths(agent, []string{"hindsight"})
+	if len(got) != 1 || got[0] != absOrSelf(idx) {
+		t.Errorf("directory entry must resolve to index.ts, got %v want [%s]", got, absOrSelf(idx))
+	}
+}
