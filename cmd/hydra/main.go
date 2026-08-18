@@ -127,6 +127,14 @@ func main() {
 	)
 	flag.Parse()
 
+	// Subcommand fast path: `hydra gates verify <project>` dry-runs the
+	// project's declared gates on the real checkout (bootstrap verification)
+	// and exits — before any daemon machinery starts.
+	if pos := flag.Args(); len(pos) > 0 && pos[0] == "gates" {
+		runGatesSubcommand(*configPath, pos[1:])
+		return
+	}
+
 	// Configure leveled logging (HYDRA_LOG_LEVEL: debug|info|warn|error).
 	logx.Init()
 	if *debug {

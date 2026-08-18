@@ -12,21 +12,21 @@ import (
 
 // Config represents the Hydra configuration
 type Config struct {
-	Overseer        OverseerConfig        `yaml:"overseer"`
-	Projects        []ProjectConfig       `yaml:"projects"`
+	Overseer OverseerConfig  `yaml:"overseer"`
+	Projects []ProjectConfig `yaml:"projects"`
 	// MultiUserDiscovery enables the multi-user project scan
 	// (projects.multi_user_discovery, default true). Not decoded directly —
 	// it lives inside the projects object and is resolved during parsing.
-	MultiUserDiscovery bool `yaml:"-"`
-	MCP             MCPConfig             `yaml:"mcp"`
-	API             APIConfig             `yaml:"api"`
-	Intelligence    IntelligenceConfig    `yaml:"intelligence"`
-	Agents          AgentsConfig          `yaml:"agents"`
-	Pi              PiRootConfig          `yaml:"pi"`
-	Output          OutputConfig          `yaml:"output"`
-	Validation      ValidationConfig      `yaml:"validation"`
-	ComplianceCycle ComplianceCycleConfig `yaml:"compliance_cycle"`
-	Shepherd        ShepherdConfig       `yaml:"shepherd"`
+	MultiUserDiscovery bool                  `yaml:"-"`
+	MCP                MCPConfig             `yaml:"mcp"`
+	API                APIConfig             `yaml:"api"`
+	Intelligence       IntelligenceConfig    `yaml:"intelligence"`
+	Agents             AgentsConfig          `yaml:"agents"`
+	Pi                 PiRootConfig          `yaml:"pi"`
+	Output             OutputConfig          `yaml:"output"`
+	Validation         ValidationConfig      `yaml:"validation"`
+	ComplianceCycle    ComplianceCycleConfig `yaml:"compliance_cycle"`
+	Shepherd           ShepherdConfig        `yaml:"shepherd"`
 }
 
 // ShepherdConfig configures Pan, the shepherd that decides the ambiguous
@@ -531,6 +531,7 @@ type ProjectConfig struct {
 	Path  string       `yaml:"path"`
 	Type  string       `yaml:"type"` // "single" or "multi"
 	Repos []RepoConfig `yaml:"repos,omitempty"`
+	Gates *GateSet     `yaml:"gates,omitempty"` // daemon-owned deterministic gates (FR-002); nil = legacy
 }
 
 // RepoConfig represents a repository within a multi-repo project

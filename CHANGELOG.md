@@ -13,6 +13,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 ### Added
+- Daemon gate runner (PRD-A FR-002, slice 1): `GateRunner` executes declared gates (test/lint/build) daemon-side with per-project serialization, worktree-only execution guard, timeouts, and atomic artifact persistence at `$HYDRA_HOME/gates/<project>/<bead>/` — artifacts written before any LLM involvement, `FinalizeStaleGateArtifacts` recovers `running` artifacts on restart. Parser registry: `exit-code`, `jest-coverage` (coverage % + failing suites; unparseable output fails closed). Config: per-project `gates:` block with `daemon_owned` flag (default false = legacy path). New `hydra gates verify <project>` bootstrap command dry-runs declared gates on the real checkout. Verified live against srv-smart-engine: lint/build pass; test correctly reports 26.97% < 80% with failing suites named.
+
+
+
+### Added
 - Worker extension resolver now supports git-installed Pi packages (`git/<host>/<org>/<repo>`, matched by repo segment to tolerate org drift/forks) and directory entry points (resolved to `index.ts`/`index.js` per pi convention). This unblocks the Hindsight pi extension (`hindsight` alias → `@walodayeet/hindsight-pi`) for workers — the first recall channel on the daemon path; npm installs still take precedence.
 
 ### Added
