@@ -2028,6 +2028,20 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 			"DELIVERABLE CONTRACT: this task is complete only when the required file edits exist on disk and verification commands ran. A plan or analysis without edits will be rejected as an empty diff.")
 	}
 
+	// Turn economy (session forensics 2026-08-17): every turn re-bills the
+	// full transcript (16K -> 244K over one bead = 25M tokens, 24.8M cache
+	// reads). The model defaults to one tool call per turn (measured 1.00
+	// calls/turn on workers, 1.02 on interactive sessions) — this guidance
+	// pushes against that default. It is a hedge, not a fix: the structural
+	// levers are early compaction (project .pi/settings.json) and the
+	// turn-level 403 breaker.
+	promptParts = append(promptParts,
+		"TURN ECONOMY: every turn re-sends the entire conversation to the model — turns are the cost multiplier.\n" +
+			"- Batch independent tool calls in the same message (multiple reads, one search+read pair, etc.).\n" +
+			"- Prefer one comprehensive command over a probe sequence (e.g. one script that gathers everything over five separate calls).\n" +
+			"- Do NOT re-run the full test suite between micro-edits: run the narrowest failing test until it passes, then the full suite ONCE at the end.\n" +
+			"- Read files at the offsets you need instead of re-reading whole files.")
+
 	// Closure protocol (PRD worker-park-and-resume Part 3): the turn does not
 	// end when the agent stops talking — it ends with a machine-readable
 	// verdict. Without one the worker re-prompts the live session.
