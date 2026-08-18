@@ -239,6 +239,11 @@ func (wl *WorkerLifecycle) HandleSuccess(worker *types.Worker, duration time.Dur
 	log.Printf("[Worker] Completed: %s (duration: %v)", worker.ID, duration)
 	worker.Status = string(types.WorkerStatusCompleted)
 	wl.retryManager.ClearRetry(worker.ID)
+	// A completed worker proves the provider's concurrency ceiling has room
+	// again — reset any sustained-capacity streak/escalation.
+	if wl.providerBreaker != nil {
+		wl.providerBreaker.RecordCapacitySuccess()
+	}
 
 	wl.dagMu.Lock()
 	defer wl.dagMu.Unlock()
@@ -279,12 +284,15 @@ func (wl *WorkerLifecycle) HandleFailure(worker *types.Worker, exitCode int, dur
 	if exitCode == 2 && wl.providerBreaker != nil {
 		wl.providerBreaker.RecordRateLimit()
 	}
-	// Exit 7 (transient provider overload) is deliberately absent from the
-	// breaker path. It is retried like any infra failure, but it must not open a
-	// circuit: three capacity blips inside ten minutes previously froze every
-	// spawn for fifteen minutes over an error that clears in seconds.
+	// Exit 7 (transient provider overload) does not open the rate-limit
+	// circuit — blips clear in seconds. But a STREAK of exit 7 spanning
+	// capacityMinSpan is sustained congestion (the co3u8 3-day storm), and
+	// then spawning must pause: RecordCapacityFailure decides.
 	if exitCode == 7 {
-		log.Printf("[WorkerLifecycle] Transient provider overload (exit 7) for %s — retrying without tripping the provider circuit", worker.ID)
+		if wl.providerBreaker != nil {
+			wl.providerBreaker.RecordCapacityFailure()
+		}
+		log.Printf("[WorkerLifecycle] Transient provider overload (exit 7) for %s — retrying without tripping the rate-limit circuit", worker.ID)
 	}
 	wl.retryManager.RecordRetry(worker.ID, workerErr)
 

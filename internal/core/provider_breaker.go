@@ -21,6 +21,19 @@ type ProviderBreaker struct {
 	fails     map[string][]time.Time
 	openUntil map[string]time.Time
 
+	// Sustained-capacity tracking (exit 7 — "concurrent request limit").
+	// Blips clear in seconds and must never freeze the fleet; a streak that
+	// spans capacityMinSpan means the account-level ceiling has been saturated
+	// for a long time (observed: 3 days on a shared Kimi account, bead co3u8,
+	// 219 rejected turns) and every respawn re-bills the whole transcript
+	// against a provider that will reject it. Then the only winning move is
+	// to stop spawning for a while.
+	capacityFails  []time.Time
+	capacityPauses int
+
+	// now is injectable for tests (capacity span arithmetic).
+	now func() time.Time
+
 	threshold int
 	window    time.Duration
 	openFor   time.Duration
@@ -40,12 +53,13 @@ func NewProviderBreaker(primaryProvider, primaryModel, fallbackProvider, fallbac
 		threshold:        3,
 		window:           10 * time.Minute,
 		openFor:          15 * time.Minute,
+		now:              time.Now,
 	}
 }
 
 func (b *ProviderBreaker) isOpenLocked(provider string) bool {
 	until, ok := b.openUntil[provider]
-	return ok && time.Now().Before(until)
+	return ok && b.now().Before(until)
 }
 
 func (b *ProviderBreaker) chooseLocked() (string, string) {
@@ -127,6 +141,63 @@ func (b *ProviderBreaker) RecordQuotaExhausted() {
 	b.openUntil[prov] = time.Now().Add(quotaCooldown)
 }
 
+// Capacity congestion constants. capacityThreshold consecutive capacity
+// failures (exit 7) spanning at least capacityMinSpan = sustained congestion
+// -> pause spawning for capacityCooldown, doubling per consecutive pause up
+// to capacityCooldownMax. A fast streak is a blip and never pauses.
+const (
+	capacityThreshold   = 6
+	capacityMinSpan     = 30 * time.Minute
+	capacityCooldown    = 15 * time.Minute
+	capacityCooldownMax = 2 * time.Hour
+)
+
+// RecordCapacityFailure records an exit-7 capacity failure (provider
+// concurrency ceiling). The failure is only meaningful in aggregate: fewer
+// than capacityThreshold in a row, or a streak that completes faster than
+// capacityMinSpan, is a blip and returns without effect. A sustained streak
+// opens the primary's circuit for an escalating cooldown, and the streak
+// resets so the next pause requires fresh evidence.
+func (b *ProviderBreaker) RecordCapacityFailure() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.primaryProvider == "" {
+		return
+	}
+	now := b.now()
+	b.capacityFails = append(b.capacityFails, now)
+	if len(b.capacityFails) < capacityThreshold {
+		return
+	}
+	streakStart := b.capacityFails[len(b.capacityFails)-capacityThreshold]
+	if now.Sub(streakStart) < capacityMinSpan {
+		return // blip: capacity clears on its own, never freeze for it
+	}
+
+	cooldown := capacityCooldown
+	for i := 0; i < b.capacityPauses && cooldown < capacityCooldownMax; i++ {
+		cooldown *= 2
+	}
+	if cooldown > capacityCooldownMax {
+		cooldown = capacityCooldownMax
+	}
+	b.capacityPauses++
+	b.capacityFails = nil
+	b.openUntil[b.primaryProvider] = now.Add(cooldown)
+	log.Printf("[ProviderBreaker] sustained capacity congestion on %s (%d failures spanning >= %s) — pausing spawns for %s (pause #%d)",
+		b.primaryProvider, capacityThreshold, capacityMinSpan, cooldown, b.capacityPauses)
+}
+
+// RecordCapacitySuccess resets the capacity streak and its escalation level.
+// A completed worker proves the concurrency ceiling has room again.
+func (b *ProviderBreaker) RecordCapacitySuccess() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.capacityFails = nil
+	b.capacityPauses = 0
+}
+
 // ShouldPause reports whether the scheduler should stop spawning workers
 // entirely, and for how long.
 //
@@ -152,7 +223,7 @@ func (b *ProviderBreaker) ShouldPause() (bool, time.Duration) {
 	if !ok {
 		return false, 0
 	}
-	if remaining := time.Until(until); remaining > 0 {
+	if remaining := until.Sub(b.now()); remaining > 0 {
 		return true, remaining
 	}
 	return false, 0
