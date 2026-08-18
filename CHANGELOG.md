@@ -7,6 +7,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Documentation
+- PRD-A FR-002 expanded into the full daemon gate-runner design: Class A/B/C separation (daemon code / declared config + parser registry / LLM judgment), artifact store at `$HYDRA_HOME/gates/`, crash-resilience semantics (artifact before LLM, fail-closed close path, per-project lock), config schema, bootstrap contract. Evidence: co3u8 autopsy (25M tokens, ~85% of turns babysitting deterministic commands).
+
+
+
 ### Added
 - Worker extension resolver now supports git-installed Pi packages (`git/<host>/<org>/<repo>`, matched by repo segment to tolerate org drift/forks) and directory entry points (resolved to `index.ts`/`index.js` per pi convention). This unblocks the Hindsight pi extension (`hindsight` alias → `@walodayeet/hindsight-pi`) for workers — the first recall channel on the daemon path; npm installs still take precedence.
 

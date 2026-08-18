@@ -86,18 +86,84 @@ Verified 2026-08-13, sources on file:
 
 **Type:** fr
 **Priority:** P0
-**Target Files:** `internal/core/gate_runner.go`, `internal/core/gate_runner_test.go`
-**Test Command:** `go test ./internal/core/ -run TestGateRunner`
+**Target Files:** `internal/core/gate_runner.go`, `internal/core/gate_artifact.go`, `internal/core/gate_parsers.go`, `internal/core/gate_config.go`, `internal/core/gate_runner_test.go`, `internal/core/gate_parsers_test.go`
+**Test Command:** `go test ./internal/core/ -run TestGate`
 **Build Command:** `go build ./...`
 **Reads From:** FR-001 (`WorkflowTemplate`)
 **Depends On:** FR-001
 
+**Design (evidence-based, 2026-08-18):** session forensics on bead co3u8 showed
+~85% of a verification-heavy bead's turns were the agent babysitting
+deterministic commands (8 full `npm run test:cov` runs, 25M tokens for 4 file
+edits). Gates therefore run daemon-side with the LLM as a *stateless consumer*
+of persisted artifacts — no LLM timeout or crash can lose verification state,
+because the artifact is written before any LLM involvement.
+
+**Separation of concerns (measured against the co3u8 command log):**
+- *Class A — deterministic, stack-agnostic (daemon code, zero config):* output
+  capture to artifact files outside the repo, timeouts, retries, per-project
+  gate lock/queue, diffstat collection, diff-whitelist enforcement.
+- *Class B — deterministic, stack-specific (declared config + parser
+  registry):* gate commands, thresholds, result parsers. Parsers are a small
+  versioned registry: `exit-code`, `jest-coverage`, `go-test`, `pytest`.
+- *Class C — judgment (LLM):* toolchain bootstrap, environment repair
+  (missing deps, lockfile drift), failure diagnosis. Bootstrap produces the
+  Class-B config once; the daemon verifies it by executing before freezing.
+
+**Config schema (per project in hydra.yaml):**
+```yaml
+projects:
+  list:
+    - name: srv-smart-engine
+      gates:
+        daemon_owned: true            # flag, default false (legacy path)
+        test:  { cmd: "npm run test:cov -- --testPathPattern=<scope>", parser: jest-coverage, threshold: 80 }
+        lint:  { cmd: "npm run lint",  parser: exit-code }
+        build: { cmd: "npm run build", parser: exit-code }
+```
+
+**Artifact store:** `$HYDRA_HOME/gates/<project>/<bead-id>/<gate>.json` —
+atomic write (tmp+rename), `{status: running|passed|failed|interrupted,
+exit_code, summary (<=2KB parsed: failing test names, coverage vs threshold),
+raw_log_path, pid, started_at, finished_at}`. Raw logs live beside it as
+`<gate>.log`. Never inside the project repo (kills the test-log pollution
+pattern observed on srv-smart-engine).
+
+**Resilience semantics:**
+- Daemon crash mid-gate: artifact left `status: running` with PID; on restart
+  the runner finalizes it if the process exited, else marks `interrupted` and
+  re-runs. Gates are idempotent; re-running is always safe.
+- LLM crash/timeout mid-analysis: no-op. The artifact persists; the next
+  attempt (retry/park-resume) reads the same artifact.
+- Close path contains zero LLM calls: pass/fail = parser output vs threshold,
+  read from the artifact. Agent-quoted output is no longer evidence.
+- Per-project gate lock: two `npm test` in one worktree collide, so gate runs
+  serialize per project via a lock + queue; queue depth is logged as a
+  fleet-health metric. Gates never hold worker slots.
+
+**Prompt integration:** fix/validation beads receive the parsed artifact
+summary (~2KB cap) + raw log path — not license to re-run the suite. Worker
+prompt doctrine (TURN ECONOMY) reinforces: narrowest failing test until
+green, full proof runs belong to the daemon.
+
+**Bootstrap contract (initially manual):** gate config is hand-authored per
+project and verified by a dry-run command (`hydra gates verify <project>`
+executes each gate once and reports parse status) before `daemon_owned` is
+flipped on. Fail-closed: no verified gates, no autonomous runs. An optional
+later FR automates bootstrap as a `GATE-SETUP:` bead type (LLM proposes
+config → daemon verifies → freeze); env-class gate failures escalate to
+re-bootstrap instead of silent degradation.
+
 **Acceptance Criteria:**
-- `RunGate(projectPath, worktreePath string, gate GateSpec) GateResult` executes a deterministic command (lint/test/coverage) in the given worktree with a 10-minute timeout
+- `RunGate(projectPath, worktreePath string, gate GateSpec) GateResult` executes a deterministic command (lint/test/coverage) in the given worktree with a configurable timeout (default 10 minutes)
 - GATE phases execute daemon-side; no worker is spawned for them (verified by zero registry rows for GATE-phase bead IDs in tests using the mock registry)
-- Gate failure is fail-closed: bead stays open, `GateResult.Output` is attached to the bead description via the beads client
+- Gate failure is fail-closed: bead stays open, the parsed artifact summary + raw log path are attached to the bead via the beads client
 - Gate commands never run in the main checkout (worktree path only; main-checkout path returns error matching `/main checkout/`)
-- `go test ./internal/core/ -run TestGateRunner` exits 0
+- Artifact written atomically at `$HYDRA_HOME/gates/...` before any LLM involvement; crash-recovery finalizes or re-runs `running` artifacts on daemon start
+- Per-project gate lock serializes runs; concurrent RunGate calls for one project queue
+- Parser registry: `exit-code`, `jest-coverage` (extracts coverage % + failing suite names), with unknown parser name returning a fail-closed error
+- `hydra gates verify <project>` dry-runs configured gates and reports parse status
+- `go test ./internal/core/ -run TestGate` exits 0
 
 ### FR-003: Diff-whitelist gate for test-only templates
 
