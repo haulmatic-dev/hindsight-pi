@@ -2042,6 +2042,13 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 			"- Do NOT re-run the full test suite between micro-edits: run the narrowest failing test until it passes, then the full suite ONCE at the end.\n" +
 			"- Read files at the offsets you need instead of re-reading whole files.")
 
+	// Daemon-owned gates (FR-002): when the project delegates verification to
+	// the daemon, the prompt redirects the agent away from suite babysitting.
+	if os.Getenv("HYDRA_DAEMON_GATES") == "1" {
+		promptParts = append(promptParts,
+			"VERIFICATION OWNERSHIP: the daemon runs the project's test/lint/build gates after you finish and re-verifies on every completion. Do NOT run the full test suite or coverage commands yourself — fix code, run only the narrowest test that proves your change, and end your turn. If a previous gate failed, its parsed summary and raw log path are in this bead's description; start from that evidence.")
+	}
+
 	// Closure protocol (PRD worker-park-and-resume Part 3): the turn does not
 	// end when the agent stops talking — it ends with a machine-readable
 	// verdict. Without one the worker re-prompts the live session.

@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"log"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -65,6 +66,7 @@ type BeadsClient interface {
 	UpdateBeadStatus(projectPath string, beadID types.BeadID, status types.BeadStatus) error
 	CreateBead(projectPath string, req types.CreateBeadRequest) (types.BeadID, error)
 	UpdateBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error
+	UpdateBeadDescription(projectPath, repoName string, beadID types.BeadID, description string) error
 }
 
 // Overseer is the main scheduler daemon
@@ -411,6 +413,19 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize bead closer
 	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o.validationService, config)
+
+	// Daemon gate runner (FR-002): attach to the close path and recover any
+	// artifacts the previous daemon incarnation died inside (running + dead
+	// PID -> interrupted, never trusted). Fail-open: recovery errors are
+	// logged, never gate startup.
+	if home := os.Getenv("HYDRA_HOME"); home != "" {
+		o.beadCloser.SetGateRunner(NewGateRunner(home))
+		if n, err := FinalizeStaleGateArtifacts(home); err != nil {
+			log.Printf("[DaemonGates] stale artifact recovery failed (continuing): %v", err)
+		} else if n > 0 {
+			log.Printf("[DaemonGates] recovered %d interrupted gate artifact(s) from previous run", n)
+		}
+	}
 	// Structured decision stream (Shepherd C1/C2): central day-files plus
 	// per-repo .hydra/events.jsonl mirrors.
 	o.beadCloser.SetEventSink(NewEventSink(DefaultEventsDir()))

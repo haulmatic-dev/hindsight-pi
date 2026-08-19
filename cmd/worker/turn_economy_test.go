@@ -34,3 +34,13 @@ func TestBuildPiPrompt_IncludesTurnEconomy(t *testing.T) {
 		}
 	}
 }
+
+// Daemon-owned gates: the prompt must redirect the agent away from full-suite
+// babysitting when (and only when) the daemon owns verification.
+func TestBuildPiPrompt_DaemonGatesNote(t *testing.T) {
+	t.Setenv("HYDRA_DAEMON_GATES", "1")
+	prompt := buildPiPrompt(types.Bead{ID: "p-1", Title: "t"}, nil, promptExtras{})
+	if !strings.Contains(prompt, "VERIFICATION OWNERSHIP") {
+		t.Error("HYDRA_DAEMON_GATES=1 must add the verification-ownership note")
+	}
+}

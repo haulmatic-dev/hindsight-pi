@@ -72,6 +72,19 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 		}
 	}
 
+	// Daemon-owned gates (FR-002 slice 2): tell the worker the daemon owns
+	// test/lint/build verification so the prompt can redirect it away from
+	// full-suite babysitting.
+	if b.config != nil {
+		for i := range b.config.Projects {
+			p := &b.config.Projects[i]
+			if p.Name == bead.Project && p.Gates != nil && p.Gates.DaemonOwned {
+				env = append(env, "HYDRA_DAEMON_GATES=1")
+				break
+			}
+		}
+	}
+
 	// Pass API key to worker if configured (with fallback to pi.standard-agent.llm)
 	apiKeyName := b.config.Agents.Pi.ApiKeyName
 	if apiKeyName == "" && b.config.Pi.StandardAgent.LLM.ApiKeyName != "" {

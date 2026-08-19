@@ -20,6 +20,7 @@ type BeadCloser struct {
 	chainKeyFn        func(types.Bead) string // maps a bead to its chain's worktree key
 	isChainMember     func(types.BeadID) bool // reports whether a bead belongs to a registered multi-bead chain
 	retainer          *VerdictRetainer        // nil-safe; Hindsight verdict retention (Shepherd D3)
+	gateRunner        *GateRunner             // nil until SetGateRunner; daemon_owned projects fail closed without it
 }
 
 // SetWorktreeManager enables commit-on-close and singleton integrate-on-close
@@ -175,6 +176,23 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 		if err := c.verifyBeforeClose(bead, projectPath, repoName); err != nil {
 			// Rejected: the bead was reopened (or escalated) inside
 			// verifyBeforeClose. Do not close it.
+			return err
+		}
+	}
+
+	// Daemon-owned deterministic gates (FR-002): on the success path, run
+	// the project's declared gates daemon-side in the chain worktree BEFORE
+	// commit/integrate/close. Zero LLM calls here; pass/fail comes from the
+	// persisted artifact. Gate failure reopens the bead with the parsed
+	// summary + raw log path instead of closing on agent-quoted output.
+	if success && reason == "completed" && bead != nil {
+		gateWt := ""
+		if c.worktreeManager != nil && c.chainKeyFn != nil {
+			if wt, ok := c.worktreeManager.ExistingWorktree(projectPath, c.chainKeyFn(*bead)); ok {
+				gateWt = wt
+			}
+		}
+		if err := c.runDaemonGates(bead, projectName, projectPath, repoName, gateWt); err != nil {
 			return err
 		}
 	}

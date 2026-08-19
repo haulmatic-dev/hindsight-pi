@@ -7,6 +7,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Daemon gates wired into the close path (FR-002 slice 2): when a project sets `gates.daemon_owned: true`, a successful worker completion runs the declared gates daemon-side in the chain worktree BEFORE commit/integrate/close. Gate failure reopens the bead via the existing rejectClose machinery (bounded by `validation.max_rounds`, then human escalation), labels it `gate-failed`, and rewrites the description with the parsed summary + raw log path so the retry worker starts from evidence instead of re-running the suite. No worktree, missing runner, or unknown parser all fail closed. Daemon startup recovers `running` gate artifacts from a crashed predecessor. Workers on daemon-owned projects get `HYDRA_DAEMON_GATES=1` and a VERIFICATION OWNERSHIP prompt note. `BeadsClient` gains `UpdateBeadDescription` (br update --description); all mocks updated. Default off — legacy path untouched.
+
+
+
 ### Documentation
 - PRD-A FR-002 expanded into the full daemon gate-runner design: Class A/B/C separation (daemon code / declared config + parser registry / LLM judgment), artifact store at `$HYDRA_HOME/gates/`, crash-resilience semantics (artifact before LLM, fail-closed close path, per-project lock), config schema, bootstrap contract. Evidence: co3u8 autopsy (25M tokens, ~85% of turns babysitting deterministic commands).
 

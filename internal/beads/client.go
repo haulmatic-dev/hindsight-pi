@@ -393,3 +393,11 @@ func (c *Client) UpdateBeadLabels(projectPath, repoName string, beadID types.Bea
 	_, err := c.execInDir(projectPath, "br", args...)
 	return err
 }
+
+// UpdateBeadDescription replaces a bead's description via br update.
+// Used by the daemon gate runner to hand a failed gate's parsed summary +
+// raw log path to the retry worker (FR-002 slice 2).
+func (c *Client) UpdateBeadDescription(projectPath, repoName string, beadID types.BeadID, description string) error {
+	_, err := c.execInDir(projectPath, "br", "update", string(beadID), "--description", description)
+	return err
+}
