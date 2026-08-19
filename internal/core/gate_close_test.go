@@ -1,6 +1,7 @@
 package core
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -113,5 +114,25 @@ func TestDaemonGates_UnknownParserBlocks(t *testing.T) {
 	bead := &types.Bead{ID: "proj-g6", Project: "proj", Status: types.StatusInProgress}
 	if err := closer.runDaemonGates(bead, "proj", t.TempDir(), "", wt); err == nil {
 		t.Fatal("unknown parser in close path must fail closed")
+	}
+}
+
+func TestDaemonGates_ScopeFromTargetFiles(t *testing.T) {
+	wt := t.TempDir()
+	cfg := gateTestConfig(true, `echo "scoped: <scope>"`)
+	closer, mock := gateTestCloser(t, cfg, wt)
+	bead := &types.Bead{ID: "proj-g7", Project: "proj", Status: types.StatusInProgress,
+		Metadata: map[string]string{"files": "src/x/a.spec.ts"}}
+	mock.beads["proj-g7"] = *bead
+	if err := closer.runDaemonGates(bead, "proj", t.TempDir(), "", wt); err != nil {
+		t.Fatalf("passing scoped gate must not block: %v", err)
+	}
+	a, err := LoadGateArtifact(closer.gateRunner.root, "proj", "proj-g7", "test")
+	if err != nil {
+		t.Fatalf("artifact must persist: %v", err)
+	}
+	data, _ := os.ReadFile(a.RawLog)
+	if !strings.Contains(string(data), "scoped: 'src/x/a.spec.ts'") {
+		t.Errorf("scope must come from bead target files, log: %q", data)
 	}
 }

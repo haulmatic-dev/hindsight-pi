@@ -1,6 +1,7 @@
 package core
 
 import (
+	"strings"
 	"context"
 	"fmt"
 	"os"
@@ -41,6 +42,11 @@ type GateRequest struct {
 	Spec         GateSpec
 	ProjectPath  string // main checkout — never executed in
 	WorktreePath string // execution cwd
+	// Scope is substituted for <scope> in Spec.Cmd — the bead's target file
+	// for scoped gates (npx jest <scope>). Empty scope drops the token
+	// carrying the placeholder, so the full gate command runs instead. The
+	// value is single-quote escaped before reaching the shell.
+	Scope        string
 	// AllowMainCheckout permits running with WorktreePath == ProjectPath.
 	// Reserved for `hydra gates verify`, whose whole job is proving the
 	// toolchain on the real checkout before daemon_owned is enabled.
@@ -93,6 +99,8 @@ func (r *GateRunner) RunGate(req GateRequest) (GateArtifact, error) {
 		timeout = gateDefaultTimeout
 	}
 
+	cmdLine := substituteGateScope(req.Spec.Cmd, req.Scope)
+
 	dir := gateDir(r.root, req.Project, req.BeadID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return GateArtifact{}, fmt.Errorf("gate artifact dir: %w", err)
@@ -127,7 +135,7 @@ func (r *GateRunner) RunGate(req GateRequest) (GateArtifact, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", req.Spec.Cmd)
+	cmd := exec.CommandContext(ctx, "sh", "-c", cmdLine)
 	cmd.Dir = req.WorktreePath
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -168,4 +176,25 @@ func (r *GateRunner) RunGate(req GateRequest) (GateArtifact, error) {
 		return a, fmt.Errorf("gate artifact final write: %w", err)
 	}
 	return a, nil
+}
+
+// substituteGateScope resolves the <scope> placeholder in a gate command.
+// With a scope: single-quote-escaped substitution. Without one: any token
+// containing the placeholder is dropped entirely — a literal <scope> would
+// reach sh as a redirection and break the command.
+func substituteGateScope(cmd, scope string) string {
+	if scope == "" {
+		if !strings.Contains(cmd, "<scope>") {
+			return cmd
+		}
+		var kept []string
+		for _, tok := range strings.Fields(cmd) {
+			if !strings.Contains(tok, "<scope>") {
+				kept = append(kept, tok)
+			}
+		}
+		return strings.Join(kept, " ")
+	}
+	escaped := "'" + strings.ReplaceAll(scope, "'", "'\\''") + "'"
+	return strings.ReplaceAll(cmd, "<scope>", escaped)
 }

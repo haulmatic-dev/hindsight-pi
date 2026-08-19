@@ -63,6 +63,14 @@ func (c *BeadCloser) runDaemonGates(bead *types.Bead, projectName, projectPath, 
 		{"test", gates.Test},
 	}
 
+	// Scoped gates: the bead's first target file substitutes <scope> (e.g.
+	// npx jest <scope>), so a bead fixing suite X is gated on suite X — not
+	// on every other red suite in the repo. No targets -> full command.
+	scope := ""
+	if targets := beadTargetFiles(bead); len(targets) > 0 {
+		scope = targets[0]
+	}
+
 	for _, g := range named {
 		if g.spec.Cmd == "" {
 			continue
@@ -72,6 +80,7 @@ func (c *BeadCloser) runDaemonGates(bead *types.Bead, projectName, projectPath, 
 			Spec:         g.spec,
 			ProjectPath:  projectPath,
 			WorktreePath: worktreePath,
+			Scope:        scope,
 		})
 		if err != nil {
 			log.Printf("[DaemonGates] %s gate %s runner fault: %v", bead.ID, g.name, err)

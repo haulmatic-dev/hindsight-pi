@@ -8,6 +8,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- Gate `<scope>` templating: `GateRequest.Scope` substitutes into gate commands (single-quote escaped); empty scope drops the placeholder token so the full command runs. The close path derives scope from the bead's target files (`Files:` metadata/description), so a bead fixing suite X is gated on suite X — not on every other red suite in the repo. Enables `daemon_owned` on partially-red projects without reject storms.
+
+
+
+### Added
 - Daemon gates wired into the close path (FR-002 slice 2): when a project sets `gates.daemon_owned: true`, a successful worker completion runs the declared gates daemon-side in the chain worktree BEFORE commit/integrate/close. Gate failure reopens the bead via the existing rejectClose machinery (bounded by `validation.max_rounds`, then human escalation), labels it `gate-failed`, and rewrites the description with the parsed summary + raw log path so the retry worker starts from evidence instead of re-running the suite. No worktree, missing runner, or unknown parser all fail closed. Daemon startup recovers `running` gate artifacts from a crashed predecessor. Workers on daemon-owned projects get `HYDRA_DAEMON_GATES=1` and a VERIFICATION OWNERSHIP prompt note. `BeadsClient` gains `UpdateBeadDescription` (br update --description); all mocks updated. Default off — legacy path untouched.
 
 

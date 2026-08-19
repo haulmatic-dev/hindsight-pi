@@ -1,6 +1,7 @@
 package core
 
 import (
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -116,5 +117,44 @@ func TestGateRunner_UnknownParserFailsClosed(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "parser") {
 		t.Errorf("unknown parser must fail closed with parser error, got %v", err)
+	}
+}
+
+func TestGateRunner_ScopeSubstitution(t *testing.T) {
+	r := NewGateRunner(t.TempDir())
+	a, err := r.RunGate(GateRequest{
+		Project: "proj", BeadID: "proj-s1", Gate: "test",
+		Spec:        GateSpec{Cmd: `echo "ran: <scope>"`, Parser: "exit-code"},
+		ProjectPath: t.TempDir(), WorktreePath: t.TempDir(),
+		Scope:       "src/x/x.spec.ts",
+	})
+	if err != nil {
+		t.Fatalf("RunGate: %v", err)
+	}
+	if a.Status != GateStatusPassed {
+		t.Fatalf("status = %s", a.Status)
+	}
+	logData, _ := os.ReadFile(a.RawLog)
+	if !strings.Contains(string(logData), "ran: 'src/x/x.spec.ts'") {
+		t.Errorf("<scope> not substituted (shell-quoted), log: %q", logData)
+	}
+}
+
+func TestGateRunner_EmptyScopeFallsBackToFullCommand(t *testing.T) {
+	r := NewGateRunner(t.TempDir())
+	a, err := r.RunGate(GateRequest{
+		Project: "proj", BeadID: "proj-s2", Gate: "test",
+		Spec:        GateSpec{Cmd: `npm run test:cov -- --testPathPattern=<scope>`, Parser: "exit-code"},
+		ProjectPath: t.TempDir(), WorktreePath: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("RunGate: %v", err)
+	}
+	// no scope: the placeholder clause is dropped, not passed literally —
+	// a literal <scope> reaches the shell as a redirection and errors.
+	_ = a
+	logData, _ := os.ReadFile(a.RawLog)
+	if strings.Contains(string(logData), "<scope>") {
+		t.Errorf("placeholder must not reach the shell, log: %q", logData)
 	}
 }
