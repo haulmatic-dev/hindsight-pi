@@ -134,6 +134,10 @@ func (m *WorktreeManager) IntegrateAndRemove(projectPath, key string) error {
 		return nil // nothing to integrate
 	}
 
+	// Dirty main checkout blocks merges outright ("Your local changes would
+	// be overwritten") — janitorial auto-commit first (2026-08-19 incident).
+	autoCommitDirtyMain(projectPath)
+
 	if _, err := gitOut(projectPath, "merge", "--no-ff", "-m", "hydra: integrate "+branch, branch); err != nil {
 		_, _ = gitOut(projectPath, "merge", "--abort")
 		return fmt.Errorf("integrate %s failed (worktree left at %s for inspection): %w", branch, wtPath, err)
@@ -297,4 +301,27 @@ func isGitWorktree(path string) bool {
 func branchExists(projectPath, branch string) bool {
 	_, err := gitOut(projectPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
 	return err == nil
+}
+
+// autoCommitDirtyMain turns a dirty main checkout into a janitorial commit
+// before merging. Uncommitted changes the merge touches fail the whole merge
+// ("Your local changes would be overwritten") — observed 2026-08-19 when 9
+// legacy-era files in srv-smart-engine blocked every integration and
+// gate-verified work piled up in quarantine while beads closed as completed.
+// Committing first converts that hard failure into an ordinary two-parent
+// merge. Same-hunk content conflicts can still conflict — those quarantine.
+func autoCommitDirtyMain(projectPath string) {
+	out, err := gitOut(projectPath, "status", "--porcelain")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return
+	}
+	if _, err := gitOut(projectPath, "add", "-A"); err != nil {
+		log.Printf("[Worktree] auto-commit dirty main: add failed (continuing): %v", err)
+		return
+	}
+	if _, err := gitOut(projectPath, "commit", "-m", "wip: hydra auto-commit of uncommitted main-checkout changes before integration"); err != nil {
+		log.Printf("[Worktree] auto-commit dirty main: commit failed (continuing): %v", err)
+		return
+	}
+	log.Printf("[Worktree] auto-committed dirty main checkout in %s before integration", projectPath)
 }

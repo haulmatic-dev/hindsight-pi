@@ -7,6 +7,12 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Fixed
+- `IntegrateAndRemove` auto-commits a dirty main checkout (`wip: hydra auto-commit ...`) before merging — uncommitted changes the merge touches used to fail every integration ("Your local changes would be overwritten"), so gate-verified work piled up in quarantine while beads closed as completed (srv-smart-engine 2026-08-19: 9 legacy-era files blocked all integrations). Same-hunk content conflicts still quarantine as designed.
+- srv-smart-engine repo hygiene (project-side, not hydra code): `.gitattributes` union-merge for append-only files (CHANGELOG.md, docs/untestable-code-log.md) — every bead appends per PRD §3; adjacent-hunk conflicts made every worktree integration collide. Union merge keeps both sides' lines.
+
+
+
 ### Added
 - Gate `<scope>` templating: `GateRequest.Scope` substitutes into gate commands (single-quote escaped); empty scope drops the placeholder token so the full command runs. The close path derives scope from the bead's target files (`Files:` metadata/description), so a bead fixing suite X is gated on suite X — not on every other red suite in the repo. Enables `daemon_owned` on partially-red projects without reject storms.
 
