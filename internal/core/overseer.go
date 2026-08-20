@@ -724,6 +724,13 @@ func (o *Overseer) getReadyBeadsFromBVPlan() ([]types.Bead, error) {
 // critical-path awareness, and impact scoring (unblocks count).
 // spawnWorker creates and starts a worker for a bead using the configured spawner
 func (o *Overseer) spawnWorker(bead types.Bead) error {
+	// Pre-spawn gate probe: a bead whose scoped gates already pass on main
+	// closes at zero token cost instead of looping a worker through
+	// empty-diff rejections (srv 65wa0: 7.9M tokens, 3 rounds, suite was
+	// already green).
+	if o.prespawnCloseIfGreen(bead) {
+		return nil
+	}
 	return o.workerSpawner.Spawn(bead)
 }
 

@@ -7,6 +7,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Pre-spawn gate probe: for `daemon_owned` projects, scoped gates (cmd contains `<scope>`) run in the project checkout BEFORE a worker spawns; already-green beads close at zero token cost with full DAG completion semantics (srv 65wa0 burned 7.9M tokens over 3 empty-diff reject rounds because its suite was already green). Probe only considers scoped gates, requires bead target files, and fails open — probe faults spawn normally. Emits `prespawn_closed` event.
+
+
+
 ### Fixed
 - `IntegrateAndRemove` auto-commits a dirty main checkout (`wip: hydra auto-commit ...`) before merging — uncommitted changes the merge touches used to fail every integration ("Your local changes would be overwritten"), so gate-verified work piled up in quarantine while beads closed as completed (srv-smart-engine 2026-08-19: 9 legacy-era files blocked all integrations). Same-hunk content conflicts still quarantine as designed.
 - srv-smart-engine repo hygiene (project-side, not hydra code): `.gitattributes` union-merge for append-only files (CHANGELOG.md, docs/untestable-code-log.md) — every bead appends per PRD §3; adjacent-hunk conflicts made every worktree integration collide. Union merge keeps both sides' lines.
