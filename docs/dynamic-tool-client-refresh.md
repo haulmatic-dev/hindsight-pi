@@ -58,6 +58,18 @@ This implementation adds dynamic reinitialization of tool clients when configura
 - Configures handler that calls `overseer.UpdateConfig()` on changes
 - Graceful shutdown of watcher on signal
 
+## Project List Hot-Reload
+
+`ConfigManager.UpdateConfig` now also detects changes to `projects.list` and rebuilds the project-scoped state without restarting the daemon:
+
+- Runs `ProjectScanner.Discover()` on the new config to resolve the project list.
+- Diffs old vs new projects by name and reports added/removed/changed projects.
+- Updates `Overseer.projects`, `BeadDiscovery`, `BeadAnalyzer`, `BeadFileReader`, and `ProjectResolver` with the new project list.
+- Registers chains and queues graphify indexing for newly added projects.
+- In-flight workers for removed projects are left untouched; the scheduler simply stops discovering new beads for those projects.
+
+This fixes the case where adding a project to `hydra.yaml` while the daemon was running left its beads undiscovered until the next restart.
+
 ## Implementation Details
 
 ### Config Change Detection

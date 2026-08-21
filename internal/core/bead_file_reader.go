@@ -19,6 +19,11 @@ func NewBeadFileReader(projects []types.Project) *BeadFileReader {
 	return &BeadFileReader{projects: projects}
 }
 
+// SetProjects updates the projects list used for bead lookups.
+func (r *BeadFileReader) SetProjects(projects []types.Project) {
+	r.projects = projects
+}
+
 // FindByID searches all project issues files for a bead with the given ID.
 func (r *BeadFileReader) FindByID(beadID string) *types.Bead {
 	for _, project := range r.projects {

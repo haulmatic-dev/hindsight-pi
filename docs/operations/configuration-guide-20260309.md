@@ -736,20 +736,20 @@ export HYDRA_LOG_LEVEL=debug
 
 ### Configuration Reload
 
-Currently, Hydra requires restart to reload config:
+Hydra hot-reloads the configuration file on change. Most settings take effect without a restart:
+
+- Tool client settings (`intelligence.*`, `mcp`) are reinitialized.
+- Operational parameters (`overseer.max_workers`, `overseer.bead_discovery_interval`) are updated.
+- The `projects.list` section is diffed and rebuilt: added projects become discoverable on the next tick, and removed projects stop new spawns while in-flight workers finish.
 
 ```bash
-# 1. Stop Hydra
-pkill -f "hydra.*config"
-
-# 2. Edit config
+# 1. Edit config
 vim hydra.yaml
 
-# 3. Restart
-./bin/hydra -config hydra.yaml
+# 2. Hydra applies the change automatically on the next file poll
 ```
 
-**Future Enhancement**: Hot-reload configuration without restart.
+If a config change is invalid, the previous configuration remains active.
 
 ## Related Documentation
 

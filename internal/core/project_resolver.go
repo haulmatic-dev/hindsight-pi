@@ -17,6 +17,11 @@ func NewProjectResolver(projects []types.Project) *ProjectResolver {
 	return &ProjectResolver{projects: projects}
 }
 
+// SetProjects updates the projects list used for path resolution.
+func (r *ProjectResolver) SetProjects(projects []types.Project) {
+	r.projects = projects
+}
+
 // ResolveProjectPath finds the project path for a given bead.
 func (r *ProjectResolver) ResolveProjectPath(bead *types.Bead) string {
 	for _, project := range r.projects {

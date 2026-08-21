@@ -1,8 +1,10 @@
 package beads
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -116,6 +118,61 @@ func repoCwd(projectPath, repoName string) string {
 	return projectPath
 }
 
+// loadJSONLMetadata reads the canonical .beads/issues.jsonl and returns a map
+// of bead ID to merged metadata/bead_metadata. br's native responses do not
+// expose arbitrary metadata, but validators and workers rely on fields like
+// target_files. This fallback keeps those fields available without requiring
+// a br schema change.
+func (c *Client) loadJSONLMetadata(projectPath, repoName string) (map[string]map[string]string, error) {
+	filePath := filepath.Join(repoCwd(projectPath, repoName), ".beads", "issues.jsonl")
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var raw struct {
+			ID           string            `json:"id"`
+			Metadata     map[string]string `json:"metadata"`
+			BeadMetadata map[string]string `json:"bead_metadata"`
+		}
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			continue
+		}
+		merged := make(map[string]string)
+		for k, v := range raw.BeadMetadata {
+			merged[k] = v
+		}
+		for k, v := range raw.Metadata {
+			merged[k] = v
+		}
+		if len(merged) > 0 {
+			result[raw.ID] = merged
+		}
+	}
+	return result, nil
+}
+
+// applyJSONLMetadata overlays metadata from the canonical JSONL onto a bead.
+// It does not overwrite keys already present from the br response.
+func (c *Client) applyJSONLMetadata(bead *types.Bead, allMeta map[string]map[string]string) {
+	if bead.Metadata == nil {
+		bead.Metadata = make(map[string]string)
+	}
+	if meta, ok := allMeta[string(bead.ID)]; ok {
+		for k, v := range meta {
+			if _, exists := bead.Metadata[k]; !exists {
+				bead.Metadata[k] = v
+			}
+		}
+	}
+}
+
 // exec executes a CLI command and returns the output or a CLIError with full details
 func (c *Client) exec(cmd string, args ...string) ([]byte, error) {
 	output, err := c.executor.Execute(cmd, args...)
@@ -222,6 +279,15 @@ func (c *Client) GetReadyBeads(projectName, projectPath, repoName string) ([]typ
 		Repo:    repoName,
 	})
 
+	// Enrich metadata from the canonical JSONL. br's response format does not
+	// include arbitrary metadata, but workers and validators need fields such
+	// as target_files that are stored in issues.jsonl.
+	if meta, metaErr := c.loadJSONLMetadata(projectPath, repoName); metaErr == nil {
+		for i := range beads {
+			c.applyJSONLMetadata(&beads[i], meta)
+		}
+	}
+
 	logx.Debugf("GetReadyBeads parsed %d beads for %s", len(beads), projectPath)
 
 	return beads, err
@@ -234,7 +300,18 @@ func (c *Client) GetBead(projectPath, repoName string, beadID types.BeadID) (*ty
 	if err != nil {
 		return nil, err
 	}
-	return c.parser.ParseBeadDetail(output, c.newContext(projectPath, repoName))
+	bead, err := c.parser.ParseBeadDetail(output, c.newContext(projectPath, repoName))
+	if err != nil {
+		return nil, err
+	}
+
+	// Enrich metadata from the canonical JSONL so target_files and other
+	// metadata fields remain visible to validators and workers.
+	if meta, metaErr := c.loadJSONLMetadata(projectPath, repoName); metaErr == nil {
+		c.applyJSONLMetadata(bead, meta)
+	}
+
+	return bead, nil
 }
 
 // UpdateBeadStatus updates the status of a bead (e.g., to "in_progress")

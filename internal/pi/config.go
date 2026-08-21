@@ -48,6 +48,12 @@ func EnsureDirectory(path string, perm os.FileMode) error {
 	if err := os.MkdirAll(path, perm); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", path, err)
 	}
+	// Apply the requested mode explicitly; os.MkdirAll respects the process
+	// umask, so tests that run under a restrictive umask still see the
+	// expected permissions.
+	if err := os.Chmod(path, perm); err != nil {
+		return fmt.Errorf("failed to set permissions on %s: %w", path, err)
+	}
 	return nil
 }
 
@@ -72,6 +78,11 @@ func EnsureFile(path string, content []byte, perm os.FileMode) error {
 	// Create the file
 	if err := os.WriteFile(path, content, perm); err != nil {
 		return fmt.Errorf("failed to create file %s: %w", path, err)
+	}
+	// os.WriteFile respects the process umask; apply the requested mode
+	// explicitly so the file has the expected permissions.
+	if err := os.Chmod(path, perm); err != nil {
+		return fmt.Errorf("failed to set permissions on %s: %w", path, err)
 	}
 
 	return nil

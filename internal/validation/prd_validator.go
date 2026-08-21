@@ -95,14 +95,31 @@ func (v *PRDValidator) ValidateChainAgainstPRD(rootBead types.Bead, leafBeads []
 		}
 	}
 
-	// If no files found at all, that's a critical gap
+	// If no files found at all: when every leaf is closed, verified-close
+	// already proved diffs exist — the gap is missing target_files METADATA,
+	// not missing implementation, and minting a fix bead sends a worker
+	// wandering the repo for a phantom (kgkc7: 20.5M tokens, 2026-08-21).
+	// Advisory only. Open leaves keep it Critical.
 	if len(allFiles) == 0 {
-		result.Passed = false
+		severity := SeverityCritical
+		allClosed := len(leafBeads) > 0
+		for _, b := range leafBeads {
+			if b.Status != types.StatusClosed && b.Status != types.StatusCompleted {
+				allClosed = false
+				break
+			}
+		}
+		if allClosed {
+			severity = SeverityWarning
+		}
 		result.Gaps = append(result.Gaps, PRDGap{
 			Title:       "No Implementation Files",
 			Description: "No leaf beads have target_files metadata",
-			Severity:    SeverityCritical,
+			Severity:    severity,
 		})
+		if severity == SeverityCritical {
+			result.Passed = false
+		}
 	}
 
 	// Agent verification: compare implementation against acceptance criteria

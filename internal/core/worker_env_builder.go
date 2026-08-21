@@ -29,7 +29,18 @@ func (b *WorkerEnvBuilder) SetProviderBreaker(pb *ProviderBreaker) {
 
 // Build creates the environment variable slice for a worker process.
 func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType string, retryCount int) []string {
-	env := append(os.Environ(),
+	// Start from the parent environment, but strip any inherited
+	// HYDRA_DAEMON_GATES value. The daemon sets this flag explicitly for
+	// daemon-owned projects; an inherited value would leak the wrong state
+	// into workers and break tests that assert the flag is absent.
+	baseEnv := make([]string, 0, len(os.Environ()))
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "HYDRA_DAEMON_GATES=") {
+			baseEnv = append(baseEnv, e)
+		}
+	}
+
+	env := append(baseEnv,
 		"HYDRA_WORKER=true",
 		// Skip Pi's startup network operations (provider-list fetch). That
 		// fetch flakes when many workers launch Pi concurrently and reports a

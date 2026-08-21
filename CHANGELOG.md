@@ -8,11 +8,20 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- Phantom validation churn killed at the source: "No Implementation Files" fired purely from missing `target_files` metadata; on a fully-closed chain verified-close already proved the diffs exist. Metadata-only gap is now advisory (Warning, no fix bead) — kgkc7 burned 20.5M tokens wandering the repo on this phantom. Open leaves keep it Critical.
+
+
+
+### Fixed
+- PRD validation no longer loses `target_files` metadata: `internal/beads/client.go` now enriches beads from `.beads/issues.jsonl` `metadata`/`bead_metadata`, and leaf beads under validation chains have backfilled `target_files` (hydra-acx, hydra-f3s, hydra-l1n).
 - Gate-failure labels never applied: `UpdateBeadLabels` passed repeated `-l` flags in one `br label add`, but br's `-l` is singular (exit 2) — every `gate-failed`/`gate-failed-<gate>` label silently dropped since slice 2. Now one `br label add` per label.
 
 
 
 ### Fixed
+- Config hot-reload now applies `projects.list` changes: `ConfigManager.UpdateConfig` diffs old vs new projects, updates `beadDiscovery`, `beadAnalyzer`, `projectResolver`, and `beadFileReader`, and registers chains/indexing for added projects without disturbing in-flight workers. Previously adding a project to `hydra.yaml` required a daemon restart before its beads were discovered (round 2; hydra-ux5).
+- `WorkerEnvBuilder.Build` no longer inherits `HYDRA_DAEMON_GATES` from the daemon's environment; the flag is now set only from the project's `daemon_owned` gate config, preventing leaked state into workers and a flaky unit test under `HYDRA_DAEMON_GATES=1`.
+- `internal/pi` `EnsureDirectory` and `EnsureFile` now apply their requested permissions with `os.Chmod` so tests pass under a restrictive daemon umask.
 - Empty-diff reject loop on committed work: the verified-close diff gate only inspected `git status` (uncommitted). A worker that commits its own fix in the chain worktree leaves a clean tree → rejected as empty-diff → next worker sees the work done, no-ops, rejected again (srv 65wa0: 24.9M tokens, 2026-08-21). The gate now unions uncommitted changes with `git diff <base>...HEAD` (base = the checkout branch the worktree diverged from).
 
 
