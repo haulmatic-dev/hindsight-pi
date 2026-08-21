@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -286,5 +287,51 @@ func BenchmarkTargetlessWarningPaths(b *testing.B) {
 	}
 	for i := 0; i < b.N; i++ {
 		_ = targetlessWarningPaths(changed)
+	}
+}
+
+// 65wa0 burned 24.9M tokens in an empty-diff reject loop: the worker
+// COMMITTED its fix in the chain worktree, leaving a clean working tree —
+// and changedFiles only looked at git status (uncommitted). Next worker saw
+// the work done, no-oped, rejected again. Committed-ahead-of-base changes
+// must count as work.
+func TestChangedFiles_IncludesCommittedAheadOfBase(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	proj := gitInitRepo(t)
+	m := NewWorktreeManager()
+	wt, err := m.EnsureWorktree(proj, "proj-c1")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	base := "master"
+	if out, _ := exec.Command("git", "-C", proj, "rev-parse", "--abbrev-ref", "HEAD").Output(); strings.TrimSpace(string(out)) != "" {
+		base = strings.TrimSpace(string(out))
+	}
+	// worker commits its change; working tree clean
+	if err := os.WriteFile(filepath.Join(wt, "fixed.go"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Commit(wt, "bead(b1): fix"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	st, _ := exec.Command("git", "-C", wt, "status", "--porcelain").Output()
+	if strings.TrimSpace(string(st)) != "" {
+		t.Fatalf("precondition: working tree must be clean, got %q", st)
+	}
+
+	changed, err := changedFilesWithBase(wt, base)
+	if err != nil {
+		t.Fatalf("changedFilesWithBase: %v", err)
+	}
+	found := false
+	for _, f := range changed {
+		if f == "fixed.go" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("committed-ahead-of-base change must count, got %v", changed)
 	}
 }

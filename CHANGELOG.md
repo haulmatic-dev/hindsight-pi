@@ -8,6 +8,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- Empty-diff reject loop on committed work: the verified-close diff gate only inspected `git status` (uncommitted). A worker that commits its own fix in the chain worktree leaves a clean tree → rejected as empty-diff → next worker sees the work done, no-ops, rejected again (srv 65wa0: 24.9M tokens, 2026-08-21). The gate now unions uncommitted changes with `git diff <base>...HEAD` (base = the checkout branch the worktree diverged from).
+
+
+
+### Fixed
 - Double-spawn race: `Spawn` inserts a `{status: spawning}` placeholder before the process reaches the worker tracker; a concurrent spawn for the same bead mistook the placeholder for an untracked orphan, deleted it, and proceeded (j81fp spawned twice in one second, 2026-08-21). A "spawning" placeholder is now treated as proof of life — rejected as duplicate, never deleted.
 
 

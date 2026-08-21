@@ -501,6 +501,13 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 		}
 	}
 
+	// Base for committed-work detection: the main checkout's current branch
+	// is what the chain worktree diverged from. Empty in main-checkout mode.
+	base := ""
+	if repoPath != projectPath {
+		base = currentBranch(projectPath)
+	}
+
 	targets := beadTargetFiles(bead)
 	needDiff := c.config.Validation.RequireDiffOnClose
 	needScope := c.config.Validation.TargetScopeMode() != "off"
@@ -508,7 +515,7 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 	var changed []string
 	var changedErr error
 	if needDiff || needScope {
-		changed, changedErr = changedFiles(repoPath)
+		changed, changedErr = changedFilesWithBase(repoPath, base)
 		if changedErr != nil {
 			log.Printf("[VerifiedClose] diff check error for %s (not blocking): %v", bead.ID, changedErr)
 		}

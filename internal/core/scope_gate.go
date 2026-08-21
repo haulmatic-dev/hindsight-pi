@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"log"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -190,4 +191,45 @@ func parseGitStatusPorcelain(out string) []string {
 	}
 
 	return files
+}
+
+// changedFilesWithBase returns uncommitted changes (git status) UNION
+// committed-ahead-of-base changes (git diff base...HEAD). A worker that
+// commits its own work in the chain worktree leaves a clean working tree —
+// status-only produced empty-diff reject loops (65wa0: 24.9M tokens,
+// 2026-08-21). Base resolution failure fails open (status-only result).
+func changedFilesWithBase(repoPath, base string) ([]string, error) {
+	changed, err := changedFiles(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	if base == "" {
+		return changed, nil
+	}
+	out, err := exec.Command("git", "-C", repoPath, "diff", "--name-only", base+"...HEAD").Output()
+	if err != nil {
+		log.Printf("[VerifiedClose] base diff failed for %s (status-only, fail open): %v", repoPath, err)
+		return changed, nil
+	}
+	seen := make(map[string]bool, len(changed))
+	for _, f := range changed {
+		seen[f] = true
+	}
+	for _, f := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if f != "" && !seen[f] {
+			changed = append(changed, f)
+			seen[f] = true
+		}
+	}
+	return changed, nil
+}
+
+// currentBranch resolves the checked-out branch of a checkout (the base the
+// chain worktree diverged from).
+func currentBranch(projectPath string) string {
+	out, err := exec.Command("git", "-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
