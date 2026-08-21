@@ -386,12 +386,14 @@ func (c *Client) CreateBead(projectPath string, req types.CreateBeadRequest) (ty
 
 // UpdateBeadLabels adds labels to an existing bead using br label add.
 func (c *Client) UpdateBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error {
-	args := []string{"label", "add", string(beadID)}
+	// br's -l flag is singular: repeated flags in one invocation exit 2,
+	// which silently dropped every gate-failed label (ux5/ffh7l 2026-08-21).
 	for _, label := range labels {
-		args = append(args, "-l", label)
+		if _, err := c.execInDir(projectPath, "br", "label", "add", string(beadID), "-l", label); err != nil {
+			return err
+		}
 	}
-	_, err := c.execInDir(projectPath, "br", args...)
-	return err
+	return nil
 }
 
 // UpdateBeadDescription replaces a bead's description via br update.

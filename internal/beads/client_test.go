@@ -1124,3 +1124,27 @@ func TestCloseBead_ForceRetryLogic(t *testing.T) {
 		t.Skip("br binary not available; force-retry logic verified by code review")
 	}
 }
+
+// br's `-l` flag is singular (ArgAction::Set): two flags in one invocation
+// exit 2, so gate-failed labels never applied live (ux5/ffh7l, 2026-08-21).
+// One br label add per label.
+func TestUpdateBeadLabels_OneCallPerLabel(t *testing.T) {
+	mockExec := NewMockExecutor()
+	client := NewClientWithExecutor(mockExec)
+	if err := client.UpdateBeadLabels("/p", "", "proj-abc1", []string{"gate-failed", "gate-failed-test"}); err != nil {
+		t.Fatalf("UpdateBeadLabels: %v", err)
+	}
+	calls := mockExec.GetCalls()
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 br calls (one per label), got %d: %+v", len(calls), calls)
+	}
+	joined := []string{}
+	for _, c := range calls {
+		joined = append(joined, c.Name+" "+strings.Join(c.Args, " "))
+	}
+	want0 := "br label add proj-abc1 -l gate-failed"
+	want1 := "br label add proj-abc1 -l gate-failed-test"
+	if joined[0] != want0 || joined[1] != want1 {
+		t.Errorf("calls = %q, want [%q %q]", joined, want0, want1)
+	}
+}

@@ -8,6 +8,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- Gate-failure labels never applied: `UpdateBeadLabels` passed repeated `-l` flags in one `br label add`, but br's `-l` is singular (exit 2) — every `gate-failed`/`gate-failed-<gate>` label silently dropped since slice 2. Now one `br label add` per label.
+
+
+
+### Fixed
 - Empty-diff reject loop on committed work: the verified-close diff gate only inspected `git status` (uncommitted). A worker that commits its own fix in the chain worktree leaves a clean tree → rejected as empty-diff → next worker sees the work done, no-ops, rejected again (srv 65wa0: 24.9M tokens, 2026-08-21). The gate now unions uncommitted changes with `git diff <base>...HEAD` (base = the checkout branch the worktree diverged from).
 
 
