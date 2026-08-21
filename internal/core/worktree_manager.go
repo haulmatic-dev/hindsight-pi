@@ -108,7 +108,10 @@ func (m *WorktreeManager) Commit(worktreePath, message string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, err := gitOut(worktreePath, "add", "-A"); err != nil {
+	// .beads is daemon machinery state (status flips, DB mirror) — never
+	// product content. Union-merging id-keyed JSONL produced duplicate rows
+	// and broke br entirely (srv soe53, 2026-08-20). Exclude it from commits.
+	if _, err := gitOut(worktreePath, "add", "-A", "--", ".", ":(exclude).beads"); err != nil {
 		return false, err
 	}
 	// `diff --cached --quiet` exits 0 when nothing is staged.

@@ -74,3 +74,38 @@ func TestIntegrateAndRemove_DirtyMainAutoCommits(t *testing.T) {
 		t.Errorf("integrate commit must be visible, log:\n%s", log)
 	}
 }
+
+// .beads is daemon machinery state (status flips, DB mirror) — it must never
+// travel from a worktree back into main. Union-merge on id-keyed JSONL
+// produced duplicate rows and broke br entirely (srv soe53, 2026-08-20).
+func TestCommit_ExcludesBeadsDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	proj := gitInitRepo(t)
+	m := NewWorktreeManager()
+	wt, err := m.EnsureWorktree(proj, "proj-b1")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	// product change + machinery change
+	if err := os.WriteFile(filepath.Join(wt, "feature.go"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(wt, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".beads", "issues.jsonl"), []byte(`{"id":"x"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Commit(wt, "bead(b1): work"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	out, _ := exec.Command("git", "-C", wt, "show", "--stat", "--format=", "HEAD").Output()
+	if !strings.Contains(string(out), "feature.go") {
+		t.Errorf("product change must be committed: %s", out)
+	}
+	if strings.Contains(string(out), "issues.jsonl") {
+		t.Errorf(".beads machinery must not be committed: %s", out)
+	}
+}

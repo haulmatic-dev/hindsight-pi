@@ -8,6 +8,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- Worktree commits now exclude `.beads/` — daemon machinery state (status flips, DB mirror) must never merge back into main. Root cause of the srv soe53 breakage: `.gitattributes` union-merge on id-keyed `issues.jsonl` kept both sides' rows → duplicate ids → br refused to read the DB. Union is right for append-only prose (CHANGELOG), wrong for id-keyed JSONL; the srv repo attribute was reverted and the file repaired (last-wins dedup).
+
+
+
+### Fixed
 - Daemon-gate bypass holes found by the first dogfood run (hydra-5cl): (1) workers no longer self-close beads when `HYDRA_DAEMON_GATES=1` — closure belongs to the daemon after gates pass (worker self-close had skipped the entire gate loop); (2) worktree setup failure under `daemon_owned` now fails the spawn instead of falling back to the shared checkout (hydra-5cl edited the daemon's own live repo). Root cause of the worktree failure itself: hydra is a submodule — `/opt/dev-tools/.git/modules/components/hydra` was root-owned; chowned to hydra.
 
 
