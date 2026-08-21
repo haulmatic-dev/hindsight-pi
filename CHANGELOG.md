@@ -7,6 +7,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Fixed
+- Daemon-gate bypass holes found by the first dogfood run (hydra-5cl): (1) workers no longer self-close beads when `HYDRA_DAEMON_GATES=1` — closure belongs to the daemon after gates pass (worker self-close had skipped the entire gate loop); (2) worktree setup failure under `daemon_owned` now fails the spawn instead of falling back to the shared checkout (hydra-5cl edited the daemon's own live repo). Root cause of the worktree failure itself: hydra is a submodule — `/opt/dev-tools/.git/modules/components/hydra` was root-owned; chowned to hydra.
+
+
+
 ### Added
 - Pre-spawn gate probe: for `daemon_owned` projects, scoped gates (cmd contains `<scope>`) run in the project checkout BEFORE a worker spawns; already-green beads close at zero token cost with full DAG completion semantics (srv 65wa0 burned 7.9M tokens over 3 empty-diff reject rounds because its suite was already green). Probe only considers scoped gates, requires bead target files, and fails open — probe faults spawn normally. Emits `prespawn_closed` event.
 

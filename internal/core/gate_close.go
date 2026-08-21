@@ -120,3 +120,17 @@ func (c *BeadCloser) annotateGateFailure(bead *types.Bead, projectPath, repoName
 		log.Printf("[DaemonGates] warning: annotation for %s may be truncated", bead.ID)
 	}
 }
+
+// daemonOwnedGates reports whether a project has daemon-owned gates enabled.
+func daemonOwnedGates(cfg *Config, project string) bool {
+	if cfg == nil {
+		return false
+	}
+	for i := range cfg.Projects {
+		p := &cfg.Projects[i]
+		if p.Name == project {
+			return p.Gates != nil && p.Gates.DaemonOwned
+		}
+	}
+	return false
+}

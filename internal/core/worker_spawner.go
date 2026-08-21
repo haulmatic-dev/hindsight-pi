@@ -200,6 +200,13 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 	runDir := projectPath
 	if s.worktreeManager != nil && s.chainKeyFn != nil {
 		if wt, wtErr := s.worktreeManager.EnsureWorktree(projectPath, s.chainKeyFn(bead)); wtErr != nil {
+			// Daemon-owned gates require isolation: the close-path gate runs in
+			// the chain worktree and refuses main-checkout execution. Falling
+			// back to the shared checkout also let hydra-5cl edit the daemon's
+			// own live repo directly (2026-08-20). Fail closed instead.
+			if daemonOwnedGates(s.config, bead.Project) {
+				return nil, fmt.Errorf("worktree setup failed for %s and project has daemon_owned gates (no shared-checkout fallback): %w", bead.ID, wtErr)
+			}
 			log.Printf("[Worktree] setup failed for %s (using shared checkout): %v", bead.ID, wtErr)
 		} else {
 			// Fail-early dependency gate (bead hydra-code-jwrh): never spawn a

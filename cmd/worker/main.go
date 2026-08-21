@@ -2461,6 +2461,14 @@ func streamLog(client *mcp.Client, level, message string) {
 // closeBeadFromWorker closes the bead using the beads CLI directly from the worker
 // This makes the worker self-contained and resilient to overseer failures
 func closeBeadFromWorker(bead types.Bead, projectPath, repoName, reason string) error {
+	// Daemon-owned gates (FR-002): closure belongs to the daemon, after gates
+	// pass. A worker self-close skips the entire gate loop — first dogfood run
+	// (hydra-5cl, 2026-08-20) bypassed every gate this way.
+	if os.Getenv("HYDRA_DAEMON_GATES") == "1" {
+		log.Printf("🔒 Daemon-owned gates: worker does not close %s; the daemon closes after gates pass", bead.ID)
+		return nil
+	}
+
 	// Use the beads CLI to close the bead
 	// Command: br close <bead-id> -m <reason>
 

@@ -136,3 +136,23 @@ func TestDaemonGates_ScopeFromTargetFiles(t *testing.T) {
 		t.Errorf("scope must come from bead target files, log: %q", data)
 	}
 }
+
+func TestDaemonOwnedGatesLookup(t *testing.T) {
+	cfg := &Config{Projects: []ProjectConfig{
+		{Name: "on", Gates: &GateSet{DaemonOwned: true}},
+		{Name: "off", Gates: &GateSet{DaemonOwned: false}},
+		{Name: "none"},
+	}}
+	if !daemonOwnedGates(cfg, "on") {
+		t.Error("daemon_owned=true must report true")
+	}
+	if daemonOwnedGates(cfg, "off") {
+		t.Error("daemon_owned=false must report false")
+	}
+	if daemonOwnedGates(cfg, "none") {
+		t.Error("missing gates block must report false")
+	}
+	if daemonOwnedGates(nil, "on") {
+		t.Error("nil config must report false")
+	}
+}

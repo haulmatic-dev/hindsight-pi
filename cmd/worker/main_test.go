@@ -201,3 +201,18 @@ func TestCloseBeadFromWorker_SkipsNonWorkspace(t *testing.T) {
 	}
 }
 
+
+// Daemon-owned gates: the worker must NOT self-close — closure is the
+// daemon's job after gates pass. Self-close bypassed the entire gate loop on
+// the first dogfood run (hydra-5cl, 2026-08-20): worktree fallback put the
+// worker in the main checkout, it closed its own bead out-of-band, and
+// BeadCloser.Close skipped the terminal bead — zero gates ran.
+func TestCloseBeadFromWorker_SkipsWhenDaemonGates(t *testing.T) {
+	t.Setenv("HYDRA_DAEMON_GATES", "1")
+	bead := types.Bead{ID: "hydra-test-456", Project: "hydra"}
+	// Even a valid workspace must not be closed by the worker: return nil
+	// without invoking br.
+	if err := closeBeadFromWorker(bead, os.Getenv("HOME"), "", "completed"); err != nil {
+		t.Errorf("daemon-gates skip must return nil, got %v", err)
+	}
+}
