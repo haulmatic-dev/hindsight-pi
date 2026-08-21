@@ -94,3 +94,18 @@ func TestPrespawnProbe_RunnerFaultFailsOpen(t *testing.T) {
 		t.Error("probe fault must fail OPEN (spawn normally), never block work")
 	}
 }
+
+// Scheduler-path beads carry an empty Project field — the project lives in
+// the bead ID prefix (the codebase pattern: worker.BeadID.Project()). The
+// probe used bead.Project directly and silently never fired (zero Prespawn
+// log lines while 65wa0 burned 20.7M tokens, 2026-08-21).
+func TestBeadProject_DerivesFromID(t *testing.T) {
+	b := &types.Bead{ID: "srv-smart-engine-65wa0"} // Project field empty
+	if got := beadProject(b); got != "srv-smart-engine" {
+		t.Errorf("beadProject = %q, want srv-smart-engine", got)
+	}
+	b2 := &types.Bead{ID: "srv-smart-engine-x", Project: "explicit"}
+	if got := beadProject(b2); got != "explicit" {
+		t.Errorf("explicit Project field wins, got %q", got)
+	}
+}

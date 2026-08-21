@@ -8,6 +8,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- Pre-spawn probe never fired: scheduler-path beads carry an empty `Project` field (the project lives in the bead ID prefix — the codebase pattern is `BeadID.Project()`); the probe's config lookup missed and silently skipped. Zero `Prespawn` log lines while 65wa0 burned 20.7M tokens across empty-diff rounds. Probe now derives project via `beadProject()` (explicit field, then ID prefix).
+
+
+
+### Fixed
 - Worktree commits now exclude `.beads/` — daemon machinery state (status flips, DB mirror) must never merge back into main. Root cause of the srv soe53 breakage: `.gitattributes` union-merge on id-keyed `issues.jsonl` kept both sides' rows → duplicate ids → br refused to read the DB. Union is right for append-only prose (CHANGELOG), wrong for id-keyed JSONL; the srv repo attribute was reverted and the file repaired (last-wins dedup).
 
 

@@ -17,6 +17,17 @@ import (
 // The probe is an OPTIMIZATION: it fails open (any error → spawn normally)
 // and only considers scoped gates (full-suite probes are too expensive).
 
+// beadProject resolves a bead's project: explicit field first, then the ID
+// prefix (scheduler-path beads carry an empty Project field — the codebase
+// pattern is worker.BeadID.Project()). The probe's silent no-fire on 65wa0
+// (20.7M tokens, 2026-08-21) was exactly this lookup missing.
+func beadProject(bead *types.Bead) string {
+	if bead.Project != "" {
+		return bead.Project
+	}
+	return bead.ID.Project()
+}
+
 // PrespawnProbePasses reports whether every scoped gate for the bead passes
 // in the project checkout. Any fault, missing scope, unscoped gate, or
 // daemon_owned=false returns false (spawn normally).
@@ -45,7 +56,7 @@ func PrespawnProbePasses(runner *GateRunner, gates *GateSet, bead *types.Bead, p
 		}
 		probed = true
 		a, err := runner.RunGate(GateRequest{
-			Project: bead.Project, BeadID: string(bead.ID), Gate: "prespawn-" + g.name,
+			Project: beadProject(bead), BeadID: string(bead.ID), Gate: "prespawn-" + g.name,
 			Spec:              g.spec,
 			ProjectPath:       projectPath,
 			WorktreePath:      projectPath,
@@ -74,7 +85,7 @@ func (o *Overseer) prespawnCloseIfGreen(bead types.Bead) bool {
 	if o.beadCloser == nil || o.beadCloser.gateRunner == nil {
 		return false
 	}
-	projectName := bead.Project
+	projectName := beadProject(&bead)
 	var gates *GateSet
 	if o.config != nil {
 		for i := range o.config.Projects {
