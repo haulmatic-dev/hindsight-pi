@@ -69,6 +69,7 @@ projects:
 	config.Intelligence.GPTCache.Enabled = false
 	config.ComplianceCycle.Enabled = false
 	config.Overseer.ResourceMonitoring.MaxMemoryPercent = 100.0
+	config.Overseer.ResourceMonitoring.MaxCPUPercent = 100.0 // keep CPU throttling from blocking spawn under fleet load
 
 	overseer := NewOverseer(config)
 
@@ -127,14 +128,27 @@ projects:
 		t.Fatalf("tick failed: %v", err)
 	}
 
-	// Give scheduler time to spawn workers before fake worker completes
-	time.Sleep(200 * time.Millisecond)
+	// Poll for worker spawn; fixed sleeps flake under load on shared CI runners.
+	var activeCount int
+	deadline := time.After(10 * time.Second)
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+poll:
+	for {
+		select {
+		case <-deadline:
+			break poll
+		case <-tick.C:
+			overseer.workerMutex.RLock()
+			activeCount = len(overseer.activeWorkers)
+			overseer.workerMutex.RUnlock()
+			if activeCount > 0 {
+				break poll
+			}
+		}
+	}
 
 	// ── Verify workers were spawned ──────────────────────────
-	overseer.workerMutex.RLock()
-	activeCount := len(overseer.activeWorkers)
-	overseer.workerMutex.RUnlock()
-
 	if activeCount == 0 {
 		t.Fatalf("expected workers to be spawned, got 0 (DAG ready=%d)", len(readyNodes))
 	}

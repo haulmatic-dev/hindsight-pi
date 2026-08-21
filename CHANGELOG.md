@@ -13,6 +13,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 ### Fixed
+- `TestMultiUser_EndToEnd` no longer relies on a fixed 200 ms sleep to assert worker spawns; it polls active workers every 25 ms with a 10 s deadline, so the test passes reliably under load when the live fleet shares the hydra user's GOCACHE/CPU. Removes the gate skip for this test.
 - `IntegrateAndRemove` auto-commits a dirty main checkout (`wip: hydra auto-commit ...`) before merging — uncommitted changes the merge touches used to fail every integration ("Your local changes would be overwritten"), so gate-verified work piled up in quarantine while beads closed as completed (srv-smart-engine 2026-08-19: 9 legacy-era files blocked all integrations). Same-hunk content conflicts still quarantine as designed.
 - srv-smart-engine repo hygiene (project-side, not hydra code): `.gitattributes` union-merge for append-only files (CHANGELOG.md, docs/untestable-code-log.md) — every bead appends per PRD §3; adjacent-hunk conflicts made every worktree integration collide. Union merge keeps both sides' lines.
 
