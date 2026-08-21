@@ -100,6 +100,14 @@ func (s *WorkerSpawner) Spawn(bead types.Bead) error {
 					return fmt.Errorf("worker already exists for bead %s", beadIDStr)
 				}
 			} else {
+				// A {status: spawning} placeholder is an in-flight spawn that has
+				// not reached the tracker yet — proof of life, NOT an orphan.
+				// Deleting it here double-spawned j81fp (2026-08-21).
+				if existing, ok := s.activeWorkers[beadIDStr]; ok && existing.Status == "spawning" {
+					s.workerMutex.Unlock()
+					s.errorLogger.Error("spawnWorker", "duplicate_check", beadIDStr, fmt.Errorf("spawn already in flight"), "warn")
+					return fmt.Errorf("spawn already in flight for bead %s", beadIDStr)
+				}
 				log.Printf("[Overseer] Cleaning up orphan worker %s (not in tracker)", beadIDStr)
 				delete(s.activeWorkers, beadIDStr)
 			}

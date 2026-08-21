@@ -8,6 +8,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- Double-spawn race: `Spawn` inserts a `{status: spawning}` placeholder before the process reaches the worker tracker; a concurrent spawn for the same bead mistook the placeholder for an untracked orphan, deleted it, and proceeded (j81fp spawned twice in one second, 2026-08-21). A "spawning" placeholder is now treated as proof of life — rejected as duplicate, never deleted.
+
+
+
+### Fixed
 - Pre-spawn probe never fired: scheduler-path beads carry an empty `Project` field (the project lives in the bead ID prefix — the codebase pattern is `BeadID.Project()`); the probe's config lookup missed and silently skipped. Zero `Prespawn` log lines while 65wa0 burned 20.7M tokens across empty-diff rounds. Probe now derives project via `beadProject()` (explicit field, then ID prefix).
 
 
