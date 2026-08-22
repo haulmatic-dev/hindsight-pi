@@ -1,6 +1,7 @@
 package core
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -25,7 +26,8 @@ func TestPrespawnProbe_AlreadyGreen(t *testing.T) {
 	}
 	bead := &types.Bead{ID: "proj-p1", Project: "proj",
 		Metadata: map[string]string{"files": "src/x/a.spec.ts"}}
-	if !PrespawnProbePasses(r, gates, bead, t.TempDir()) {
+	pass_, _ := PrespawnProbePasses(r, gates, bead, t.TempDir())
+	if !pass_ {
 		t.Error("passing scoped gate must report already-green")
 	}
 }
@@ -38,7 +40,8 @@ func TestPrespawnProbe_RedSpawns(t *testing.T) {
 	}
 	bead := &types.Bead{ID: "proj-p2", Project: "proj",
 		Metadata: map[string]string{"files": "src/x/a.spec.ts"}}
-	if PrespawnProbePasses(r, gates, bead, t.TempDir()) {
+	pass_, _ := PrespawnProbePasses(r, gates, bead, t.TempDir())
+	if pass_ {
 		t.Error("failing scoped gate must spawn a worker")
 	}
 }
@@ -52,7 +55,8 @@ func TestPrespawnProbe_SkipsUnscopedGates(t *testing.T) {
 	}
 	bead := &types.Bead{ID: "proj-p3", Project: "proj",
 		Metadata: map[string]string{"files": "src/x/a.spec.ts"}}
-	if PrespawnProbePasses(r, gates, bead, t.TempDir()) {
+	pass_, _ := PrespawnProbePasses(r, gates, bead, t.TempDir())
+	if pass_ {
 		t.Error("unscoped gates must not be probed pre-spawn")
 	}
 }
@@ -64,7 +68,8 @@ func TestPrespawnProbe_NoTargetsSpawns(t *testing.T) {
 		Test:        GateSpec{Cmd: "true # <scope>", Parser: "exit-code"},
 	}
 	bead := &types.Bead{ID: "proj-p4", Project: "proj"}
-	if PrespawnProbePasses(r, gates, bead, t.TempDir()) {
+	pass_, _ := PrespawnProbePasses(r, gates, bead, t.TempDir())
+	if pass_ {
 		t.Error("no target files = no scope = no probe")
 	}
 }
@@ -77,7 +82,8 @@ func TestPrespawnProbe_DisabledSpawns(t *testing.T) {
 	}
 	bead := &types.Bead{ID: "proj-p5", Project: "proj",
 		Metadata: map[string]string{"files": "src/x/a.spec.ts"}}
-	if PrespawnProbePasses(r, gates, bead, t.TempDir()) {
+	pass_, _ := PrespawnProbePasses(r, gates, bead, t.TempDir())
+	if pass_ {
 		t.Error("daemon_owned=false must never probe")
 	}
 }
@@ -90,7 +96,8 @@ func TestPrespawnProbe_RunnerFaultFailsOpen(t *testing.T) {
 	}
 	bead := &types.Bead{ID: "proj-p6", Project: "proj",
 		Metadata: map[string]string{"files": "src/x/a.spec.ts"}}
-	if PrespawnProbePasses(r, gates, bead, t.TempDir()) {
+	pass_, _ := PrespawnProbePasses(r, gates, bead, t.TempDir())
+	if pass_ {
 		t.Error("probe fault must fail OPEN (spawn normally), never block work")
 	}
 }
@@ -107,5 +114,54 @@ func TestBeadProject_DerivesFromID(t *testing.T) {
 	b2 := &types.Bead{ID: "srv-smart-engine-x", Project: "explicit"}
 	if got := beadProject(b2); got != "explicit" {
 		t.Errorf("explicit Project field wins, got %q", got)
+	}
+}
+
+// Option A (context priming): a RED probe knows exactly why the suite fails —
+// the worker currently burns 3-5 discovery turns (and ~100K context each)
+// re-deriving it. The probe must hand the evidence over: artifact with
+// summary + raw log path on red.
+func TestPrespawnProbe_RedReturnsEvidence(t *testing.T) {
+	r := NewGateRunner(t.TempDir())
+	gates := &GateSet{
+		DaemonOwned: true,
+		Test:        GateSpec{Cmd: "echo 'FAIL src/x/a.spec.ts: expected 1 got 2' >&2; false # <scope>", Parser: "exit-code"},
+	}
+	bead := &types.Bead{ID: "proj-p9", Project: "proj",
+		Metadata: map[string]string{"files": "src/x/a.spec.ts"}}
+	pass, ev := PrespawnProbePasses(r, gates, bead, t.TempDir())
+	if pass {
+		t.Fatal("red gate must not pass")
+	}
+	if ev == nil {
+		t.Fatal("red probe must return the evidence artifact")
+	}
+	if !strings.Contains(ev.Summary, "expected 1 got 2") {
+		t.Errorf("evidence summary must carry the failure, got %q", ev.Summary)
+	}
+	if ev.RawLog == "" {
+		t.Error("evidence must carry the raw log path")
+	}
+	if ev.Gate != "prespawn-test" {
+		t.Errorf("evidence gate = %q, want prespawn-test", ev.Gate)
+	}
+}
+
+// Probe evidence lands in the bead description marker-delimited: repeated
+// probes REPLACE the block instead of growing the description forever.
+func TestAppendProbeEvidence_ReplacesPriorBlock(t *testing.T) {
+	d1 := appendProbeEvidence("orig desc", "prespawn-test", GateArtifact{Summary: "first failure", RawLog: "/l1"})
+	if !strings.Contains(d1, "orig desc") || !strings.Contains(d1, "first failure") || !strings.Contains(d1, "/l1") {
+		t.Fatalf("evidence must append to description, got %q", d1)
+	}
+	d2 := appendProbeEvidence(d1, "prespawn-test", GateArtifact{Summary: "second failure", RawLog: "/l2"})
+	if strings.Contains(d2, "first failure") {
+		t.Error("second probe must replace the prior evidence block")
+	}
+	if !strings.Contains(d2, "second failure") {
+		t.Error("second probe evidence must be present")
+	}
+	if strings.Count(d2, "prespawn-evidence") != 2 { // open + close markers
+		t.Errorf("markers must appear exactly once each, got %q", d2)
 	}
 }

@@ -7,6 +7,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Pre-spawn probe now primes the worker prompt on RED: the probe already knows why the scoped gate fails, so its parsed summary + raw log path are written into the bead description (marker-delimited, replaced on re-probe) before spawning. Workers were burning 3-5 discovery turns at ~100K context each re-deriving the failure. Green path unchanged (0-token close); faults still fail open.
+
+
+
 ### Fixed
 - Integration no longer quarantines on `.beads/`-only merge conflicts: the beads mirror is br-owned on main, worktree-side writes are redundant, so conflicts confined to `.beads/` auto-resolve `--ours` and the merge proceeds (65wa0's gate-proven suite fix quarantined on a mirror row, 2026-08-21). Real-code conflicts still abort + quarantine.
 

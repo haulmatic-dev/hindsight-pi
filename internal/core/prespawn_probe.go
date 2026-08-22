@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"log"
 	"strings"
 
@@ -30,14 +31,18 @@ func beadProject(bead *types.Bead) string {
 
 // PrespawnProbePasses reports whether every scoped gate for the bead passes
 // in the project checkout. Any fault, missing scope, unscoped gate, or
-// daemon_owned=false returns false (spawn normally).
-func PrespawnProbePasses(runner *GateRunner, gates *GateSet, bead *types.Bead, projectPath string) bool {
+// daemon_owned=false returns false (spawn normally). A RED gate also returns
+// the evidence artifact (parsed summary + raw log path) so the caller can
+// prime the worker prompt — option A: the probe already knows why the suite
+// fails; spawning blind makes the worker burn 3-5 discovery turns at ~100K
+// context each re-deriving it.
+func PrespawnProbePasses(runner *GateRunner, gates *GateSet, bead *types.Bead, projectPath string) (bool, *GateArtifact) {
 	if runner == nil || gates == nil || !gates.DaemonOwned {
-		return false
+		return false, nil
 	}
 	targets := beadTargetFiles(bead)
 	if len(targets) == 0 {
-		return false
+		return false, nil
 	}
 	scope := targets[0]
 
@@ -65,17 +70,37 @@ func PrespawnProbePasses(runner *GateRunner, gates *GateSet, bead *types.Bead, p
 		})
 		if err != nil {
 			log.Printf("[Prespawn] %s probe %s fault (failing open, spawning): %v", bead.ID, g.name, err)
-			return false
+			return false, nil
 		}
 		if a.Status != GateStatusPassed {
 			log.Printf("[Prespawn] %s probe %s FAILED — spawning worker (summary: %.200s)", bead.ID, g.name, a.Summary)
-			return false
+			return false, &a
 		}
 	}
 	if probed {
 		log.Printf("[Prespawn] %s already green on scoped gates — closing without a worker (0 tokens)", bead.ID)
 	}
-	return probed
+	return probed, nil
+}
+
+// appendProbeEvidence attaches probe evidence to a bead description in a
+// marker-delimited block; repeated probes REPLACE the block so descriptions
+// do not grow without bound across retries.
+func appendProbeEvidence(desc, gate string, a GateArtifact) string {
+	const open = "\n\n<!-- prespawn-evidence -->\n"
+	const close = "\n<!-- /prespawn-evidence -->"
+	if i := strings.Index(desc, open); i >= 0 {
+		if j := strings.Index(desc[i:], close); j >= 0 {
+			desc = desc[:i] + desc[i+j+len(close):]
+		}
+	}
+	ev := fmt.Sprintf("%s[daemon prespawn probe: gate `%s` is RED on the working branch — fix this directly, do NOT re-run the full suite to rediscover it]\n%s\nraw log: %s%s",
+		open, gate, a.Summary, a.RawLog, close)
+	desc += ev
+	if len(desc) > 6000 {
+		desc = desc[:6000]
+	}
+	return desc
 }
 
 // prespawnCloseIfGreen runs the probe and, when green, closes the bead and
@@ -102,7 +127,14 @@ func (o *Overseer) prespawnCloseIfGreen(bead types.Bead) bool {
 	if projectPath == "" {
 		return false
 	}
-	if !PrespawnProbePasses(o.beadCloser.gateRunner, gates, &bead, projectPath) {
+	pass, evidence := PrespawnProbePasses(o.beadCloser.gateRunner, gates, &bead, projectPath)
+	if !pass {
+		if evidence != nil && o.beadsClient != nil {
+			desc := appendProbeEvidence(bead.Description, evidence.Gate, *evidence)
+			if err := o.beadsClient.UpdateBeadDescription(projectPath, bead.ID.Repo(), bead.ID, desc); err != nil {
+				log.Printf("[Prespawn] %s evidence annotation failed (fail open): %v", bead.ID, err)
+			}
+		}
 		return false
 	}
 
