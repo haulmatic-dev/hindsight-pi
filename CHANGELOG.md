@@ -7,6 +7,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Fixed
+- Integration no longer quarantines on `.beads/`-only merge conflicts: the beads mirror is br-owned on main, worktree-side writes are redundant, so conflicts confined to `.beads/` auto-resolve `--ours` and the merge proceeds (65wa0's gate-proven suite fix quarantined on a mirror row, 2026-08-21). Real-code conflicts still abort + quarantine.
+
+
+
 ### Added
 - Per-bead token budget (`overseer.max_bead_tokens`, 0 = disabled): Charon kills a *working* worker whose cumulative tokens exceed the ceiling and marks the bead failed so the retry cap escalates, labelled `token-budget-exceeded`. Non-converging grinders were burning 18-25M before the wall-clock timeout noticed (kgkc7 20.5M, soe53 18.2M). Parked workers are never budget-killed — frozen workers burn nothing.
 

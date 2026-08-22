@@ -142,9 +142,25 @@ func (m *WorktreeManager) IntegrateAndRemove(projectPath, key string) error {
 	autoCommitDirtyMain(projectPath)
 
 	if _, err := gitOut(projectPath, "merge", "--no-ff", "-m", "hydra: integrate "+branch, branch); err != nil {
+		// .beads/ is a br-owned mirror: br state on main is the source of
+		// truth and worktree-side writes are redundant, so a conflict
+		// confined to .beads/ resolves --ours. It quarantined 65wa0's
+		// gate-proven fix on a mirror row (2026-08-21). Real-code
+		// conflicts still abort + quarantine.
+		if beadsOnlyConflict(projectPath) {
+			if _, oerr := gitOut(projectPath, "checkout", "--ours", "--", ".beads"); oerr == nil {
+				_, _ = gitOut(projectPath, "add", ".beads")
+				if _, cerr := gitOut(projectPath, "commit", "--no-edit"); cerr == nil {
+					log.Printf("[Worktree] auto-resolved .beads-only merge conflict (--ours) integrating %s", branch)
+					goto merged
+				}
+			}
+		}
 		_, _ = gitOut(projectPath, "merge", "--abort")
 		return fmt.Errorf("integrate %s failed (worktree left at %s for inspection): %w", branch, wtPath, err)
 	}
+
+merged:
 
 	if isGitWorktree(wtPath) {
 		_, _ = gitOut(projectPath, "worktree", "remove", wtPath, "--force")
@@ -152,6 +168,21 @@ func (m *WorktreeManager) IntegrateAndRemove(projectPath, key string) error {
 	_, _ = gitOut(projectPath, "branch", "-D", branch)
 	_, _ = gitOut(projectPath, "worktree", "prune")
 	return nil
+}
+
+// beadsOnlyConflict reports whether every unmerged path in a failed merge
+// lives under .beads/ (the br-owned mirror — safe to resolve --ours).
+func beadsOnlyConflict(projectPath string) bool {
+	out, err := gitOut(projectPath, "diff", "--name-only", "--diff-filter=U")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return false
+	}
+	for _, p := range strings.Split(strings.TrimSpace(out), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(p), ".beads/") && strings.TrimSpace(p) != ".beads" {
+			return false
+		}
+	}
+	return true
 }
 
 // QuarantineAndRemove preserves a failed chain's work on a quarantine branch

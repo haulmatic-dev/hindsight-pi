@@ -109,3 +109,67 @@ func TestCommit_ExcludesBeadsDir(t *testing.T) {
 		t.Errorf(".beads machinery must not be committed: %s", out)
 	}
 }
+
+// .beads/issues.jsonl is a br-owned mirror: both main and the chain worktree
+// write it, so it conflicts on EVERY integration that carries beads writes
+// (65wa0's gate-proven suite fix quarantined on a .beads-only conflict,
+// 2026-08-21). br state on main is the source of truth; worktree-side beads
+// writes are redundant. IntegrateAndRemove must auto-resolve conflicts that
+// are confined to .beads/ with --ours and proceed. Real-code conflicts still
+// quarantine.
+func TestIntegrateAndRemove_BeadsOnlyConflictAutoResolves(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	proj := gitInitRepo(t)
+	m := NewWorktreeManager()
+
+	beads := filepath.Join(proj, ".beads")
+	if err := os.MkdirAll(beads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beads, "issues.jsonl"), []byte("{\"id\":\"main-1\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(dir string, args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run(proj, "add", ".beads/issues.jsonl")
+	run(proj, "commit", "-m", "add beads mirror")
+
+	wt, err := m.EnsureWorktree(proj, "proj-beads1")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	// worktree: real change + a beads write
+	if err := os.WriteFile(filepath.Join(wt, "fix.go"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".beads", "issues.jsonl"), []byte("{\"id\":\"wt-1\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(wt, "add", "-A")
+	run(wt, "commit", "-m", "work + beads write")
+
+	// main: conflicting beads write
+	if err := os.WriteFile(filepath.Join(beads, "issues.jsonl"), []byte("{\"id\":\"main-2\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(proj, "commit", "-am", "main beads write")
+
+	if err := m.IntegrateAndRemove(proj, "proj-beads1"); err != nil {
+		t.Fatalf("beads-only conflict must auto-resolve with --ours, got: %v", err)
+	}
+	// real change landed
+	if _, err := os.Stat(filepath.Join(proj, "fix.go")); err != nil {
+		t.Error("fix.go must be integrated")
+	}
+	// main's beads mirror kept
+	content, _ := os.ReadFile(filepath.Join(beads, "issues.jsonl"))
+	if !strings.Contains(string(content), "main-2") {
+		t.Errorf(".beads must resolve to ours, got %q", content)
+	}
+}
