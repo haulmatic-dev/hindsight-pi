@@ -459,6 +459,11 @@ type OverseerConfig struct {
 	// worker spawns, the adjudicator, and validation — so they stop refusing
 	// each other's calls (Shepherd B3).
 	ProviderPool PoolConfig `yaml:"provider_pool"`
+	// MaxBeadTokens is the cumulative per-bead token ceiling enforced by
+	// Charon: a working worker past the ceiling is killed and escalated via
+	// the retry cap (0 = disabled). Non-converging grinders otherwise burn
+	// 18-25M before the wall-clock timeout notices them.
+	MaxBeadTokens int64 `yaml:"max_bead_tokens"`
 	// WorktreeIsolation runs each chain in its own git worktree and commits
 	// its work on verified-close, integrating back to the working branch on
 	// chain completion. Off by default (opt-in).

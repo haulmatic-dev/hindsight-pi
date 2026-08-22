@@ -7,6 +7,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Per-bead token budget (`overseer.max_bead_tokens`, 0 = disabled): Charon kills a *working* worker whose cumulative tokens exceed the ceiling and marks the bead failed so the retry cap escalates, labelled `token-budget-exceeded`. Non-converging grinders were burning 18-25M before the wall-clock timeout noticed (kgkc7 20.5M, soe53 18.2M). Parked workers are never budget-killed — frozen workers burn nothing.
+
+
+
 ### Fixed
 - Phantom validation churn killed at the source: "No Implementation Files" fired purely from missing `target_files` metadata; on a fully-closed chain verified-close already proved the diffs exist. Metadata-only gap is now advisory (Warning, no fix bead) — kgkc7 burned 20.5M tokens wandering the repo on this phantom. Open leaves keep it Critical.
 

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -102,5 +103,51 @@ func TestStuckDecision_NilRegistryIsLegacy(t *testing.T) {
 	kill, _ := c.shouldKillAsStuck(pastTimeoutRecord("b1"), time.Now())
 	if !kill {
 		t.Errorf("nil registry = legacy wall-clock behavior")
+	}
+}
+
+// Token budget (option D): a non-converging worker grinds 200+ turns at
+// ~100K context each (kgkc7 20.5M, soe53 18.2M — 2026-08-21). Charon must
+// kill workers whose cumulative tokens exceed overseer.max_bead_tokens and
+// let the retry cap escalate, instead of letting them burn to timeout.
+// Parked workers burn nothing — never budget-killed.
+func TestCharon_TokenBudgetKillsRunaway(t *testing.T) {
+	c, st := registryCharon(t)
+	c.SetMaxBeadTokens(3_000_000)
+	rec := pastTimeoutRecord("proj-burn1")
+
+	upsertLive(t, st, "proj-burn1", registry.StateWorking, 0)
+	if err := st.Heartbeat("proj-burn1", 5_000_000); err != nil {
+		t.Fatalf("AddTokens: %v", err)
+	}
+	kill, reason := c.shouldKillAsStuck(rec, time.Now())
+	if !kill {
+		t.Fatal("worker over token budget must be killed")
+	}
+	if !strings.Contains(reason, "token budget") {
+		t.Errorf("reason %q must name the token budget", reason)
+	}
+}
+
+func TestCharon_TokenBudgetSparesParkedAndDisabled(t *testing.T) {
+	c, st := registryCharon(t)
+	c.SetMaxBeadTokens(3_000_000)
+	rec := pastTimeoutRecord("proj-park1")
+	upsertLive(t, st, "proj-park1", registry.StateParked, 0)
+	if err := st.Heartbeat("proj-park1", 9_000_000); err != nil {
+		t.Fatalf("AddTokens: %v", err)
+	}
+	if kill, _ := c.shouldKillAsStuck(rec, time.Now()); kill {
+		t.Error("parked worker must never be budget-killed (it burns nothing)")
+	}
+
+	c2, st2 := registryCharon(t) // budget disabled (0)
+	rec2 := pastTimeoutRecord("proj-burn2")
+	upsertLive(t, st2, "proj-burn2", registry.StateWorking, 0)
+	if err := st2.Heartbeat("proj-burn2", 50_000_000); err != nil {
+		t.Fatalf("AddTokens: %v", err)
+	}
+	if kill, _ := c2.shouldKillAsStuck(rec2, time.Now()); kill {
+		t.Error("budget 0 (disabled) must never kill")
 	}
 }

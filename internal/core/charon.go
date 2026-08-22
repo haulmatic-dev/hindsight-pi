@@ -33,6 +33,7 @@ type Charon struct {
 	lastRegistryReap      time.Time // throttles the ghost-registry-row sweep
 	registryStore         *registry.Store
 	heartbeatHungAfter    time.Duration // stale registry heartbeat → hung worker
+	maxBeadTokens         int64         // cumulative per-bead token ceiling (0 = disabled)
 }
 
 // JanitorStats tracks cleanup statistics
@@ -52,6 +53,12 @@ type JanitorStats struct {
 }
 
 // NewCharon creates a new orphan process janitor with timeout for stuck worker detection
+// SetMaxBeadTokens sets the per-bead cumulative token ceiling (0 disables).
+// Non-converging workers grind 200+ turns at ~100K context each (kgkc7
+// 20.5M, soe53 18.2M — 2026-08-21); the cap kills them and lets the retry
+// manager escalate instead of burning to the wall-clock timeout.
+func (j *Charon) SetMaxBeadTokens(n int64) { j.maxBeadTokens = n }
+
 func NewCharon(beadsClient *beads.Client, workerTracker *WorkerTracker, workerTimeout time.Duration) *Charon {
 	return &Charon{
 		beadsClient:        beadsClient,
@@ -305,6 +312,11 @@ func (j *Charon) performCleanup() {
 			j.workerTracker.MarkWorkerCompleted(pid, -2) // -2 indicates timeout
 			// Mark bead as failed so it can be retried
 			j.markBeadFailed(beadID, fmt.Sprintf("Worker timed out after %v", runtime))
+			if strings.Contains(reason, "token budget") && j.beadsClient != nil {
+				if err := j.beadsClient.UpdateBeadLabels(record.ProjectPath, "", types.BeadID(beadID), []string{"token-budget-exceeded"}); err != nil {
+					log.Printf("[Charon] budget label failed for %s (fail open): %v", beadID, err)
+				}
+			}
 			log.Printf("[Charon] ✅ Killed stuck worker process group PGID %d, marked bead %s as failed for retry", pgid, beadID)
 		}
 	}
@@ -379,6 +391,10 @@ func (j *Charon) shouldKillAsStuck(record *WorkerRecord, now time.Time) (kill bo
 	if j.registryStore != nil {
 		row, ok, err := j.registryStore.GetWorker(record.BeadID)
 		if err == nil && ok {
+			// Token budget: only working workers burn; parked are frozen at 0.
+			if j.maxBeadTokens > 0 && row.State == registry.StateWorking && row.TokensSoFar > j.maxBeadTokens {
+				return true, fmt.Sprintf("token budget exceeded (%d > %d)", row.TokensSoFar, j.maxBeadTokens)
+			}
 			age := now.Sub(row.LastHeartbeat)
 			if age > j.heartbeatHungAfter {
 				return true, fmt.Sprintf("registry heartbeat stale for %v (threshold %v), state=%s — hung", age, j.heartbeatHungAfter, row.State)

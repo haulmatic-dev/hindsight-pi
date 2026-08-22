@@ -19,6 +19,11 @@ overseer:
   retry_delay: 30s
 
   # How long a single worker can run before being considered stuck
+  # Cumulative per-bead token ceiling. Charon kills a working worker past
+  # this and escalates via the retry cap (0 = disabled). Grinders were
+  # burning 18-25M tokens before the timeout noticed. Suggested: 5000000.
+  max_bead_tokens: 0
+
   worker_timeout: 10m
 
   # How long to wait for a worker to accept a handoff
