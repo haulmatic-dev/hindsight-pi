@@ -303,6 +303,7 @@ func NewOverseer(config *Config) *Overseer {
 	}
 	o.orphanJanitor = NewCharon(o.beadsClient.(*beads.Client), o.workerTracker, workerTimeout)
 	o.orphanJanitor.SetMaxBeadTokens(config.Overseer.MaxBeadTokens)
+	o.orphanJanitor.SetRetryManager(o.retryManager)
 	o.orphanJanitor.SetProjectsProvider(o.GetProjects)
 	// Inject access to the in-memory activeWorkers map so Charon can clean up
 	// stale placeholder entries (PID 0) that would otherwise block new spawns

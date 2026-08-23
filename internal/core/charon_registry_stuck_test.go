@@ -189,3 +189,21 @@ func TestCharon_TokenBudgetSparesParkedAndDisabled(t *testing.T) {
 		t.Error("budget 0 (disabled) must never kill")
 	}
 }
+
+// Charon kills must consume retry budget (1xs7z burned 51.6M across 4+
+// kill/respawn cycles, 2026-08-23): the forced-kill exit classifies as infra
+// (free retry), so without an explicit RecordRetry the spawn gate never
+// engages and every kill just respawns a fresh worker that re-burns to the
+// backstop. Charon kills are real failures and must count.
+func TestCharon_KillRecordsRetry(t *testing.T) {
+	rm := NewRetryManager(time.Millisecond, 5*time.Millisecond)
+	c, _ := registryCharon(t)
+	c.SetRetryManager(rm)
+
+	c.recordKillRetry("proj-k1", "token budget hard backstop exceeded")
+	c.recordKillRetry("proj-k1", "token budget hard backstop exceeded")
+
+	if got := rm.GetRetryCount("proj-k1"); got != 2 {
+		t.Errorf("retry count = %d, want 2 — uncapped Charon kills loop forever", got)
+	}
+}

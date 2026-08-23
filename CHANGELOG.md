@@ -7,6 +7,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Fixed
+- Charon kills now consume retry budget: killed processes classify as infra exits on the worker-death path (forced-kill = free retry), so budget/stuck kills respawned forever — 1xs7z burned 51.6M tokens across 4+ kill/respawn cycles on 2026-08-23. `recordKillRetry` counts each kill; the spawn gate (`RetryExhaustedError`) now stops the cycle at `default_retries`.
+
+
+
 ### Added
 - Worker prompt now states an explicit turn budget (~40 turns) with an over-budget exit: commit progress, emit `done:false` with findings. The turn-economy block implied infinite runway; 200-turn grinds cost 20M tokens (kgkc7/soe53). Also mandates piping test output through `tail` — full jest dumps were the per-turn context flood.
 

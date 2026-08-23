@@ -39,6 +39,7 @@ type Charon struct {
 	panArbiter            func(beadID string) bool // fresh Pan continue verdict = stay of execution
 	steeredMu             sync.Mutex
 	steeredAt             map[string]time.Time // bead → last budget steer (rate limit)
+	retryManager          *RetryManager          // Charon kills consume retry budget (else infra-classified free respawns loop)
 }
 
 // JanitorStats tracks cleanup statistics
@@ -69,6 +70,21 @@ func (j *Charon) SetMaxBeadTokens(n int64) { j.maxBeadTokens = n }
 // SetPanArbiter injects the stay-of-execution lookup (Pan's recent
 // life-continuing verdicts). Nil = no stays.
 func (j *Charon) SetPanArbiter(f func(beadID string) bool) { j.panArbiter = f }
+
+// SetRetryManager wires the retry budget. Without it a Charon kill is
+// classified as an infra exit on the worker-death path (forced-kill = free
+// retry) and the bead respawns forever (1xs7z: 51.6M tokens over 4+
+// kill/respawn cycles, 2026-08-23).
+func (j *Charon) SetRetryManager(rm *RetryManager) { j.retryManager = rm }
+
+// recordKillRetry counts a Charon kill against the bead's retry budget so
+// the spawn gate (RetryExhaustedError) stops the kill/respawn cycle.
+func (j *Charon) recordKillRetry(beadID, reason string) {
+	if j.retryManager == nil {
+		return
+	}
+	j.retryManager.RecordRetry(beadID, fmt.Errorf("charon kill: %s", reason))
+}
 
 // maybeBudgetSteer enqueues a converge steer for a working worker between
 // the soft cap and the hard backstop. Rate-limited to one steer per bead
@@ -370,7 +386,10 @@ func (j *Charon) performCleanup() {
 			j.stats.ProcessGroupsCleaned++
 			// Mark as completed with timeout exit code
 			j.workerTracker.MarkWorkerCompleted(pid, -2) // -2 indicates timeout
-			// Mark bead as failed so it can be retried
+			// Mark bead as failed so it can be retried — and count the kill
+			// against the retry budget, else the infra-classified exit
+			// respawns it forever.
+			j.recordKillRetry(beadID, reason)
 			j.markBeadFailed(beadID, fmt.Sprintf("Worker timed out after %v", runtime))
 			if strings.Contains(reason, "token budget") && j.beadsClient != nil {
 				if err := j.beadsClient.UpdateBeadLabels(record.ProjectPath, "", types.BeadID(beadID), []string{"token-budget-exceeded"}); err != nil {
