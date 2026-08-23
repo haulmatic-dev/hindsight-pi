@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/beads"
+	"sync"
+
 	"github.com/haulmatic-dev/hydra/internal/registry"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -33,7 +35,10 @@ type Charon struct {
 	lastRegistryReap      time.Time // throttles the ghost-registry-row sweep
 	registryStore         *registry.Store
 	heartbeatHungAfter    time.Duration // stale registry heartbeat → hung worker
-	maxBeadTokens         int64         // cumulative per-bead token ceiling (0 = disabled)
+	maxBeadTokens         int64         // soft cap: steer + Pan candidate (0 = disabled); hard backstop = 2x
+	panArbiter            func(beadID string) bool // fresh Pan continue verdict = stay of execution
+	steeredMu             sync.Mutex
+	steeredAt             map[string]time.Time // bead → last budget steer (rate limit)
 }
 
 // JanitorStats tracks cleanup statistics
@@ -53,11 +58,64 @@ type JanitorStats struct {
 }
 
 // NewCharon creates a new orphan process janitor with timeout for stuck worker detection
-// SetMaxBeadTokens sets the per-bead cumulative token ceiling (0 disables).
-// Non-converging workers grind 200+ turns at ~100K context each (kgkc7
-// 20.5M, soe53 18.2M — 2026-08-21); the cap kills them and lets the retry
-// manager escalate instead of burning to the wall-clock timeout.
+// SetMaxBeadTokens sets the per-bead SOFT token cap (0 disables). Crossing
+// it enqueues a converge steer and surfaces the worker to Pan — it never
+// kills: the hard-kill design would have killed ux5 (9M) and acx (11.7M),
+// beads that landed, and did kill cc0d6 mid-'continue' (2026-08-22). The
+// hard backstop at 2x still kills true runaways, unless Pan just said
+// continue.
 func (j *Charon) SetMaxBeadTokens(n int64) { j.maxBeadTokens = n }
+
+// SetPanArbiter injects the stay-of-execution lookup (Pan's recent
+// life-continuing verdicts). Nil = no stays.
+func (j *Charon) SetPanArbiter(f func(beadID string) bool) { j.panArbiter = f }
+
+// maybeBudgetSteer enqueues a converge steer for a working worker between
+// the soft cap and the hard backstop. Rate-limited to one steer per bead
+// per hour; duplicates against the pending queue like Pan does.
+func (j *Charon) maybeBudgetSteer(record *WorkerRecord) {
+	if j.maxBeadTokens <= 0 || j.registryStore == nil {
+		return
+	}
+	row, ok, err := j.registryStore.GetWorker(record.BeadID)
+	if err != nil || !ok || row.State != registry.StateWorking {
+		return
+	}
+	if row.TokensSoFar <= j.maxBeadTokens || row.TokensSoFar > 2*j.maxBeadTokens {
+		return
+	}
+	j.steeredMu.Lock()
+	if time.Since(j.steeredAt[record.BeadID]) < time.Hour {
+		j.steeredMu.Unlock()
+		return
+	}
+	j.steeredMu.Unlock()
+	if pending, perr := j.registryStore.PendingCommands(record.BeadID); perr == nil {
+		for _, pc := range pending {
+			if pc.Kind == registry.CmdSteer {
+				return
+			}
+		}
+	}
+	msg := fmt.Sprintf("Token budget threshold crossed (%d > %d). Converge NOW: commit your current progress, run the scoped test only, write your verdict. Do not start new exploration.",
+		row.TokensSoFar, j.maxBeadTokens)
+	if err := j.registryStore.EnqueueCommand(record.BeadID, registry.CmdSteer, msg); err != nil {
+		log.Printf("[Charon] budget steer enqueue failed for %s (fail open): %v", record.BeadID, err)
+		return
+	}
+	j.steeredMu.Lock()
+	if j.steeredAt == nil {
+		j.steeredAt = make(map[string]time.Time)
+	}
+	j.steeredAt[record.BeadID] = time.Now()
+	j.steeredMu.Unlock()
+	if j.beadsClient != nil {
+		if err := j.beadsClient.UpdateBeadLabels(record.ProjectPath, "", types.BeadID(record.BeadID), []string{"token-budget-soft"}); err != nil {
+			log.Printf("[Charon] soft-budget label failed for %s (fail open): %v", record.BeadID, err)
+		}
+	}
+	log.Printf("[Charon] %s crossed token soft cap (%d > %d) — converge steer queued, surfaced to Pan", record.BeadID, row.TokensSoFar, j.maxBeadTokens)
+}
 
 func NewCharon(beadsClient *beads.Client, workerTracker *WorkerTracker, workerTimeout time.Duration) *Charon {
 	return &Charon{
@@ -278,6 +336,8 @@ func (j *Charon) performCleanup() {
 			continue
 		}
 
+		j.maybeBudgetSteer(record)
+
 		// Check for stuck workers. With a registry, liveness is the
 		// heartbeat: parked and actively-reporting workers are never killed
 		// on wall time; only a stale heartbeat (hung) kills. Without a
@@ -391,9 +451,14 @@ func (j *Charon) shouldKillAsStuck(record *WorkerRecord, now time.Time) (kill bo
 	if j.registryStore != nil {
 		row, ok, err := j.registryStore.GetWorker(record.BeadID)
 		if err == nil && ok {
-			// Token budget: only working workers burn; parked are frozen at 0.
-			if j.maxBeadTokens > 0 && row.State == registry.StateWorking && row.TokensSoFar > j.maxBeadTokens {
-				return true, fmt.Sprintf("token budget exceeded (%d > %d)", row.TokensSoFar, j.maxBeadTokens)
+			// Hard backstop only (2x soft cap); the soft cap steers + surfaces
+			// to Pan (maybeBudgetSteer). A fresh Pan continue verdict stays
+			// the kill — converging work must be allowed to finish.
+			if j.maxBeadTokens > 0 && row.State == registry.StateWorking && row.TokensSoFar > 2*j.maxBeadTokens {
+				if j.panArbiter != nil && j.panArbiter(record.BeadID) {
+					return false, fmt.Sprintf("over hard backstop (%d > %d) but Pan continued recently — stay of execution", row.TokensSoFar, 2*j.maxBeadTokens)
+				}
+				return true, fmt.Sprintf("token budget hard backstop exceeded (%d > %d)", row.TokensSoFar, 2*j.maxBeadTokens)
 			}
 			age := now.Sub(row.LastHeartbeat)
 			if age > j.heartbeatHungAfter {

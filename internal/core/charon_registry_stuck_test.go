@@ -106,26 +106,64 @@ func TestStuckDecision_NilRegistryIsLegacy(t *testing.T) {
 	}
 }
 
-// Token budget (option D): a non-converging worker grinds 200+ turns at
-// ~100K context each (kgkc7 20.5M, soe53 18.2M — 2026-08-21). Charon must
-// kill workers whose cumulative tokens exceed overseer.max_bead_tokens and
-// let the retry cap escalate, instead of letting them burn to timeout.
-// Parked workers burn nothing — never budget-killed.
-func TestCharon_TokenBudgetKillsRunaway(t *testing.T) {
+// Budget-as-signal (2026-08-22 correction of option D): a hard kill at the
+// ceiling would have killed ux5 (9M) and acx (11.7M) — beads that LANDED —
+// and did kill cc0d6 minutes after Pan judged it 'continue'. Soft cap
+// (max_bead_tokens) steers the worker to converge and surfaces it to Pan;
+// only the hard backstop (2x) kills, and a fresh Pan continue verdict stays
+// it. Parked workers burn nothing — never budget-killed.
+func TestCharon_TokenBudgetSoftCapSteersNotKills(t *testing.T) {
 	c, st := registryCharon(t)
 	c.SetMaxBeadTokens(3_000_000)
 	rec := pastTimeoutRecord("proj-burn1")
 
 	upsertLive(t, st, "proj-burn1", registry.StateWorking, 0)
 	if err := st.Heartbeat("proj-burn1", 5_000_000); err != nil {
-		t.Fatalf("AddTokens: %v", err)
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	// between soft (3M) and hard (6M): must NOT kill
+	if kill, _ := c.shouldKillAsStuck(rec, time.Now()); kill {
+		t.Fatal("soft-cap crossing must not kill — converging work dies (ux5/acx lesson)")
+	}
+	// must enqueue a converge steer
+	c.maybeBudgetSteer(rec)
+	pending, err := st.PendingCommands("proj-burn1")
+	if err != nil || len(pending) == 0 {
+		t.Fatalf("soft cap must enqueue a steer command, pending=%v err=%v", pending, err)
+	}
+	if pending[0].Kind != registry.CmdSteer {
+		t.Errorf("kind = %s, want steer", pending[0].Kind)
+	}
+}
+
+func TestCharon_TokenBudgetHardBackstopKills(t *testing.T) {
+	c, st := registryCharon(t)
+	c.SetMaxBeadTokens(3_000_000) // hard = 6M
+	rec := pastTimeoutRecord("proj-burn9")
+	upsertLive(t, st, "proj-burn9", registry.StateWorking, 0)
+	if err := st.Heartbeat("proj-burn9", 9_000_000); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
 	}
 	kill, reason := c.shouldKillAsStuck(rec, time.Now())
 	if !kill {
-		t.Fatal("worker over token budget must be killed")
+		t.Fatal("worker past the hard backstop (2x) must be killed")
 	}
 	if !strings.Contains(reason, "token budget") {
 		t.Errorf("reason %q must name the token budget", reason)
+	}
+}
+
+func TestCharon_TokenBudgetPanContinueStaysKill(t *testing.T) {
+	c, st := registryCharon(t)
+	c.SetMaxBeadTokens(3_000_000)
+	c.SetPanArbiter(func(beadID string) bool { return beadID == "proj-conv1" })
+	rec := pastTimeoutRecord("proj-conv1")
+	upsertLive(t, st, "proj-conv1", registry.StateWorking, 0)
+	if err := st.Heartbeat("proj-conv1", 9_000_000); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if kill, _ := c.shouldKillAsStuck(rec, time.Now()); kill {
+		t.Fatal("fresh Pan continue verdict must stay the backstop kill")
 	}
 }
 

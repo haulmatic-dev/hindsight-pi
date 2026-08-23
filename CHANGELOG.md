@@ -7,6 +7,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Changed
+- Token budget is now a signal, not an axe: crossing `overseer.max_bead_tokens` enqueues a "converge now" steer (rate-limited 1/hr, labelled `token-budget-soft`) and surfaces the worker to Pan as a judgment candidate — it no longer kills. A hard backstop at 2× kills true runaways, stayed by a fresh Pan `continue` verdict. The kill-at-cap design would have killed ux5 (9M) and acx (11.7M) — beads that landed — and did kill cc0d6 minutes after Pan judged it healthy.
+
+
+
 ### Added
 - Pre-spawn probe now primes the worker prompt on RED: the probe already knows why the scoped gate fails, so its parsed summary + raw log path are written into the bead description (marker-delimited, replaced on re-probe) before spawning. Workers were burning 3-5 discovery turns at ~100K context each re-deriving the failure. Green path unchanged (0-token close); faults still fail open.
 

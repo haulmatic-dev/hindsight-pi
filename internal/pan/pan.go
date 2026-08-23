@@ -10,6 +10,7 @@
 package pan
 
 import (
+	"sync"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -37,6 +38,13 @@ type Config struct {
 	HungAfter        time.Duration // heartbeat staleness → hung candidate; default 5m
 	ParkOverdueGrace time.Duration // wake_at overdue → overdue candidate; default 10m
 	NudgeCap         int           // verdict-missing nudges before attention; default 3
+
+	// TokenBudget (mirrors overseer.max_bead_tokens) turns the ceiling into
+	// a judgment candidate instead of a hard kill: crossing it means "needs
+	// arbitration", and a fresh continue verdict stays Charon's backstop.
+	// 0 disables. (2026-08-22: the hard-kill design would have killed ux5
+	// and acx — beads that landed — and did kill cc0d6 mid-'continue'.)
+	TokenBudget int64
 
 	// Pan's own pi identity. Its provider MUST be configurable separately
 	// from the worker fleet's: Pan has to stay lucid during the congestion
@@ -102,6 +110,34 @@ type Shepherd struct {
 	store Store
 	run   Runner
 	stop  chan struct{}
+
+	verdictsMu sync.Mutex
+	verdicts   map[string]time.Time // bead → last life-continuing verdict
+}
+
+// recordVerdict notes a non-terminal decision (continue/steer/compact) so
+// Charon's hard backstop can grant a stay of execution.
+func (s *Shepherd) recordVerdict(beadID string, kind registry.CommandKind) {
+	switch kind {
+	case registry.CmdContinue, registry.CmdSteer, registry.CmdCompactAndContinue:
+	default:
+		return // terminal verdicts (abandon) do not extend life
+	}
+	s.verdictsMu.Lock()
+	if s.verdicts == nil {
+		s.verdicts = make(map[string]time.Time)
+	}
+	s.verdicts[beadID] = time.Now()
+	s.verdictsMu.Unlock()
+}
+
+// ContinuedRecently reports whether Pan issued a life-continuing verdict for
+// the bead within the window.
+func (s *Shepherd) ContinuedRecently(beadID string, within time.Duration) bool {
+	s.verdictsMu.Lock()
+	defer s.verdictsMu.Unlock()
+	t, ok := s.verdicts[beadID]
+	return ok && time.Since(t) <= within
 }
 
 // New builds a Shepherd. run may be nil, in which case the real pi runner is
@@ -201,6 +237,7 @@ func (s *Shepherd) Tick(ctx context.Context) {
 			log.Printf("[Pan] enqueue %s for %s failed: %v", kind, d.BeadID, err)
 			continue
 		}
+		s.recordVerdict(d.BeadID, kind)
 		enqueued++
 		log.Printf("[Pan] queued %s for %s: %s", kind, d.BeadID, truncate(d.Message, 120))
 	}
@@ -228,6 +265,9 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 			now.After(w.ParkWakeAt.Add(s.cfg.ParkOverdueGrace)):
 			out = append(out, Candidate{Record: w, Reason: fmt.Sprintf(
 				"parked past wake_at + %v grace (reason: %s)", s.cfg.ParkOverdueGrace, w.ParkReason)})
+		case w.State == registry.StateWorking && s.cfg.TokenBudget > 0 && w.TokensSoFar > s.cfg.TokenBudget:
+			out = append(out, Candidate{Record: w, Reason: fmt.Sprintf(
+				"token budget exceeded (%d > %d) — converging or wandering?", w.TokensSoFar, s.cfg.TokenBudget)})
 		case w.State == registry.StateWorking && !w.LastHeartbeat.IsZero() &&
 			now.Sub(w.LastHeartbeat) > s.cfg.HungAfter &&
 			now.Sub(w.StartedAt) >= 2*s.cfg.HungAfter:

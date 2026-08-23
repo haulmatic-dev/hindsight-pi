@@ -66,7 +66,16 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 			Model:            panCfg.Model,
 			Thinking:         panCfg.Thinking,
 			APIKeyName:       panCfg.APIKeyName,
+			TokenBudget:      o.config.Overseer.MaxBeadTokens,
 		}, o.registryStore, nil)
+
+		// Budget arbitration: a fresh Pan continue verdict stays Charon's
+		// hard backstop (converging work must be allowed to finish).
+		if o.orphanJanitor != nil {
+			o.orphanJanitor.SetPanArbiter(func(beadID string) bool {
+				return o.panShepherd.ContinuedRecently(beadID, 5*time.Minute)
+			})
+		}
 	}
 
 	// Start Pan, the shepherd (fail-open; nil when the registry is unavailable)
