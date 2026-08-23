@@ -2042,6 +2042,13 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 			"- Do NOT re-run the full test suite between micro-edits: run the narrowest failing test until it passes, then the full suite ONCE at the end.\n" +
 			"- Read files at the offsets you need instead of re-reading whole files.")
 
+	// Turn horizon (2026-08-22): the economy block says turns are expensive
+	// but implies infinite runway; 200-turn grinds (20M tokens) resulted. An
+	// explicit budget makes the model pace itself and converts wandering
+	// into an early honest unmet verdict instead of a grind to the wall.
+	promptParts = append(promptParts,
+		"TURN BUDGET: plan for ~40 turns total. Track your own count. If you pass 40 without the narrow test green: stop exploring, commit whatever progress exists, and emit HYDRA_VERDICT with done:false and your findings — an honest unmet verdict is a good outcome; grinding without convergence is not. When running tests, pipe output through tail (`... 2>&1 | tail -30`) — full test output floods the context every turn.")
+
 	// Daemon-owned gates (FR-002): when the project delegates verification to
 	// the daemon, the prompt redirects the agent away from suite babysitting.
 	if os.Getenv("HYDRA_DAEMON_GATES") == "1" {

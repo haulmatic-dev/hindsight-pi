@@ -7,6 +7,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Worker prompt now states an explicit turn budget (~40 turns) with an over-budget exit: commit progress, emit `done:false` with findings. The turn-economy block implied infinite runway; 200-turn grinds cost 20M tokens (kgkc7/soe53). Also mandates piping test output through `tail` — full jest dumps were the per-turn context flood.
+
+
+
 ### Changed
 - Token budget is now a signal, not an axe: crossing `overseer.max_bead_tokens` enqueues a "converge now" steer (rate-limited 1/hr, labelled `token-budget-soft`) and surfaces the worker to Pan as a judgment candidate — it no longer kills. A hard backstop at 2× kills true runaways, stayed by a fresh Pan `continue` verdict. The kill-at-cap design would have killed ux5 (9M) and acx (11.7M) — beads that landed — and did kill cc0d6 minutes after Pan judged it healthy.
 

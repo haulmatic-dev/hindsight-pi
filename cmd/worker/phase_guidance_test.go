@@ -49,3 +49,18 @@ func TestBuildPiPrompt_IncludesPhaseGuidance(t *testing.T) {
 		t.Error("non-fix beads must not carry fix doctrine")
 	}
 }
+
+// Turn horizon (2026-08-22): non-converging workers grind 200+ turns at
+// ~100K context each because nothing tells them the budget is finite. An
+// explicit horizon makes the model pace itself and — critically — converts
+// wandering into an early honest unmet-verdict instead of a 20M grind
+// (kgkc7/soe53 class).
+func TestBuildPiPrompt_TurnHorizon(t *testing.T) {
+	p := buildPiPrompt(types.Bead{Type: "fix", Title: "t", Description: "d"}, nil, promptExtras{})
+	if !strings.Contains(p, "TURN BUDGET") {
+		t.Error("prompt must state an explicit turn budget")
+	}
+	if !strings.Contains(p, "unmet") {
+		t.Error("horizon must direct over-budget wandering to an unmet verdict, not more exploration")
+	}
+}
