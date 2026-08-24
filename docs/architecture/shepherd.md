@@ -242,8 +242,12 @@ counter error never blocks the scheduler. Implemented in
 snapshot of the registry that may place steering commands (parked worker
 that overslept, working-but-stalled worker, zombie with a dead PID) or a
 `close_satisfied` verdict for a bead whose work is already on the working
-branch. Fail-open: Pan down or unparseable advice → the deterministic rules below
-still run. **Disabled** until configured with its own provider key
+branch. Since 2026-08-24 Pan also sees scheduler-level blocked beads — beads
+that are READY but have no live worker row because they hit retry exhaustion
+or a spawn failure. Without these candidates Pan cannot judge the blockers
+that would otherwise deadlock the fleet (e.g. a worktree conflict that
+exhausts retries while the pool still reports phantom placeholders). Fail-open:
+Pan down or unparseable advice → the deterministic rules below still run. **Disabled** until configured with its own provider key
 (`shepherd.pan` in config; see `hydra-config.yaml.example` for a `minimax` / `MiniMax-M2.7` configuration) — it must not
 share the fleet's Kimi account.
 

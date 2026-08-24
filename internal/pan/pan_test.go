@@ -316,3 +316,61 @@ func TestTickDeduplicatesPendingCommands(t *testing.T) {
 		t.Fatalf("enqueued %d commands across 2 ticks, want 1 (dedup): %+v", len(store.enqueued), store.enqueued)
 	}
 }
+
+func TestCandidatesBlockedBeads(t *testing.T) {
+	store := &fakeStore{}
+	s := New(Config{Enabled: true}, store, nil)
+	s.SetBlockedBeads(func() []BlockedBead {
+		return []BlockedBead{
+			{BeadID: "blocked-1", Reason: "retry exhausted after 5 attempts", Since: time.Now().Add(-5 * time.Minute)},
+		}
+	})
+
+	cands, err := s.Candidates()
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("got %d candidates, want 1: %+v", len(cands), cands)
+	}
+	if cands[0].Record.BeadID != "blocked-1" {
+		t.Errorf("candidate bead ID = %q, want blocked-1", cands[0].Record.BeadID)
+	}
+	if !strings.HasPrefix(cands[0].Reason, "BLOCKED: ") {
+		t.Errorf("reason missing BLOCKED: prefix: %q", cands[0].Reason)
+	}
+}
+
+func TestCandidatesBlockedBeadsDedupLiveWorker(t *testing.T) {
+	store := &fakeStore{workers: []registry.WorkerRecord{hungWorker("live-1")}}
+	s := New(Config{Enabled: true}, store, nil)
+	s.SetBlockedBeads(func() []BlockedBead {
+		return []BlockedBead{{BeadID: "live-1", Reason: "retry exhausted"}}
+	})
+
+	cands, err := s.Candidates()
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("got %d candidates, want 1: %+v", len(cands), cands)
+	}
+	if cands[0].Record.BeadID != "live-1" {
+		t.Errorf("candidate bead ID = %q, want live-1", cands[0].Record.BeadID)
+	}
+	if strings.HasPrefix(cands[0].Reason, "BLOCKED: ") {
+		t.Errorf("live worker was reported as blocked: %q", cands[0].Reason)
+	}
+}
+
+func TestCandidatesBlockedBeadsNilFunc(t *testing.T) {
+	store := &fakeStore{}
+	s := New(Config{Enabled: true}, store, nil)
+	cands, err := s.Candidates()
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(cands) != 0 {
+		t.Errorf("nil BlockedBeads produced %d candidate(s): %+v", len(cands), cands)
+	}
+}

@@ -163,6 +163,23 @@ func (rm *RetryManager) RetryInfo(beadID string) (count int, lastErr error, last
 	return 0, nil, time.Time{}, false
 }
 
+// LastFailure returns a read-only snapshot of the most recent failure for a
+// bead. The reason is the error string (or "unknown" if none was captured);
+// the count is total attempts including infra failures.
+func (rm *RetryManager) LastFailure(beadID string) (reason string, attemptCount int, timestamp time.Time) {
+	rm.retriesMu.RLock()
+	defer rm.retriesMu.RUnlock()
+	if info, exists := rm.retries[beadID]; exists {
+		if info.lastErr != nil {
+			reason = info.lastErr.Error()
+		} else {
+			reason = "unknown"
+		}
+		return reason, info.count + info.infraCount, info.lastError
+	}
+	return "", 0, time.Time{}
+}
+
 // GetValidationRetryCount returns the validation retry count.
 func (rm *RetryManager) GetValidationRetryCount(beadID string) int {
 	rm.validationRetriesMu.RLock()

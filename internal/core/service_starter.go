@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"path/filepath"
 	"sync"
@@ -70,6 +71,47 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 			Thinking:         panCfg.Thinking,
 			APIKeyName:       panCfg.APIKeyName,
 			TokenBudget:      o.config.Overseer.MaxBeadTokens,
+			BlockedBeads: func() []pan.BlockedBead {
+				var blocked []pan.BlockedBead
+				if o.retryManager == nil || o.workerSpawner == nil {
+					return blocked
+				}
+				maxRetries := o.config.Overseer.DefaultRetries
+				if maxRetries <= 0 {
+					maxRetries = defaultMaxRetries
+				}
+				for beadID, count := range o.retryManager.Snapshot() {
+					if count < maxRetries {
+						continue
+					}
+					reason, attempts, since := o.retryManager.LastFailure(beadID)
+					blocked = append(blocked, pan.BlockedBead{
+						BeadID: beadID,
+						Reason: fmt.Sprintf("retry exhausted after %d attempts: %s", attempts, reason),
+						Since:  since,
+					})
+				}
+				for _, beadID := range o.workerSpawner.ListSpawnFailures() {
+					already := false
+					for _, b := range blocked {
+						if b.BeadID == beadID {
+							already = true
+							break
+						}
+					}
+					if already {
+						continue
+					}
+					if reason, since, ok := o.workerSpawner.LastSpawnFailure(beadID); ok {
+						blocked = append(blocked, pan.BlockedBead{
+							BeadID: beadID,
+							Reason: fmt.Sprintf("spawn failed: %s", reason),
+							Since:  since,
+						})
+					}
+				}
+				return blocked
+			},
 		}, o.registryStore, nil)
 
 		// Resolve project path for a bead ID using the configured projects.
