@@ -27,6 +27,7 @@ type Config struct {
 	Validation         ValidationConfig      `yaml:"validation"`
 	ComplianceCycle    ComplianceCycleConfig `yaml:"compliance_cycle"`
 	Shepherd           ShepherdConfig        `yaml:"shepherd"`
+	Worktree           WorktreeConfig        `yaml:"worktree"`
 }
 
 // ShepherdConfig configures Pan, the shepherd that decides the ambiguous
@@ -260,6 +261,13 @@ type OutputConfig struct {
 	Remote string `yaml:"remote"`
 }
 
+// WorktreeConfig controls git-worktree behaviour used by the daemon.
+type WorktreeConfig struct {
+	// QuarantineAutoDrain enables automatic cleanup of hydra/quarantine/*
+	// branches during the worktree reconciler tick. Default false (dry-run).
+	QuarantineAutoDrain bool `yaml:"quarantine_auto_drain"`
+}
+
 // OutputPushEnabled reports whether the output/push feature is enabled.
 func (c *Config) OutputPushEnabled() bool {
 	if c == nil {
@@ -293,6 +301,7 @@ type rawConfig struct {
 	Validation      ValidationConfig      `yaml:"validation"`
 	ComplianceCycle ComplianceCycleConfig `yaml:"compliance_cycle"`
 	Shepherd        ShepherdConfig        `yaml:"shepherd"`
+	Worktree        WorktreeConfig        `yaml:"worktree"`
 }
 
 // projectsListConfig handles the case where projects is an object with 'list' field
@@ -806,6 +815,7 @@ func LoadConfig(path string) (*Config, error) {
 		StandardAgent:   raw.Pi.StandardAgent,
 	}
 	config.Output = raw.Output
+	config.Worktree = raw.Worktree
 	// Handle projects field - can be:
 	// 1. An array of ProjectConfig (direct list)
 	// 2. An object with 'auto_discover' and 'list' fields
@@ -872,6 +882,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 		StandardAgent:   raw.Pi.StandardAgent,
 	}
 	config.Output = raw.Output
+	config.Worktree = raw.Worktree
 	config.Validation = raw.Validation
 	config.ComplianceCycle = raw.ComplianceCycle
 	config.Shepherd = raw.Shepherd
@@ -918,6 +929,7 @@ func (c *Config) Clone() *Config {
 		Agents:       c.Agents,
 		Pi:           c.Pi,
 		Output:       c.Output,
+		Worktree:     c.Worktree,
 	}
 
 	// Deep copy Projects slice

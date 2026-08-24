@@ -586,6 +586,11 @@ func (o *Overseer) publishProjects() {
 			token = uc.Token
 		}
 		PublishRepo(o.worktreeManager, project.Path, token, active, o.terminalBeadChecker(project.Path))
+		if o.config != nil && o.config.Worktree.QuarantineAutoDrain {
+			if _, _, err := DrainQuarantineBranches(project.Path, false); err != nil {
+				log.Printf("[publishProjects] drain quarantine for %s: %v", project.Path, err)
+			}
+		}
 	}
 }
 

@@ -163,6 +163,7 @@ When running Hydra end-to-end on a real project, the following configuration MUS
 | `overseer.worker_timeout` | yaml | 45m | active-time cap (parked excluded); 15m = zero completions |
 | `HYDRA_WORKER_ACTIVITY_TIMEOUT` | systemd drop-in | 10m | watchdog horizon; provider queue waits >4m killed turns at the default |
 | `output.push` | yaml | true | pushes integration branch to origin; off = finished work invisible |
+| `worktree.quarantine_auto_drain` | yaml | false | automatic cleanup of stale `hydra/quarantine/*` branches during the worktree reconciler tick; enable only after reviewing the drain rules |
 
 Full table with semantics: `hydra-operator` skill §6 ("Operating knobs").
 
