@@ -56,6 +56,23 @@ node /Users/buddhi/source-code/personal/dev-tools/config/pi/skills/task-breakdow
 node /Users/buddhi/source-code/personal/dev-tools/config/pi/skills/task-breakdown/cli.mjs docs/PRD/feature.md --json --session-id my-feature
 ```
 
+## Bead Spec Quality (measured, 2026-08-24)
+
+Spec precision is the single biggest token-cost lever: two same-class dogfood
+beads under identical machinery cost 0.9M vs 8.9M tokens. The difference: the
+cheap one named exact files, function names, and semantics; the expensive one
+said "reuse the existing path logic" without naming it. Every task description
+this tool emits (or a human writes) MUST:
+
+- Name anchor symbols: exact file paths, existing functions to extend, table
+  names, config keys. Never "reuse existing X" without naming X.
+- End with a `Files:` line listing exact files (or a single directory) the
+  task may touch — this feeds the pre-spawn probe scoping and the close-path
+  scope gate.
+- State fail-open vs fail-closed expectations for each new check.
+- State the verification commands the worker must run (narrow test first,
+  then broad).
+
 ## Files
 
 - `cli.mjs` - CLI entry point
