@@ -29,7 +29,7 @@ type Charon struct {
 	stopChan              chan struct{}
 	stats                 JanitorStats
 	getProjects           func() []types.Project
-	activeWorkersSnapshot func() map[string]int
+	activeWorkersSnapshot func() map[string]*types.Worker
 	onStaleActiveWorker   func(beadID string)
 	lastWorktreeGC        time.Time // throttles the stale-worktree sweep
 	lastRegistryReap      time.Time // throttles the ghost-registry-row sweep
@@ -160,12 +160,12 @@ func (j *Charon) SetProjectsProvider(fn func() []types.Project) {
 }
 
 // SetActiveWorkersSnapshot lets the caller inject a function that returns a
-// snapshot of the overseer's in-memory activeWorkers map (keyed by bead ID).
-// Charon uses this to detect and clean up stale placeholder entries — beads
-// whose worker process never recorded a real PID (PID == 0). The persistent
-// worker tracker alone cannot detect this because the entry's status is
-// still "running".
-func (j *Charon) SetActiveWorkersSnapshot(fn func() map[string]int) {
+// snapshot of the overseer's in-memory activeWorkers map (keyed by bead ID,
+// valued by the *types.Worker entry). Charon uses this to detect and clean up
+// stale placeholder entries — beads whose worker process never recorded a real
+// PID (PID == 0). The persistent worker tracker alone cannot detect this
+// because the entry's status is still "running".
+func (j *Charon) SetActiveWorkersSnapshot(fn func() map[string]*types.Worker) {
 	j.activeWorkersSnapshot = fn
 }
 
@@ -411,7 +411,9 @@ func (j *Charon) performCleanup() {
 	// its PID is recorded (so the tracker has PID 0) leaves a stuck "spawning"
 	// entry in the overseer's activeWorkers map. That entry blocks all new
 	// spawns for that bead with "worker already exists". We use the injected
-	// snapshot to detect PID-0 entries and clear them.
+	// snapshot to detect PID-0 entries, but only reap placeholders older than
+	// 10 minutes to avoid racing with an in-flight spawn (the double-spawn
+	// guard from PR #163).
 	if cleared := j.clearStaleActiveWorkers(); cleared > 0 {
 		log.Printf("[Charon] 🧹 Cleared %d stale in-memory worker entries (PID 0 placeholder)", cleared)
 	}
@@ -530,8 +532,15 @@ func (j *Charon) markBeadFailed(beadID string, reason string) {
 // bead with "worker already exists" because the persistent worker tracker
 // shows them as status="running" even though no real process is alive.
 //
+// Placeholders younger than 10 minutes are NEVER reaped: they are proof of an
+// in-flight spawn (the double-spawn race fixed by PR #163). A placeholder
+// older than 10 minutes with no live process is dead by definition and is
+// reaped with the [Spawn] tag.
+//
 // Returns the number of entries cleared.
 func (j *Charon) clearStaleActiveWorkers() int {
+	const stalePlaceholderThreshold = 10 * time.Minute
+
 	if j.activeWorkersSnapshot == nil {
 		return 0
 	}
@@ -541,13 +550,27 @@ func (j *Charon) clearStaleActiveWorkers() int {
 	}
 
 	cleared := 0
-	for beadID, pid := range snapshot {
-		if pid != 0 {
+	for beadID, w := range snapshot {
+		if w == nil {
 			continue
 		}
-		// PID 0 with a real entry means the worker process died before its
-		// connector recorded a real PID. Clear it from the persistent tracker
-		// too so a future spawn isn't blocked by "worker already exists".
+		// Only reap placeholder / PID-0 entries.
+		if w.PID != 0 {
+			continue
+		}
+		// Young placeholders are in-flight spawns, not orphans.
+		age := time.Since(w.StartTime)
+		if age < stalePlaceholderThreshold {
+			continue
+		}
+		// If the tracker knows a live process for this bead, leave it.
+		if j.workerTracker != nil {
+			if record, ok := j.workerTracker.GetWorkerByBead(beadID); ok && record.PID > 0 && j.isProcessRunning(record.PID) {
+				continue
+			}
+		}
+
+		// Clear the persistent tracker record too, if it matches this phantom.
 		if j.workerTracker != nil {
 			if record, ok := j.workerTracker.GetWorkerByBead(beadID); ok && record.PID == 0 {
 				if err := j.workerTracker.MarkWorkerCompleted(0, -1); err != nil {
@@ -561,6 +584,7 @@ func (j *Charon) clearStaleActiveWorkers() int {
 			j.onStaleActiveWorker(beadID)
 		}
 		cleared++
+		log.Printf("[Spawn] reaped stale placeholder %s (age %v)", beadID, age)
 	}
 	return cleared
 }
