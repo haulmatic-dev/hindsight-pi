@@ -79,28 +79,62 @@ func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error
 	defer m.mu.Unlock()
 
 	wtPath := m.worktreePath(projectPath, key)
-	if isGitWorktree(wtPath) {
-		return wtPath, nil
+	branch := m.branchName(key)
+	base := m.resolveBase(projectPath)
+
+	// Something already occupies the target path. Distinguish a valid chain
+	// worktree of this project from a broken symlink/empty dir/junk path, and
+	// refuse to delete a valid worktree that belongs to a different repository.
+	if _, err := os.Lstat(wtPath); err == nil {
+		if isOurWorktree(projectPath, wtPath) {
+			// Only reset a clean worktree whose HEAD is behind/ahead of the current
+			// base. A dirty worktree contains in-flight worker output and must be
+			// returned as-is (the caller will commit/integrate it).
+			baseCommit, _ := gitOut(projectPath, "rev-parse", base)
+			wtHead, _ := gitOut(wtPath, "rev-parse", "HEAD")
+			if strings.TrimSpace(wtHead) != strings.TrimSpace(baseCommit) && worktreeClean(wtPath) {
+				if err := resetWorktree(wtPath, base); err != nil {
+					return "", fmt.Errorf("worktree reuse reset %s: %w", wtPath, err)
+				}
+				log.Printf("[Worktree] recovered stale path %s (reuse)", wtPath)
+			}
+			return wtPath, nil
+		}
+		if isForeignWorktree(wtPath) {
+			return "", fmt.Errorf("refusing to remove existing path %s: it is a valid git worktree of a different repository", wtPath)
+		}
+
+		// Broken symlink, empty directory, or otherwise unusable path: prune
+		// stale git worktree registrations once, then remove the path and recreate.
+		if _, err := gitOut(projectPath, "worktree", "prune"); err != nil {
+			log.Printf("[Worktree] prune before recovery of %s: %v", wtPath, err)
+		}
+		if err := os.RemoveAll(wtPath); err != nil {
+			return "", fmt.Errorf("remove stale worktree path %s: %w", wtPath, err)
+		}
+		log.Printf("[Worktree] recovered stale path %s (prune+recreate)", wtPath)
+	} else if !os.IsNotExist(err) {
+		return "", err
 	}
+
 	if err := os.MkdirAll(worktreeRoot(projectPath), 0o755); err != nil {
 		return "", err
 	}
 
-	base, err := m.WorkingBranch(projectPath)
-	if err != nil || base == "" || base == "HEAD" {
-		base = "HEAD"
-	}
-	branch := m.branchName(key)
-
 	if branchExists(projectPath, branch) {
-		// Stale branch from a prior run — attach a worktree to it.
 		if _, err := gitOut(projectPath, "worktree", "add", wtPath, branch); err != nil {
 			return "", fmt.Errorf("worktree add (existing branch %s): %w", branch, err)
 		}
-		return wtPath, nil
+	} else {
+		if _, err := gitOut(projectPath, "worktree", "add", "-b", branch, wtPath, base); err != nil {
+			return "", fmt.Errorf("worktree add %s off %s: %w", branch, base, err)
+		}
 	}
-	if _, err := gitOut(projectPath, "worktree", "add", "-b", branch, wtPath, base); err != nil {
-		return "", fmt.Errorf("worktree add %s off %s: %w", branch, base, err)
+
+	// A stale branch may carry old commits; reset the (possibly reattached)
+	// worktree to the current base so the chain starts from a clean, known HEAD.
+	if err := resetWorktree(wtPath, base); err != nil {
+		return "", fmt.Errorf("worktree reset after add %s: %w", wtPath, err)
 	}
 	return wtPath, nil
 }
@@ -338,6 +372,45 @@ func isGitWorktree(path string) bool {
 func branchExists(projectPath, branch string) bool {
 	_, err := gitOut(projectPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
 	return err == nil
+}
+
+func (m *WorktreeManager) resolveBase(projectPath string) string {
+	base, err := m.WorkingBranch(projectPath)
+	if err != nil || base == "" || base == "HEAD" {
+		return "HEAD"
+	}
+	return base
+}
+
+func resetWorktree(wtPath, base string) error {
+	if _, err := gitOut(wtPath, "reset", "--hard", base); err != nil {
+		return err
+	}
+	_, err := gitOut(wtPath, "clean", "-fd")
+	return err
+}
+
+func isOurWorktree(projectPath, wtPath string) bool {
+	if _, err := os.Stat(filepath.Join(wtPath, ".git")); err != nil {
+		return false
+	}
+	if _, err := gitOut(wtPath, "rev-parse", "--git-dir"); err != nil {
+		return false
+	}
+	return worktreeSourceRepo(filepath.Join(wtPath, ".git")) == projectPath
+}
+
+func isForeignWorktree(wtPath string) bool {
+	if _, err := os.Stat(filepath.Join(wtPath, ".git")); err != nil {
+		return false
+	}
+	_, err := gitOut(wtPath, "rev-parse", "--git-dir")
+	return err == nil
+}
+
+func worktreeClean(wtPath string) bool {
+	out, err := gitOut(wtPath, "status", "--porcelain")
+	return err == nil && strings.TrimSpace(out) == ""
 }
 
 // autoCommitDirtyMain turns a dirty main checkout into a janitorial commit

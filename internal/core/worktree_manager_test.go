@@ -1,9 +1,12 @@
 package core
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -76,6 +79,184 @@ func TestWorktreeManager_Lifecycle(t *testing.T) {
 	}
 	if branchExists(proj, m.branchName("srv-chain-1")) {
 		t.Fatal("chain branch should be deleted")
+	}
+}
+
+func TestWorktreeManager_EnsureWorktree_RecoversBrokenSymlink(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	proj := gitInitRepo(t)
+	m := NewWorktreeManager()
+	wtPath := m.worktreePath(proj, "chain-symlink")
+	root := worktreeRoot(proj)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/nonexistent/stale-path", wtPath); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	wt, err := m.EnsureWorktree(proj, "chain-symlink")
+	log.SetOutput(old)
+	if err != nil {
+		t.Fatalf("EnsureWorktree should recover broken symlink: %v", err)
+	}
+	if wt != wtPath {
+		t.Fatalf("expected %s, got %s", wtPath, wt)
+	}
+	if !isGitWorktree(wt) {
+		t.Fatalf("recovered path is not a git worktree: %s", wt)
+	}
+	if !strings.Contains(buf.String(), "[Worktree] recovered stale path") || !strings.Contains(buf.String(), "(prune+recreate)") {
+		t.Fatalf("expected recovery log, got: %s", buf.String())
+	}
+}
+
+func TestWorktreeManager_EnsureWorktree_ReusesValidWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	proj := gitInitRepo(t)
+	m := NewWorktreeManager()
+	key := "chain-reuse"
+
+	wt, err := m.EnsureWorktree(proj, key)
+	if err != nil {
+		t.Fatalf("first EnsureWorktree: %v", err)
+	}
+	if _, err := gitOut(proj, "rev-parse", "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Advance main after the worktree was created.
+	if err := os.WriteFile(filepath.Join(proj, "main-advance.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCmd(t, proj, "add", "-A")
+	runGitCmd(t, proj, "commit", "-m", "advance main")
+	mainHead, err := gitOut(proj, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	wt2, err := m.EnsureWorktree(proj, key)
+	log.SetOutput(old)
+	if err != nil {
+		t.Fatalf("reuse EnsureWorktree: %v", err)
+	}
+	if wt2 != wt {
+		t.Fatalf("reuse should return same path: %s vs %s", wt2, wt)
+	}
+	wtHead, err := gitOut(wt, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(wtHead) != strings.TrimSpace(mainHead) {
+		t.Fatalf("worktree not reset to base: worktree=%s main=%s", wtHead, mainHead)
+	}
+	if !strings.Contains(buf.String(), "[Worktree] recovered stale path") || !strings.Contains(buf.String(), "(reuse)") {
+		t.Fatalf("expected reuse log, got: %s", buf.String())
+	}
+}
+
+func TestWorktreeManager_EnsureWorktree_ReattachesStaleBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	proj := gitInitRepo(t)
+	m := NewWorktreeManager()
+	key := "chain-reattach"
+
+	wt, err := m.EnsureWorktree(proj, key)
+	if err != nil {
+		t.Fatalf("first EnsureWorktree: %v", err)
+	}
+	// Leave a commit on the chain branch so the branch tip differs from main.
+	if err := os.WriteFile(filepath.Join(wt, "chain.txt"), []byte("c\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Commit(wt, "chain commit"); err != nil {
+		t.Fatalf("commit in worktree: %v", err)
+	}
+
+	// Remove the worktree directory but keep the branch (stale branch, absent path).
+	runGitCmd(t, proj, "worktree", "remove", wt)
+	if _, err := os.Stat(wt); err == nil {
+		t.Fatal("worktree path still exists after remove")
+	}
+	if !branchExists(proj, m.branchName(key)) {
+		t.Fatal("chain branch should still exist")
+	}
+
+	mainHead, err := gitOut(proj, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wt2, err := m.EnsureWorktree(proj, key)
+	if err != nil {
+		t.Fatalf("reattach EnsureWorktree: %v", err)
+	}
+	if wt2 != wt {
+		t.Fatalf("reattach should return same path: %s vs %s", wt2, wt)
+	}
+	if !isGitWorktree(wt2) {
+		t.Fatalf("reattached path is not a worktree: %s", wt2)
+	}
+	wtHead, err := gitOut(wt2, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(wtHead) != strings.TrimSpace(mainHead) {
+		t.Fatalf("reattached worktree not reset to base: worktree=%s main=%s", wtHead, mainHead)
+	}
+}
+
+func TestWorktreeManager_EnsureWorktree_ForeignWorktreeFailsClosed(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	projA := gitInitRepo(t)
+	projB := gitInitRepo(t)
+	m := NewWorktreeManager()
+	key := "chain-foreign"
+	wtPath := m.worktreePath(projA, key)
+	root := worktreeRoot(projA)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a valid worktree of repo B at the path repo A would use.
+	runGitCmd(t, projB, "worktree", "add", wtPath)
+	if !isGitWorktree(wtPath) {
+		t.Fatal("foreign worktree not created")
+	}
+
+	_, err := m.EnsureWorktree(projA, key)
+	if err == nil {
+		t.Fatal("expected error for foreign worktree, got nil")
+	}
+	if !strings.Contains(err.Error(), "different repository") {
+		t.Fatalf("expected different-repo error, got: %v", err)
+	}
+	if _, err := os.Stat(wtPath); err != nil {
+		t.Fatalf("foreign worktree path should not have been removed: %v", err)
+	}
+}
+
+func runGitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	c := exec.Command("git", args...)
+	c.Dir = dir
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
 }
 
