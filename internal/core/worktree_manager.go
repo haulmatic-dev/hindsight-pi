@@ -72,6 +72,9 @@ func (m *WorktreeManager) WorkingBranch(projectPath string) (string, error) {
 // EnsureWorktree creates the chain's worktree off the working branch if it
 // does not exist and returns its path. Idempotent — reuses an existing one.
 func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error) {
+	if projectPath == "" {
+		return "", fmt.Errorf("refusing to create worktree %q with empty project path (would worktree the daemon cwd — 1xs7z wrong-repo incident, 2026-08-23)", key)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

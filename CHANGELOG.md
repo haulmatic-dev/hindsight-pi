@@ -8,6 +8,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- Wrong-repo worktree on unresolved project: scheduler-path beads carry an empty `Project` field; `FindProjectPath` matched nothing, the spawner fell back to the empty field, and `git worktree add` ran in the daemon's cwd — 1xs7z's "srv" chain worktree was a dev-tools checkout (51.6M tokens wandering the wrong repo, 2026-08-23). `FindProjectPath` now derives project from the bead ID prefix; the spawner never substitutes the name-as-path; `EnsureWorktree` refuses empty paths outright.
+
+
+
+### Fixed
 - Charon kills now consume retry budget: killed processes classify as infra exits on the worker-death path (forced-kill = free retry), so budget/stuck kills respawned forever — 1xs7z burned 51.6M tokens across 4+ kill/respawn cycles on 2026-08-23. `recordKillRetry` counts each kill; the spawn gate (`RetryExhaustedError`) now stops the cycle at `default_retries`.
 
 

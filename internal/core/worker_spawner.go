@@ -185,8 +185,12 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 	}
 
 	projectPath := s.beadAnalyzer.FindProjectPath(&bead)
+	// No fallback to the raw Project field: it is a NAME, not a path, and is
+	// empty on the scheduler path. Unresolved stays "" and downstream fails
+	// closed (EnsureWorktree refuses empty; daemon_owned blocks shared
+	// checkout) — never worktree the daemon's cwd (1xs7z, 2026-08-23).
 	if projectPath == "" {
-		projectPath = bead.Project
+		log.Printf("[Overseer] project path unresolved for %s (project %q) — spawn will fail closed", bead.ID, bead.Project)
 	}
 
 	if s.beadsClient != nil && projectPath != "" {

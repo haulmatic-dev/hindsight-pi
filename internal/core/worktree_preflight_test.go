@@ -1,6 +1,7 @@
 package core
 
 import (
+	"github.com/haulmatic-dev/hydra/pkg/types"
 	"context"
 	"errors"
 	"os"
@@ -130,4 +131,25 @@ func stubInstallRunner(called *int, effect func(string)) func() {
 		return "", nil
 	}
 	return func() { installRunner = orig }
+}
+
+// 1xs7z (2026-08-23, 51.6M tokens burned): a scheduler-path bead has an
+// empty Project field; FindProjectPath matched nothing, the spawner fell
+// back to the empty field, and git worktree add ran in the DAEMON'S CWD —
+// creating a dev-tools checkout as the "srv-smart-engine" chain worktree.
+// Three layers must hold: analyzer derives from the bead ID, spawner
+// fallback uses it too, and EnsureWorktree refuses an empty project path.
+func TestFindProjectPath_EmptyProjectDerivesFromID(t *testing.T) {
+	ba := NewBeadAnalyzer([]types.Project{{Name: "srv-smart-engine", Path: "/srv", Type: types.RepoTypeSingle}})
+	bead := &types.Bead{ID: "srv-smart-engine-1xs7z"} // Project empty, as from the scheduler
+	if got := ba.FindProjectPath(bead); got != "/srv" {
+		t.Errorf("FindProjectPath = %q, want /srv (derive project from bead ID)", got)
+	}
+}
+
+func TestEnsureWorktree_EmptyPathRefused(t *testing.T) {
+	m := NewWorktreeManager()
+	if _, err := m.EnsureWorktree("", "proj-x1"); err == nil {
+		t.Fatal("empty project path must fail closed — never worktree the daemon cwd")
+	}
 }
