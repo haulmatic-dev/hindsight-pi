@@ -394,10 +394,22 @@ func isOurWorktree(projectPath, wtPath string) bool {
 	if _, err := os.Stat(filepath.Join(wtPath, ".git")); err != nil {
 		return false
 	}
-	if _, err := gitOut(wtPath, "rev-parse", "--git-dir"); err != nil {
-		return false
+	// Identity via the common git dir: survives submodules (gitdir under
+	// <super>/.git/modules/<name>) and linked-worktree redirection. The old
+	// "/.git/worktrees/" marker parse false-positived on submodule layouts and
+	// wedged every hydra spawn on 2026-08-24 (hydra-x9e: 67 retries).
+	ours := gitCommonDir(projectPath)
+	theirs := gitCommonDir(wtPath)
+	return ours != "" && ours == theirs
+}
+
+// gitCommonDir resolves a checkout's shared git directory as an absolute path.
+func gitCommonDir(path string) string {
+	out, err := gitOut(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return ""
 	}
-	return worktreeSourceRepo(filepath.Join(wtPath, ".git")) == projectPath
+	return strings.TrimSpace(out)
 }
 
 func isForeignWorktree(wtPath string) bool {
