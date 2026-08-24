@@ -3,10 +3,12 @@ package core
 import (
 	"context"
 	"log"
+	"path/filepath"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/pan"
 	"github.com/haulmatic-dev/hydra/internal/registry"
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // ServiceStarter starts all overseer background services.
@@ -68,6 +70,43 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 			APIKeyName:       panCfg.APIKeyName,
 			TokenBudget:      o.config.Overseer.MaxBeadTokens,
 		}, o.registryStore, nil)
+
+		// Resolve project path for a bead ID using the configured projects.
+		projectPathForID := func(id types.BeadID) string {
+			projectName := id.Project()
+			repoName := id.Repo()
+			for _, p := range o.projects {
+				if p.Name != projectName {
+					continue
+				}
+				if p.Type == "multi" && repoName != "" {
+					return filepath.Join(p.Path, repoName)
+				}
+				return p.Path
+			}
+			return ""
+		}
+
+		o.panShepherd.SetZeroDiff(func(beadID string) (bool, bool) {
+			id := types.BeadID(beadID)
+			projectPath := projectPathForID(id)
+			if projectPath == "" || o.worktreeManager == nil {
+				return false, false
+			}
+			key := o.chainKeyForBead(types.Bead{ID: id})
+			wt, ok := o.worktreeManager.ExistingWorktree(projectPath, key)
+			if !ok {
+				return false, false
+			}
+			base := currentBranch(projectPath)
+			changed, err := changedFilesWithBase(wt, base)
+			if err != nil {
+				log.Printf("[Pan] zero-diff check failed for %s (treating as unknown): %v", beadID, err)
+				return false, false
+			}
+			return len(changed) == 0, true
+		})
+		o.panShepherd.SetOnCloseSatisfied(BuildCloseSatisfied(o))
 
 		// Budget arbitration: a fresh Pan continue verdict stays Charon's
 		// hard backstop (converging work must be allowed to finish).

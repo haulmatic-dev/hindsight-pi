@@ -10,11 +10,11 @@
 package pan
 
 import (
-	"sync"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/registry"
@@ -92,6 +92,7 @@ var allowedActions = map[registry.CommandKind]bool{
 	registry.CmdSteer:              true,
 	registry.CmdCompactAndContinue: true,
 	registry.CmdAbandonWithSummary: true,
+	registry.CmdCloseSatisfied:     true,
 }
 
 // Candidate is a registry record needing a judgment call, with the reason it
@@ -110,6 +111,13 @@ type Shepherd struct {
 	store Store
 	run   Runner
 	stop  chan struct{}
+
+	// ZeroDiff reports whether a bead's worktree is empty of changes relative
+	// to the working branch. Optional; nil means "unknown, no marker".
+	ZeroDiff func(beadID string) (zero bool, known bool)
+	// OnCloseSatisfied closes a bead that Pan has decided is already satisfied.
+	// Optional; nil means the close_satisfied decision is ignored.
+	OnCloseSatisfied func(beadID string) error
 
 	verdictsMu sync.Mutex
 	verdicts   map[string]time.Time // bead → last life-continuing verdict
@@ -150,6 +158,16 @@ func New(cfg Config, store Store, run Runner) *Shepherd {
 	return &Shepherd{cfg: cfg, store: store, run: run, stop: make(chan struct{})}
 }
 
+// SetZeroDiff injects the optional zero-diff detector.
+func (s *Shepherd) SetZeroDiff(fn func(beadID string) (bool, bool)) {
+	s.ZeroDiff = fn
+}
+
+// SetOnCloseSatisfied injects the optional close-satisfied handler.
+func (s *Shepherd) SetOnCloseSatisfied(fn func(beadID string) error) {
+	s.OnCloseSatisfied = fn
+}
+
 // Start runs Pan's tick loop in the background.
 func (s *Shepherd) Start() {
 	if !s.cfg.Enabled {
@@ -179,6 +197,10 @@ func (s *Shepherd) Stop() { close(s.stop) }
 // Tick runs one attention pass. Every failure is logged and swallowed:
 // Pan is fail-open by contract.
 func (s *Shepherd) Tick(ctx context.Context) {
+	if s.store == nil {
+		log.Printf("[Pan] no store configured; skipping tick")
+		return
+	}
 	cands, err := s.Candidates()
 	if err != nil {
 		log.Printf("[Pan] candidate scan failed (skipping tick): %v", err)
@@ -213,6 +235,19 @@ func (s *Shepherd) Tick(ctx context.Context) {
 		}
 		if d.BeadID == "" {
 			log.Printf("[Pan] rejecting decision with empty bead_id")
+			continue
+		}
+		// close_satisfied is a daemon-side action, not a worker command.
+		if kind == registry.CmdCloseSatisfied {
+			if s.OnCloseSatisfied == nil {
+				log.Printf("[Pan] close_satisfied for %s has no handler configured; ignoring", d.BeadID)
+				continue
+			}
+			if err := s.OnCloseSatisfied(d.BeadID); err != nil {
+				log.Printf("[Pan] close_satisfied for %s failed: %v", d.BeadID, err)
+				continue
+			}
+			log.Printf("[Pan] closed-satisfied %s", d.BeadID)
 			continue
 		}
 		// Dedup against the pending queue: a dead worker never consumes its
@@ -266,8 +301,14 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 			out = append(out, Candidate{Record: w, Reason: fmt.Sprintf(
 				"parked past wake_at + %v grace (reason: %s)", s.cfg.ParkOverdueGrace, w.ParkReason)})
 		case w.State == registry.StateWorking && s.cfg.TokenBudget > 0 && w.TokensSoFar > s.cfg.TokenBudget:
-			out = append(out, Candidate{Record: w, Reason: fmt.Sprintf(
-				"token budget exceeded (%d > %d) — converging or wandering?", w.TokensSoFar, s.cfg.TokenBudget)})
+			reason := fmt.Sprintf(
+				"token budget exceeded (%d > %d) — converging or wandering?", w.TokensSoFar, s.cfg.TokenBudget)
+			if s.ZeroDiff != nil {
+				if zero, _ := s.ZeroDiff(w.BeadID); zero {
+					reason += "; zero diff on target files — wandering or already-satisfied?"
+				}
+			}
+			out = append(out, Candidate{Record: w, Reason: reason})
 		case w.State == registry.StateWorking && !w.LastHeartbeat.IsZero() &&
 			now.Sub(w.LastHeartbeat) > s.cfg.HungAfter &&
 			now.Sub(w.StartedAt) >= 2*s.cfg.HungAfter:
@@ -292,6 +333,7 @@ needs a judgment call. For EVERY worker decide exactly one action:
 - "steer": inject guidance into the live session (payload: the steering message)
 - "compact-and-continue": session context is exhausted; compact then continue
 - "abandon-with-summary": give up gracefully (payload: what was done and what remains)
+- "close_satisfied": the bead's acceptance criteria are already met on the working branch and the worker found nothing to do; close it without a worker
 
 Rules:
 - Parked on provider-capacity errors: prefer "continue" unless the park reason

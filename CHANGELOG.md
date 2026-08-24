@@ -18,6 +18,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 ### Added
+- Pan can now autonomously close already-satisfied beads: a new `close_satisfied` verdict runs daemon-owned scoped gates on the main checkout and, if green, closes the bead as `already-satisfied (Pan)` with label `closed-satisfied`. This breaks the empty-diff reject loop where a worker correctly finds nothing to do but verified-close refuses an empty diff, burning tens of millions of tokens until a human intervenes (1xs7z, round 3).
+
+### Added
 - Worker prompt now states an explicit turn budget (~40 turns) with an over-budget exit: commit progress, emit `done:false` with findings. The turn-economy block implied infinite runway; 200-turn grinds cost 20M tokens (kgkc7/soe53). Also mandates piping test output through `tail` — full jest dumps were the per-turn context flood.
 
 
