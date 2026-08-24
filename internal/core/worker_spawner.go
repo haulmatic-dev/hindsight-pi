@@ -95,6 +95,21 @@ func (s *WorkerSpawner) recordSpawnFailure(beadID string, err error) {
 	s.spawnFailures[beadID] = &spawnFailureInfo{err: err.Error(), timestamp: time.Now()}
 }
 
+// ClearSpawningPlaceholder removes a stale "spawning" placeholder from the
+// active-workers map. Called by Pan's reap-placeholder repair for beads that
+// never created a real worker row. Returns true if a placeholder was removed.
+func (s *WorkerSpawner) ClearSpawningPlaceholder(beadID string) bool {
+	s.workerMutex.Lock()
+	defer s.workerMutex.Unlock()
+	w, ok := s.activeWorkers[beadID]
+	if !ok || w == nil || w.Status != "spawning" {
+		return false
+	}
+	delete(s.activeWorkers, beadID)
+	log.Printf("[WorkerSpawner] cleared spawning placeholder for %s", beadID)
+	return true
+}
+
 // LastSpawnFailure returns the last recorded spawn failure for a bead.
 // If no failure has been recorded it returns zero values.
 func (s *WorkerSpawner) LastSpawnFailure(beadID string) (reason string, timestamp time.Time, ok bool) {

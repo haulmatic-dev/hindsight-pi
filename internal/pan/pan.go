@@ -122,6 +122,87 @@ var allowedActions = map[registry.CommandKind]bool{
 	registry.CmdCloseSatisfied:     true,
 }
 
+// isAllowedAction returns true for known worker command kinds and for
+// whitelisted "repair:<name>" daemon-side actions.
+func isAllowedAction(action string) bool {
+	if allowedActions[registry.CommandKind(action)] {
+		return true
+	}
+	return strings.HasPrefix(action, "repair:")
+}
+
+// parseRepairName extracts the handler name from "repair:<name>".
+func parseRepairName(action string) (string, bool) {
+	if !strings.HasPrefix(action, "repair:") {
+		return "", false
+	}
+	return strings.TrimPrefix(action, "repair:"), true
+}
+
+// hasLiveWorker reports whether the bead has any non-completed worker row.
+// A live row means the bead is not a scheduler-level blocker and must not be
+// repaired.
+func (s *Shepherd) hasLiveWorker(beadID string) bool {
+	if s.store == nil {
+		return false
+	}
+	workers, err := s.store.ListWorkers() // non-completed only
+	if err != nil {
+		log.Printf("[Pan] repair live-worker check failed for %s: %v", beadID, err)
+		return false
+	}
+	for _, w := range workers {
+		if w.BeadID == beadID {
+			return true
+		}
+	}
+	return false
+}
+
+// canRepair checks the one-repair-per-bead-per-hour rate limit.
+func (s *Shepherd) canRepair(beadID string) (bool, time.Duration) {
+	s.repairMu.Lock()
+	defer s.repairMu.Unlock()
+	if s.repairLimits == nil {
+		s.repairLimits = make(map[string]time.Time)
+	}
+	if last, ok := s.repairLimits[beadID]; ok && time.Since(last) < time.Hour {
+		return false, time.Hour - time.Since(last)
+	}
+	return true, 0
+}
+
+// recordRepair notes that a repair ran for the bead, capturing the error
+// (nil = ok) so the rate-limit detail can report the last outcome.
+func (s *Shepherd) recordRepair(beadID string, err error) {
+	s.repairMu.Lock()
+	defer s.repairMu.Unlock()
+	if s.repairLimits == nil {
+		s.repairLimits = make(map[string]time.Time)
+	}
+	if s.repairResults == nil {
+		s.repairResults = make(map[string]error)
+	}
+	s.repairLimits[beadID] = time.Now()
+	s.repairResults[beadID] = err
+}
+
+// emitRepairEvent emits the audit event for a repair attempt. It is fail-open:
+// a failure to emit must not stop the pipeline.
+func (s *Shepherd) emitRepairEvent(beadID, action, result, detail string) {
+	payload, _ := json.Marshal(map[string]string{
+		"bead_id": beadID,
+		"action":  action,
+		"result":  result,
+		"detail":  detail,
+	})
+	if s.OnRepairEvent != nil {
+		s.OnRepairEvent(beadID, action, result, detail)
+	} else {
+		log.Printf("[PanRepair] %s", payload)
+	}
+}
+
 // Candidate is a registry record needing a judgment call, with the reason it
 // surfaced.
 type Candidate struct {
@@ -145,9 +226,19 @@ type Shepherd struct {
 	// OnCloseSatisfied closes a bead that Pan has decided is already satisfied.
 	// Optional; nil means the close_satisfied decision is ignored.
 	OnCloseSatisfied func(beadID string) error
+	// RepairHandlers maps "<name>" → handler for "repair:<name>" verdicts.
+	// Optional; nil means all repair actions are rejected.
+	RepairHandlers map[string]func(beadID string) error
+	// OnRepairEvent is called after a repair handler runs. If nil, Pan logs
+	// the event with log.Printf. Optional; used by tests to capture events.
+	OnRepairEvent func(beadID, action, result, detail string)
 
 	verdictsMu sync.Mutex
 	verdicts   map[string]time.Time // bead → last life-continuing verdict
+
+	repairMu      sync.Mutex
+	repairLimits  map[string]time.Time // bead → last repair run
+	repairResults map[string]error    // bead → last repair error (for rate-limit detail)
 }
 
 // recordVerdict notes a non-terminal decision (continue/steer/compact) so
@@ -193,6 +284,20 @@ func (s *Shepherd) SetZeroDiff(fn func(beadID string) (bool, bool)) {
 // SetOnCloseSatisfied injects the optional close-satisfied handler.
 func (s *Shepherd) SetOnCloseSatisfied(fn func(beadID string) error) {
 	s.OnCloseSatisfied = fn
+}
+
+// SetRepairHandlers injects the repair handler map. The map is copied so the
+// caller can modify their own copy after the call without racing Pan.
+func (s *Shepherd) SetRepairHandlers(handlers map[string]func(beadID string) error) {
+	s.RepairHandlers = make(map[string]func(beadID string) error, len(handlers))
+	for k, v := range handlers {
+		s.RepairHandlers[k] = v
+	}
+}
+
+// SetOnRepairEvent injects the optional repair event hook.
+func (s *Shepherd) SetOnRepairEvent(fn func(beadID, action, result, detail string)) {
+	s.OnRepairEvent = fn
 }
 
 // SetBlockedBeads injects the optional blocked-bead source.
@@ -264,9 +369,9 @@ func (s *Shepherd) Tick(ctx context.Context) {
 	}
 
 	enqueued := 0
+	repaired := 0
 	for _, d := range decisions {
-		kind := registry.CommandKind(d.Action)
-		if !allowedActions[kind] {
+		if !isAllowedAction(d.Action) {
 			log.Printf("[Pan] rejecting unknown action %q for %s", d.Action, d.BeadID)
 			continue
 		}
@@ -274,6 +379,15 @@ func (s *Shepherd) Tick(ctx context.Context) {
 			log.Printf("[Pan] rejecting decision with empty bead_id")
 			continue
 		}
+		// Daemon-side repair verdict: execute whitelisted handler, do not
+		// enqueue a worker command.
+		if name, ok := parseRepairName(d.Action); ok {
+			s.handleRepair(d.BeadID, name)
+			repaired++
+			continue
+		}
+
+		kind := registry.CommandKind(d.Action)
 		// close_satisfied is a daemon-side action, not a worker command.
 		if kind == registry.CmdCloseSatisfied {
 			if s.OnCloseSatisfied == nil {
@@ -316,6 +430,43 @@ func (s *Shepherd) Tick(ctx context.Context) {
 	if enqueued > 0 {
 		log.Printf("[Pan] queued %d decision(s)", enqueued)
 	}
+	if repaired > 0 {
+		log.Printf("[Pan] ran %d repair(s)", repaired)
+	}
+}
+
+// handleRepair executes a whitelisted repair handler for a blocked bead.
+// It is fail-open: errors are logged and emitted as audit events only.
+func (s *Shepherd) handleRepair(beadID, name string) {
+	// Safety gate: never repair a bead that still has a live worker row.
+	if s.hasLiveWorker(beadID) {
+		s.emitRepairEvent(beadID, name, "error", "refused: bead has a live worker row")
+		log.Printf("[Pan] repair %s for %s refused: live worker row exists", name, beadID)
+		return
+	}
+	// Rate limit: one repair per bead per hour.
+	if ok, remaining := s.canRepair(beadID); !ok {
+		detail := fmt.Sprintf("rate limited: %v until next repair", remaining)
+		s.emitRepairEvent(beadID, name, "error", detail)
+		log.Printf("[Pan] repair %s for %s rate limited (%v remaining)", name, beadID, remaining)
+		return
+	}
+	handler, ok := s.RepairHandlers[name]
+	if !ok || handler == nil {
+		s.emitRepairEvent(beadID, name, "error", "unknown repair handler")
+		log.Printf("[Pan] repair %s for %s rejected: no handler configured", name, beadID)
+		return
+	}
+
+	if err := handler(beadID); err != nil {
+		s.recordRepair(beadID, err)
+		s.emitRepairEvent(beadID, name, "error", err.Error())
+		log.Printf("[Pan] repair %s for %s failed: %v", name, beadID, err)
+		return
+	}
+	s.recordRepair(beadID, nil)
+	s.emitRepairEvent(beadID, name, "ok", "")
+	log.Printf("[Pan] repair %s for %s succeeded", name, beadID)
 }
 
 // Candidates returns the ambiguous tail: parked-overdue, hung,
@@ -401,6 +552,7 @@ needs a judgment call. For EVERY worker decide exactly one action:
 - "compact-and-continue": session context is exhausted; compact then continue
 - "abandon-with-summary": give up gracefully (payload: what was done and what remains)
 - "close_satisfied": the bead's acceptance criteria are already met on the working branch and the worker found nothing to do; close it without a worker
+- "repair:<name>": execute a whitelisted daemon-side repair (payload: ignored). Only for BLOCKED beads with no live worker row.
 
 Rules:
 - Parked on provider-capacity errors: prefer "continue" unless the park reason
@@ -410,6 +562,8 @@ Rules:
   token progress, then "steer".
 - Verdict missing after nudge cap: "steer" with a message demanding the
   HYDRA_VERDICT block, or "abandon-with-summary" if tokens show no progress.
+- Repairs: only issue "repair:<name>" for BLOCKED beads that have no live healthy
+  worker. Each bead can receive at most one repair of each name per hour.
 - Never invent bead IDs. One decision per candidate.
 
 Reply with ONLY a JSON array, no prose:

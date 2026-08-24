@@ -131,6 +131,21 @@ func (rm *RetryManager) ClearRetry(beadID string) {
 	}
 }
 
+// ResetRetryCount clears the retry state for a bead and returns the previous
+// genuine-fault count. Used by Pan's reset-retries repair handler.
+func (rm *RetryManager) ResetRetryCount(beadID string) int {
+	rm.retriesMu.Lock()
+	defer rm.retriesMu.Unlock()
+	info, exists := rm.retries[beadID]
+	if !exists {
+		return 0
+	}
+	prev := info.count
+	delete(rm.retries, beadID)
+	log.Printf("[Retry] Bead %s retry count reset (previous fault count: %d)", beadID, prev)
+	return prev
+}
+
 // GetRetryCount returns the current retry count for a bead.
 func (rm *RetryManager) GetRetryCount(beadID string) int {
 	rm.retriesMu.RLock()
