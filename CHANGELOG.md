@@ -18,6 +18,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 ### Added
+- Worker prompt now injects deterministic discovery directives as protocol: every bead is told to run `hindsight_search` once at start, and beads without a `Files:` line (discovery-class beads) are required to run `graphify query` before exploring files, with a fallback to `rg`. Session forensics showed workers skipped graphify entirely and rarely used hindsight_search because both were discretionary skills.
+
+### Added
 - Pan can now autonomously close already-satisfied beads: a new `close_satisfied` verdict runs daemon-owned scoped gates on the main checkout and, if green, closes the bead as `already-satisfied (Pan)` with label `closed-satisfied`. This breaks the empty-diff reject loop where a worker correctly finds nothing to do but verified-close refuses an empty diff, burning tens of millions of tokens until a human intervenes (1xs7z, round 3).
 
 ### Added
