@@ -854,6 +854,18 @@ func reserveFiles(client *mcp.Client, bead types.Bead) error {
 	return nil
 }
 
+// hasFilesLine reports whether the bead description declares explicit target
+// files via a standalone "Files:" line. Beads without such a line are treated
+// as discovery-class beads and must run code-discovery tools first.
+func hasFilesLine(desc string) bool {
+	for _, line := range strings.Split(desc, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "Files:") {
+			return true
+		}
+	}
+	return false
+}
+
 // extractTargetFiles extracts target files from bead metadata or description
 func extractTargetFiles(bead types.Bead) []string {
 	var files []string
@@ -2016,6 +2028,23 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 	// discipline that phase actually needs, instead of one generic prompt.
 	if g := phaseGuidance(bead); g != "" {
 		promptParts = append(promptParts, g)
+	}
+
+	// Deterministic discovery directives (session forensics 2026-08-24):
+	// workers never invoked graphify and only rarely ran hindsight_search
+	// because skills are discretionary. Convert the two most valuable
+	// discovery tools into protocol so they cannot be skipped.
+	promptParts = append(promptParts,
+		"DISCOVERY PROTOCOL: at bead start run `hindsight_search` once with this bead's key terms; skip silently if the tool is unavailable.")
+	if !hasFilesLine(bead.Description) {
+		keywords := bead.Title
+		if keywords == "" {
+			keywords = bead.Type
+		}
+		promptParts = append(promptParts,
+			fmt.Sprintf("CODE DISCOVERY (mandatory): run `graphify query %q --budget 2000` BEFORE exploring files.", keywords),
+			"- If graphify-out/graph.json is missing in cwd, fall back to `rg`.",
+			"- Reuse the existing target-file parsing; do not add a second parser.")
 	}
 
 	// Anti-consultant guard: implementation-type beads must produce file

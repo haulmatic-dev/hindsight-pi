@@ -216,3 +216,58 @@ func TestCloseBeadFromWorker_SkipsWhenDaemonGates(t *testing.T) {
 		t.Errorf("daemon-gates skip must return nil, got %v", err)
 	}
 }
+
+// Deterministic discovery directives: session forensics show workers skipped
+// graphify and underused hindsight_search because they were skills the agent
+// could ignore. These tests verify the prompt now injects them as protocol.
+
+func TestBuildPiPrompt_DiscoveryBead_GetsGraphifyBlock(t *testing.T) {
+	bead := types.Bead{
+		ID:          "hydra-discovery-1",
+		Type:        "task",
+		Title:       "Find and fix the timeout bug",
+		Description: "The worker sometimes hangs.\n\nAcceptance:\n- timeout handled",
+	}
+	prompt := buildPiPrompt(bead, nil, promptExtras{})
+	if !strings.Contains(prompt, "CODE DISCOVERY (mandatory)") {
+		t.Errorf("expected mandatory CODE DISCOVERY block for discovery-class bead")
+	}
+	if !strings.Contains(prompt, `graphify query "Find and fix the timeout bug" --budget 2000`) {
+		t.Errorf("expected graphify query instruction with bead title as keywords")
+	}
+	if !strings.Contains(prompt, "graphify-out/graph.json is missing") {
+		t.Errorf("expected graphify fallback to rg")
+	}
+}
+
+func TestBuildPiPrompt_BeadWithFilesLine_NoGraphifyBlock(t *testing.T) {
+	bead := types.Bead{
+		ID:          "hydra-files-1",
+		Type:        "implement",
+		Title:       "Implement feature",
+		Description: "Implement the feature.\n\nFiles: cmd/foo.go, cmd/bar.go",
+	}
+	prompt := buildPiPrompt(bead, nil, promptExtras{})
+	if strings.Contains(prompt, "CODE DISCOVERY (mandatory)") {
+		t.Errorf("expected NO discovery block for bead with explicit Files: line")
+	}
+}
+
+func TestBuildPiPrompt_EveryBead_GetsHindsightLine(t *testing.T) {
+	cases := []string{
+		"no Files: line here",
+		"Files: cmd/foo.go",
+	}
+	for _, desc := range cases {
+		bead := types.Bead{
+			ID:          "hydra-every-1",
+			Type:        "task",
+			Title:       "Task",
+			Description: desc,
+		}
+		prompt := buildPiPrompt(bead, nil, promptExtras{})
+		if !strings.Contains(prompt, "hindsight_search") {
+			t.Errorf("expected hindsight_search line for description %q", desc)
+		}
+	}
+}
