@@ -309,15 +309,15 @@ func NewOverseer(config *Config) *Overseer {
 	// stale placeholder entries (PID 0) that would otherwise block new spawns
 	// for the same bead. The snapshot is taken under the worker mutex by the
 	// callback to avoid racing with concurrent spawns.
-	o.orphanJanitor.SetActiveWorkersSnapshot(func() map[string]int {
+	o.orphanJanitor.SetActiveWorkersSnapshot(func() map[string]*types.Worker {
 		o.workerMutex.RLock()
 		defer o.workerMutex.RUnlock()
-		snapshot := make(map[string]int, len(o.activeWorkers))
+		snapshot := make(map[string]*types.Worker, len(o.activeWorkers))
 		for id, w := range o.activeWorkers {
 			if w == nil {
 				continue
 			}
-			snapshot[id] = w.PID
+			snapshot[id] = w
 		}
 		return snapshot
 	})

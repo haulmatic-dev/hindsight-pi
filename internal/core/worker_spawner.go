@@ -127,11 +127,25 @@ func (s *WorkerSpawner) Spawn(bead types.Bead) error {
 	}
 
 	placeholderWorker := &types.Worker{
-		ID:     beadIDStr,
-		Status: "spawning",
+		ID:        beadIDStr,
+		Status:    "spawning",
+		StartTime: time.Now(),
 	}
 	s.activeWorkers[beadIDStr] = placeholderWorker
 	s.workerMutex.Unlock()
+
+	// The placeholder owns this slot for the duration of the spawn attempt. Any
+	// failure after this point must remove it; otherwise a {status:"spawning"}
+	// phantom blocks the bead forever (pool deadlock, 2026-08-24).
+	spawned := false
+	defer func() {
+		if spawned {
+			return
+		}
+		s.workerMutex.Lock()
+		delete(s.activeWorkers, beadIDStr)
+		s.workerMutex.Unlock()
+	}()
 
 	if count, lastErr, _, exists := s.retryManager.RetryInfo(beadIDStr); exists {
 		maxRetries := s.config.Overseer.DefaultRetries
@@ -151,12 +165,10 @@ func (s *WorkerSpawner) Spawn(bead types.Bead) error {
 
 	worker, err := s.SpawnInternal(bead)
 	if err != nil {
-		s.workerMutex.Lock()
-		delete(s.activeWorkers, beadIDStr)
-		s.workerMutex.Unlock()
 		return err
 	}
 
+	spawned = true
 	s.workerMutex.Lock()
 	s.activeWorkers[beadIDStr] = worker
 	s.workerMutex.Unlock()
