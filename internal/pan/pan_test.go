@@ -194,7 +194,108 @@ func TestParseDecisionsToleratesFencesAndProse(t *testing.T) {
 	}
 }
 
-// TestTickDeduplicatesPendingCommands reproduces the 2026-08-06 live spam:
+func TestCandidatesZeroDiffMarkerAppendsReason(t *testing.T) {
+	store := &fakeStore{workers: []registry.WorkerRecord{{
+		BeadID: "over-budget-zero", State: registry.StateWorking,
+		LastHeartbeat: time.Now(), TokensSoFar: 200,
+	}}}
+
+	s := New(Config{Enabled: true, TokenBudget: 100}, store, nil)
+	s.SetZeroDiff(func(beadID string) (bool, bool) {
+		return beadID == "over-budget-zero", true
+	})
+	cands, err := s.Candidates()
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(cands))
+	}
+	if !strings.Contains(cands[0].Reason, "zero diff on target files") {
+		t.Errorf("reason missing zero-diff marker: %q", cands[0].Reason)
+	}
+}
+
+func TestCandidatesZeroDiffUnknownNoMarker(t *testing.T) {
+	store := &fakeStore{workers: []registry.WorkerRecord{{
+		BeadID: "over-budget-unknown", State: registry.StateWorking,
+		LastHeartbeat: time.Now(), TokensSoFar: 200,
+	}}}
+
+	s := New(Config{Enabled: true, TokenBudget: 100}, store, nil)
+	cands, err := s.Candidates()
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(cands))
+	}
+	if strings.Contains(cands[0].Reason, "zero diff") {
+		t.Errorf("reason should not contain zero-diff marker when unknown: %q", cands[0].Reason)
+	}
+}
+
+func TestTickCloseSatisfiedCallsHandler(t *testing.T) {
+	store := &fakeStore{workers: []registry.WorkerRecord{hungWorker("bead-1")}}
+	runner := func(ctx context.Context, cfg Config, prompt string) (string, error) {
+		return `[{"bead_id": "bead-1", "action": "close_satisfied", "message": "already green"}]`, nil
+	}
+
+	var handled []string
+	s := New(Config{Enabled: true}, store, runner)
+	s.SetOnCloseSatisfied(func(beadID string) error {
+		handled = append(handled, beadID)
+		return nil
+	})
+	s.Tick(context.Background())
+
+	if len(handled) != 1 || handled[0] != "bead-1" {
+		t.Fatalf("handler called %v, want [bead-1]", handled)
+	}
+	if len(store.enqueued) != 0 {
+		t.Errorf("close_satisfied enqueued a worker command: %+v", store.enqueued)
+	}
+}
+
+func TestTickCloseSatisfiedNilHandlerIgnored(t *testing.T) {
+	store := &fakeStore{workers: []registry.WorkerRecord{hungWorker("bead-1")}}
+	runner := func(ctx context.Context, cfg Config, prompt string) (string, error) {
+		return `[{"bead_id": "bead-1", "action": "close_satisfied", "message": "already green"}]`, nil
+	}
+
+	s := New(Config{Enabled: true}, store, runner)
+	s.Tick(context.Background()) // must not panic
+
+	if len(store.enqueued) != 0 {
+		t.Errorf("close_satisfied enqueued a worker command: %+v", store.enqueued)
+	}
+}
+
+func TestTickCloseSatisfiedHandlerErrorDoesNotEnqueue(t *testing.T) {
+	store := &fakeStore{workers: []registry.WorkerRecord{hungWorker("bead-1")}}
+	runner := func(ctx context.Context, cfg Config, prompt string) (string, error) {
+		return `[{"bead_id": "bead-1", "action": "close_satisfied", "message": "already green"}]`, nil
+	}
+
+	s := New(Config{Enabled: true}, store, runner)
+	s.SetOnCloseSatisfied(func(beadID string) error {
+		return fmt.Errorf("gate red")
+	})
+	s.Tick(context.Background())
+
+	if len(store.enqueued) != 0 {
+		t.Errorf("close_satisfied enqueued a worker command after handler error: %+v", store.enqueued)
+	}
+}
+
+func TestNilDepsNoPanic(t *testing.T) {
+	// A freshly-built shepherd with nil deps must survive a no-op tick.
+	s := New(Config{Enabled: false}, nil, nil)
+	s.SetZeroDiff(nil)
+	s.SetOnCloseSatisfied(nil)
+	s.Tick(context.Background())
+}
+
 // Pan queued 511 identical abandon-with-summary commands for one dead bead
 // (srv-smart-engine-g1m) because a dead worker never consumes its queue and
 // Pan re-decided the same verdict every tick. Before enqueueing, Pan must

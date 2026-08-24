@@ -21,6 +21,10 @@ type WorkerReport struct {
 	NudgeCount  int       `json:"nudge_count"`
 }
 
+// CmdCloseSatisfied tells Pan to close a bead whose acceptance criteria are
+// already met on the working branch, without spawning or continuing a worker.
+const CmdCloseSatisfied CommandKind = "close_satisfied"
+
 // CompletionReport marks a worker terminal.
 type CompletionReport struct {
 	BeadID   string `json:"bead_id"`

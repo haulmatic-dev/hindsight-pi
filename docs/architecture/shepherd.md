@@ -56,6 +56,7 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `fix_capped` | fix-of-fix refused (recursion cap) | — |
 | `chain_quarantined` | failed chain routed to quarantine | quarantine branch |
 | `verdict_retained` | a judgment was stored in Hindsight | `kind` (`adjudication`/`failed_close`), verdict or exit code |
+| `satisfied_closed` | Pan closes a bead whose acceptance criteria are already met on the working branch | `tokens` (`0`) |
 
 Read programmatically with `ReadEvents(path)` (torn-line tolerant; a missing
 file is an empty stream, not an error).
@@ -239,8 +240,9 @@ counter error never blocks the scheduler. Implemented in
 
 **Pan, the shepherd.** `internal/pan`: a pi-agent run every 60s against a
 snapshot of the registry that may place steering commands (parked worker
-that overslept, working-but-stalled worker, zombie with a dead PID).
-Fail-open: Pan down or unparseable advice → the deterministic rules below
+that overslept, working-but-stalled worker, zombie with a dead PID) or a
+`close_satisfied` verdict for a bead whose work is already on the working
+branch. Fail-open: Pan down or unparseable advice → the deterministic rules below
 still run. **Disabled** until configured with its own provider key
 (`shepherd.pan` in config; see `hydra-config.yaml.example` for a `minimax` / `MiniMax-M2.7` configuration) — it must not
 share the fleet's Kimi account.
