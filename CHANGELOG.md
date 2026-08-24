@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- Pan no longer judges beads that have already reached a terminal state: `Shepherd.Candidates()` accepts an optional `TerminalBead` injection and silently skips workers whose bead is closed/completed, preventing repeated MiniMax calls and log spam for dead beads (e.g., 1xs7z's 118M-token parked row). Wired in `internal/core/service_starter.go` with a 5-minute cache and fail-open on lookup errors.
 - Directory-shaped bead targets (`Files: cmd/worker/`) could never satisfy the close-path diff gate: `buildTargetSets` treats every target as a file and `hasTargetChanges` exact-matched only, so hydra-2l9's fully-committed worktree was empty-diff rejected 3× (7.5M tokens at risk). `hasTargetChanges` now also path-prefix matches with a `/` boundary. `TestHasTargetChanges_DirectoryTarget`.
 - Wrong-repo worktree on unresolved project: scheduler-path beads carry an empty `Project` field; `FindProjectPath` matched nothing, the spawner fell back to the empty field, and `git worktree add` ran in the daemon's cwd — 1xs7z's "srv" chain worktree was a dev-tools checkout (51.6M tokens wandering the wrong repo, 2026-08-23). `FindProjectPath` now derives project from the bead ID prefix; the spawner never substitutes the name-as-path; `EnsureWorktree` refuses empty paths outright.
 

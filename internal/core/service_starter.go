@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/pan"
@@ -107,6 +108,43 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 			return len(changed) == 0, true
 		})
 		o.panShepherd.SetOnCloseSatisfied(BuildCloseSatisfied(o))
+
+		// Pan should not judge beads that have already reached a terminal
+		// state. Cache the lookup for 5 minutes: terminal is monotonic, so
+		// a stale false only costs one extra tick before the row is reaped.
+		terminalCache := make(map[string]struct {
+			terminal bool
+			at       time.Time
+		})
+		var terminalMu sync.Mutex
+		const terminalTTL = 5 * time.Minute
+		o.panShepherd.SetTerminalBead(func(beadID string) bool {
+			id := types.BeadID(beadID)
+			projectPath := projectPathForID(id)
+			if projectPath == "" {
+				return false
+			}
+			repoName := id.Repo()
+
+			terminalMu.Lock()
+			entry, ok := terminalCache[beadID]
+			terminalMu.Unlock()
+			if ok && time.Since(entry.at) < terminalTTL {
+				return entry.terminal
+			}
+
+			bead, err := o.beadsClient.GetBead(projectPath, repoName, id)
+			terminal := err == nil && bead != nil && bead.Status.IsTerminal()
+
+			terminalMu.Lock()
+			terminalCache[beadID] = struct {
+				terminal bool
+				at       time.Time
+			}{terminal, time.Now()}
+			terminalMu.Unlock()
+
+			return terminal
+		})
 
 		// Budget arbitration: a fresh Pan continue verdict stays Charon's
 		// hard backstop (converging work must be allowed to finish).
