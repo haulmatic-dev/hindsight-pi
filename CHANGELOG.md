@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- Pan shepherd visibility into blocked beads: `internal/pan.Candidates()` now unions scheduler-level blocked beads (retry-exhausted and spawn-failed beads with no live worker row) supplied by `BlockedBeads`. The retry manager exposes `LastFailure()` and the worker spawner keeps a per-bead `LastSpawnFailure()` map, both wired in `internal/core/service_starter.go`. Blocked candidates carry a `BLOCKED:` reason prefix and are never duplicated when a live worker row exists. *Authored by a Hydra dogfood run.*
 - Deterministic quarantine drain: new `hydra drain-quarantine [--apply]` subcommand and `worktree.quarantine_auto_drain` config flag clean up stale `hydra/quarantine/*` branches without LLM judgment. Deletes branches that are fully merged, touch only identical content, or add only superseded `*.spec.ts` / `*_test.go` files; keeps branches younger than 7 days.
 
 ### Fixed

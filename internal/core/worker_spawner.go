@@ -32,6 +32,14 @@ type WorkerSpawner struct {
 	userContexts     map[string]*UserContext // username -> context (for per-user git auth)
 	worktreeManager  *WorktreeManager        // per-chain git isolation; nil = disabled
 	chainKeyFn       func(types.Bead) string // maps a bead to its chain's worktree key
+
+	spawnFailureMu sync.RWMutex
+	spawnFailures  map[string]*spawnFailureInfo // bead ID -> last spawn failure
+}
+
+type spawnFailureInfo struct {
+	err       string
+	timestamp time.Time
 }
 
 // SetWorktreeManager enables per-chain worktree isolation for spawned workers.
@@ -68,15 +76,60 @@ func NewWorkerSpawner(
 		workerEnvBuilder: workerEnvBuilder,
 		workerLifecycle:  workerLifecycle,
 		userContexts:     userContexts,
+		spawnFailures:    make(map[string]*spawnFailureInfo),
 	}
 }
 
+// recordSpawnFailure stores the last non-nil error returned by Spawn for a
+// bead. It is used by Pan to surface blocked beads that never created a worker
+// row. Callers must not hold spawner mutexes.
+func (s *WorkerSpawner) recordSpawnFailure(beadID string, err error) {
+	if err == nil {
+		return
+	}
+	s.spawnFailureMu.Lock()
+	defer s.spawnFailureMu.Unlock()
+	if s.spawnFailures == nil {
+		s.spawnFailures = make(map[string]*spawnFailureInfo)
+	}
+	s.spawnFailures[beadID] = &spawnFailureInfo{err: err.Error(), timestamp: time.Now()}
+}
+
+// LastSpawnFailure returns the last recorded spawn failure for a bead.
+// If no failure has been recorded it returns zero values.
+func (s *WorkerSpawner) LastSpawnFailure(beadID string) (reason string, timestamp time.Time, ok bool) {
+	s.spawnFailureMu.RLock()
+	defer s.spawnFailureMu.RUnlock()
+	if info, exists := s.spawnFailures[beadID]; exists {
+		return info.err, info.timestamp, true
+	}
+	return "", time.Time{}, false
+}
+
+// ListSpawnFailures returns a snapshot of all bead IDs that have a recorded
+// spawn failure.
+func (s *WorkerSpawner) ListSpawnFailures() []string {
+	s.spawnFailureMu.RLock()
+	defer s.spawnFailureMu.RUnlock()
+	out := make([]string, 0, len(s.spawnFailures))
+	for beadID := range s.spawnFailures {
+		out = append(out, beadID)
+	}
+	return out
+}
+
 // Spawn creates and starts a worker for a bead with duplicate checking and limits.
-func (s *WorkerSpawner) Spawn(bead types.Bead) error {
+func (s *WorkerSpawner) Spawn(bead types.Bead) (err error) {
 	beadIDStr := bead.ID.String()
 	if beadIDStr == "" {
 		return fmt.Errorf("cannot spawn worker for bead with empty ID")
 	}
+
+	defer func() {
+		if err != nil {
+			s.recordSpawnFailure(beadIDStr, err)
+		}
+	}()
 
 	if s.spawnRateLimiter.shouldBackoff() {
 		backoff := time.Duration(1<<uint(s.spawnRateLimiter.FailureCount()-1)) * time.Second

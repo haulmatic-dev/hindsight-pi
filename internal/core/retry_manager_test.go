@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -175,5 +176,27 @@ func TestRetryManager_ClearRetryResetsBothCounters(t *testing.T) {
 	}
 	if !rm.ShouldRetry("b7", 3) {
 		t.Error("bead should be freshly eligible after its state was cleared")
+	}
+}
+
+func TestRetryManager_LastFailure(t *testing.T) {
+	rm := newTestRetryManager()
+	wantErr := fmt.Errorf("spawn failure: worktree conflict")
+	rm.RecordRetry("bead-1", wantErr)
+
+	reason, attempts, ts := rm.LastFailure("bead-1")
+	if reason != wantErr.Error() {
+		t.Errorf("reason = %q, want %q", reason, wantErr.Error())
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1", attempts)
+	}
+	if ts.IsZero() {
+		t.Errorf("timestamp zero")
+	}
+
+	reason, attempts, ts = rm.LastFailure("unknown-bead")
+	if reason != "" || attempts != 0 || !ts.IsZero() {
+		t.Errorf("unknown bead should return zero values, got %q %d %v", reason, attempts, ts)
 	}
 }

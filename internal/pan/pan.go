@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,21 @@ type Store interface {
 	EnqueueCommand(beadID string, kind registry.CommandKind, payload string) error
 	PendingCommands(beadID string) ([]registry.Command, error)
 }
+
+// BlockedBead surfaces a READY bead that the scheduler cannot start because a
+// prerequisite is blocked (retry exhaustion, spawn failure, etc.). It has no
+// live worker row, so Pan must judge it as a non-liveness candidate.
+// The injected function may return nil; it is called inside Candidates and is
+// fail-open (nil guard, swallowed panic).
+type BlockedBead struct {
+	BeadID string
+	Reason string
+	Since  time.Time
+}
+
+// BlockedBeadsFunc returns the current set of scheduler-level blocked beads.
+// Nil means "none" and must never panic.
+type BlockedBeadsFunc func() []BlockedBead
 
 // Config tunes Pan. A zero Config is valid and disabled.
 type Config struct {
@@ -51,6 +67,11 @@ type Config struct {
 	// by Candidates to avoid judging dead beads. Nil means "unknown, include
 	// the candidate" (fail open).
 	TerminalBead func(beadID string) bool
+
+	// BlockedBeads returns READY beads that are blocked at the scheduler level
+	// (retry exhaustion, spawn failure, worktree conflict, etc.). Pan unions
+	// these with registry-derived candidates. Nil means "none" and is fail-open.
+	BlockedBeads BlockedBeadsFunc
 
 	// Pan's own pi identity. Its provider MUST be configurable separately
 	// from the worker fleet's: Pan has to stay lucid during the congestion
@@ -174,6 +195,11 @@ func (s *Shepherd) SetOnCloseSatisfied(fn func(beadID string) error) {
 	s.OnCloseSatisfied = fn
 }
 
+// SetBlockedBeads injects the optional blocked-bead source.
+func (s *Shepherd) SetBlockedBeads(fn BlockedBeadsFunc) {
+	s.cfg.BlockedBeads = fn
+}
+
 // SetTerminalBead injects the optional terminal-bead detector.
 func (s *Shepherd) SetTerminalBead(fn func(beadID string) bool) {
 	s.cfg.TerminalBead = fn
@@ -292,8 +318,9 @@ func (s *Shepherd) Tick(ctx context.Context) {
 	}
 }
 
-// Candidates returns the ambiguous tail: parked-overdue, hung, and
-// nudge-cap-reached workers. Everything else belongs to deterministic rules.
+// Candidates returns the ambiguous tail: parked-overdue, hung,
+// nudge-cap-reached workers, and scheduler-level blocked beads with no live
+// worker row. Everything else belongs to deterministic rules.
 func (s *Shepherd) Candidates() ([]Candidate, error) {
 	workers, err := s.store.ListWorkers(registry.StateWorking, registry.StateParked)
 	if err != nil {
@@ -302,6 +329,7 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 
 	now := time.Now()
 	var out []Candidate
+	live := make(map[string]bool)
 	for _, w := range workers {
 		var reason string
 		switch {
@@ -336,8 +364,29 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 		if s.cfg.TerminalBead != nil && s.cfg.TerminalBead(w.BeadID) {
 			continue
 		}
+		live[w.BeadID] = true
 		out = append(out, Candidate{Record: w, Reason: reason})
 	}
+
+	if s.cfg.BlockedBeads != nil {
+		for _, b := range s.cfg.BlockedBeads() {
+			if live[b.BeadID] {
+				continue
+			}
+			reason := b.Reason
+			if !strings.HasPrefix(reason, "BLOCKED: ") {
+				reason = "BLOCKED: " + reason
+			}
+			if !b.Since.IsZero() {
+				reason += fmt.Sprintf(" (since %s)", time.Since(b.Since).Round(time.Second))
+			}
+			out = append(out, Candidate{
+				Record: registry.WorkerRecord{BeadID: b.BeadID},
+				Reason: reason,
+			})
+		}
+	}
+
 	return out, nil
 }
 
