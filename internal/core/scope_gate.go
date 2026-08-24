@@ -132,8 +132,13 @@ func hasTargetChanges(changed, targets []string) bool {
 	targetSet, _ := buildTargetSets(targets)
 	for _, c := range changed {
 		clean := filepath.Clean(c)
-		if _, ok := targetSet[clean]; ok {
-			return true
+		for t := range targetSet {
+			// Exact match for file targets; path-boundary prefix match for
+			// directory targets like "cmd/worker/" (hydra-2l9: directory
+			// targets could never exact-match -> empty-diff reject loop).
+			if clean == t || strings.HasPrefix(clean, t+"/") {
+				return true
+			}
 		}
 	}
 	return false
