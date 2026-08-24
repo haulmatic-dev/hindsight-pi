@@ -7,6 +7,26 @@ import (
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
+func TestBuildPiPrompt_IncludesWorkspaceGuard(t *testing.T) {
+	bead := types.Bead{
+		ID:    "test-bead",
+		Title: "GREEN: Implement feature",
+		Type:  "implement",
+	}
+	prompt := buildPiPrompt(bead, nil, promptExtras{})
+
+	for _, want := range []string{
+		"WORKSPACE:",
+		"cwd is your git worktree",
+		"never cd to the main checkout",
+		"All edits belong in cwd",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing workspace guidance %q", want)
+		}
+	}
+}
+
 // Turn economy: pi's RPC turn path records exactly one assistant message per
 // tool call, and every turn re-bills the entire transcript. Session forensics
 // on srv-smart-engine (2026-08-17, bead co3u8) showed 167 turns / 166 unique
