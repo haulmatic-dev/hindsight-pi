@@ -46,6 +46,12 @@ type Config struct {
 	// and acx — beads that landed — and did kill cc0d6 mid-'continue'.)
 	TokenBudget int64
 
+	// TerminalBead reports whether a bead has reached a terminal state
+	// (closed, completed, etc.). When true the worker row is silently skipped
+	// by Candidates to avoid judging dead beads. Nil means "unknown, include
+	// the candidate" (fail open).
+	TerminalBead func(beadID string) bool
+
 	// Pan's own pi identity. Its provider MUST be configurable separately
 	// from the worker fleet's: Pan has to stay lucid during the congestion
 	// storms it manages. APIKeyName names the env var holding its key.
@@ -166,6 +172,11 @@ func (s *Shepherd) SetZeroDiff(fn func(beadID string) (bool, bool)) {
 // SetOnCloseSatisfied injects the optional close-satisfied handler.
 func (s *Shepherd) SetOnCloseSatisfied(fn func(beadID string) error) {
 	s.OnCloseSatisfied = fn
+}
+
+// SetTerminalBead injects the optional terminal-bead detector.
+func (s *Shepherd) SetTerminalBead(fn func(beadID string) bool) {
+	s.cfg.TerminalBead = fn
 }
 
 // Start runs Pan's tick loop in the background.
@@ -292,23 +303,23 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 	now := time.Now()
 	var out []Candidate
 	for _, w := range workers {
+		var reason string
 		switch {
 		case w.NudgeCount >= s.cfg.NudgeCap:
-			out = append(out, Candidate{Record: w, Reason: fmt.Sprintf(
-				"verdict missing after %d nudges (cap %d)", w.NudgeCount, s.cfg.NudgeCap)})
+			reason = fmt.Sprintf(
+				"verdict missing after %d nudges (cap %d)", w.NudgeCount, s.cfg.NudgeCap)
 		case w.State == registry.StateParked && !w.ParkWakeAt.IsZero() &&
 			now.After(w.ParkWakeAt.Add(s.cfg.ParkOverdueGrace)):
-			out = append(out, Candidate{Record: w, Reason: fmt.Sprintf(
-				"parked past wake_at + %v grace (reason: %s)", s.cfg.ParkOverdueGrace, w.ParkReason)})
+			reason = fmt.Sprintf(
+				"parked past wake_at + %v grace (reason: %s)", s.cfg.ParkOverdueGrace, w.ParkReason)
 		case w.State == registry.StateWorking && s.cfg.TokenBudget > 0 && w.TokensSoFar > s.cfg.TokenBudget:
-			reason := fmt.Sprintf(
+			reason = fmt.Sprintf(
 				"token budget exceeded (%d > %d) — converging or wandering?", w.TokensSoFar, s.cfg.TokenBudget)
 			if s.ZeroDiff != nil {
 				if zero, _ := s.ZeroDiff(w.BeadID); zero {
 					reason += "; zero diff on target files — wandering or already-satisfied?"
 				}
 			}
-			out = append(out, Candidate{Record: w, Reason: reason})
 		case w.State == registry.StateWorking && !w.LastHeartbeat.IsZero() &&
 			now.Sub(w.LastHeartbeat) > s.cfg.HungAfter &&
 			now.Sub(w.StartedAt) >= 2*s.cfg.HungAfter:
@@ -316,9 +327,16 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 			// turn — tokens legitimately 0 (they land at turn end) and its
 			// heartbeat can predate it in the registration race. Pan abandoned
 			// exactly such a worker live (srv-smart-engine-pes, 2026-08-07).
-			out = append(out, Candidate{Record: w, Reason: fmt.Sprintf(
-				"no heartbeat for %v (threshold %v)", now.Sub(w.LastHeartbeat), s.cfg.HungAfter)})
+			reason = fmt.Sprintf(
+				"no heartbeat for %v (threshold %v)", now.Sub(w.LastHeartbeat), s.cfg.HungAfter)
 		}
+		if reason == "" {
+			continue
+		}
+		if s.cfg.TerminalBead != nil && s.cfg.TerminalBead(w.BeadID) {
+			continue
+		}
+		out = append(out, Candidate{Record: w, Reason: reason})
 	}
 	return out, nil
 }
