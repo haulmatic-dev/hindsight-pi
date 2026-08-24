@@ -335,3 +335,19 @@ func TestChangedFiles_IncludesCommittedAheadOfBase(t *testing.T) {
 		t.Errorf("committed-ahead-of-base change must count, got %v", changed)
 	}
 }
+
+func TestHasTargetChanges_DirectoryTarget(t *testing.T) {
+	// hydra-2l9: bead target "cmd/worker/" (a directory) never exact-matched,
+	// so a fully-committed worktree was empty-diff rejected 3x.
+	if !hasTargetChanges([]string{"cmd/worker/session_stats.go"}, []string{"cmd/worker/"}) {
+		t.Fatalf("file under a directory target should satisfy target diff")
+	}
+	// Sibling directory must not match.
+	if hasTargetChanges([]string{"cmd/hydra/main.go"}, []string{"cmd/worker/"}) {
+		t.Fatalf("file in sibling directory should not satisfy directory target")
+	}
+	// Prefix-without-boundary must not match (cmd/worker2 vs cmd/worker).
+	if hasTargetChanges([]string{"cmd/worker2/x.go"}, []string{"cmd/worker/"}) {
+		t.Fatalf("partial-name directory must not match without path boundary")
+	}
+}
