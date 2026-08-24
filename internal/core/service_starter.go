@@ -151,6 +151,46 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 		})
 		o.panShepherd.SetOnCloseSatisfied(BuildCloseSatisfied(o))
 
+		// Pan repair handlers: whitelisted daemon-side actions that clear
+		// scheduler-level blockers without a worker command. They are
+		// fail-open: errors are logged and emitted as audit events only.
+		o.panShepherd.SetRepairHandlers(map[string]func(beadID string) error{
+			"repair-worktree": func(beadID string) error {
+				id := types.BeadID(beadID)
+				projectPath := projectPathForID(id)
+				if projectPath == "" {
+					return fmt.Errorf("repair-worktree: project path unresolved for %s", beadID)
+				}
+				if o.worktreeManager == nil {
+					return fmt.Errorf("repair-worktree: no worktree manager for %s", beadID)
+				}
+				key := o.chainKeyForBead(types.Bead{ID: id})
+				o.worktreeManager.Remove(projectPath, key)
+				if _, err := o.worktreeManager.EnsureWorktree(projectPath, key); err != nil {
+					return fmt.Errorf("repair-worktree: recreate %s: %w", beadID, err)
+				}
+				log.Printf("[PanRepair] repair-worktree succeeded for %s", beadID)
+				return nil
+			},
+			"reap-placeholder": func(beadID string) error {
+				if o.workerSpawner == nil {
+					return fmt.Errorf("reap-placeholder: no worker spawner")
+				}
+				if !o.workerSpawner.ClearSpawningPlaceholder(beadID) {
+					log.Printf("[PanRepair] reap-placeholder: no spawning placeholder for %s", beadID)
+				}
+				return nil
+			},
+			"reset-retries": func(beadID string) error {
+				if o.retryManager == nil {
+					return fmt.Errorf("reset-retries: no retry manager")
+				}
+				prev := o.retryManager.ResetRetryCount(beadID)
+				log.Printf("[PanRepair] reset-retries for %s (previous fault count: %d)", beadID, prev)
+				return nil
+			},
+		})
+
 		// Pan should not judge beads that have already reached a terminal
 		// state. Cache the lookup for 5 minutes: terminal is monotonic, so
 		// a stale false only costs one extra tick before the row is reaped.

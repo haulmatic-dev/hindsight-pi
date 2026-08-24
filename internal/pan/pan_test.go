@@ -25,6 +25,15 @@ func (f *fakeStore) ListWorkers(states ...registry.WorkerState) ([]registry.Work
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
+	if len(states) == 0 {
+		var out []registry.WorkerRecord
+		for _, w := range f.workers {
+			if w.State != registry.StateCompleted {
+				out = append(out, w)
+			}
+		}
+		return out, nil
+	}
 	want := map[registry.WorkerState]bool{}
 	for _, s := range states {
 		want[s] = true

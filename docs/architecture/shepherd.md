@@ -251,6 +251,25 @@ Pan down or unparseable advice → the deterministic rules below still run. **Di
 (`shepherd.pan` in config; see `hydra-config.yaml.example` for a `minimax` / `MiniMax-M2.7` configuration) — it must not
 share the fleet's Kimi account.
 
+**Pan repair verdict.** Since 2026-08-24 Pan can also issue whitelisted
+`repair:<name>` actions for *blocked* candidates. These are daemon-side
+repairs, not worker commands: the daemon executes the handler, verifies the
+outcome, and emits a `[PanRepair]` JSON audit event (`bead_id`, `action`,
+`result`=`ok|error`, `detail`). Handlers are configured in
+`internal/core/service_starter.go`:
+
+| Name | Handler | Safety guard |
+|---|---|---|
+| `repair-worktree` | `WorktreeManager.Remove` then `EnsureWorktree` for the bead's chain key | refuses if the project path or worktree manager is missing |
+| `reap-placeholder` | `WorkerSpawner.ClearSpawningPlaceholder` | no-op if no placeholder exists |
+| `reset-retries` | `RetryManager.ResetRetryCount` | returns the previous fault count in the audit detail |
+
+Pan rejects a repair if the bead has any non-completed worker row (live worker
+safety), if the handler is unknown or nil, or if the same bead was repaired
+within the last hour. The prompt documents `repair:<name>` as BLOCKED-only.
+Handlers are fail-open: a failed repair is logged and emitted, but never blocks
+the pipeline.
+
 **Charon is liveness-based now.** The stuck-worker sweep used to kill on
 wall-clock time alone and on 2026-08-01 killed every fleet worker at ~15m —
 including parked workers and one worker while it was emitting its closing
