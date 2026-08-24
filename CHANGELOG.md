@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Fixed
+- Worktree-identity guard false-positived on submodule gitdirs: `worktreeSourceRepo` parsed the `.git` pointer for `/.git/worktrees/`, which matches the SUPER-project's `.git` first when the repo is a submodule (hydra lives at `/opt/dev-tools/.git/modules/components/hydra`) — every hydra spawn failed "valid git worktree of a different repository" (hydra-x9e: 67 retries, fleet wedge 2026-08-24). `isOurWorktree` now compares `git rev-parse --git-common-dir` on both sides. `TestIsOurWorktree_SubmoduleGitdir` / `TestIsOurWorktree_ForeignRepo`.
+
 ### Added
 - Pan repair verdict: whitelisted daemon-executed repairs for blocked beads (`repair-worktree`, `reap-placeholder`, `reset-retries`). Pan parses `repair:<name>` decisions, refuses them on live worker rows, enforces one repair per bead per hour, and emits a `[PanRepair]` JSON audit event. Handlers are wired in `internal/core/service_starter.go` and tested in `internal/pan` and `internal/core`. *Authored by a Hydra dogfood run.*
 - Pan shepherd visibility into blocked beads: `internal/pan.Candidates()` now unions scheduler-level blocked beads (retry-exhausted and spawn-failed beads with no live worker row) supplied by `BlockedBeads`. The retry manager exposes `LastFailure()` and the worker spawner keeps a per-bead `LastSpawnFailure()` map, both wired in `internal/core/service_starter.go`. Blocked candidates carry a `BLOCKED:` reason prefix and are never duplicated when a live worker row exists. *Authored by a Hydra dogfood run.*
