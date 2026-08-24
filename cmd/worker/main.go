@@ -2057,6 +2057,14 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 			"DELIVERABLE CONTRACT: this task is complete only when the required file edits exist on disk and verification commands ran. A plan or analysis without edits will be rejected as an empty diff.")
 	}
 
+	// Workspace guard (incident 2jjz8, 2026-08-24): a worker cd'd out of
+	// its worktree and wrote a spec file into the main checkout. The
+	// dirty-main auto-commit swept it onto the branch, but the worktree was
+	// clean so verified-close rejected the empty diff and the bead nearly
+	// looped forever.
+	promptParts = append(promptParts,
+		"WORKSPACE: your cwd is your git worktree. NEVER write files outside it — never cd to the main checkout, never use absolute paths into it. All edits belong in cwd.")
+
 	// Turn economy (session forensics 2026-08-17): every turn re-bills the
 	// full transcript (16K -> 244K over one bead = 25M tokens, 24.8M cache
 	// reads). The model defaults to one tool call per turn (measured 1.00

@@ -244,6 +244,62 @@ func captureLogOutput(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
+// TestVerifyBeforeClose_MainCheckoutLeak reproduces incident 2jjz8: a worker
+// wrote into the main checkout instead of its worktree. The worktree is clean,
+// but the main checkout holds the changed target file. The diff gate must pass
+// because the main-checkout changes are unioned in, and each leaked file must
+// be logged.
+func TestVerifyBeforeClose_MainCheckoutLeak(t *testing.T) {
+	projectPath := initGitRepoWithCommit(t)
+
+	wtMgr := NewWorktreeManager()
+	key := "test-leak"
+	if _, err := wtMgr.EnsureWorktree(projectPath, key); err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	wtPath, ok := wtMgr.ExistingWorktree(projectPath, key)
+	if !ok {
+		t.Fatal("worktree was not created")
+	}
+
+	target := "feature.go"
+	writeFile(t, projectPath, target, "leaked content\n")
+	if _, err := os.Stat(filepath.Join(wtPath, target)); err == nil {
+		t.Fatalf("worktree unexpectedly contains %s", target)
+	}
+
+	bead := types.Bead{
+		ID:       "test-project-leak",
+		Title:    "GREEN: implement feature",
+		Project:  "test-project",
+		Type:     "implement",
+		Status:   types.StatusInProgress,
+		Metadata: map[string]string{"files": target},
+	}
+
+	cfg := DefaultConfig()
+	cfg.Validation.RequireDiffOnClose = true
+	resolver := NewProjectResolver([]types.Project{
+		{Name: "test-project", Path: projectPath, Type: types.RepoTypeSingle},
+	})
+	closer := NewBeadCloser(newMockBeadsClient(), nil, resolver, nil, cfg)
+	closer.SetWorktreeManager(wtMgr,
+		func(_ types.Bead) string { return key },
+		func(_ types.BeadID) bool { return false },
+	)
+
+	logs := captureLogOutput(t, func() {
+		if err := closer.verifyBeforeClose(&bead, projectPath, ""); err != nil {
+			t.Fatalf("verifyBeforeClose returned error: %v", err)
+		}
+	})
+
+	want := "[VerifiedClose] test-project-leak main-checkout leak: feature.go"
+	if !strings.Contains(logs, want) {
+		t.Errorf("expected leak log %q, got:\n%s", want, logs)
+	}
+}
+
 func TestVerifyBeforeClose_TargetLessImplementationWarns(t *testing.T) {
 	repo, closer, bead := setupScopeGateTest(t, "block")
 	bead.Metadata = nil

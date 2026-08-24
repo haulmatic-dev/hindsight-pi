@@ -489,15 +489,12 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 	if repoPath == "" {
 		repoPath = projectPath
 	}
-	// When worktree isolation is active the worker wrote to the chain's
-	// worktree, NOT the shared checkout (which stays clean until the chain
-	// integrates). Inspect the worktree so the gate sees the real changes;
-	// checking repoPath here rejected every worktree-isolated bead as
-	// "empty-diff" even though the worker did its job. Fall back to repoPath
-	// when there is no worktree (isolation disabled, or not yet created).
+	mainRepoPath := projectPath
+	switchedToWorktree := false
 	if c.worktreeManager != nil && c.chainKeyFn != nil {
 		if wt, ok := c.worktreeManager.ExistingWorktree(projectPath, c.chainKeyFn(*bead)); ok {
 			repoPath = wt
+			switchedToWorktree = true
 		}
 	}
 
@@ -518,6 +515,30 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 		changed, changedErr = changedFilesWithBase(repoPath, base)
 		if changedErr != nil {
 			log.Printf("[VerifiedClose] diff check error for %s (not blocking): %v", bead.ID, changedErr)
+		}
+	}
+
+	// Incident 2jjz8: the agent wrote into the main checkout instead of its
+	// worktree. When we are inspecting a worktree, also collect uncommitted
+	// changes in the main checkout and union them into the diff/scope
+	// evidence. The dirty-main auto-commit already sweeps these files onto
+	// the branch at integration time, so the work is preserved either way.
+	if switchedToWorktree && (needDiff || needScope) {
+		mainChanged, mainErr := changedFiles(mainRepoPath)
+		if mainErr != nil {
+			log.Printf("[VerifiedClose] main-checkout diff check error for %s (not blocking): %v", bead.ID, mainErr)
+		} else if len(mainChanged) > 0 {
+			seen := make(map[string]bool, len(changed))
+			for _, f := range changed {
+				seen[f] = true
+			}
+			for _, f := range mainChanged {
+				if !seen[f] {
+					log.Printf("[VerifiedClose] %s main-checkout leak: %s", bead.ID, f)
+					changed = append(changed, f)
+					seen[f] = true
+				}
+			}
 		}
 	}
 
