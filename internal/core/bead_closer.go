@@ -543,7 +543,28 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 	}
 
 	if needDiff && !hasTargetChanges(changed, targets) {
-		return c.rejectClose(bead, projectPath, repoName, "empty-diff")
+		// 5k33p class: the worker's commits may have been integrated into the
+		// working branch before verified-close ran. The worktree can be clean
+		// while the main checkout already contains the bead's target changes
+		// since the chain diverged. If so, treat the diff gate as satisfied
+		// and proceed to daemon gates; otherwise keep the empty-diff reject.
+		alreadyIntegrated := false
+		if switchedToWorktree {
+			baseBranch := currentBranch(projectPath)
+			chainBranch := currentBranch(repoPath)
+			if baseBranch != "" && chainBranch != "" {
+				mainChanged, mainErr := changedFilesSinceMergeBase(projectPath, baseBranch, chainBranch)
+				if mainErr != nil {
+					log.Printf("[VerifiedClose] already-integrated check failed for %s (not blocking): %v", bead.ID, mainErr)
+				} else if hasTargetChanges(mainChanged, targets) {
+					alreadyIntegrated = true
+					log.Printf("[VerifiedClose] %s targets already integrated on %s; treating as satisfied", bead.ID, baseBranch)
+				}
+			}
+		}
+		if !alreadyIntegrated {
+			return c.rejectClose(bead, projectPath, repoName, "empty-diff")
+		}
 	}
 
 	if needScope {

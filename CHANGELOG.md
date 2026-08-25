@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- Verified-close now treats an already-integrated bead as satisfied: when the chain worktree diff is empty, `verifyBeforeClose` checks whether the bead's targets changed on the main checkout since the chain's merge base; if so, it proceeds to daemon gates instead of rejecting empty-diff (srv-smart-engine-5k33p class, 2026-08-25). `TestVerifyBeforeClose_AlreadyIntegratedTargetPasses` / `BothCleanEmptyDiffRejectUnchanged` / `NoChainBranchSkipAlreadyIntegratedCheck`.
 - Worktree-identity guard false-positived on submodule gitdirs: `worktreeSourceRepo` parsed the `.git` pointer for `/.git/worktrees/`, which matches the SUPER-project's `.git` first when the repo is a submodule (hydra lives at `/opt/dev-tools/.git/modules/components/hydra`) — every hydra spawn failed "valid git worktree of a different repository" (hydra-x9e: 67 retries, fleet wedge 2026-08-24). `isOurWorktree` now compares `git rev-parse --git-common-dir` on both sides. `TestIsOurWorktree_SubmoduleGitdir` / `TestIsOurWorktree_ForeignRepo`.
 
 ### Added

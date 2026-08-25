@@ -374,3 +374,130 @@ func TestVerifyBeforeClose_DeclaredTargetsUnaffected(t *testing.T) {
 		t.Fatalf("declared-target bead should not emit target-less warning, got:\n%s", logs)
 	}
 }
+
+func TestVerifyBeforeClose_AlreadyIntegratedTargetPasses(t *testing.T) {
+	// 5k33p class: the worker's commits were integrated into the working branch
+	// before verified-close ran. The chain worktree is clean, but the main
+	// checkout contains a commit touching the bead's target since the merge base.
+	projectPath := initGitRepoWithCommit(t)
+	t.Setenv("HYDRA_HOME", t.TempDir())
+
+	wtMgr := NewWorktreeManager()
+	key := "already-integrated"
+	wtPath, err := wtMgr.EnsureWorktree(projectPath, key)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	target := "feature.go"
+	writeFile(t, projectPath, target, "integrated content\n")
+	runGit(t, projectPath, "add", target)
+	runGit(t, projectPath, "commit", "-m", "integrate target")
+
+	// Worktree must be clean (no uncommitted or ahead-of-base changes).
+	st, _ := exec.Command("git", "-C", wtPath, "status", "--porcelain").Output()
+	if strings.TrimSpace(string(st)) != "" {
+		t.Fatalf("precondition: worktree must be clean, got %q", st)
+	}
+
+	bead := types.Bead{
+		ID:       "test-project-integrated",
+		Title:    "GREEN: implement feature",
+		Project:  "test-project",
+		Type:     "implement",
+		Status:   types.StatusInProgress,
+		Metadata: map[string]string{"files": target},
+	}
+
+	cfg := DefaultConfig()
+	cfg.Validation.RequireDiffOnClose = true
+	resolver := NewProjectResolver([]types.Project{
+		{Name: "test-project", Path: projectPath, Type: types.RepoTypeSingle},
+	})
+	closer := NewBeadCloser(newMockBeadsClient(), nil, resolver, nil, cfg)
+	closer.SetWorktreeManager(wtMgr,
+		func(_ types.Bead) string { return key },
+		func(_ types.BeadID) bool { return false },
+	)
+
+	logs := captureLogOutput(t, func() {
+		if err := closer.verifyBeforeClose(&bead, projectPath, ""); err != nil {
+			t.Fatalf("already-integrated target must not reject close: %v", err)
+		}
+	})
+
+	want := "[VerifiedClose] test-project-integrated targets already integrated on main"
+	if !strings.Contains(logs, want) {
+		t.Errorf("expected integration log %q, got:\n%s", want, logs)
+	}
+}
+
+func TestVerifyBeforeClose_BothCleanEmptyDiffRejectUnchanged(t *testing.T) {
+	projectPath := initGitRepoWithCommit(t)
+	t.Setenv("HYDRA_HOME", t.TempDir())
+
+	wtMgr := NewWorktreeManager()
+	key := "both-clean"
+	if _, err := wtMgr.EnsureWorktree(projectPath, key); err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	bead := types.Bead{
+		ID:       "test-project-clean",
+		Title:    "GREEN: implement feature",
+		Project:  "test-project",
+		Type:     "implement",
+		Status:   types.StatusInProgress,
+		Metadata: map[string]string{"files": "feature.go"},
+	}
+
+	cfg := DefaultConfig()
+	cfg.Validation.RequireDiffOnClose = true
+	resolver := NewProjectResolver([]types.Project{
+		{Name: "test-project", Path: projectPath, Type: types.RepoTypeSingle},
+	})
+	closer := NewBeadCloser(newMockBeadsClient(), nil, resolver, nil, cfg)
+	closer.SetWorktreeManager(wtMgr,
+		func(_ types.Bead) string { return key },
+		func(_ types.BeadID) bool { return false },
+	)
+
+	err := closer.verifyBeforeClose(&bead, projectPath, "")
+	if err == nil {
+		t.Fatal("expected empty-diff rejection when both worktree and main checkout are clean")
+	}
+	if !strings.Contains(err.Error(), "empty-diff") {
+		t.Fatalf("expected empty-diff rejection, got: %v", err)
+	}
+}
+
+func TestVerifyBeforeClose_NoChainBranchSkipAlreadyIntegratedCheck(t *testing.T) {
+	// No chain worktree/branch exists (e.g. it was merged and deleted). The
+	// already-integrated check must be skipped and the existing empty-diff
+	// reject must still fire.
+	projectPath := initGitRepoWithCommit(t)
+
+	bead := types.Bead{
+		ID:       "test-project-no-chain",
+		Title:    "GREEN: implement feature",
+		Project:  "test-project",
+		Type:     "implement",
+		Status:   types.StatusInProgress,
+		Metadata: map[string]string{"files": "feature.go"},
+	}
+
+	cfg := DefaultConfig()
+	cfg.Validation.RequireDiffOnClose = true
+	resolver := NewProjectResolver([]types.Project{
+		{Name: "test-project", Path: projectPath, Type: types.RepoTypeSingle},
+	})
+	closer := NewBeadCloser(newMockBeadsClient(), nil, resolver, nil, cfg)
+
+	err := closer.verifyBeforeClose(&bead, projectPath, "")
+	if err == nil {
+		t.Fatal("expected empty-diff rejection when no chain branch exists")
+	}
+	if !strings.Contains(err.Error(), "empty-diff") {
+		t.Fatalf("expected empty-diff rejection, got: %v", err)
+	}
+}

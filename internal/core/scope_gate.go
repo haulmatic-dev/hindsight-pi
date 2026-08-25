@@ -238,3 +238,35 @@ func currentBranch(projectPath string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// changedFilesSinceMergeBase returns the repo-relative paths that changed on
+// the main checkout between the merge base of baseBranch and chainBranch and
+// HEAD. This detects work that was already integrated into the working branch
+// before verified-close ran (5k33p class): the chain worktree may be clean,
+// but the main checkout contains the bead's target changes since the chain
+// diverged. Git errors are returned so the caller can decide whether to fail
+// open or skip the check.
+func changedFilesSinceMergeBase(projectPath, baseBranch, chainBranch string) ([]string, error) {
+	if projectPath == "" || baseBranch == "" || chainBranch == "" {
+		return nil, fmt.Errorf("changedFilesSinceMergeBase: projectPath, baseBranch, and chainBranch are required")
+	}
+	mb, err := exec.Command("git", "-C", projectPath, "merge-base", baseBranch, chainBranch).Output()
+	if err != nil {
+		return nil, fmt.Errorf("merge-base %s %s in %s: %w", baseBranch, chainBranch, projectPath, err)
+	}
+	mergeBase := strings.TrimSpace(string(mb))
+	if mergeBase == "" {
+		return nil, fmt.Errorf("merge-base returned empty for %s %s in %s", baseBranch, chainBranch, projectPath)
+	}
+	out, err := exec.Command("git", "-C", projectPath, "diff", "--name-only", mergeBase+"...HEAD").Output()
+	if err != nil {
+		return nil, fmt.Errorf("diff --name-only %s...HEAD in %s: %w", mergeBase, projectPath, err)
+	}
+	files := make([]string, 0)
+	for _, f := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if f != "" {
+			files = append(files, f)
+		}
+	}
+	return files, nil
+}
