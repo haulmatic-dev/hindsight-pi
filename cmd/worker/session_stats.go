@@ -24,13 +24,14 @@ type toolMixStats struct {
 	Payload      map[string]int64 // bytes per tool name
 	TotalCalls   int
 	BashJestRuns int
+	GateCmdRuns  map[string]int // gate-command invocations keyed by matched prefix
 }
 
 // gatherSessionToolMix reads the *.jsonl files in sessionDir and aggregates
 // toolCall usage. It returns ok=false (and logs nothing) when the session
-// directory is missing or contains no jsonl files. Any read or parse error
-// logs a debug line and aborts the aggregation so bad data never gates the
-// worker result.
+// directory is missing or contains no jsonl files. Any read error logs a debug
+// line and aborts the aggregation so bad data never gates the worker result.
+// Individual malformed jsonl lines are skipped.
 func gatherSessionToolMix(sessionDir string) (toolMixStats, bool) {
 	entries, err := os.ReadDir(sessionDir)
 	if err != nil {
@@ -53,12 +54,15 @@ func gatherSessionToolMix(sessionDir string) (toolMixStats, bool) {
 	}
 
 	stats := toolMixStats{
-		Counts:  make(map[string]int),
-		Payload: make(map[string]int64),
+		Counts:      make(map[string]int),
+		Payload:     make(map[string]int64),
+		GateCmdRuns: make(map[string]int),
 	}
 
+	gatePrefixes := loadGateCommandPrefixes()
+
 	for _, path := range files {
-		fileStats, err := readSessionFileToolMix(path)
+		fileStats, err := readSessionFileToolMix(path, gatePrefixes)
 		if err != nil {
 			log.Printf("[SessionStats] debug: skipping stats for %s: %v", sessionDir, err)
 			return toolMixStats{}, false
@@ -70,9 +74,10 @@ func gatherSessionToolMix(sessionDir string) (toolMixStats, bool) {
 }
 
 // readSessionFileToolMix reads at most the last maxSessionReadBytes of a
-// single jsonl session file and returns the per-tool aggregation. A parse
-// error on any line aborts and returns the error so the caller can fail open.
-func readSessionFileToolMix(path string) (toolMixStats, error) {
+// single jsonl session file and returns the per-tool aggregation. Individual
+// malformed jsonl lines are debug-logged and skipped; a scanner-level error
+// aborts and returns the error so the caller can fail open.
+func readSessionFileToolMix(path string, gatePrefixes []string) (toolMixStats, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return toolMixStats{}, err
@@ -95,8 +100,9 @@ func readSessionFileToolMix(path string) (toolMixStats, error) {
 	}
 
 	stats := toolMixStats{
-		Counts:  make(map[string]int),
-		Payload: make(map[string]int64),
+		Counts:      make(map[string]int),
+		Payload:     make(map[string]int64),
+		GateCmdRuns: make(map[string]int),
 	}
 
 	scanner := bufio.NewScanner(f)
@@ -107,8 +113,9 @@ func readSessionFileToolMix(path string) (toolMixStats, error) {
 	}
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		if err := accumulateToolCalls(&stats, line); err != nil {
-			return toolMixStats{}, fmt.Errorf("%s: %w", filepath.Base(path), err)
+		if err := accumulateToolCalls(&stats, line, gatePrefixes); err != nil {
+			log.Printf("[SessionStats] debug: skipping malformed line in %s: %v", filepath.Base(path), err)
+			continue
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -119,10 +126,11 @@ func readSessionFileToolMix(path string) (toolMixStats, error) {
 }
 
 // accumulateToolCalls parses one jsonl line, finds every nested toolCall,
-// increments counts and payload totals, and detects jest/test-agent bash
-// invocations. It returns an error for malformed JSON so the caller can
-// fail open.
-func accumulateToolCalls(stats *toolMixStats, line []byte) error {
+// increments counts and payload totals, detects jest/test-agent bash
+// invocations, and counts bash invocations that match the daemon-declared
+// gate-command prefixes. It returns an error for malformed JSON so the caller
+// can skip the line and continue.
+func accumulateToolCalls(stats *toolMixStats, line []byte, gatePrefixes []string) error {
 	if len(line) == 0 {
 		return nil
 	}
@@ -143,8 +151,16 @@ func accumulateToolCalls(stats *toolMixStats, line []byte) error {
 		stats.Payload[name] += lineLen
 		stats.TotalCalls++
 		if name == "bash" {
-			if cmd := bashCommand(m); cmd != "" && isJestRun(cmd) {
-				stats.BashJestRuns++
+			if cmd := bashCommand(m); cmd != "" {
+				if isJestRun(cmd) {
+					stats.BashJestRuns++
+				}
+				normCmd := normalizeWhitespace(cmd)
+				for _, p := range gatePrefixes {
+					if strings.Contains(normCmd, p) {
+						stats.GateCmdRuns[p]++
+					}
+				}
 			}
 		}
 	})
@@ -183,6 +199,54 @@ func isJestRun(cmd string) bool {
 	return strings.Contains(lower, "jest") || strings.Contains(lower, "test:agent")
 }
 
+// loadGateCommandPrefixes parses HYDRA_GATE_CMDS (JSON array of declared gate
+// commands) and returns the matching prefixes. The prefix is the command up to
+// its first placeholder or flag token; e.g. "npm run test:agent -- <scope>"
+// becomes "npm run test:agent". Fail-open: missing or malformed env var logs a
+// debug line and returns nil.
+func loadGateCommandPrefixes() []string {
+	v := os.Getenv("HYDRA_GATE_CMDS")
+	if v == "" {
+		return nil
+	}
+	var cmds []string
+	if err := json.Unmarshal([]byte(v), &cmds); err != nil {
+		log.Printf("[SessionStats] debug: failed to parse HYDRA_GATE_CMDS: %v", err)
+		return nil
+	}
+	out := make([]string, 0, len(cmds))
+	for _, c := range cmds {
+		if p := gateCmdPrefix(c); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// gateCmdPrefix returns the command string up to (but not including) the
+// first placeholder or flag token, with whitespace normalized. An empty or
+// whitespace-only command returns "".
+func gateCmdPrefix(cmd string) string {
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return ""
+	}
+	n := len(fields)
+	for i, tok := range fields {
+		if strings.HasPrefix(tok, "<") || strings.HasPrefix(tok, "-") {
+			n = i
+			break
+		}
+	}
+	return strings.Join(fields[:n], " ")
+}
+
+// normalizeWhitespace collapses runs of whitespace into a single space and
+// trims leading/trailing whitespace.
+func normalizeWhitespace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // mergeToolMixStats adds fileStats into total.
 func mergeToolMixStats(total *toolMixStats, fileStats toolMixStats) {
 	for name, n := range fileStats.Counts {
@@ -193,14 +257,22 @@ func mergeToolMixStats(total *toolMixStats, fileStats toolMixStats) {
 	}
 	total.TotalCalls += fileStats.TotalCalls
 	total.BashJestRuns += fileStats.BashJestRuns
+	for p, n := range fileStats.GateCmdRuns {
+		total.GateCmdRuns[p] += n
+	}
 }
 
 // formatSessionToolMix returns the canonical [SessionStats] log line.
 func formatSessionToolMix(beadID string, stats toolMixStats) string {
 	tools := formatSortedIntMap(filterCounts(stats.Counts))
 	payload := formatSortedKBMap(filterPayload(stats.Payload))
+	gateRuns := ""
+	if len(stats.GateCmdRuns) > 0 {
+		b, _ := json.Marshal(stats.GateCmdRuns)
+		gateRuns = fmt.Sprintf(" gate_runs=%s", string(b))
+	}
 	return fmt.Sprintf(
-		"[SessionStats] %s turns=%d tools=%s payloadKB=%s graphify=%d hindsight_search=%d jest_runs=%d",
+		"[SessionStats] %s turns=%d tools=%s payloadKB=%s graphify=%d hindsight_search=%d jest_runs=%d%s",
 		beadID,
 		stats.TotalCalls,
 		tools,
@@ -208,6 +280,7 @@ func formatSessionToolMix(beadID string, stats toolMixStats) string {
 		intValue(stats.Counts, "graphify"),
 		intValue(stats.Counts, "hindsight_search"),
 		stats.BashJestRuns,
+		gateRuns,
 	)
 }
 

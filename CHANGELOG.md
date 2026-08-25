@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- Verify-loop budget rule + gate-command telemetry (token economics lever 1): daemon-owned projects now pass their declared gate commands to workers via `HYDRA_GATE_CMDS`; the worker prompt adds a `VERIFY LOOP BUDGET` rule and session telemetry counts gate-command invocations, surfacing them in `[SessionStats]` as `gate_runs={...}`. Fail-open: missing or malformed env data is debug-logged and never blocks completion.
 - Per-bead tool-mix telemetry: workers now parse the Pi session jsonl after exit and emit a single `[SessionStats]` line with turn/tool/payload counts plus `graphify`, `hindsight_search`, and `jest_runs` breakdowns. Missing session directories are silently skipped; parse errors are debug-logged and never gate bead completion. *Authored by a Hydra dogfood run.*
 
 ### Fixed

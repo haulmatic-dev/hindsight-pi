@@ -2095,6 +2095,8 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 	if os.Getenv("HYDRA_DAEMON_GATES") == "1" {
 		promptParts = append(promptParts,
 			"VERIFICATION OWNERSHIP: the daemon runs the project's test/lint/build gates after you finish and re-verifies on every completion. Do NOT run the full test suite or coverage commands yourself — fix code, run only the narrowest test that proves your change, and end your turn. If a previous gate failed, its parsed summary and raw log path are in this bead's description; start from that evidence.")
+		promptParts = append(promptParts,
+			"VERIFY LOOP BUDGET: the daemon runs the gate commands after you finish; during your run, each full gate command may be executed at most 3 times (once RED, once GREEN, once final). Between edits, use the cheapest scoped check your project skills name (e.g. a single-suite run or a typecheck), never the full suite.")
 	}
 
 	// Closure protocol (PRD worker-park-and-resume Part 3): the turn does not
