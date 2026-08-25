@@ -475,6 +475,14 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 // It returns nil when the bead may close, or a non-nil error (after
 // reopening or escalating the bead) when the close must be aborted.
 func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName string) error {
+	// Terminal beads skip verification entirely: a resurrected close attempt
+	// on an already-closed bead would only find an empty diff and reject.
+	if c.beadsClient != nil {
+		if fresh, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID); err == nil && fresh != nil && fresh.Status.IsTerminal() {
+			log.Printf("[VerifiedClose] Bead %s already terminal (%s); skipping verification", bead.ID, fresh.Status)
+			return nil
+		}
+	}
 	// 1. Blocking TDD validation (only gates TDD-phase beads).
 	if c.shouldRunTDDValidation(bead) && c.validationService != nil {
 		passed, err := c.validationService.TDDChainPasses(*bead, projectPath)
@@ -614,6 +622,16 @@ func (c *BeadCloser) checkTargetScope(bead *types.Bead, projectPath, repoName st
 // the caller aborts the close.
 func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason string) error {
 	beadID := string(bead.ID)
+
+	// Never reopen a terminal bead: a second close attempt after a successful
+	// close+integration sees an empty diff and must not resurrect the bead
+	// (2026-08-24/25 resurrection loop: i1g, 5r0, bz5, aga accepted-then-reopened).
+	if c.beadsClient != nil {
+		if fresh, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID); err == nil && fresh != nil && fresh.Status.IsTerminal() {
+			log.Printf("[VerifiedClose] Bead %s already terminal (%s); skipping reject (%s)", beadID, fresh.Status, reason)
+			return nil
+		}
+	}
 
 	maxRounds := 3
 	if c.config != nil && c.config.Validation.MaxRounds > 0 {
