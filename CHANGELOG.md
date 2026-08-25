@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Per-bead tool-mix telemetry: workers now parse the Pi session jsonl after exit and emit a single `[SessionStats]` line with turn/tool/payload counts plus `graphify`, `hindsight_search`, and `jest_runs` breakdowns. Missing session directories are silently skipped; parse errors are debug-logged and never gate bead completion. *Authored by a Hydra dogfood run.*
+
 ### Fixed
 - Resurrection loop: a second close attempt after a successful close+integration saw an empty diff and `rejectClose` REOPENED the already-closed bead (i1g, 5r0, bz5, aga accepted-then-reopened 2026-08-24/25). `rejectClose` is now a no-op on terminal beads and `verifyBeforeClose` skips them at entry. `TestRejectClose_TerminalBeadIsNoOp` / `TestVerifyBeforeClose_TerminalBeadSkips`.
 - Pan terminal-bead leak into blocked candidates and repair-action invention spam. `Candidates()` now applies `TerminalBead` to scheduler-level blocked beads before they become candidates, and `BuildPrompt()` lists the exact repair whitelist (`repair-worktree`, `reap-placeholder`, `reset-retries`) so the model cannot invent names. Unknown `repair:<name>` decisions are rejected with a `[Pan]` log and remembered per bead so they are not re-proposed the next tick, stopping the MiniMax rate-limiter burn (hydra-dcy class, 2026-08-25).

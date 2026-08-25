@@ -393,6 +393,10 @@ func main() {
 
 	result, err := executeWithRetry(bead, determinedAgentType, mcpClient, retryPolicy, projectPath, config)
 
+	// Per-bead tool-mix telemetry from the Pi session jsonl. Fail-open: any
+	// problem is debug-logged and never gates the worker result.
+	emitSessionToolMixStats(bead, os.Getenv("HYDRA_HOME"))
+
 	// Calculate duration
 	duration := time.Since(startTime)
 	if result != nil {
