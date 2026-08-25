@@ -751,6 +751,32 @@ vim hydra.yaml
 
 If a config change is invalid, the previous configuration remains active.
 
+### `status` subcommand
+
+The `hydra status` subcommand prints a compact, read-only fleet rollup:
+
+```bash
+./bin/hydra status
+```
+
+Sections:
+
+1. **Workers** — last 8 rows from the worker registry.
+2. **Recent verdicts** — last 6 `[CloseEvent]` / `[PanRepair]` lines from the daemon log.
+3. **Boards** — per project open/in_progress counts plus top 3 ready beads.
+4. **Queue health** — pool utilisation, parked workers with stale heartbeats,
+   and open P1 beads with no worker row.
+
+The log path is configurable:
+
+```yaml
+status:
+  log_path: /var/log/hydra/hydra-error.log
+```
+
+If the registry or log is missing or unreadable, the command degrades to a note
+instead of failing.
+
 ## Related Documentation
 
 - [Monitoring & Metrics](./monitoring-metrics-20260309.md) - Observability

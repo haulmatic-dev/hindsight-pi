@@ -21,3 +21,10 @@ func registryPath() string {
 	}
 	return filepath.Join(dir, "registry.db")
 }
+
+// RegistryPath returns the resolved path to the daemon-owned worker registry
+// database. It mirrors registryPath() for use by subcommands and tools outside
+// this package.
+func RegistryPath() string {
+	return registryPath()
+}
