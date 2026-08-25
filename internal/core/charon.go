@@ -40,6 +40,9 @@ type Charon struct {
 	steeredMu             sync.Mutex
 	steeredAt             map[string]time.Time // bead → last budget steer (rate limit)
 	retryManager          *RetryManager          // Charon kills consume retry budget (else infra-classified free respawns loop)
+	maxWorkers            int                    // pool size ceiling for phantom-slot deadlock detection
+	events                *EventSink             // structured event stream; nil-safe
+	deadlockScans         int                    // consecutive scans seeing active>=max and zero live PIDs
 }
 
 // JanitorStats tracks cleanup statistics
@@ -76,6 +79,13 @@ func (j *Charon) SetPanArbiter(f func(beadID string) bool) { j.panArbiter = f }
 // retry) and the bead respawns forever (1xs7z: 51.6M tokens over 4+
 // kill/respawn cycles, 2026-08-23).
 func (j *Charon) SetRetryManager(rm *RetryManager) { j.retryManager = rm }
+
+// SetMaxWorkers injects the pool-size ceiling used by the phantom-slot
+// deadlock detector. A non-positive value disables the detector.
+func (j *Charon) SetMaxWorkers(n int) { j.maxWorkers = n }
+
+// SetEventSink attaches the structured event stream. Nil stays a no-op.
+func (j *Charon) SetEventSink(s *EventSink) { j.events = s }
 
 // recordKillRetry counts a Charon kill against the bead's retry budget so
 // the spawn gate (RetryExhaustedError) stops the kill/respawn cycle.
@@ -418,6 +428,12 @@ func (j *Charon) performCleanup() {
 		log.Printf("[Charon] 🧹 Cleared %d stale in-memory worker entries (PID 0 placeholder)", cleared)
 	}
 
+	// Belt-and-braces: if the pool reports full occupancy with zero live
+	// PIDs for two consecutive scans, reap stale phantom slots.
+	if reaped := j.checkAndReapPoolDeadlock(); reaped > 0 {
+		log.Printf("[Charon] 🧹 Pool deadlock reaper removed %d phantom slots", reaped)
+	}
+
 	j.logStats()
 
 	// Cleanup old records periodically (older than 24 hours)
@@ -682,6 +698,116 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 	}
 
 	return recovered
+}
+
+// checkAndReapPoolDeadlock is the belt-and-braces detector for the
+// N/N-with-zero-live-PIDs deadlock class. If the pool appears full
+// (active count >= maxWorkers) and no tracked process is alive for two
+// consecutive scans, every placeholder row older than 10 minutes is
+// reaped. Real workers are never touched, the daemon is never restarted,
+// and young placeholders are protected from the double-spawn race.
+func (j *Charon) checkAndReapPoolDeadlock() int {
+	const stalePlaceholderThreshold = 10 * time.Minute
+
+	if j.maxWorkers <= 0 || j.workerTracker == nil {
+		return 0
+	}
+
+	// Active count: prefer the overseer's in-memory active map (it includes
+	// spawning placeholders that may not have a tracker row yet), then fall
+	// back to persisted running records.
+	activeCount := 0
+	if j.activeWorkersSnapshot != nil {
+		for _, w := range j.activeWorkersSnapshot() {
+			if w != nil {
+				activeCount++
+			}
+		}
+	}
+	if activeCount == 0 {
+		activeCount = len(j.workerTracker.GetRunningWorkerRecords())
+	}
+
+	if activeCount < j.maxWorkers {
+		j.deadlockScans = 0
+		return 0
+	}
+
+	// Live process count via PID liveness for every tracked worker.
+	tracked := j.workerTracker.GetRunningWorkerRecords()
+	live := 0
+	for pid := range tracked {
+		if pid > 0 && j.isProcessRunning(pid) {
+			live++
+		}
+	}
+
+	if live > 0 {
+		j.deadlockScans = 0
+		return 0
+	}
+
+	j.deadlockScans++
+	if j.deadlockScans < 2 {
+		return 0
+	}
+
+	// Reap every stale placeholder. A live process was already ruled out
+	// above, so any running row here is phantom.
+	reaped := 0
+	for pid, rec := range tracked {
+		if rec.Status != "running" {
+			continue
+		}
+		if pid > 0 && j.isProcessRunning(pid) {
+			continue // race: process came alive
+		}
+		if time.Since(rec.StartedAt) < stalePlaceholderThreshold {
+			continue
+		}
+		if err := j.workerTracker.MarkWorkerCompleted(pid, -1); err != nil {
+			log.Printf("[Charon] pool deadlock: failed to mark placeholder %s completed: %v", rec.BeadID, err)
+			continue
+		}
+		reaped++
+	}
+
+	// Also clear matching in-memory placeholder entries so new spawns are
+	// unblocked for those beads.
+	if j.activeWorkersSnapshot != nil && j.onStaleActiveWorker != nil {
+		for beadID, w := range j.activeWorkersSnapshot() {
+			if w == nil || w.PID != 0 {
+				continue
+			}
+			if time.Since(w.StartTime) < stalePlaceholderThreshold {
+				continue
+			}
+			if rec, ok := j.workerTracker.GetWorkerByBead(beadID); !ok || rec.Status != "running" {
+				continue
+			}
+			j.onStaleActiveWorker(beadID)
+		}
+	}
+
+	if reaped > 0 {
+		log.Printf("[Charon] pool deadlock: reaping %d phantom slots", reaped)
+		if j.events != nil {
+			j.events.Emit(Event{
+				Type:   "charon_pool_deadlock",
+				Reason: "phantom_slots",
+				Detail: fmt.Sprintf("pool deadlock detected: reaping %d phantom slots", reaped),
+				Fields: map[string]any{
+					"active":      activeCount,
+					"max_workers": j.maxWorkers,
+					"live":        live,
+					"reaped":      reaped,
+				},
+			})
+		}
+	}
+
+	j.deadlockScans = 0
+	return reaped
 }
 
 // isProcessRunning checks if a process is still running
