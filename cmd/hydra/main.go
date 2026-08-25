@@ -142,6 +142,13 @@ func main() {
 		return
 	}
 
+	// Subcommand fast path: `hydra status` prints a compact fleet rollup
+	// (workers, verdicts, boards, queue health) and exits.
+	if pos := flag.Args(); len(pos) > 0 && pos[0] == "status" {
+		runStatusSubcommand(*configPath)
+		return
+	}
+
 	// Configure leveled logging (HYDRA_LOG_LEVEL: debug|info|warn|error).
 	logx.Init()
 	if *debug {

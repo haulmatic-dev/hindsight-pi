@@ -28,6 +28,7 @@ type Config struct {
 	ComplianceCycle    ComplianceCycleConfig `yaml:"compliance_cycle"`
 	Shepherd           ShepherdConfig        `yaml:"shepherd"`
 	Worktree           WorktreeConfig        `yaml:"worktree"`
+	Status             StatusConfig          `yaml:"status"`
 }
 
 // ShepherdConfig configures Pan, the shepherd that decides the ambiguous
@@ -269,6 +270,13 @@ type WorktreeConfig struct {
 	QuarantineAutoDrain bool `yaml:"quarantine_auto_drain"`
 }
 
+// StatusConfig configures the hydra status subcommand.
+type StatusConfig struct {
+	// LogPath is the daemon log to scan for recent verdicts.
+	// Default: /var/log/hydra/hydra-error.log
+	LogPath string `yaml:"log_path"`
+}
+
 // OutputPushEnabled reports whether the output/push feature is enabled.
 func (c *Config) OutputPushEnabled() bool {
 	if c == nil {
@@ -312,6 +320,7 @@ type rawConfig struct {
 	ComplianceCycle ComplianceCycleConfig `yaml:"compliance_cycle"`
 	Shepherd        ShepherdConfig        `yaml:"shepherd"`
 	Worktree        WorktreeConfig        `yaml:"worktree"`
+	Status          StatusConfig          `yaml:"status"`
 }
 
 // projectsListConfig handles the case where projects is an object with 'list' field
@@ -708,6 +717,9 @@ func DefaultConfig() *Config {
 				AutoUpdate:     true,
 			},
 		},
+		Status: StatusConfig{
+			LogPath: "/var/log/hydra/hydra-error.log",
+		},
 	}
 }
 
@@ -816,6 +828,7 @@ func LoadConfig(path string) (*Config, error) {
 	config.Validation = raw.Validation
 	config.ComplianceCycle = raw.ComplianceCycle
 	config.Shepherd = raw.Shepherd
+	config.Status = raw.Status
 	config.Pi = PiRootConfig{
 		ConfigDir:       raw.Pi.ConfigDir,
 		PiConfigDir:     raw.Pi.PiConfigDir,
@@ -896,6 +909,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 	config.Validation = raw.Validation
 	config.ComplianceCycle = raw.ComplianceCycle
 	config.Shepherd = raw.Shepherd
+	config.Status = raw.Status
 	// Handle projects field
 	if !isZeroNode(raw.Projects) {
 		if raw.Projects.Kind == yaml.SequenceNode {
@@ -932,14 +946,18 @@ func (c *Config) Clone() *Config {
 	}
 
 	cloned := &Config{
-		Overseer:     c.Overseer,
-		MCP:          c.MCP,
-		API:          c.API,
-		Intelligence: c.Intelligence,
-		Agents:       c.Agents,
-		Pi:           c.Pi,
-		Output:       c.Output,
-		Worktree:     c.Worktree,
+		Overseer:        c.Overseer,
+		MCP:             c.MCP,
+		API:             c.API,
+		Intelligence:    c.Intelligence,
+		Agents:          c.Agents,
+		Pi:              c.Pi,
+		Output:          c.Output,
+		Validation:      c.Validation,
+		ComplianceCycle: c.ComplianceCycle,
+		Shepherd:        c.Shepherd,
+		Worktree:        c.Worktree,
+		Status:          c.Status,
 	}
 
 	// Deep copy Projects slice
