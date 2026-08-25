@@ -1,9 +1,15 @@
 package core
 
 import (
+	"fmt"
 	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // branchAheadOfRemote reports whether localBranch has commits not yet on
@@ -63,4 +69,141 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, activeKeys map[s
 		AppendActivity(projectPath, "publish", "push skipped: "+reason)
 	}
 	return pushed, reason
+}
+
+// AutoPR exec-layer hooks. Overridden in tests to avoid real git/gh calls.
+var (
+	autoPRGitPush  = defaultAutoPRGitPush
+	autoPRLsRemote = defaultAutoPRLsRemote
+	autoPRGhCreate = defaultAutoPRGhCreate
+)
+
+// maybeOpenAutoPR creates a PR when a push to the protected base branch was
+// rejected. It is fail-open: any error is logged and the integration result is
+// left unchanged.
+func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName, branch string, bead *types.Bead) {
+	if cfg == nil || !cfg.AutoPREnabled() || beadsClient == nil || bead == nil || branch == "" {
+		return
+	}
+	head := "dogfood/" + string(bead.ID)
+	for _, l := range bead.Labels {
+		if l == "pr-open" {
+			log.Printf("[AutoPR] skipping %s: already has pr-open label", bead.ID)
+			return
+		}
+	}
+	if out, err := autoPRLsRemote(projectPath, "origin", "refs/heads/"+head); err == nil && strings.TrimSpace(out) != "" {
+		log.Printf("[AutoPR] skipping %s: %s already exists on origin", bead.ID, head)
+		return
+	}
+	token := autoPRResolveToken()
+	if err := autoPRGitPush(projectPath, "refs/heads/"+head, token); err != nil {
+		log.Printf("[AutoPR] failed for %s: push %s: %v", bead.ID, head, err)
+		return
+	}
+	title := bead.Title
+	if title == "" {
+		title = "Hydra auto-PR"
+	}
+	body := "Authored by a Hydra dogfood run."
+	url, err := autoPRGhCreate(projectPath, branch, head, title, body, token)
+	if err != nil {
+		log.Printf("[AutoPR] failed for %s: %v", bead.ID, err)
+		return
+	}
+	newLabels := make([]string, 0, len(bead.Labels)+1)
+	hasOpen := false
+	for _, l := range bead.Labels {
+		if l == "pr-open" {
+			hasOpen = true
+		}
+		newLabels = append(newLabels, l)
+	}
+	if !hasOpen {
+		newLabels = append(newLabels, "pr-open")
+	}
+	if err := beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, newLabels); err != nil {
+		log.Printf("[AutoPR] failed for %s: update labels: %v (fail open)", bead.ID, err)
+	}
+	desc := bead.Description
+	if desc != "" {
+		desc += "\n\n"
+	}
+	desc += "Auto-PR: " + url
+	if err := beadsClient.UpdateBeadDescription(projectPath, repoName, bead.ID, desc); err != nil {
+		log.Printf("[AutoPR] failed for %s: update description: %v (fail open)", bead.ID, err)
+	}
+	log.Printf("[AutoPR] %s -> %s", bead.ID, url)
+}
+
+// autoPRResolveToken prefers GH_TOKEN, then parses x-access-token from the
+// ~/.git-credentials store used by the git push path.
+func autoPRResolveToken() string {
+	if t := os.Getenv("GH_TOKEN"); t != "" {
+		return t
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".git-credentials"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		idx := strings.Index(line, "x-access-token:")
+		if idx < 0 {
+			continue
+		}
+		rest := line[idx+len("x-access-token:"):]
+		end := strings.IndexAny(rest, "@ \t")
+		if end >= 0 {
+			return rest[:end]
+		}
+		return strings.TrimSpace(rest)
+	}
+	return ""
+}
+
+func defaultAutoPRGitPush(repoPath, ref, token string) error {
+	originURL, err := gitOut(repoPath, "remote", "get-url", "origin")
+	if err != nil {
+		return fmt.Errorf("get origin: %w", err)
+	}
+	target := authenticatedURL(strings.TrimSpace(originURL), token)
+	if target == "" {
+		target = "origin"
+	}
+	if _, err := gitOut(repoPath, "push", target, "HEAD:"+ref); err != nil {
+		return fmt.Errorf("push HEAD:%s: %w", ref, err)
+	}
+	return nil
+}
+
+func defaultAutoPRLsRemote(repoPath, remote, ref string) (string, error) {
+	return gitOut(repoPath, "ls-remote", remote, ref)
+}
+
+func defaultAutoPRGhCreate(repoPath, base, head, title, body, token string) (string, error) {
+	cmd := exec.Command("gh", "pr", "create",
+		"--base", base,
+		"--head", head,
+		"--title", title,
+		"--body", body,
+	)
+	cmd.Dir = repoPath
+	if token != "" {
+		cmd.Env = append(os.Environ(), "GH_TOKEN="+token)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gh pr create: %w\n%s", err, strings.TrimSpace(string(out)))
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.HasPrefix(lines[i], "http://") || strings.HasPrefix(lines[i], "https://") {
+			return strings.TrimSpace(lines[i]), nil
+		}
+	}
+	return "", fmt.Errorf("no PR URL in gh output: %s", strings.TrimSpace(string(out)))
 }

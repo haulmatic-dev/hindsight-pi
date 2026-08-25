@@ -259,6 +259,7 @@ type PiSkillsConfig struct {
 type OutputConfig struct {
 	Push   bool   `yaml:"push"`
 	Remote string `yaml:"remote"`
+	AutoPR bool   `yaml:"auto_pr"`
 }
 
 // WorktreeConfig controls git-worktree behaviour used by the daemon.
@@ -286,6 +287,15 @@ func (c *Config) OutputPushRemote() string {
 		return "origin"
 	}
 	return c.Output.Remote
+}
+
+// AutoPREnabled reports whether automatic PR creation for protected-branch
+// push rejections is enabled.
+func (c *Config) AutoPREnabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.Output.AutoPR
 }
 
 // rawConfig is used for YAML parsing to handle the nested projects structure

@@ -1,9 +1,13 @@
 package core
 
 import (
+	"errors"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 func gitRun(t *testing.T, dir string, args ...string) {
@@ -76,4 +80,190 @@ func TestPublishRepo_PushesAheadBranch(t *testing.T) {
 	if err != nil || len(out) == 0 {
 		t.Fatalf("remote has no commits after publish: %v\n%s", err, out)
 	}
+}
+
+type autoPRFakeBeadsClient struct {
+	labels       map[string][]string
+	descriptions map[string]string
+}
+
+func (m *autoPRFakeBeadsClient) ListBeads(projectPath, repoName string) ([]types.Bead, error) {
+	return nil, nil
+}
+func (m *autoPRFakeBeadsClient) GetBead(projectPath, repoName string, beadID types.BeadID) (*types.Bead, error) {
+	return nil, nil
+}
+func (m *autoPRFakeBeadsClient) CloseBead(projectPath, repoName string, beadID types.BeadID, reason string) error {
+	return nil
+}
+func (m *autoPRFakeBeadsClient) GetReadyBeads(projectName, projectPath, repoName string) ([]types.Bead, error) {
+	return nil, nil
+}
+func (m *autoPRFakeBeadsClient) UpdateBeadStatus(projectPath string, beadID types.BeadID, status types.BeadStatus) error {
+	return nil
+}
+func (m *autoPRFakeBeadsClient) CreateBead(projectPath string, req types.CreateBeadRequest) (types.BeadID, error) {
+	return "", nil
+}
+func (m *autoPRFakeBeadsClient) UpdateBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error {
+	if m.labels == nil {
+		m.labels = make(map[string][]string)
+	}
+	m.labels[string(beadID)] = labels
+	return nil
+}
+func (m *autoPRFakeBeadsClient) UpdateBeadDescription(projectPath, repoName string, beadID types.BeadID, description string) error {
+	if m.descriptions == nil {
+		m.descriptions = make(map[string]string)
+	}
+	m.descriptions[string(beadID)] = description
+	return nil
+}
+
+type autoPRFakeExec struct {
+	pushes   []autoPRPushArgs
+	lsRemote []autoPRLsArgs
+	ghCreate []autoPRGhArgs
+	ghURL    string
+	ghErr    error
+	lsFound  bool
+}
+
+type autoPRPushArgs struct {
+	repoPath, ref, token string
+}
+
+type autoPRLsArgs struct {
+	repoPath, remote, ref string
+}
+
+type autoPRGhArgs struct {
+	repoPath, base, head, title, body, token string
+}
+
+func installAutoPRFake(f *autoPRFakeExec) func() {
+	origPush := autoPRGitPush
+	origLs := autoPRLsRemote
+	origGh := autoPRGhCreate
+	autoPRGitPush = func(repoPath, ref, token string) error {
+		f.pushes = append(f.pushes, autoPRPushArgs{repoPath, ref, token})
+		return nil
+	}
+	autoPRLsRemote = func(repoPath, remote, ref string) (string, error) {
+		f.lsRemote = append(f.lsRemote, autoPRLsArgs{repoPath, remote, ref})
+		if f.lsFound {
+			return "abc\t" + ref + "\n", nil
+		}
+		return "", nil
+	}
+	autoPRGhCreate = func(repoPath, base, head, title, body, token string) (string, error) {
+		f.ghCreate = append(f.ghCreate, autoPRGhArgs{repoPath, base, head, title, body, token})
+		if f.ghErr != nil {
+			return "", f.ghErr
+		}
+		return f.ghURL, nil
+	}
+	return func() {
+		autoPRGitPush = origPush
+		autoPRLsRemote = origLs
+		autoPRGhCreate = origGh
+	}
+}
+
+func TestAutoPR_Disabled(t *testing.T) {
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/1"}
+	restore := installAutoPRFake(fake)
+	defer restore()
+	bc := &autoPRFakeBeadsClient{}
+	bead := &types.Bead{ID: "proj-abc", Title: "Add foo"}
+	maybeOpenAutoPR(bc, &Config{Output: OutputConfig{Push: true}}, "/tmp", "", "main", bead)
+	if len(fake.pushes)+len(fake.lsRemote)+len(fake.ghCreate) > 0 {
+		t.Fatalf("expected no auto-pr activity when disabled, got pushes=%d ls=%d gh=%d", len(fake.pushes), len(fake.lsRemote), len(fake.ghCreate))
+	}
+}
+
+func TestAutoPR_OpensPR(t *testing.T) {
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/42"}
+	restore := installAutoPRFake(fake)
+	defer restore()
+	bc := &autoPRFakeBeadsClient{}
+	bead := &types.Bead{ID: "proj-abc", Title: "Add foo", Labels: []string{"fr"}}
+	maybeOpenAutoPR(bc, &Config{Output: OutputConfig{Push: true, AutoPR: true}}, "/tmp", "", "main", bead)
+	if len(fake.pushes) != 1 {
+		t.Fatalf("expected 1 push, got %d", len(fake.pushes))
+	}
+	if fake.pushes[0].ref != "refs/heads/dogfood/proj-abc" {
+		t.Errorf("push ref = %q, want refs/heads/dogfood/proj-abc", fake.pushes[0].ref)
+	}
+	if len(fake.ghCreate) != 1 {
+		t.Fatalf("expected 1 gh create, got %d", len(fake.ghCreate))
+	}
+	g := fake.ghCreate[0]
+	if g.base != "main" || g.head != "dogfood/proj-abc" || g.title != "Add foo" || g.body != "Authored by a Hydra dogfood run." {
+		t.Errorf("unexpected gh args: %+v", g)
+	}
+	wantLabels := []string{"fr", "pr-open"}
+	if got := bc.labels["proj-abc"]; !sliceStrEqual(got, wantLabels) {
+		t.Errorf("labels = %v, want %v", got, wantLabels)
+	}
+	if desc := bc.descriptions["proj-abc"]; !strings.Contains(desc, "https://github.com/x/y/pull/42") {
+		t.Errorf("description missing URL: %q", desc)
+	}
+}
+
+func TestAutoPR_SkipsWhenLabelPresent(t *testing.T) {
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/42"}
+	restore := installAutoPRFake(fake)
+	defer restore()
+	bc := &autoPRFakeBeadsClient{}
+	bead := &types.Bead{ID: "proj-abc", Title: "Add foo", Labels: []string{"pr-open"}}
+	maybeOpenAutoPR(bc, &Config{Output: OutputConfig{Push: true, AutoPR: true}}, "/tmp", "", "main", bead)
+	if len(fake.pushes)+len(fake.lsRemote)+len(fake.ghCreate) > 0 {
+		t.Fatalf("expected no auto-pr activity for already-open bead, got pushes=%d ls=%d gh=%d", len(fake.pushes), len(fake.lsRemote), len(fake.ghCreate))
+	}
+}
+
+func TestAutoPR_SkipsWhenRemoteBranchExists(t *testing.T) {
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/42", lsFound: true}
+	restore := installAutoPRFake(fake)
+	defer restore()
+	bc := &autoPRFakeBeadsClient{}
+	bead := &types.Bead{ID: "proj-abc", Title: "Add foo"}
+	maybeOpenAutoPR(bc, &Config{Output: OutputConfig{Push: true, AutoPR: true}}, "/tmp", "", "main", bead)
+	if len(fake.pushes) > 0 {
+		t.Fatalf("expected no push when remote branch exists, got %d", len(fake.pushes))
+	}
+	if len(fake.ghCreate) > 0 {
+		t.Fatalf("expected no gh create when remote branch exists, got %d", len(fake.ghCreate))
+	}
+}
+
+func TestAutoPR_FailOpenOnGhError(t *testing.T) {
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/42", ghErr: errors.New("gh exploded")}
+	restore := installAutoPRFake(fake)
+	defer restore()
+	bc := &autoPRFakeBeadsClient{}
+	bead := &types.Bead{ID: "proj-abc", Title: "Add foo"}
+	maybeOpenAutoPR(bc, &Config{Output: OutputConfig{Push: true, AutoPR: true}}, "/tmp", "", "main", bead)
+	if len(fake.pushes) != 1 {
+		t.Fatalf("expected push to happen, got %d", len(fake.pushes))
+	}
+	if len(bc.labels) > 0 {
+		t.Fatalf("expected no label update on gh failure, got %v", bc.labels)
+	}
+	if len(bc.descriptions) > 0 {
+		t.Fatalf("expected no description update on gh failure, got %v", bc.descriptions)
+	}
+}
+
+func sliceStrEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
