@@ -93,11 +93,9 @@ func TestTickRepairRefusesLiveWorker(t *testing.T) {
 	}
 }
 
-func TestTickRepairUnknownHandler(t *testing.T) {
+func TestTickRepairUnknownActionRejectedAndRemembered(t *testing.T) {
 	store := &fakeStore{}
-	var lastEvent struct {
-		beadID, action, result, detail string
-	}
+	var events int
 
 	runner := func(ctx context.Context, cfg Config, prompt string) (string, error) {
 		return `[{"bead_id": "blocked-1", "action": "repair:not-configured", "message": ""}]`, nil
@@ -109,18 +107,24 @@ func TestTickRepairUnknownHandler(t *testing.T) {
 	})
 	s.SetRepairHandlers(map[string]func(beadID string) error{})
 	s.SetOnRepairEvent(func(beadID, action, result, detail string) {
-		lastEvent = struct {
-			beadID, action, result, detail string
-		}{beadID, action, result, detail}
+		events++
 	})
 
 	s.Tick(context.Background())
 
-	if lastEvent.result != "error" {
-		t.Fatalf("event result = %q, want error", lastEvent.result)
+	if events != 0 {
+		t.Errorf("unknown repair action emitted %d repair events, want 0", events)
 	}
-	if lastEvent.detail != "unknown repair handler" {
-		t.Errorf("event detail = %q, want unknown handler", lastEvent.detail)
+	key := "blocked-1/repair:not-configured"
+	if !s.rejectedActions[key] {
+		t.Errorf("unknown repair action not remembered; rejectedActions = %+v", s.rejectedActions)
+	}
+
+	// Second tick with the same invented action must be a silent no-op.
+	events = 0
+	s.Tick(context.Background())
+	if events != 0 {
+		t.Errorf("second tick emitted %d repair events, want 0", events)
 	}
 }
 

@@ -213,6 +213,23 @@ All workers run under the same Hydra process. There is no container/chroot isola
 
 ## Monitoring
 
+### One-command fleet rollup
+
+Run `hydra status` at any time to see a compact snapshot of fleet health:
+
+```bash
+sudo -u hydra hydra status
+```
+
+The report includes:
+
+- **Workers** — last 8 rows from the worker registry (bead, state, tokens, exit code, age).
+- **Recent verdicts** — last 6 `[CloseEvent]` / `[PanRepair]` lines from the daemon log.
+- **Boards** — per configured project, open/in-progress counts and the top 3 ready beads.
+- **Queue health** — pool utilisation, parked workers with stale heartbeats, and starved open P1 beads with no worker row.
+
+The log path defaults to `/var/log/hydra/hydra-error.log` and can be overridden with `status.log_path` in `hydra.yaml`. The command is read-only; if the registry or log is unavailable the section degrades to a note instead of erroring.
+
 ### Check discovered users
 
 ```bash

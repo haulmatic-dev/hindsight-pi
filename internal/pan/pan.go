@@ -122,13 +122,26 @@ var allowedActions = map[registry.CommandKind]bool{
 	registry.CmdCloseSatisfied:     true,
 }
 
+// repairWhitelist is the only set of daemon-side repair actions Pan may propose.
+// The prompt lists these names explicitly; the parser rejects anything else so
+// the model cannot invent action names and burn MiniMax calls.
+var repairWhitelist = map[string]bool{
+	"repair-worktree":  true,
+	"reap-placeholder": true,
+	"reset-retries":    true,
+}
+
 // isAllowedAction returns true for known worker command kinds and for
 // whitelisted "repair:<name>" daemon-side actions.
 func isAllowedAction(action string) bool {
 	if allowedActions[registry.CommandKind(action)] {
 		return true
 	}
-	return strings.HasPrefix(action, "repair:")
+	name, ok := parseRepairName(action)
+	if !ok {
+		return false
+	}
+	return repairWhitelist[name]
 }
 
 // parseRepairName extracts the handler name from "repair:<name>".
@@ -238,7 +251,10 @@ type Shepherd struct {
 
 	repairMu      sync.Mutex
 	repairLimits  map[string]time.Time // bead → last repair run
-	repairResults map[string]error    // bead → last repair error (for rate-limit detail)
+	repairResults map[string]error     // bead → last repair error (for rate-limit detail)
+
+	rejectedMu      sync.Mutex
+	rejectedActions map[string]bool // beadID + "/" + action; unknown repair actions remembered per session
 }
 
 // recordVerdict notes a non-terminal decision (continue/steer/compact) so
@@ -372,7 +388,23 @@ func (s *Shepherd) Tick(ctx context.Context) {
 	repaired := 0
 	for _, d := range decisions {
 		if !isAllowedAction(d.Action) {
-			log.Printf("[Pan] rejecting unknown action %q for %s", d.Action, d.BeadID)
+			if strings.HasPrefix(d.Action, "repair:") {
+				key := d.BeadID + "/" + d.Action
+				s.rejectedMu.Lock()
+				if s.rejectedActions == nil {
+					s.rejectedActions = make(map[string]bool)
+				}
+				already := s.rejectedActions[key]
+				if !already {
+					s.rejectedActions[key] = true
+				}
+				s.rejectedMu.Unlock()
+				if !already {
+					log.Printf("[Pan] unknown repair action %s rejected for %s", d.Action, d.BeadID)
+				}
+			} else {
+				log.Printf("[Pan] rejecting unknown action %q for %s", d.Action, d.BeadID)
+			}
 			continue
 		}
 		if d.BeadID == "" {
@@ -524,6 +556,9 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 			if live[b.BeadID] {
 				continue
 			}
+			if s.cfg.TerminalBead != nil && s.cfg.TerminalBead(b.BeadID) {
+				continue
+			}
 			reason := b.Reason
 			if !strings.HasPrefix(reason, "BLOCKED: ") {
 				reason = "BLOCKED: " + reason
@@ -552,7 +587,7 @@ needs a judgment call. For EVERY worker decide exactly one action:
 - "compact-and-continue": session context is exhausted; compact then continue
 - "abandon-with-summary": give up gracefully (payload: what was done and what remains)
 - "close_satisfied": the bead's acceptance criteria are already met on the working branch and the worker found nothing to do; close it without a worker
-- "repair:<name>": execute a whitelisted daemon-side repair (payload: ignored). Only for BLOCKED beads with no live worker row.
+- "repair:<name>": execute a whitelisted daemon-side repair (payload: ignored). Only for BLOCKED beads with no live worker row. The only valid repair names are: repair-worktree, reap-placeholder, reset-retries. No other repair:<name> strings exist; if none fit, choose continue or abandon-with-summary.
 
 Rules:
 - Parked on provider-capacity errors: prefer "continue" unless the park reason

@@ -17,6 +17,19 @@ Hydra is an intelligent orchestration system that manages ephemeral workers to p
 | 🛠 **[Admin Guide](docs/guides/admin-guide.md)** | Run Hydra as a multi-user daemon |
 | 📖 **[All Docs](docs/README.md)** | Complete documentation index |
 
+### Useful subcommands
+
+- `hydra status` — print a one-command fleet rollup: live workers from the
+  registry, the most recent `[CloseEvent]` / `[PanRepair]` verdicts, per-project
+  board counts plus the top ready beads, and queue-health flags (pool
+  utilisation, parked workers with stale heartbeats, starved open P1s).
+  Configure the log path with `status.log_path` (default
+  `/var/log/hydra/hydra-error.log`).
+- `hydra gates verify <project>` — dry-run the project's declared gates on the
+  real checkout before enabling `daemon_owned`.
+- `hydra drain-quarantine [--apply] [<project>]` — clean up stale
+  `hydra/quarantine/*` branches.
+
 ## Our Philosophy
 
 **The Lernaean Approach to Software Development**

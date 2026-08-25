@@ -255,6 +255,9 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	}
 	o.projects = projectScanner.Projects()
 	log.Printf("📁 Discovered %d projects from config", len(o.projects))
+	if o.config != nil && o.config.OutputPushEnabled() && o.config.AutoPREnabled() {
+		log.Println("[AutoPR] Enabled: protected-branch push rejections will open a PR")
+	}
 
 	// Discover multi-user projects (gated: projects.multi_user_discovery,
 	// default true). Disabled narrows execution to projects.list only.

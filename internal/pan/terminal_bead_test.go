@@ -85,5 +85,34 @@ func TestCandidatesTerminalBeadSkippedSilently(t *testing.T) {
 	}
 }
 
+func TestCandidatesBlockedBeadsSkipsTerminalBead(t *testing.T) {
+	store := &fakeStore{}
+	s := New(Config{Enabled: true}, store, nil)
+	s.SetTerminalBead(func(beadID string) bool {
+		return beadID == "terminal-blocked"
+	})
+	s.SetBlockedBeads(func() []BlockedBead {
+		return []BlockedBead{
+			{BeadID: "terminal-blocked", Reason: "retry exhausted"},
+			{BeadID: "still-blocked", Reason: "spawn failed"},
+		}
+	})
+
+	cands, err := s.Candidates()
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	got := map[string]bool{}
+	for _, c := range cands {
+		got[c.Record.BeadID] = true
+	}
+	if got["terminal-blocked"] {
+		t.Errorf("terminal blocked bead became a candidate")
+	}
+	if !got["still-blocked"] {
+		t.Errorf("non-terminal blocked bead missing")
+	}
+}
+
 // Test for the core service wiring helper would live in internal/core,
 // but the Candidates logic itself is covered above.

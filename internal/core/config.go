@@ -28,6 +28,7 @@ type Config struct {
 	ComplianceCycle    ComplianceCycleConfig `yaml:"compliance_cycle"`
 	Shepherd           ShepherdConfig        `yaml:"shepherd"`
 	Worktree           WorktreeConfig        `yaml:"worktree"`
+	Status             StatusConfig          `yaml:"status"`
 }
 
 // ShepherdConfig configures Pan, the shepherd that decides the ambiguous
@@ -259,6 +260,7 @@ type PiSkillsConfig struct {
 type OutputConfig struct {
 	Push   bool   `yaml:"push"`
 	Remote string `yaml:"remote"`
+	AutoPR bool   `yaml:"auto_pr"`
 }
 
 // WorktreeConfig controls git-worktree behaviour used by the daemon.
@@ -266,6 +268,13 @@ type WorktreeConfig struct {
 	// QuarantineAutoDrain enables automatic cleanup of hydra/quarantine/*
 	// branches during the worktree reconciler tick. Default false (dry-run).
 	QuarantineAutoDrain bool `yaml:"quarantine_auto_drain"`
+}
+
+// StatusConfig configures the hydra status subcommand.
+type StatusConfig struct {
+	// LogPath is the daemon log to scan for recent verdicts.
+	// Default: /var/log/hydra/hydra-error.log
+	LogPath string `yaml:"log_path"`
 }
 
 // OutputPushEnabled reports whether the output/push feature is enabled.
@@ -288,6 +297,15 @@ func (c *Config) OutputPushRemote() string {
 	return c.Output.Remote
 }
 
+// AutoPREnabled reports whether automatic PR creation for protected-branch
+// push rejections is enabled.
+func (c *Config) AutoPREnabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.Output.AutoPR
+}
+
 // rawConfig is used for YAML parsing to handle the nested projects structure
 type rawConfig struct {
 	Overseer        OverseerConfig        `yaml:"overseer"`
@@ -302,6 +320,7 @@ type rawConfig struct {
 	ComplianceCycle ComplianceCycleConfig `yaml:"compliance_cycle"`
 	Shepherd        ShepherdConfig        `yaml:"shepherd"`
 	Worktree        WorktreeConfig        `yaml:"worktree"`
+	Status          StatusConfig          `yaml:"status"`
 }
 
 // projectsListConfig handles the case where projects is an object with 'list' field
@@ -698,6 +717,9 @@ func DefaultConfig() *Config {
 				AutoUpdate:     true,
 			},
 		},
+		Status: StatusConfig{
+			LogPath: "/var/log/hydra/hydra-error.log",
+		},
 	}
 }
 
@@ -806,6 +828,7 @@ func LoadConfig(path string) (*Config, error) {
 	config.Validation = raw.Validation
 	config.ComplianceCycle = raw.ComplianceCycle
 	config.Shepherd = raw.Shepherd
+	config.Status = raw.Status
 	config.Pi = PiRootConfig{
 		ConfigDir:       raw.Pi.ConfigDir,
 		PiConfigDir:     raw.Pi.PiConfigDir,
@@ -886,6 +909,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 	config.Validation = raw.Validation
 	config.ComplianceCycle = raw.ComplianceCycle
 	config.Shepherd = raw.Shepherd
+	config.Status = raw.Status
 	// Handle projects field
 	if !isZeroNode(raw.Projects) {
 		if raw.Projects.Kind == yaml.SequenceNode {
@@ -922,14 +946,18 @@ func (c *Config) Clone() *Config {
 	}
 
 	cloned := &Config{
-		Overseer:     c.Overseer,
-		MCP:          c.MCP,
-		API:          c.API,
-		Intelligence: c.Intelligence,
-		Agents:       c.Agents,
-		Pi:           c.Pi,
-		Output:       c.Output,
-		Worktree:     c.Worktree,
+		Overseer:        c.Overseer,
+		MCP:             c.MCP,
+		API:             c.API,
+		Intelligence:    c.Intelligence,
+		Agents:          c.Agents,
+		Pi:              c.Pi,
+		Output:          c.Output,
+		Validation:      c.Validation,
+		ComplianceCycle: c.ComplianceCycle,
+		Shepherd:        c.Shepherd,
+		Worktree:        c.Worktree,
+		Status:          c.Status,
 	}
 
 	// Deep copy Projects slice
