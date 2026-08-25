@@ -465,6 +465,9 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 	} else {
 		log.Printf("[Output] push skipped for %s: %s", bead.ID, reason)
 		AppendActivity(projectPath, string(bead.ID), "push skipped: "+reason)
+		if reason == "protected branch" {
+			maybeOpenAutoPR(c.beadsClient, c.config, projectPath, bead.ID.Repo(), branch, bead)
+		}
 	}
 }
 
