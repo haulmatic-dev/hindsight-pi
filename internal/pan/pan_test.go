@@ -326,6 +326,19 @@ func TestTickDeduplicatesPendingCommands(t *testing.T) {
 	}
 }
 
+func TestBuildPromptListsRepairWhitelist(t *testing.T) {
+	prompt := BuildPrompt(nil)
+	for _, name := range []string{"repair-worktree", "reap-placeholder", "reset-retries"} {
+		if !strings.Contains(prompt, name) {
+			t.Errorf("prompt missing whitelisted repair name %q", name)
+		}
+	}
+	want := "No other repair:<name> strings exist"
+	if !strings.Contains(prompt, want) {
+		t.Errorf("prompt missing explicit no-other-names clause")
+	}
+}
+
 func TestCandidatesBlockedBeads(t *testing.T) {
 	store := &fakeStore{}
 	s := New(Config{Enabled: true}, store, nil)
