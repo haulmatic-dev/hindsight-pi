@@ -65,6 +65,9 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, activeKeys map[s
 		log.Printf("[Publish] pushed %s (%s) to origin", projectPath, branch)
 		AppendActivity(projectPath, "publish", "pushed "+branch)
 	} else {
+		if strings.HasPrefix(reason, "remote at") {
+			log.Printf("[Publish] push verification FAILED for %s/%s: %s", projectPath, branch, reason)
+		}
 		log.Printf("[Publish] push skipped for %s: %s", projectPath, reason)
 		AppendActivity(projectPath, "publish", "push skipped: "+reason)
 	}
@@ -133,7 +136,7 @@ func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName
 	if err := beadsClient.UpdateBeadDescription(projectPath, repoName, bead.ID, desc); err != nil {
 		log.Printf("[AutoPR] failed for %s: update description: %v (fail open)", bead.ID, err)
 	}
-	log.Printf("[AutoPR] %s -> %s", bead.ID, url)
+	log.Printf("[Output] auto-PR created: %s", url)
 }
 
 // autoPRResolveToken prefers GH_TOKEN, then parses x-access-token from the

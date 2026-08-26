@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -253,6 +254,44 @@ func TestAutoPR_FailOpenOnGhError(t *testing.T) {
 	}
 	if len(bc.descriptions) > 0 {
 		t.Fatalf("expected no description update on gh failure, got %v", bc.descriptions)
+	}
+}
+
+// TestPublishAfterIntegrate_AutoPRWhenVerificationFails ensures that a push
+// which appears to succeed but does not actually update the remote (e.g. branch
+// protection silently drops the pack) is caught by verification and falls back
+// to the auto-PR path.
+func TestPublishAfterIntegrate_AutoPRWhenVerificationFails(t *testing.T) {
+	repo, remote := setupReachableRemote(t)
+	commitFile(t, repo, "file.txt", "a")
+	git(t, repo, "push", "-u", "origin", "main")
+	first := headCommit(t, repo)
+
+	commitFile(t, repo, "file.txt", "b")
+
+	hook := fmt.Sprintf("#!/bin/sh\nwhile read old new ref; do\n  case \"$ref\" in\n    refs/heads/main)\n      git update-ref refs/heads/main %s \"$new\"\n      ;;\n  esac\ndone\n", first)
+	writeHook(t, remote, "post-receive", hook)
+
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/99"}
+	restore := installAutoPRFake(fake)
+	defer restore()
+
+	bc := &autoPRFakeBeadsClient{}
+	closer := NewBeadCloser(bc, nil, nil, nil, &Config{Output: OutputConfig{Push: true, AutoPR: true}})
+	closer.SetWorktreeManager(NewWorktreeManager(), nil, nil)
+	closer.publishAfterIntegrate(repo, &types.Bead{ID: "bead-xyz", Title: "Fix things"})
+
+	if len(fake.pushes) != 1 {
+		t.Fatalf("expected auto-pr push, got %d", len(fake.pushes))
+	}
+	if fake.pushes[0].ref != "refs/heads/dogfood/bead-xyz" {
+		t.Errorf("unexpected auto-pr ref %q", fake.pushes[0].ref)
+	}
+	if len(fake.ghCreate) != 1 {
+		t.Fatalf("expected gh pr create, got %d", len(fake.ghCreate))
+	}
+	if fake.ghCreate[0].base != "main" || fake.ghCreate[0].head != "dogfood/bead-xyz" {
+		t.Errorf("unexpected gh args: %+v", fake.ghCreate[0])
 	}
 }
 

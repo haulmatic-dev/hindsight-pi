@@ -1,6 +1,7 @@
 package core
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -76,6 +77,7 @@ func TestWorkerEnvBuilder_GateCmdsJSON(t *testing.T) {
 }
 
 func TestWorkerEnvBuilder_GateCmdsAbsentWhenNotDaemonOwned(t *testing.T) {
+	os.Unsetenv("HYDRA_GATE_CMDS")
 	cfg := &Config{
 		Projects: []ProjectConfig{{
 			Name: "proj", Path: "/tmp/proj", Type: "single",

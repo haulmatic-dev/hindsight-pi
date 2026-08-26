@@ -224,3 +224,23 @@ shepherd:
     provider: minimax
     model: MiniMax-M2.7
     api_key_name: MINIMAX_API_KEY   # env var holding Pan's own key (NOT the fleet key)
+
+# ------------------------------------------------------------------------------
+# OUTPUT — Publishing completed work back to origin and automatic PR fallback
+# ------------------------------------------------------------------------------
+output:
+  # Push integrated work to the configured remote. When disabled, Hydra leaves
+  # all commits local and you must merge manually.
+  push: false
+
+  # Remote to push to. Defaults to "origin" when push is enabled and remote is
+  # left empty.
+  remote: ""
+
+  # Auto-PR: when push is enabled and a push to the protected base branch is
+  # rejected (or appears to succeed but the remote tip does not match), Hydra
+  # pushes HEAD to refs/heads/dogfood/<bead-id> and opens a PR via `gh pr create`.
+  # Requires the `gh` CLI and a valid GH_TOKEN or ~/.git-credentials entry.
+  # This is an operator-side toggle; apply it in /etc/hydra/hydra.yaml.
+  auto_pr: false
+

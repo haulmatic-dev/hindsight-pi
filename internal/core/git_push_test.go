@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,6 +71,34 @@ func TestPushBranch(t *testing.T) {
 		}
 		if reason != "protected branch" {
 			t.Errorf("PushBranch(repo, \"origin\", \"main\") reason = %q; want %q", reason, "protected branch")
+		}
+	})
+
+	t.Run("post-receive reversion is detected as verification failure", func(t *testing.T) {
+		t.Parallel()
+		repo, remote := setupReachableRemote(t)
+		commitFile(t, repo, "file.txt", "a")
+		git(t, repo, "push", "-u", "origin", "main")
+		first := headCommit(t, repo)
+
+		commitFile(t, repo, "file.txt", "b")
+		local := headCommit(t, repo)
+
+		hook := fmt.Sprintf("#!/bin/sh\nwhile read old new ref; do\n  case \"$ref\" in\n    refs/heads/main)\n      git update-ref refs/heads/main %s \"$new\"\n      ;;\n  esac\ndone\n", first)
+		writeHook(t, remote, "post-receive", hook)
+
+		pushed, reason := PushBranch(repo, "origin", "main")
+		if pushed {
+			t.Fatalf("expected push verification failure, got pushed=true")
+		}
+		if !strings.HasPrefix(reason, "remote at") {
+			t.Fatalf("expected reason to start with 'remote at', got %q", reason)
+		}
+		if !strings.Contains(reason, local) {
+			t.Errorf("reason missing local sha %s: %q", local, reason)
+		}
+		if !strings.Contains(reason, first) {
+			t.Errorf("reason missing remote sha %s: %q", first, reason)
 		}
 	})
 }
