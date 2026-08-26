@@ -34,15 +34,15 @@ type Charon struct {
 	lastWorktreeGC        time.Time // throttles the stale-worktree sweep
 	lastRegistryReap      time.Time // throttles the ghost-registry-row sweep
 	registryStore         *registry.Store
-	heartbeatHungAfter    time.Duration // stale registry heartbeat → hung worker
-	maxBeadTokens         int64         // soft cap: steer + Pan candidate (0 = disabled); hard backstop = 2x
+	heartbeatHungAfter    time.Duration            // stale registry heartbeat → hung worker
+	maxBeadTokens         int64                    // soft cap: steer + Pan candidate (0 = disabled); hard backstop = 2x
 	panArbiter            func(beadID string) bool // fresh Pan continue verdict = stay of execution
 	steeredMu             sync.Mutex
 	steeredAt             map[string]time.Time // bead → last budget steer (rate limit)
-	retryManager          *RetryManager          // Charon kills consume retry budget (else infra-classified free respawns loop)
-	maxWorkers            int                    // pool size ceiling for phantom-slot deadlock detection
-	events                *EventSink             // structured event stream; nil-safe
-	deadlockScans         int                    // consecutive scans seeing active>=max and zero live PIDs
+	retryManager          *RetryManager        // Charon kills consume retry budget (else infra-classified free respawns loop)
+	maxWorkers            int                  // pool size ceiling for phantom-slot deadlock detection
+	events                *EventSink           // structured event stream; nil-safe
+	deadlockScans         int                  // consecutive scans seeing active>=max and zero live PIDs
 }
 
 // JanitorStats tracks cleanup statistics
@@ -678,6 +678,25 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 			}
 			if age := time.Since(bead.UpdatedAt); age < grace {
 				log.Printf("[Charon] ⏳ Bead %s is only %v old, within %v grace period; leaving in_progress", beadIDStr, age, grace)
+				continue
+			}
+
+			// The bead list can be stale. Re-read the canonical bead before the
+			// destructive reopen: if it has already reached a terminal state,
+			// the worker row is the orphan, not the bead. Reap the row and leave
+			// the bead closed.
+			fresh, err := j.beadsClient.GetBead(project.Path, "", bead.ID)
+			if err != nil {
+				log.Printf("[Charon] ⚠️  Skipping orphan recovery for bead %s: failed to refresh canonical status: %v", beadIDStr, err)
+				continue
+			}
+			if fresh.Status.IsTerminal() {
+				log.Printf("[OrphanRetry] bead %s already terminal (%s); skipping reopen", beadIDStr, fresh.Status)
+				if removed, rmErr := j.workerTracker.RemoveWorkerByBeadID(beadIDStr); rmErr != nil {
+					log.Printf("[OrphanRetry] failed to reap worker row for terminal bead %s (fail open): %v", beadIDStr, rmErr)
+				} else if removed {
+					log.Printf("[OrphanRetry] reaped stale worker row for terminal bead %s", beadIDStr)
+				}
 				continue
 			}
 

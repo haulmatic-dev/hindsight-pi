@@ -266,6 +266,31 @@ func (wt *WorkerTracker) GetStats() (running, completed int) {
 	return running, completed
 }
 
+// RemoveWorkerByBeadID deletes a tracked worker record by its bead ID.
+// It is used to reap stale worker rows for beads that have already reached
+// a terminal state, so they are not treated as live workers by orphan
+// recovery or process cleanup.
+func (wt *WorkerTracker) RemoveWorkerByBeadID(beadID string) (bool, error) {
+	wt.mu.Lock()
+	defer wt.mu.Unlock()
+
+	removed := false
+	for pid, r := range wt.workers {
+		if r.BeadID == beadID {
+			delete(wt.workers, pid)
+			removed = true
+		}
+	}
+	if !removed {
+		return false, nil
+	}
+	if err := wt.save(); err != nil {
+		return false, fmt.Errorf("failed to remove worker %s: %w", beadID, err)
+	}
+	log.Printf("[WorkerTracker] Removed worker record for bead %s", beadID)
+	return true, nil
+}
+
 // GetWorkerByBead finds a worker record by bead ID
 func (wt *WorkerTracker) GetWorkerByBead(beadID string) (*WorkerRecord, bool) {
 	wt.mu.RLock()
