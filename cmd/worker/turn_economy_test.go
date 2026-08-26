@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -62,5 +63,17 @@ func TestBuildPiPrompt_DaemonGatesNote(t *testing.T) {
 	prompt := buildPiPrompt(types.Bead{ID: "p-1", Title: "t"}, nil, promptExtras{})
 	if !strings.Contains(prompt, "VERIFICATION OWNERSHIP") {
 		t.Error("HYDRA_DAEMON_GATES=1 must add the verification-ownership note")
+	}
+	if !strings.Contains(prompt, "VERIFY LOOP BUDGET") {
+		t.Error("HYDRA_DAEMON_GATES=1 must add the verify-loop budget rule")
+	}
+}
+
+// Verify-loop budget must not appear when the daemon does not own gates.
+func TestBuildPiPrompt_VerifyLoopBudgetAbsentWithoutDaemonGates(t *testing.T) {
+	os.Unsetenv("HYDRA_DAEMON_GATES")
+	prompt := buildPiPrompt(types.Bead{ID: "p-1", Title: "t"}, nil, promptExtras{})
+	if strings.Contains(prompt, "VERIFY LOOP BUDGET") {
+		t.Error("VERIFY LOOP BUDGET must not appear when HYDRA_DAEMON_GATES is unset")
 	}
 }

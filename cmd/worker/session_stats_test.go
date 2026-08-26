@@ -57,6 +57,9 @@ func TestGatherSessionToolMix_CountsAndJestRuns(t *testing.T) {
 	if !strings.Contains(got, "jest_runs=1") {
 		t.Errorf("log line missing jest_runs=1: %s", got)
 	}
+	if strings.Contains(got, "gate_runs=") {
+		t.Errorf("log line must not contain gate_runs when HYDRA_GATE_CMDS is unset: %s", got)
+	}
 	// graphify and hindsight_search are reported as dedicated fields, not
 	// duplicated inside the generic tools/payload lists.
 	if strings.Contains(got, "graphify:") || strings.Contains(got, "hindsight_search:") {
@@ -82,7 +85,7 @@ func TestGatherSessionToolMix_MissingDir(t *testing.T) {
 	}
 }
 
-func TestGatherSessionToolMix_ParseErrorSkipsStats(t *testing.T) {
+func TestGatherSessionToolMix_ParseErrorSkipsMalformedLine(t *testing.T) {
 	dir := t.TempDir()
 	writeFixture(t, dir, "bad.jsonl", []string{
 		`{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"echo hi"}}]}}`,
@@ -94,12 +97,15 @@ func TestGatherSessionToolMix_ParseErrorSkipsStats(t *testing.T) {
 	log.SetOutput(&buf)
 	defer log.SetOutput(old)
 
-	_, ok := gatherSessionToolMix(dir)
-	if ok {
-		t.Error("expected ok=false when a jsonl line is malformed")
+	stats, ok := gatherSessionToolMix(dir)
+	if !ok {
+		t.Fatal("expected ok=true when only one jsonl line is malformed")
+	}
+	if stats.Counts["bash"] != 1 {
+		t.Errorf("Counts[bash] = %d, want 1", stats.Counts["bash"])
 	}
 	if !strings.Contains(buf.String(), "[SessionStats] debug:") {
-		t.Errorf("expected debug log for parse error, got: %q", buf.String())
+		t.Errorf("expected debug log for malformed line, got: %q", buf.String())
 	}
 }
 
@@ -112,6 +118,73 @@ func TestEmitSessionToolMixStats_NoHydraHome(t *testing.T) {
 	emitSessionToolMixStats(types.Bead{ID: "hydra/test-123"}, "")
 	if buf.String() != "" {
 		t.Errorf("expected no log when HYDRA_HOME is empty, got: %q", buf.String())
+	}
+}
+
+func TestGatherSessionToolMix_GateCmdRuns(t *testing.T) {
+	t.Setenv("HYDRA_GATE_CMDS", `["npm run test:agent -- <scope>","go test <scope>","npm run lint"]`)
+	dir := t.TempDir()
+	writeFixture(t, dir, "session.jsonl", []string{
+		`{"type":"session","id":"test-bead"}`,
+		`{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"npm run test:agent -- foo"}},{"type":"toolCall","name":"bash","arguments":{"command":"go test ./cmd/worker"}},{"type":"toolCall","name":"bash","arguments":{"command":"npm   run  lint"}},{"type":"toolCall","name":"bash","arguments":{"command":"npm run build"}}]}}`,
+		`{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"npx jest foo.spec.ts"}}]}}`,
+	})
+
+	stats, ok := gatherSessionToolMix(dir)
+	if !ok {
+		t.Fatal("gatherSessionToolMix returned ok=false for valid fixture")
+	}
+
+	want := map[string]int{
+		"npm run test:agent": 1,
+		"go test":            1,
+		"npm run lint":       1,
+	}
+	if len(stats.GateCmdRuns) != len(want) {
+		t.Errorf("GateCmdRuns = %v, want %v", stats.GateCmdRuns, want)
+	}
+	for k, v := range want {
+		if got := stats.GateCmdRuns[k]; got != v {
+			t.Errorf("GateCmdRuns[%q] = %d, want %d", k, got, v)
+		}
+	}
+	if stats.GateCmdRuns["npm run build"] != 0 {
+		t.Errorf("npm run build must not be counted as a gate run: %v", stats.GateCmdRuns)
+	}
+	if stats.BashJestRuns != 2 {
+		t.Errorf("BashJestRuns = %d, want 2", stats.BashJestRuns)
+	}
+
+	got := formatSessionToolMix("test-bead", stats)
+	if !strings.Contains(got, `gate_runs={`) {
+		t.Errorf("log line missing gate_runs field: %s", got)
+	}
+	if !strings.Contains(got, `"go test":1`) || !strings.Contains(got, `"npm run lint":1`) || !strings.Contains(got, `"npm run test:agent":1`) {
+		t.Errorf("log line missing expected gate run counts: %s", got)
+	}
+}
+
+func TestGatherSessionToolMix_GateCmdRunsFailOpen(t *testing.T) {
+	t.Setenv("HYDRA_GATE_CMDS", "not-json")
+	dir := t.TempDir()
+	writeFixture(t, dir, "session.jsonl", []string{
+		`{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"go test ./..."}}]}}`,
+	})
+
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(old)
+
+	stats, ok := gatherSessionToolMix(dir)
+	if !ok {
+		t.Fatal("expected ok=true when HYDRA_GATE_CMDS is malformed")
+	}
+	if len(stats.GateCmdRuns) != 0 {
+		t.Errorf("GateCmdRuns must be empty when env is malformed, got %v", stats.GateCmdRuns)
+	}
+	if !strings.Contains(buf.String(), "[SessionStats] debug:") {
+		t.Errorf("expected debug log for malformed HYDRA_GATE_CMDS, got: %q", buf.String())
 	}
 }
 

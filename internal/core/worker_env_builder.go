@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -25,6 +26,27 @@ func NewWorkerEnvBuilder(config *Config) *WorkerEnvBuilder {
 // buildPiEnv for rate-limit failover. Safe to leave unset (no failover).
 func (b *WorkerEnvBuilder) SetProviderBreaker(pb *ProviderBreaker) {
 	b.breaker = pb
+}
+
+// gateCommandList returns the declared gate commands in canonical
+// test/lint/build order, omitting empty specs. The commands are passed to
+// workers as-is (including any <scope> placeholder) so telemetry can match
+// against the same strings the daemon will later execute.
+func gateCommandList(g *GateSet) []string {
+	if g == nil {
+		return nil
+	}
+	cmds := make([]string, 0, 3)
+	if g.Test.Cmd != "" {
+		cmds = append(cmds, g.Test.Cmd)
+	}
+	if g.Lint.Cmd != "" {
+		cmds = append(cmds, g.Lint.Cmd)
+	}
+	if g.Build.Cmd != "" {
+		cmds = append(cmds, g.Build.Cmd)
+	}
+	return cmds
 }
 
 // Build creates the environment variable slice for a worker process.
@@ -85,12 +107,23 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 
 	// Daemon-owned gates (FR-002 slice 2): tell the worker the daemon owns
 	// test/lint/build verification so the prompt can redirect it away from
-	// full-suite babysitting.
+	// full-suite babysitting. Also pass the exact gate commands so the
+	// worker's close-time telemetry knows what it invoked.
 	if b.config != nil {
 		for i := range b.config.Projects {
 			p := &b.config.Projects[i]
 			if p.Name == bead.Project && p.Gates != nil && p.Gates.DaemonOwned {
 				env = append(env, "HYDRA_DAEMON_GATES=1")
+				if cmds := gateCommandList(p.Gates); len(cmds) > 0 {
+					var buf bytes.Buffer
+					enc := json.NewEncoder(&buf)
+					enc.SetEscapeHTML(false)
+					if err := enc.Encode(cmds); err == nil {
+						env = append(env, fmt.Sprintf("HYDRA_GATE_CMDS=%s", strings.TrimSpace(buf.String())))
+					} else {
+						log.Printf("[WARN] Failed to marshal gate commands: %v", err)
+					}
+				}
 				break
 			}
 		}
