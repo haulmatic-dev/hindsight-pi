@@ -21,6 +21,7 @@ type projectAwareExecutor struct {
 	mu           sync.Mutex
 	calls        []string
 	responses    map[string][]byte
+	showResponse []byte
 	failProjects map[string]bool
 }
 
@@ -42,6 +43,12 @@ func (e *projectAwareExecutor) ExecuteInDir(dir string, name string, arg ...stri
 			return resp, nil
 		}
 		return []byte(`{"issues":[],"total":0,"limit":500,"offset":0,"has_more":false}`), nil
+	}
+	if name == "br" && len(arg) > 0 && arg[0] == "show" {
+		if e.showResponse != nil {
+			return e.showResponse, nil
+		}
+		return []byte("[]"), nil
 	}
 	return []byte("{}"), nil
 }
@@ -73,6 +80,7 @@ func setupDeadlockCharon(t *testing.T, beadID string, beadAge time.Duration) (*C
 
 	exec := &projectAwareExecutor{
 		responses:    map[string][]byte{healthyDir: beadListJSON(beadID, time.Now().Add(-beadAge))},
+		showResponse: inProgressDetailFromList(beadListJSON(beadID, time.Now().Add(-beadAge))),
 		failProjects: map[string]bool{brokenDir: true},
 	}
 	client := beads.NewClientWithExecutor(exec)

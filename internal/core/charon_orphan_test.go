@@ -22,6 +22,8 @@ type recordingExecutor struct {
 	mu        sync.Mutex
 	calls     []string
 	listResp  []byte
+	getResp   []byte
+	getErr    error
 	closeErr  error
 	updateErr error
 }
@@ -44,6 +46,11 @@ func (e *recordingExecutor) respond(name string, arg []string) ([]byte, error) {
 		switch arg[0] {
 		case "list":
 			return e.listResp, nil
+		case "show":
+			if e.getErr != nil {
+				return nil, e.getErr
+			}
+			return e.getResp, nil
 		case "update":
 			if e.updateErr != nil {
 				return nil, e.updateErr
@@ -81,6 +88,43 @@ func (e *recordingExecutor) CountCalls(prefix string) int {
 
 // beadListJSON returns a paginated br list response containing a single
 // in_progress bead with the supplied updatedAt timestamp.
+func inProgressDetailFromList(listResp []byte) []byte {
+	if len(listResp) == 0 {
+		return nil
+	}
+	var page struct {
+		Issues []map[string]any `json:"issues"`
+	}
+	if err := json.Unmarshal(listResp, &page); err != nil || len(page.Issues) == 0 {
+		return nil
+	}
+	issue := page.Issues[0]
+	// Force the detail status to in_progress so the default GetBead response
+	// matches the list response; tests that need a terminal/failed detail
+	// override exec.getResp explicitly.
+	issue["status"] = "in_progress"
+	b, _ := json.Marshal([]map[string]any{issue})
+	return b
+}
+
+func terminalBeadJSON(beadID string, status string) []byte {
+	updatedStr := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
+	createdStr := time.Now().Add(-70 * time.Minute).Format(time.RFC3339)
+
+	m := map[string]any{
+		"id":         beadID,
+		"title":      "orphan bead",
+		"status":     status,
+		"priority":   4,
+		"issue_type": "implement",
+		"labels":     []string{},
+		"created_at": createdStr,
+		"updated_at": updatedStr,
+	}
+	b, _ := json.Marshal([]map[string]any{m})
+	return b
+}
+
 func beadListJSON(beadID string, updatedAt time.Time) []byte {
 	updatedStr := updatedAt.Format(time.RFC3339)
 	if updatedAt.IsZero() {
@@ -129,7 +173,7 @@ func setupOrphanCharon(t *testing.T, listResp []byte, grace time.Duration) (*Cha
 		t.Fatalf("NewWorkerTracker: %v", err)
 	}
 
-	exec := &recordingExecutor{listResp: listResp}
+	exec := &recordingExecutor{listResp: listResp, getResp: inProgressDetailFromList(listResp)}
 	client := beads.NewClientWithExecutor(exec)
 	charon := NewCharon(client, tracker, 0)
 	charon.orphanBeadGrace = grace
@@ -137,6 +181,63 @@ func setupOrphanCharon(t *testing.T, listResp []byte, grace time.Duration) (*Cha
 		return []types.Project{{Name: "test", Path: t.TempDir()}}
 	})
 	return charon, exec
+}
+
+func TestRecoverOrphanInProgressBeads_SkipsTerminalBeadAndReapsRow(t *testing.T) {
+	beadID := "test-orphan-terminal"
+	charon, exec := setupOrphanCharon(t, beadListJSON(beadID, time.Now().Add(-10*time.Minute)), 5*time.Minute)
+	exec.getResp = terminalBeadJSON(beadID, "closed")
+
+	projectPath := t.TempDir()
+	charon.SetProjectsProvider(func() []types.Project {
+		return []types.Project{{Name: "test", Path: projectPath}}
+	})
+
+	// Stale worker row for a bead that is already terminal (process is gone, only
+	// the persisted record remains).
+	if err := charon.workerTracker.TrackWorkerWithPGID(12345, 12345, beadID, projectPath); err != nil {
+		t.Fatalf("TrackWorkerWithPGID: %v", err)
+	}
+	if err := charon.workerTracker.MarkWorkerCompleted(12345, 0); err != nil {
+		t.Fatalf("MarkWorkerCompleted: %v", err)
+	}
+
+	var buf bytes.Buffer
+	oldOutput := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(oldOutput)
+		log.SetFlags(oldFlags)
+	}()
+
+	got := charon.recoverOrphanInProgressBeads()
+	if got != 0 {
+		t.Fatalf("recovered = %d, want 0 for terminal bead", got)
+	}
+
+	if charon.stats.OrphanBeadsRecovered != 0 {
+		t.Errorf("OrphanBeadsRecovered = %d, want 0", charon.stats.OrphanBeadsRecovered)
+	}
+	if n := exec.CountCalls("br update " + beadID + " --status open"); n != 0 {
+		t.Errorf("expected zero UpdateBeadStatus(open) calls for terminal bead, got %d; calls:\n%v", n, exec.Calls())
+	}
+	if n := exec.CountCalls("br close"); n != 0 {
+		t.Errorf("expected zero CloseBead calls, got %d; calls:\n%v", n, exec.Calls())
+	}
+	if n := exec.CountCalls("br show"); n != 1 {
+		t.Errorf("expected one GetBead call, got %d; calls:\n%v", n, exec.Calls())
+	}
+	if _, ok := charon.workerTracker.GetWorkerByBead(beadID); ok {
+		t.Errorf("expected worker row for terminal bead to be reaped, but it still exists")
+	}
+	if !strings.Contains(buf.String(), "already terminal") {
+		t.Errorf("expected log to contain 'already terminal', got:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "reopened orphan bead") {
+		t.Errorf("expected no 'reopened orphan bead' log, got:\n%s", buf.String())
+	}
 }
 
 func TestRecoverOrphanInProgressBeads_ReopensOldOrphan(t *testing.T) {
