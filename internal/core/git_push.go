@@ -58,6 +58,32 @@ func redactToken(text, token string) string {
 	return strings.ReplaceAll(text, token, "***")
 }
 
+// verifyRemoteHead checks that the remote-tracking ref for branch matches the
+// local branch head. It returns (true, "", "") on match and (false, localSHA,
+// remoteSHA) on mismatch or error. The comparison uses ls-remote so it does not
+// trust the local remote-tracking ref, which can be updated even when the
+// remote silently ignores the push.
+func verifyRemoteHead(repoPath, remote, branch string) (bool, string, string) {
+	localOut, err := gitOut(repoPath, "rev-parse", "--verify", "refs/heads/"+branch)
+	if err != nil {
+		return false, "", ""
+	}
+	localSHA := strings.TrimSpace(localOut)
+	remoteOut, err := gitOut(repoPath, "ls-remote", remote, "refs/heads/"+branch)
+	if err != nil {
+		return false, localSHA, ""
+	}
+	fields := strings.Fields(remoteOut)
+	if len(fields) == 0 {
+		return false, localSHA, ""
+	}
+	remoteSHA := fields[0]
+	if localSHA == remoteSHA {
+		return true, localSHA, remoteSHA
+	}
+	return false, localSHA, remoteSHA
+}
+
 // PushBranchWithToken pushes branch from repoPath to the repo's origin,
 // authenticating with the given personal access token (the project owner's).
 // It resolves origin, injects the token into a one-shot HTTPS URL (never
@@ -82,6 +108,9 @@ func PushBranchWithToken(repoPath, branch, token string) (bool, string) {
 	cmd := exec.Command("git", "-C", repoPath, "push", authURL, branch)
 	out, cErr := cmd.CombinedOutput()
 	if cErr == nil {
+		if ok, local, remote := verifyRemoteHead(repoPath, "origin", branch); !ok {
+			return false, fmt.Sprintf("remote at %s, local %s", remote, local)
+		}
 		return true, ""
 	}
 	msg := redactToken(string(out), token)
@@ -113,6 +142,9 @@ func PushBranch(repoPath, remote, branch string) (bool, string) {
 	cmd := exec.Command("git", "-C", repoPath, "push", remote, branch)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
+		if ok, local, rem := verifyRemoteHead(repoPath, remote, branch); !ok {
+			return false, fmt.Sprintf("remote at %s, local %s", rem, local)
+		}
 		return true, ""
 	}
 
