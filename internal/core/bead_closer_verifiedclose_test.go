@@ -426,7 +426,7 @@ func TestVerifyBeforeClose_AlreadyIntegratedTargetPasses(t *testing.T) {
 		}
 	})
 
-	want := "[VerifiedClose] test-project-integrated targets already integrated on main"
+	want := "[VerifiedClose] test-project-integrated"
 	if !strings.Contains(logs, want) {
 		t.Errorf("expected integration log %q, got:\n%s", want, logs)
 	}
@@ -499,5 +499,118 @@ func TestVerifyBeforeClose_NoChainBranchSkipAlreadyIntegratedCheck(t *testing.T)
 	}
 	if !strings.Contains(err.Error(), "empty-diff") {
 		t.Fatalf("expected empty-diff rejection, got: %v", err)
+	}
+}
+
+func TestVerifyBeforeClose_IntegratedChainBranchAncestorPasses(t *testing.T) {
+	// dy0/ig9hw class: after the chain branch is merged into main, the
+	// worktree is clean and the merge base has moved past the work. A direct
+	// ancestry check must treat the bead as already integrated.
+	projectPath := initGitRepoWithCommit(t)
+	t.Setenv("HYDRA_HOME", t.TempDir())
+
+	wtMgr := NewWorktreeManager()
+	key := "ancestor-integrated"
+	wtPath, err := wtMgr.EnsureWorktree(projectPath, key)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	target := "feature.go"
+
+	// Worker writes and commits the target in the chain worktree.
+	writeFile(t, wtPath, target, "package main\n")
+	runGit(t, wtPath, "add", target)
+	runGit(t, wtPath, "commit", "-m", "worker commit")
+
+	// Chain branch is merged into main (integrate-into-chain succeeded).
+	chainBranch := currentBranch(wtPath)
+	runGit(t, projectPath, "merge", chainBranch, "--no-ff", "-m", "integrate chain")
+
+	bead := types.Bead{
+		ID:       "test-project-ancestor",
+		Title:    "GREEN: implement feature",
+		Project:  "test-project",
+		Type:     "implement",
+		Status:   types.StatusInProgress,
+		Metadata: map[string]string{"files": target},
+	}
+
+	cfg := DefaultConfig()
+	cfg.Validation.RequireDiffOnClose = true
+	resolver := NewProjectResolver([]types.Project{
+		{Name: "test-project", Path: projectPath, Type: types.RepoTypeSingle},
+	})
+	closer := NewBeadCloser(newMockBeadsClient(), nil, resolver, nil, cfg)
+	closer.SetWorktreeManager(wtMgr,
+		func(_ types.Bead) string { return key },
+		func(_ types.BeadID) bool { return false },
+	)
+
+	logs := captureLogOutput(t, func() {
+		if err := closer.verifyBeforeClose(&bead, projectPath, ""); err != nil {
+			t.Fatalf("ancestor-integrated chain branch must not reject close: %v", err)
+		}
+	})
+
+	want := "[VerifiedClose] test-project-ancestor chain branch"
+	if !strings.Contains(logs, want) {
+		t.Errorf("expected ancestry integration log containing %q, got:\n%s", want, logs)
+	}
+}
+
+func TestVerifyBeforeClose_PartialIntegrationLFAFallback(t *testing.T) {
+	// The chain branch is NOT an ancestor of main, but the bead's target
+	// file already changed on main since the two branches diverged. The
+	// per-target merge-base fallback (not the ancestry shortcut) must pass.
+	projectPath := initGitRepoWithCommit(t)
+	t.Setenv("HYDRA_HOME", t.TempDir())
+
+	wtMgr := NewWorktreeManager()
+	key := "partial-lfa"
+	wtPath, err := wtMgr.EnsureWorktree(projectPath, key)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	// Chain branch carries a unique commit so it is not an ancestor of main.
+	writeFile(t, wtPath, "chain_only.go", "package main\n")
+	runGit(t, wtPath, "add", "chain_only.go")
+	runGit(t, wtPath, "commit", "-m", "chain-only work")
+
+	// Target file lands on main after the chain diverged.
+	target := "feature.go"
+	writeFile(t, projectPath, target, "package main\n")
+	runGit(t, projectPath, "add", target)
+	runGit(t, projectPath, "commit", "-m", "target on main")
+
+	bead := types.Bead{
+		ID:       "test-project-partial",
+		Title:    "GREEN: implement feature",
+		Project:  "test-project",
+		Type:     "implement",
+		Status:   types.StatusInProgress,
+		Metadata: map[string]string{"files": target},
+	}
+
+	cfg := DefaultConfig()
+	cfg.Validation.RequireDiffOnClose = true
+	resolver := NewProjectResolver([]types.Project{
+		{Name: "test-project", Path: projectPath, Type: types.RepoTypeSingle},
+	})
+	closer := NewBeadCloser(newMockBeadsClient(), nil, resolver, nil, cfg)
+	closer.SetWorktreeManager(wtMgr,
+		func(_ types.Bead) string { return key },
+		func(_ types.BeadID) bool { return false },
+	)
+
+	logs := captureLogOutput(t, func() {
+		if err := closer.verifyBeforeClose(&bead, projectPath, ""); err != nil {
+			t.Fatalf("partial integration fallback must not reject close: %v", err)
+		}
+	})
+
+	want := "[VerifiedClose] test-project-partial targets already integrated on main"
+	if !strings.Contains(logs, want) {
+		t.Errorf("expected fallback integration log %q, got:\n%s", want, logs)
 	}
 }

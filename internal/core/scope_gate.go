@@ -270,3 +270,34 @@ func changedFilesSinceMergeBase(projectPath, baseBranch, chainBranch string) ([]
 	}
 	return files, nil
 }
+
+// branchIsAncestorOfMain reports whether branch is a strict ancestor of the
+// main checkout's current HEAD. We require the branch tip to differ from
+// HEAD so that an idle worktree that never diverged from main is not mistaken
+// for an already-integrated chain.
+func branchIsAncestorOfMain(projectPath, branch string) (bool, error) {
+	if projectPath == "" || branch == "" {
+		return false, fmt.Errorf("branchIsAncestorOfMain: projectPath and branch are required")
+	}
+	headOut, err := exec.Command("git", "-C", projectPath, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return false, fmt.Errorf("rev-parse HEAD in %s: %w", projectPath, err)
+	}
+	tipOut, err := exec.Command("git", "-C", projectPath, "rev-parse", branch).Output()
+	if err != nil {
+		return false, fmt.Errorf("rev-parse %s in %s: %w", branch, projectPath, err)
+	}
+	if strings.TrimSpace(string(headOut)) == strings.TrimSpace(string(tipOut)) {
+		return false, nil
+	}
+	// merge-base --is-ancestor exits 0 when branch is an ancestor of HEAD,
+	// exits 1 when it is not, and exits non-zero with stderr on error.
+	cmd := exec.Command("git", "-C", projectPath, "merge-base", "--is-ancestor", branch, "HEAD")
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("merge-base --is-ancestor %s HEAD in %s: %w", branch, projectPath, err)
+	}
+	return true, nil
+}
