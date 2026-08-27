@@ -263,6 +263,7 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	// default true). Disabled narrows execution to projects.list only.
 	if o.config.MultiUserDiscovery {
 		multiUserDiscovery := NewMultiUserDiscovery()
+		multiUserDiscovery.SetExclude(o.config.AutoDiscoverExclude)
 		if err := multiUserDiscovery.Discover(); err != nil {
 			log.Printf("[MultiUser] Discovery error: %v", err)
 		} else {

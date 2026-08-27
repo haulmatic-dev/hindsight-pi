@@ -573,6 +573,21 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 		}
 	}
 
+	// Belt-and-braces: retry-manager and spawn-failure residue can survive a
+	// verified close, and a stale TerminalBead cache or unresolved project path
+	// can let a terminal bead leak into the judgment prompt. Re-check terminal
+	// status on every collected candidate before returning.
+	if s.cfg.TerminalBead != nil {
+		filtered := out[:0]
+		for _, cand := range out {
+			if s.cfg.TerminalBead(cand.Record.BeadID) {
+				continue
+			}
+			filtered = append(filtered, cand)
+		}
+		out = filtered
+	}
+
 	return out, nil
 }
 

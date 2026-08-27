@@ -435,6 +435,11 @@ func NewOverseer(config *Config) *Overseer {
 	retainer := NewVerdictRetainer(o.hindsightClient)
 	o.beadCloser.SetVerdictRetainer(retainer)
 
+	// Wire retry/spawn state purgers into the close path so verified closes
+	// clear retry and spawn-failure residue for the bead.
+	o.beadCloser.SetRetryManager(o.retryManager)
+	o.beadCloser.SetWorkerSpawner(o.workerSpawner)
+
 	// Per-chain worktree isolation (opt-in via overseer.worktree_isolation).
 	// Wires the manager into spawn (run worker in the chain's worktree) and
 	// close (commit its work); integration happens on chain completion.

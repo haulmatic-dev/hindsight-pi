@@ -121,6 +121,16 @@ func (s *WorkerSpawner) LastSpawnFailure(beadID string) (reason string, timestam
 	return "", time.Time{}, false
 }
 
+// ClearSpawnFailure removes the last recorded spawn failure for a bead.
+func (s *WorkerSpawner) ClearSpawnFailure(beadID string) {
+	s.spawnFailureMu.Lock()
+	defer s.spawnFailureMu.Unlock()
+	if _, exists := s.spawnFailures[beadID]; exists {
+		delete(s.spawnFailures, beadID)
+		log.Printf("[WorkerSpawner] cleared spawn failure for %s", beadID)
+	}
+}
+
 // ListSpawnFailures returns a snapshot of all bead IDs that have a recorded
 // spawn failure.
 func (s *WorkerSpawner) ListSpawnFailures() []string {

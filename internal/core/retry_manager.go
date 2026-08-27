@@ -121,6 +121,14 @@ func (rm *RetryManager) RecordRetry(beadID string, err error) time.Duration {
 	return backoff
 }
 
+// Clear removes all retry state for a bead: genuine retries, infra retries,
+// last failure, and validation retries. Called after a verified close so the
+// bead carries no residue into Pan candidacy or future spawn decisions.
+func (rm *RetryManager) Clear(beadID string) {
+	rm.ClearRetry(beadID)
+	rm.ClearValidationRetry(beadID)
+}
+
 // ClearRetry removes a bead from retry tracking.
 func (rm *RetryManager) ClearRetry(beadID string) {
 	rm.retriesMu.Lock()

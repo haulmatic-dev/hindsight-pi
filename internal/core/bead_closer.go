@@ -21,6 +21,8 @@ type BeadCloser struct {
 	isChainMember     func(types.BeadID) bool // reports whether a bead belongs to a registered multi-bead chain
 	retainer          *VerdictRetainer        // nil-safe; Hindsight verdict retention (Shepherd D3)
 	gateRunner        *GateRunner             // nil until SetGateRunner; daemon_owned projects fail closed without it
+	retryManager      *RetryManager           // clears retry residue on verified close
+	workerSpawner     *WorkerSpawner          // clears spawn-failure residue on verified close
 }
 
 // SetWorktreeManager enables commit-on-close and singleton integrate-on-close
@@ -51,6 +53,15 @@ func (c *BeadCloser) SetEventSink(s *EventSink) { c.events = s }
 // SetVerdictRetainer attaches Hindsight verdict retention (Shepherd D3).
 // Nil stays a no-op.
 func (c *BeadCloser) SetVerdictRetainer(r *VerdictRetainer) { c.retainer = r }
+
+// SetRetryManager wires the retry manager so verified closes can purge
+// retry state (fault/validation/spawn residue) and keep dead beads out of
+// Pan candidacy.
+func (c *BeadCloser) SetRetryManager(rm *RetryManager) { c.retryManager = rm }
+
+// SetWorkerSpawner wires the worker spawner so verified closes can purge
+// spawn-failure residue.
+func (c *BeadCloser) SetWorkerSpawner(s *WorkerSpawner) { c.workerSpawner = s }
 
 // retainFailedClose retains a failed close as a Hindsight memory when a
 // failure cause was extracted. Fail-open: nil retainer or nil memory (no bead,
@@ -242,7 +253,31 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 		Bead: worker.BeadID.String(), Reason: reason,
 		Fields: map[string]any{"exit_code": exitCode, "success": success}})
 
-	return c.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason)
+	if err := c.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason); err != nil {
+		return err
+	}
+
+	// Purge scheduler residue for verified closes so closed beads cannot
+	// re-enter Pan candidacy or respawn decisions via stale retry/spawn
+	// records. Failure here is logged but must not fail the close.
+	if reason == "completed" {
+		c.purgeCloseState(worker.BeadID)
+	}
+	return nil
+}
+
+// purgeCloseState clears retry-manager and spawner residue for a bead that
+// has just closed successfully. Keeps terminal beads from lingering in
+// scheduler-level blocked-bead sources.
+func (c *BeadCloser) purgeCloseState(beadID types.BeadID) {
+	id := beadID.String()
+	if c.retryManager != nil {
+		c.retryManager.Clear(id)
+		c.retryManager.ClearValidationRetry(id)
+	}
+	if c.workerSpawner != nil {
+		c.workerSpawner.ClearSpawnFailure(id)
+	}
 }
 
 // shouldRunTDDValidation reports whether RunTDDValidation should fire
