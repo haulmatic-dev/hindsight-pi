@@ -956,10 +956,15 @@ func (o *Overseer) shouldSpawnWorker(node *Node) bool {
 // isBeadRunning checks if a bead is currently being executed by an active worker
 func (o *Overseer) isBeadRunning(beadID string) bool {
 	o.workerMutex.RLock()
-	defer o.workerMutex.RUnlock()
-
 	_, exists := o.activeWorkers[beadID]
-	return exists
+	o.workerMutex.RUnlock()
+	if exists {
+		return true
+	}
+	if o.workerSpawner != nil {
+		return o.workerSpawner.HasLiveRegistryWorker(beadID)
+	}
+	return false
 }
 
 // GetActiveWorkerCount returns the number of currently active workers

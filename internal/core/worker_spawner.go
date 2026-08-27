@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/registry"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -29,13 +30,17 @@ type WorkerSpawner struct {
 	beadAnalyzer     *BeadAnalyzer
 	workerEnvBuilder *WorkerEnvBuilder
 	workerLifecycle  *WorkerLifecycle
-	userContexts     map[string]*UserContext // username -> context (for per-user git auth)
-	worktreeManager  *WorktreeManager        // per-chain git isolation; nil = disabled
-	chainKeyFn       func(types.Bead) string // maps a bead to its chain's worktree key
+	userContexts         map[string]*UserContext // username -> context (for per-user git auth)
+	worktreeManager      *WorktreeManager        // per-chain git isolation; nil = disabled
+	chainKeyFn           func(types.Bead) string // maps a bead to its chain's worktree key
+	registryStore        *registry.Store         // daemon-owned source of worker truth
+	parkedRespawnTimeout time.Duration           // parked rows older than this may be respawned
 
 	spawnFailureMu sync.RWMutex
 	spawnFailures  map[string]*spawnFailureInfo // bead ID -> last spawn failure
 }
+
+const defaultParkedRespawnTimeout = 10 * time.Minute
 
 type spawnFailureInfo struct {
 	err       string
@@ -46,6 +51,16 @@ type spawnFailureInfo struct {
 func (s *WorkerSpawner) SetWorktreeManager(m *WorktreeManager, chainKeyFn func(types.Bead) string) {
 	s.worktreeManager = m
 	s.chainKeyFn = chainKeyFn
+}
+
+// SetRegistryStore wires the daemon's registry store so the duplicate-spawn
+// check can see parked and working rows that survive a scheduler tick or
+// daemon restart.
+func (s *WorkerSpawner) SetRegistryStore(st *registry.Store) {
+	s.registryStore = st
+	if s.parkedRespawnTimeout == 0 {
+		s.parkedRespawnTimeout = defaultParkedRespawnTimeout
+	}
 }
 
 // NewWorkerSpawner creates a new worker spawner.
@@ -143,6 +158,45 @@ func (s *WorkerSpawner) ListSpawnFailures() []string {
 	return out
 }
 
+// HasLiveRegistryWorker reports whether the daemon's registry contains a
+// live (non-terminal) worker row for the bead. It is exported for the
+// scheduler's duplicate-spawn guard.
+func (s *WorkerSpawner) HasLiveRegistryWorker(beadID string) bool {
+	live, _ := s.isRegistryWorkerLive(beadID)
+	return live
+}
+
+// isRegistryWorkerLive reports whether a non-terminal worker row exists in
+// the daemon's registry. Parked rows are treated as live workers that block
+// respawn, unless the park is older than parkedRespawnTimeout.
+func (s *WorkerSpawner) isRegistryWorkerLive(beadID string) (bool, error) {
+	if s.registryStore == nil {
+		return false, nil
+	}
+	rec, ok, err := s.registryStore.GetWorker(beadID)
+	if err != nil {
+		log.Printf("[WorkerSpawner] registry lookup failed for %s: %v", beadID, err)
+		return false, nil
+	}
+	if !ok {
+		return false, nil
+	}
+	if rec.State.Terminal() {
+		return false, nil
+	}
+	if rec.State == registry.StateParked {
+		timeout := s.parkedRespawnTimeout
+		if timeout <= 0 {
+			timeout = defaultParkedRespawnTimeout
+		}
+		if !rec.ParkSince.IsZero() && time.Since(rec.ParkSince) > timeout {
+			log.Printf("[WorkerSpawner] parked row for %s is older than %v; allowing respawn", beadID, timeout)
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // Spawn creates and starts a worker for a bead with duplicate checking and limits.
 func (s *WorkerSpawner) Spawn(bead types.Bead) (err error) {
 	beadIDStr := bead.ID.String()
@@ -194,6 +248,12 @@ func (s *WorkerSpawner) Spawn(bead types.Bead) (err error) {
 			s.errorLogger.Error("spawnWorker", "duplicate_check", beadIDStr, fmt.Errorf("worker already exists"), "warn")
 			return fmt.Errorf("worker already exists for bead %s", beadIDStr)
 		}
+	}
+
+	if live, _ := s.isRegistryWorkerLive(beadIDStr); live {
+		s.workerMutex.Unlock()
+		s.errorLogger.Error("spawnWorker", "duplicate_check", beadIDStr, fmt.Errorf("worker already exists"), "warn")
+		return fmt.Errorf("worker already exists for bead %s", beadIDStr)
 	}
 
 	activeCount := len(s.activeWorkers)

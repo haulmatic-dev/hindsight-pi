@@ -118,7 +118,13 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 	log.Printf("[closeBead] Closing with reason: %s (path: %s)", reason, projectPath)
 
 	bead, err := c.beadsClient.GetBead(projectPath, repoName, worker.BeadID)
-	if err == nil && bead.Status.IsTerminal() {
+	if err != nil {
+		return fmt.Errorf("[closeBead] cannot verify state of bead %s: %w", worker.BeadID.String(), err)
+	}
+	if bead == nil {
+		return fmt.Errorf("[closeBead] bead %s not found; cannot verify state before closing", worker.BeadID.String())
+	}
+	if bead.Status.IsTerminal() {
 		log.Printf("[closeBead] Bead %s already closed (status: %s), skipping", worker.BeadID.String(), bead.Status)
 		return nil
 	}
@@ -516,7 +522,11 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 	// Terminal beads skip verification entirely: a resurrected close attempt
 	// on an already-closed bead would only find an empty diff and reject.
 	if c.beadsClient != nil {
-		if fresh, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID); err == nil && fresh != nil && fresh.Status.IsTerminal() {
+		fresh, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID)
+		if err != nil {
+			return fmt.Errorf("[VerifiedClose] cannot verify state of bead %s: %w", bead.ID, err)
+		}
+		if fresh != nil && fresh.Status.IsTerminal() {
 			log.Printf("[VerifiedClose] Bead %s already terminal (%s); skipping verification", bead.ID, fresh.Status)
 			return nil
 		}
@@ -665,7 +675,11 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 	// close+integration sees an empty diff and must not resurrect the bead
 	// (2026-08-24/25 resurrection loop: i1g, 5r0, bz5, aga accepted-then-reopened).
 	if c.beadsClient != nil {
-		if fresh, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID); err == nil && fresh != nil && fresh.Status.IsTerminal() {
+		fresh, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID)
+		if err != nil {
+			return fmt.Errorf("[VerifiedClose] cannot verify state of bead %s before reject: %w", beadID, err)
+		}
+		if fresh != nil && fresh.Status.IsTerminal() {
 			log.Printf("[VerifiedClose] Bead %s already terminal (%s); skipping reject (%s)", beadID, fresh.Status, reason)
 			return nil
 		}

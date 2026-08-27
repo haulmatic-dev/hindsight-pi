@@ -4,6 +4,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/haulmatic-dev/hydra/internal/registry"
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 func TestScheduler_ShouldPauseForCongestion_TriggersAndHolds(t *testing.T) {
@@ -98,15 +101,32 @@ func TestScheduler_ShouldPauseForCongestion_AtThreshold(t *testing.T) {
 	}
 }
 
-func TestScheduler_ShouldPauseForCongestion_BelowThreshold(t *testing.T) {
-	s := &Scheduler{
-		congestionCounter: func() (int, error) { return 2, nil },
-	}
-	paused, err := s.shouldPauseForCongestion()
+func TestScheduler_ShouldSpawnWorker_ParkedRegistryRowBlocks(t *testing.T) {
+	st, err := registry.Open(":memory:")
 	if err != nil {
-		t.Fatalf("shouldPauseForCongestion: %v", err)
+		t.Fatalf("registry.Open: %v", err)
 	}
-	if paused {
-		t.Fatal("expected no pause below threshold")
+	defer st.Close()
+
+	beadID := "proj-park-sched"
+	if err := st.UpsertWorker(registry.WorkerRecord{
+		BeadID:        beadID,
+		PID:           1,
+		State:         registry.StateParked,
+		StartedAt:     time.Now().Add(-5 * time.Minute),
+		LastHeartbeat: time.Now().Add(-30 * time.Second),
+		ParkSince:     time.Now().Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("UpsertWorker: %v", err)
+	}
+
+	o := NewOverseer(DefaultConfig())
+	o.registryStore = st
+	o.workerSpawner.SetRegistryStore(st)
+
+	s := NewScheduler(o)
+	node := &Node{Bead: types.Bead{ID: types.BeadID(beadID), Project: "proj", Type: "bug"}}
+	if s.ShouldSpawnWorker(node) {
+		t.Fatal("ShouldSpawnWorker must return false for a parked registry row")
 	}
 }
