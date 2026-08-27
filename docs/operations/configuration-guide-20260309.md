@@ -215,6 +215,20 @@ projects:
 
 **Warning**: Auto-discovery can find unexpected projects. Recommended to disable and explicitly list projects.
 
+#### `auto_discover_exclude`
+
+**Type**: `array` of strings  
+**Default**: `[]`  
+**Description**: Project directory names or paths that the multi-user discovery scanner should skip. Applied before repo discovery or `bv` triage, so an uninitialized directory like `demo` no longer spams the logs every tick.
+
+```yaml
+projects:
+  auto_discover: true
+  auto_discover_exclude:
+    - demo
+    - /home/*/projects/noise
+```
+
 #### `list`
 
 **Type**: `array` of project objects  

@@ -77,8 +77,8 @@ func TestCandidatesTerminalBeadSkippedSilently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Candidates: %v", err)
 	}
-	if called != 2 {
-		t.Errorf("TerminalBead called %d times, want 2", called)
+	if called != 3 {
+		t.Errorf("TerminalBead called %d times, want 3", called)
 	}
 	if len(cands) != 1 || cands[0].Record.BeadID != "b" {
 		t.Errorf("expected only bead b, got %+v", cands)

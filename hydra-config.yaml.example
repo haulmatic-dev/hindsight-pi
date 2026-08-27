@@ -51,6 +51,12 @@ projects:
   # Set to true to auto-discover projects by walking parent directories
   auto_discover: false
 
+  # Exclude project directory names or paths from auto-discovery. Applied
+  # before bv triage runs, so a non-Hydra directory like `demo` no longer
+  # spams the logs every tick.
+  auto_discover_exclude:
+    - demo
+
   # Explicit project list (used when auto_discover is false)
   list:
     - name: my-project

@@ -22,6 +22,7 @@ type MultiUserDiscovery struct {
 	projects []types.Project
 	blocked  []string // users whose config exists but is unreadable by the daemon
 	HomeDir  string   // Base directory to scan (default: /home)
+	Exclude  []string // project dir names or paths to skip during discovery
 }
 
 // NewMultiUserDiscovery creates a new multi-user discovery instance.
@@ -30,6 +31,12 @@ func NewMultiUserDiscovery() *MultiUserDiscovery {
 		users:   make(map[string]*UserContext),
 		HomeDir: "/home",
 	}
+}
+
+// SetExclude configures project directory names or paths that should be
+// skipped during discovery. Applied before any repo discovery or bv triage.
+func (d *MultiUserDiscovery) SetExclude(exclude []string) {
+	d.Exclude = exclude
 }
 
 // Discover scans HomeDir/* for .hydra/config.yaml and loads user configs.
@@ -135,6 +142,12 @@ func (d *MultiUserDiscovery) GetUser(username string) *UserContext {
 
 // convertProject converts a UserProject to a types.Project with auto-discovery.
 func (d *MultiUserDiscovery) convertProject(up UserProject, ctx *UserContext) *types.Project {
+	// Skip excluded projects before touching the filesystem or invoking bv.
+	if d.isExcluded(up.Name) || d.isExcluded(up.Path) {
+		log.Printf("[MultiUserDiscovery] Excluding project %s/%s (matched auto_discover_exclude)", ctx.Username, up.Name)
+		return nil
+	}
+
 	// Validate path exists
 	if _, err := os.Stat(up.Path); os.IsNotExist(err) {
 		log.Printf("[MultiUserDiscovery] Project path not found for %s/%s: %s", ctx.Username, up.Name, up.Path)
@@ -174,6 +187,21 @@ func (d *MultiUserDiscovery) convertProject(up UserProject, ctx *UserContext) *t
 	return &project
 }
 
+// isExcluded reports whether a project name or path matches the exclusion list.
+// Entries may be bare directory names or full paths.
+func (d *MultiUserDiscovery) isExcluded(name string) bool {
+	if name == "" {
+		return false
+	}
+	base := filepath.Base(name)
+	for _, e := range d.Exclude {
+		if e == name || e == base {
+			return true
+		}
+	}
+	return false
+}
+
 // discoverRepos checks subdirectories for .beads/beads.db markers.
 func (d *MultiUserDiscovery) discoverRepos(projectPath string) []types.Repo {
 	var repos []types.Repo
@@ -185,6 +213,10 @@ func (d *MultiUserDiscovery) discoverRepos(projectPath string) []types.Repo {
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
+			continue
+		}
+		if d.isExcluded(entry.Name()) {
+			log.Printf("[MultiUserDiscovery] Excluding repo %s (matched auto_discover_exclude)", entry.Name())
 			continue
 		}
 		beadsPath := filepath.Join(projectPath, entry.Name(), ".beads", "beads.db")

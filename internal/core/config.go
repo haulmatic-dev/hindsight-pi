@@ -14,6 +14,10 @@ import (
 type Config struct {
 	Overseer OverseerConfig  `yaml:"overseer"`
 	Projects []ProjectConfig `yaml:"projects"`
+	// AutoDiscoverExclude lists project directory names or paths that the
+	// multi-user project scanner should skip. Applied before any repo
+	// discovery or bv triage runs.
+	AutoDiscoverExclude []string `yaml:"-"`
 	// MultiUserDiscovery enables the multi-user project scan
 	// (projects.multi_user_discovery, default true). Not decoded directly —
 	// it lives inside the projects object and is resolved during parsing.
@@ -325,9 +329,10 @@ type rawConfig struct {
 
 // projectsListConfig handles the case where projects is an object with 'list' field
 type projectsListConfig struct {
-	AutoDiscover       bool            `yaml:"auto_discover"`
-	MultiUserDiscovery *bool           `yaml:"multi_user_discovery"`
-	List               []ProjectConfig `yaml:"list"`
+	AutoDiscover        bool            `yaml:"auto_discover"`
+	AutoDiscoverExclude []string        `yaml:"auto_discover_exclude"`
+	MultiUserDiscovery  *bool           `yaml:"multi_user_discovery"`
+	List                []ProjectConfig `yaml:"list"`
 }
 
 // IntelligenceConfig contains configuration for intelligence services
@@ -858,6 +863,7 @@ func LoadConfig(path string) (*Config, error) {
 				if projectsObj.MultiUserDiscovery != nil {
 					config.MultiUserDiscovery = *projectsObj.MultiUserDiscovery
 				}
+				config.AutoDiscoverExclude = projectsObj.AutoDiscoverExclude
 			} else {
 				// Try parsing as direct array anyway
 				if err := raw.Projects.Decode(&config.Projects); err != nil {
@@ -923,6 +929,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 				if projectsObj.MultiUserDiscovery != nil {
 					config.MultiUserDiscovery = *projectsObj.MultiUserDiscovery
 				}
+				config.AutoDiscoverExclude = projectsObj.AutoDiscoverExclude
 			} else {
 				if err := raw.Projects.Decode(&config.Projects); err != nil {
 					return nil, fmt.Errorf("failed to parse projects: %w", err)
@@ -964,6 +971,10 @@ func (c *Config) Clone() *Config {
 	if c.Projects != nil {
 		cloned.Projects = make([]ProjectConfig, len(c.Projects))
 		copy(cloned.Projects, c.Projects)
+	}
+	if c.AutoDiscoverExclude != nil {
+		cloned.AutoDiscoverExclude = make([]string, len(c.AutoDiscoverExclude))
+		copy(cloned.AutoDiscoverExclude, c.AutoDiscoverExclude)
 	}
 
 	// Deep copy Agents.Pi.PhaseModels map so mutations of the returned
