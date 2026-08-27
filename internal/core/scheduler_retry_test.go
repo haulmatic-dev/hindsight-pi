@@ -1,6 +1,7 @@
 package core
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -65,7 +66,45 @@ func TestScheduler_RetryStateSurvivesUntilCompletion(t *testing.T) {
 	}
 }
 
-// TestGovernorPressureCodes pins which failures the concurrency governor is
+// TestScheduler_ExhaustedBeadRemovedFromReadyAndEventEmittedOnce guards the
+// 2026-08-27 runaway where a DAG-ready, retry-exhausted bead was spawned every
+// tick, producing nested errors and growing the attempt counter to 386/3.
+// Such beads must be dropped from the ready list and emit exactly one
+// retry_exhausted event.
+func TestScheduler_ExhaustedBeadRemovedFromReadyAndEventEmittedOnce(t *testing.T) {
+	s, o := newTestScheduler(t, 5, GovernorConfig{})
+
+	eventsDir := t.TempDir()
+	o.beadCloser.SetEventSink(NewEventSink(eventsDir))
+
+	bead := types.Bead{ID: types.BeadID("bead-exhausted"), Project: "proj", Type: "bug"}
+	for i := 0; i < 3; i++ {
+		o.retryManager.RecordRetry(string(bead.ID), faultErr())
+	}
+
+	ready := []types.Bead{bead}
+	got := s.getRetryEligibleBeads(ready)
+	if len(got) != 0 {
+		t.Fatalf("exhausted bead still scheduled: got %d ready beads, want 0", len(got))
+	}
+
+	// A second tick must not emit another event.
+	_ = s.getRetryEligibleBeads(ready)
+
+	events, err := ReadEvents(filepath.Join(eventsDir, time.Now().UTC().Format("2006-01-02")+".jsonl"))
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected exactly one retry_exhausted event, got %d", len(events))
+	}
+	if events[0].Type != "retry_exhausted" {
+		t.Errorf("event type = %q, want retry_exhausted", events[0].Type)
+	}
+	if events[0].Bead != string(bead.ID) {
+		t.Errorf("event bead = %q, want %q", events[0].Bead, bead.ID)
+	}
+}
 // allowed to react to. Exit 7 is the one that matters: it is a capacity blip
 // that clears in seconds, and feeding it to the governor made the governor and
 // the provider pool two controllers fighting over one actuator.

@@ -7,6 +7,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/registry"
@@ -24,11 +25,20 @@ type Scheduler struct {
 
 	// congestionPausedUntil is non-zero while a congestion pause is in effect.
 	congestionPausedUntil time.Time
+
+	// exhaustedEventEmitted tracks which beads have already emitted a
+	// retry_exhausted structured event. The event must fire once per exhaustion,
+	// not on every scheduler tick.
+	exhaustedEventMu      sync.Mutex
+	exhaustedEventEmitted map[string]bool
 }
 
 // NewScheduler creates a new scheduler.
 func NewScheduler(overseer *Overseer) *Scheduler {
-	s := &Scheduler{overseer: overseer}
+	s := &Scheduler{
+		overseer:              overseer,
+		exhaustedEventEmitted: make(map[string]bool),
+	}
 	if overseer != nil && overseer.registryStore != nil {
 		store := overseer.registryStore
 		s.congestionCounter = func() (int, error) {
@@ -127,24 +137,41 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 	}
 	o.workerMutex.RUnlock()
 
-	for beadID := range retrySnapshot {
-		if _, exists := readyMap[beadID]; exists {
-			continue
-		}
+	maxRetries := o.config.Overseer.DefaultRetries
+	if maxRetries <= 0 {
+		maxRetries = defaultMaxRetries
+	}
 
+	for beadID := range retrySnapshot {
 		if active[beadID] {
 			continue
 		}
 
-		if !o.retryManager.ShouldRetry(beadID, o.config.Overseer.DefaultRetries) {
+		if !o.retryManager.ShouldRetry(beadID, maxRetries) {
+			// The bead has exhausted its retry budget (or is in cooldown).
+			// If the DAG also thinks it is ready, stop the scheduler from
+			// attempting to spawn it again. Without this guard a bead that is
+			// both DAG-ready and retry-exhausted gets spawned every tick,
+			// wrapping the previous error and wedging the bead forever
+			// (2026-08-27: 386/3 attempts for hydra-btt).
+			if bead, exists := readyMap[beadID]; exists {
+				count, _, _, _ := o.retryManager.RetryInfo(beadID)
+				if count >= maxRetries {
+					if !o.workerSpawner.HasLiveRegistryWorker(beadID) {
+						s.emitRetryExhausted(bead, count)
+					}
+					delete(readyMap, beadID)
+					readyBeads = removeBeadByID(readyBeads, beadID)
+				}
+			}
+			continue
+		}
+
+		if _, exists := readyMap[beadID]; exists {
 			continue
 		}
 
 		count, _, _, _ := o.retryManager.RetryInfo(beadID)
-		maxRetries := o.config.Overseer.DefaultRetries
-		if maxRetries <= 0 {
-			maxRetries = defaultMaxRetries
-		}
 
 		if bead, err := s.getBeadFromDAG(beadID); err == nil {
 			readyBeads = append(readyBeads, bead)
@@ -166,6 +193,52 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 	}
 
 	return readyBeads
+}
+
+// emitRetryExhausted writes a single structured event when a bead has
+// exhausted its retry budget and has no live worker or registry row. It is
+// emitted once per exhaustion, not on every scheduler tick.
+func (s *Scheduler) emitRetryExhausted(bead types.Bead, attempts int) {
+	beadID := string(bead.ID)
+	s.exhaustedEventMu.Lock()
+	if s.exhaustedEventEmitted[beadID] {
+		s.exhaustedEventMu.Unlock()
+		return
+	}
+	s.exhaustedEventEmitted[beadID] = true
+	s.exhaustedEventMu.Unlock()
+
+	o := s.overseer
+	projectPath := ""
+	if o.beadAnalyzer != nil {
+		projectPath = o.beadAnalyzer.FindProjectPath(&bead)
+	}
+
+	ev := Event{
+		Type:    "retry_exhausted",
+		Reason:  "retry_exhausted",
+		Project: string(bead.Project),
+		Bead:    beadID,
+		Detail: fmt.Sprintf("Bead %s has exhausted %d retry attempts and has no live worker; blocked for human review",
+			beadID, attempts),
+		Fields: map[string]any{"attempts": attempts},
+	}
+	if o.beadCloser != nil && o.beadCloser.events != nil {
+		o.beadCloser.events.EmitRepo(projectPath, ev)
+	} else {
+		log.Printf("[Retry] %s", ev.Detail)
+	}
+}
+
+// removeBeadByID returns a copy of beads with the given bead ID removed.
+func removeBeadByID(beads []types.Bead, beadID string) []types.Bead {
+	filtered := make([]types.Bead, 0, len(beads))
+	for _, b := range beads {
+		if string(b.ID) != beadID {
+			filtered = append(filtered, b)
+		}
+	}
+	return filtered
 }
 
 // getBeadFromDAG retrieves a bead from the DAG by ID.
@@ -387,7 +460,7 @@ func (s *Scheduler) Tick() error {
 				strings.Contains(errMsg, "resource limits exceeded")
 
 			if !isResourceConstraint {
-				o.retryManager.RecordRetry(beadIDStr, err)
+				o.retryManager.RecordRetryWithCap(beadIDStr, o.config.Overseer.DefaultRetries, err)
 			}
 			o.errorLogger.Error("Overseer", "spawnWorker", beadIDStr, err, "error")
 			continue
