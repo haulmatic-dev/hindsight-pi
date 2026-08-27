@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -176,6 +177,49 @@ func TestRetryManager_ClearRetryResetsBothCounters(t *testing.T) {
 	}
 	if !rm.ShouldRetry("b7", 3) {
 		t.Error("bead should be freshly eligible after its state was cleared")
+	}
+}
+
+// TestRetryManager_CountDoesNotExceedMaxRetries guards the scheduler path:
+// once a bead has recorded maxRetries genuine failures, further failures must
+// not push the counter past the cap. Without this the log reads attempt 386/3
+// because the count keeps growing while the bead is already abandoned.
+func TestRetryManager_CountDoesNotExceedMaxRetries(t *testing.T) {
+	rm := newTestRetryManager()
+
+	for i := 0; i < 5; i++ {
+		rm.RecordRetry("b8", faultErr())
+	}
+
+	if got := rm.GetRetryCount("b8"); got > 3 {
+		t.Errorf("fault count = %d, must not exceed maxRetries=3", got)
+	}
+	backdate(t, rm, "b8", time.Hour)
+	if rm.ShouldRetry("b8", 3) {
+		t.Error("exhausted bead was still eligible after exceeding the cap")
+	}
+}
+
+// TestRetryManager_RecordRetryUnwrapsExhaustedError prevents the unbounded
+// nesting seen on 2026-08-27: each failure wrapped the previous
+// "bead X exhausted N attempts" message, producing a 385-deep chain.
+// Recording a RetryExhaustedError must store the root cause once.
+func TestRetryManager_RecordRetryUnwrapsExhaustedError(t *testing.T) {
+	rm := newTestRetryManager()
+	root := faultErr()
+	rm.RecordRetry("b9", root)
+	rm.RecordRetry("b9", root)
+	rm.RecordRetry("b9", root)
+
+	exhausted := &RetryExhaustedError{BeadID: "b9", Attempts: 3, LastError: root}
+	rm.RecordRetry("b9", exhausted)
+
+	reason, _, _ := rm.LastFailure("b9")
+	if strings.Contains(reason, "exhausted 3 retry attempts: bead b9 exhausted") {
+		t.Errorf("last error is nested: %q", reason)
+	}
+	if !strings.Contains(reason, root.Error()) {
+		t.Errorf("root cause lost from last error: %q", reason)
 	}
 }
 

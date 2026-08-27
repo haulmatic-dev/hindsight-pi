@@ -294,7 +294,7 @@ func (wl *WorkerLifecycle) HandleFailure(worker *types.Worker, exitCode int, dur
 		}
 		log.Printf("[WorkerLifecycle] Transient provider overload (exit 7) for %s — retrying without tripping the rate-limit circuit", worker.ID)
 	}
-	wl.retryManager.RecordRetry(worker.ID, workerErr)
+	wl.retryManager.RecordRetryWithCap(worker.ID, wl.getMaxRetries(), workerErr)
 
 	retryCount := wl.retryManager.GetRetryCount(worker.ID)
 	maxRetries := wl.getMaxRetries()

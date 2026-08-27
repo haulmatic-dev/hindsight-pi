@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -97,7 +98,26 @@ func (rm *RetryManager) ShouldRetry(beadID string, maxRetries int) bool {
 }
 
 // RecordRetry increments the retry count and returns the next backoff delay.
+// It uses the configured defaultMaxRetries as the cap; callers that need a
+// different cap should use RecordRetryWithCap.
 func (rm *RetryManager) RecordRetry(beadID string, err error) time.Duration {
+	return rm.RecordRetryWithCap(beadID, 0, err)
+}
+
+// RecordRetryWithCap records a failure against the bead's retry budget.
+// Once info.count reaches maxRetries, further genuine faults are recorded as
+// the latest error and update the timestamp/backoff, but they do NOT push the
+// fault counter past the cap. A RetryExhaustedError is unwrapped so the stored
+// last error is the root cause, not a chain of nested wrappers.
+func (rm *RetryManager) RecordRetryWithCap(beadID string, maxRetries int, err error) time.Duration {
+	if maxRetries <= 0 {
+		maxRetries = defaultMaxRetries
+	}
+
+	// Stop the 2026-08-27 nesting where each failure wrapped the previous
+	// "bead X exhausted N attempts" message.
+	err = rootCause(err)
+
 	rm.retriesMu.Lock()
 	defer rm.retriesMu.Unlock()
 
@@ -111,7 +131,7 @@ func (rm *RetryManager) RecordRetry(beadID string, err error) time.Duration {
 	info.isInfra = isInfrastructureError(err)
 	if info.isInfra {
 		info.infraCount++
-	} else {
+	} else if info.count < maxRetries {
 		info.count++
 	}
 
@@ -119,6 +139,20 @@ func (rm *RetryManager) RecordRetry(beadID string, err error) time.Duration {
 	log.Printf("[Retry] Bead %s failure recorded (faults=%d, infra=%d, isInfra=%v, next backoff %v): %v",
 		beadID, info.count, info.infraCount, info.isInfra, backoff, err)
 	return backoff
+}
+
+// rootCause peels off RetryExhaustedError wrappers so we keep the underlying
+// failure, not a growing chain of "exhausted N attempts" strings.
+func rootCause(err error) error {
+	for {
+		var re *RetryExhaustedError
+		if errors.As(err, &re) && re.LastError != nil {
+			err = re.LastError
+			continue
+		}
+		break
+	}
+	return err
 }
 
 // Clear removes all retry state for a bead: genuine retries, infra retries,
