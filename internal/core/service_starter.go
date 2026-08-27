@@ -44,6 +44,9 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	} else {
 		o.registryStore = regStore
 		log.Printf("[Registry] Initialized")
+		if o.workerSpawner != nil {
+			o.workerSpawner.SetRegistryStore(regStore)
+		}
 		// Charon's stuck-worker sweep judges liveness from the registry
 		// (heartbeat), not the wall clock: parked and actively-reporting
 		// workers are never killed on time alone.
