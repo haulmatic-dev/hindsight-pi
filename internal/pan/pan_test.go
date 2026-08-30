@@ -396,3 +396,37 @@ func TestCandidatesBlockedBeadsNilFunc(t *testing.T) {
 		t.Errorf("nil BlockedBeads produced %d candidate(s): %+v", len(cands), cands)
 	}
 }
+
+// Regression (2026-08-30, srv-smart-engine-v4bpl): a stale spawn-failure record
+// from a superseded attempt stayed in BlockedBeads; when a healthy new worker
+// spawned, Candidates only marked beads live if the WORKER itself had a
+// candidacy reason, so the stale BLOCKED record survived and Pan abandoned a
+// 2-minute-old worker. Any live worker row must suppress blocked candidacy.
+func TestCandidates_BlockedBeadSuppressedByAnyLiveWorker(t *testing.T) {
+	store := &fakeStore{workers: []registry.WorkerRecord{
+		// healthy young worker: no heartbeat issue, no budget, no nudges
+		{BeadID: "srv-smart-engine-v4bpl", State: registry.StateWorking,
+			StartedAt: time.Now(), LastHeartbeat: time.Now()},
+	}}
+	s := New(Config{Enabled: true, NudgeCap: 3, HungAfter: 5 * time.Minute}, store, nil)
+	s.SetBlockedBeads(func() []BlockedBead {
+		return []BlockedBead{
+			{BeadID: "srv-smart-engine-v4bpl", Reason: "spawn failed: worker stale", Since: time.Now().Add(-90 * time.Minute)},
+			{BeadID: "no-worker-bead", Reason: "retry exhausted", Since: time.Now().Add(-time.Hour)},
+		}
+	})
+	cands, err := s.Candidates()
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	got := map[string]bool{}
+	for _, c := range cands {
+		got[c.Record.BeadID] = true
+	}
+	if got["srv-smart-engine-v4bpl"] {
+		t.Error("blocked candidacy for a bead with a live worker row must be suppressed")
+	}
+	if !got["no-worker-bead"] {
+		t.Error("blocked candidacy for a bead with NO worker row must remain")
+	}
+}

@@ -469,6 +469,10 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 		}
 	}
 
+	// A successful spawn supersedes any earlier failure record; leaving it
+	// would keep the bead in Pan's blocked candidacy while a live worker runs.
+	s.ClearSpawnFailure(beadIDStr)
+
 	go s.workerLifecycle.Monitor(worker, cmd)
 
 	return worker, nil

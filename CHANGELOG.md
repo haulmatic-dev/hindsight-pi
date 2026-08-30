@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Fixed
+- Pan no longer sees scheduler-blocked candidacy for beads with a live worker row: `Candidates()` now marks every live worker as suppressing (previously only workers that were themselves candidates), and a successful `Spawn` clears the bead's stale spawn-failure record. Root cause of the 2026-08-30 incident where Pan abandoned healthy 2-minute-old workers (srv-smart-engine-v4bpl et al.) over 1.5h-stale spawn-failure records, eating the srv coverage queue.
+
 ### Added
 - `projects.auto_discover_exclude` config list: multi-user discovery now skips excluded project directory names or paths before running `bv` triage, silencing log spam from uninitialized directories like `demo`.
 - Verify-loop budget rule + gate-command telemetry (token economics lever 1): daemon-owned projects now pass their declared gate commands to workers via `HYDRA_GATE_CMDS`; the worker prompt adds a `VERIFY LOOP BUDGET` rule and session telemetry counts gate-command invocations, surfacing them in `[SessionStats]` as `gate_runs={...}`. Fail-open: missing or malformed env data is debug-logged and never blocks completion.

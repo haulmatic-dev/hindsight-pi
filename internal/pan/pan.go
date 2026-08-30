@@ -514,6 +514,12 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 	var out []Candidate
 	live := make(map[string]bool)
 	for _, w := range workers {
+		// Any live worker row suppresses the bead's blocked candidacy below —
+		// a stale spawn-failure/retry record must not speak over a running
+		// worker (Pan abandoned 2-minute-old v4bpl over a 1.5h-stale record,
+		// 2026-08-30). Set unconditionally, not only when the worker itself
+		// has a candidacy reason.
+		live[w.BeadID] = true
 		var reason string
 		switch {
 		case w.NudgeCount >= s.cfg.NudgeCap:
@@ -547,7 +553,6 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 		if s.cfg.TerminalBead != nil && s.cfg.TerminalBead(w.BeadID) {
 			continue
 		}
-		live[w.BeadID] = true
 		out = append(out, Candidate{Record: w, Reason: reason})
 	}
 
