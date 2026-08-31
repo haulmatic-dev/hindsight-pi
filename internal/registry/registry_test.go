@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -292,9 +293,60 @@ func TestReapStale_NoCandidates(t *testing.T) {
 	}
 }
 
-// Ghost rows (non-terminal, heartbeat frozen) must be reaped by the runtime
-// sweep without touching completed rows — those are fleet-metric history and
-// belong to the startup ReapStale sweep.
+// Daemon restart leaves non-terminal worker rows behind. Rows pointing at
+// dead PIDs must be marked completed so the bead can respawn; live rows
+// must be left untouched.
+func TestReconcileDeadPIDs_MarksDeadAndPreservesLive(t *testing.T) {
+	st := openTest(t)
+
+	dead := liveRecord("bead-dead")
+	dead.PID = 999999 // non-existent process
+
+	live := liveRecord("bead-live")
+	live.PID = os.Getpid()
+	live.State = StateParked
+
+	done := liveRecord("bead-done")
+	done.State = StateCompleted
+
+	for _, rec := range []WorkerRecord{dead, live, done} {
+		if err := st.UpsertWorker(rec); err != nil {
+			t.Fatalf("UpsertWorker %s: %v", rec.BeadID, err)
+		}
+	}
+
+	if err := st.EnqueueCommand("bead-dead", CmdContinue, ""); err != nil {
+		t.Fatalf("EnqueueCommand: %v", err)
+	}
+
+	n, ids, err := st.ReconcileDeadPIDs()
+	if err != nil {
+		t.Fatalf("ReconcileDeadPIDs: %v", err)
+	}
+	if n != 1 || len(ids) != 1 || ids[0] != "bead-dead" {
+		t.Fatalf("expected 1 dead row (bead-dead), got n=%d ids=%v", n, ids)
+	}
+
+	deadRec, ok, _ := st.GetWorker("bead-dead")
+	if !ok || deadRec.State != StateCompleted || deadRec.ExitCode != -1 {
+		t.Errorf("dead row not marked orphan-reaped: state=%s exit=%d", deadRec.State, deadRec.ExitCode)
+	}
+	cmds, _ := st.PendingCommands("bead-dead")
+	if len(cmds) != 0 {
+		t.Errorf("pending commands for dead worker should be dropped, got %d", len(cmds))
+	}
+
+	liveRec, ok, _ := st.GetWorker("bead-live")
+	if !ok || liveRec.State != StateParked {
+		t.Errorf("live parked row was touched: state=%s", liveRec.State)
+	}
+
+	doneRec, ok, _ := st.GetWorker("bead-done")
+	if !ok || doneRec.State != StateCompleted {
+		t.Errorf("completed row disappeared or changed: state=%s", doneRec.State)
+	}
+}
+
 func TestReapGhosts(t *testing.T) {
 	st, err := Open(":memory:")
 	if err != nil {
