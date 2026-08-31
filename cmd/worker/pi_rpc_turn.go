@@ -51,6 +51,11 @@ type rpcTurn struct {
 	// no way to tell from a worker log whether the extensions loaded at all.
 	notifications map[string]int
 
+	// aborting is set when the worker asks pi to cancel the in-flight agent
+	// turn before parking. Events emitted by the abort (agent_end/error with
+	// stopReason "aborted") must not be treated as a new turn failure.
+	aborting bool
+
 	finishOnce sync.Once
 }
 
@@ -69,6 +74,30 @@ func (t *rpcTurn) reset() {
 	t.failed = false
 	t.errMsg = ""
 	t.text.Reset()
+	t.aborting = false
+}
+
+// abort asks pi to cancel the current agent turn. In RPC mode the provider
+// request is an in-flight HTTP stream; leaving it open while parked poisons
+// the lane and causes the next wake prompt to 403 on a concurrency limit.
+func (t *rpcTurn) abort(stdin io.Writer) {
+	t.mu.Lock()
+	t.aborting = true
+	t.mu.Unlock()
+
+	if stdin == nil {
+		return
+	}
+	line, err := json.Marshal(map[string]any{"type": "abort"})
+	if err != nil {
+		log.Printf("[Worker:rpc] abort: encode failed: %v", err)
+		return
+	}
+	if _, err := stdin.Write(append(line, '\n')); err != nil {
+		log.Printf("[Worker:rpc] abort: write failed: %v", err)
+	} else {
+		log.Printf("[Worker:rpc] sent abort for in-flight turn")
+	}
 }
 
 // rpcPromptLine builds the JSONL command that starts a turn.
@@ -190,6 +219,10 @@ func (t *rpcTurn) handleLine(line string, stdin io.Writer) bool {
 
 	case "agent_end":
 		t.mu.Lock()
+		if t.aborting {
+			t.mu.Unlock()
+			return false
+		}
 		t.ended = true
 		// A turn can reach agent_end and still have failed: pi reports model
 		// failures INSIDE the message (stopReason/errorMessage), not in the
@@ -218,6 +251,10 @@ func (t *rpcTurn) handleLine(line string, stdin io.Writer) bool {
 
 	case "error":
 		t.mu.Lock()
+		if t.aborting {
+			t.mu.Unlock()
+			return false
+		}
 		t.ended = true
 		t.failed = true
 		if e, ok := event["error"].(map[string]any); ok {

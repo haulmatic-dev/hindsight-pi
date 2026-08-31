@@ -143,6 +143,16 @@ func decideParkClass(errMsg string) (park bool, reason string) {
 // (PRD Part 3): steer/continue reshape the wake prompt, abandon-with-summary
 // closes the turn and the session instead of resuming.
 func parkSession(ps *parkState, wait time.Duration, reason string, stdin io.WriteCloser, turn *rpcTurn, reprompt string) {
+	// Cancel the in-flight provider request before sleeping. A dangling HTTP
+	// stream counts against the account's concurrency limit and poisons the
+	// lane for the next prompt after wake (srv-smart-engine 9n2sb/d73cg
+	// 2026-08-31 06:01-06:26). All parkable reasons are provider-capacity,
+	// but guard defensively so ad-hoc tests that pass non-capacity reasons
+	// are not forced to mock an abort.
+	if strings.HasPrefix(reason, "provider-capacity") {
+		turn.abort(stdin)
+	}
+
 	ps.begin(wait, reason)
 	since, wake, parkReason := ps.parkInfo()
 	if activeReporter != nil {
