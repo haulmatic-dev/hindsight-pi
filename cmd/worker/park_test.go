@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -73,5 +74,52 @@ func TestParkReasonClassification(t *testing.T) {
 	_, reason := decideParkClass(`403 concurrent request limit`)
 	if !strings.Contains(reason, "provider-capacity") {
 		t.Errorf("reason should classify the tier: %q", reason)
+	}
+}
+
+// recordingWriteCloser is a bytes.Buffer that also implements io.WriteCloser.
+type recordingWriteCloser struct {
+	bytes.Buffer
+}
+
+func (recordingWriteCloser) Close() error { return nil }
+
+func TestParkAbortsInFlightTurnBeforeSleep(t *testing.T) {
+	ps := newParkState(0)
+	stdin := &recordingWriteCloser{}
+	turn := newRPCTurn(false)
+
+	// Simulate the 403 concurrency-limit event that triggers the park.
+	if done := turn.handleLine(`{"type":"error","error":{"errorMessage":"403 You've reached your concurrent request limit"}}`, nil); !done {
+		t.Fatal("error event must end the turn")
+	}
+	if !turn.Failed() {
+		t.Fatal("turn should be failed before park")
+	}
+
+	parkSession(ps, 20*time.Millisecond, "provider-capacity: concurrency limit", stdin, turn,
+		"The provider rejected the previous request for capacity reasons. It should accept requests again now — continue your task from where you stopped.")
+
+	// Abort must be written synchronously, before the sleep goroutine wakes.
+	if !strings.Contains(stdin.String(), `{"type":"abort"}`) {
+		t.Errorf("park must abort the in-flight pi turn before sleeping, got writes: %q", stdin.String())
+	}
+
+	// The abort cleanup events that pi emits must not re-fail the turn or
+	// overwrite the original park-triggering error.
+	if done := turn.handleLine(`{"type":"agent_end","messages":[{"stopReason":"aborted"}]}`, nil); done {
+		t.Error("abort cleanup agent_end must not close the turn")
+	}
+	if !strings.Contains(turn.ErrMsg(), "concurrent request limit") {
+		t.Errorf("original park reason must survive abort cleanup, got err=%q", turn.ErrMsg())
+	}
+
+	// Wait for wake and verify reset + reprompt.
+	time.Sleep(200 * time.Millisecond)
+	if turn.Failed() {
+		t.Errorf("turn should be reset after wake, still failed with %q", turn.ErrMsg())
+	}
+	if !strings.Contains(stdin.String(), "continue your task from where you stopped") {
+		t.Errorf("wake must reprompt with the resume message, got: %q", stdin.String())
 	}
 }
