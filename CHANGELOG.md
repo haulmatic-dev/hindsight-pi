@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- Pan workerless abandon deadlock: terminal `abandon-with-summary` verdicts for beads with no live worker row are now executed daemon-side through the normal close-as-failed path instead of being enqueued as a worker command. This breaks the stable pending-abandon loop that kept srv-smart-engine-iz5v7/ibwnt blocked for 2 hours. Stale pending abandons older than 2× the Pan interval also trigger daemon-side execution. `OnAbandonWithSummary` wired in `internal/core/service_starter.go`; tests in `internal/pan` and `internal/core`.
 - Pan no longer sees scheduler-blocked candidacy for beads with a live worker row: `Candidates()` now marks every live worker as suppressing (previously only workers that were themselves candidates), and a successful `Spawn` clears the bead's stale spawn-failure record. Root cause of the 2026-08-30 incident where Pan abandoned healthy 2-minute-old workers (srv-smart-engine-v4bpl et al.) over 1.5h-stale spawn-failure records, eating the srv coverage queue.
 
 ### Added
