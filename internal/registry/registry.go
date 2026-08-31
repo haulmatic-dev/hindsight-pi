@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -280,6 +281,74 @@ func (s *Store) MarkCompleted(beadID string, exitCode int) error {
 		return fmt.Errorf("mark completed %s: %w", beadID, err)
 	}
 	return nil
+}
+
+// pidAlive reports whether a PID still has a live process.
+func pidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
+}
+
+// ReconcileDeadPIDs marks non-terminal worker rows whose process is dead as
+// completed (exit code -1, reason orphan-reaped) and drops any pending
+// commands for those beads. This is the daemon startup guard against orphan
+// registry rows left by a restart that killed workers without cleaning up.
+// It returns the count of rows reconciled and their bead IDs.
+func (s *Store) ReconcileDeadPIDs() (int, []string, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, nil, fmt.Errorf("reconcile dead pids begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(
+		`SELECT bead_id, pid FROM workers WHERE state IN (?,?,?)`,
+		StateWorking, StateParked, StateHung)
+	if err != nil {
+		return 0, nil, fmt.Errorf("reconcile dead pids select: %w", err)
+	}
+	type orphan struct {
+		beadID string
+		pid    int
+	}
+	var candidates []orphan
+	for rows.Next() {
+		var o orphan
+		if err := rows.Scan(&o.beadID, &o.pid); err != nil {
+			rows.Close()
+			return 0, nil, fmt.Errorf("reconcile dead pids scan: %w", err)
+		}
+		candidates = append(candidates, o)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, nil, fmt.Errorf("reconcile dead pids rows: %w", err)
+	}
+
+	now := time.Now().UTC()
+	var reaped []string
+	for _, c := range candidates {
+		if pidAlive(c.pid) {
+			continue
+		}
+		if _, err := tx.Exec(
+			`UPDATE workers SET state=?, exit_code=?, completed_at=?, err_message=? WHERE bead_id=?`,
+			StateCompleted, -1, now.Format(timeFmt), "orphan-reaped", c.beadID); err != nil {
+			return 0, nil, fmt.Errorf("reconcile dead pids mark %s: %w", c.beadID, err)
+		}
+		if _, err := tx.Exec(
+			`DELETE FROM commands WHERE bead_id=? AND consumed_at IS NULL`, c.beadID); err != nil {
+			return 0, nil, fmt.Errorf("reconcile dead pids commands %s: %w", c.beadID, err)
+		}
+		reaped = append(reaped, c.beadID)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, nil, fmt.Errorf("reconcile dead pids commit: %w", err)
+	}
+	return len(reaped), reaped, nil
 }
 
 // ReapStale deletes worker registry rows that are terminal (completed) or

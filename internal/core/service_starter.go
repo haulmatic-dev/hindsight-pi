@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,6 +61,15 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 			log.Printf("[Registry] ReapStale warning: %v", err)
 		} else if n > 0 {
 			log.Printf("[Registry] Reaped %d stale worker row(s)", n)
+		}
+
+		// Reconcile any non-terminal rows whose PID is dead after a restart.
+		// This must run before Pan's first tick so orphan rows never become
+		// candidates for undeliverable commands.
+		if n, ids, err := regStore.ReconcileDeadPIDs(); err != nil {
+			log.Printf("[Registry] ReconcileDeadPIDs warning: %v", err)
+		} else if n > 0 {
+			log.Printf("[Registry] Reconciled %d dead worker row(s) orphaned by restart: %s", n, strings.Join(ids, ", "))
 		}
 
 		panCfg := o.config.Shepherd.Pan
