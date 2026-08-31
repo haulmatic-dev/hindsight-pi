@@ -18,6 +18,7 @@ type fakeStore struct {
 		kind    registry.CommandKind
 		payload string
 	}
+	pending []registry.Command
 	listErr error
 }
 
@@ -49,6 +50,11 @@ func (f *fakeStore) ListWorkers(states ...registry.WorkerState) ([]registry.Work
 
 func (f *fakeStore) PendingCommands(beadID string) ([]registry.Command, error) {
 	var out []registry.Command
+	for _, c := range f.pending {
+		if c.BeadID == beadID {
+			out = append(out, c)
+		}
+	}
 	for _, e := range f.enqueued {
 		if e.bead == beadID {
 			out = append(out, registry.Command{BeadID: e.bead, Kind: e.kind, Payload: e.payload})
@@ -428,5 +434,117 @@ func TestCandidates_BlockedBeadSuppressedByAnyLiveWorker(t *testing.T) {
 	}
 	if !got["no-worker-bead"] {
 		t.Error("blocked candidacy for a bead with NO worker row must remain")
+	}
+}
+
+// Regression (srv-smart-engine-iz5z7 2026-08-30): a workerless bead that Pan
+// judges as abandon-with-summary must be closed daemon-side. Enqueuing the
+// command for a dead worker produces a stable deadlock — no one consumes it.
+func TestTickAbandonWorkerlessExecutesDirectly(t *testing.T) {
+	store := &fakeStore{}
+	runner := func(ctx context.Context, cfg Config, prompt string) (string, error) {
+		return `[{"bead_id": "bead-dead", "action": "abandon-with-summary", "message": "workerless"}]`, nil
+	}
+
+	var handled []string
+	s := New(Config{Enabled: true, Interval: time.Second}, store, runner)
+	s.SetBlockedBeads(func() []BlockedBead {
+		return []BlockedBead{{BeadID: "bead-dead", Reason: "retry exhausted"}}
+	})
+	s.SetOnAbandonWithSummary(func(beadID string) error {
+		handled = append(handled, beadID)
+		return nil
+	})
+	s.Tick(context.Background())
+
+	if len(handled) != 1 || handled[0] != "bead-dead" {
+		t.Fatalf("direct abandon handler called %v, want [bead-dead]", handled)
+	}
+	if len(store.enqueued) != 0 {
+		t.Errorf("workerless abandon enqueued a worker command: %+v", store.enqueued)
+	}
+}
+
+func TestTickAbandonWithLiveWorkerStillEnqueues(t *testing.T) {
+	store := &fakeStore{workers: []registry.WorkerRecord{hungWorker("bead-live")}}
+	runner := func(ctx context.Context, cfg Config, prompt string) (string, error) {
+		return `[{"bead_id": "bead-live", "action": "abandon-with-summary", "message": "hung"}]`, nil
+	}
+
+	var handled []string
+	s := New(Config{Enabled: true, Interval: time.Second}, store, runner)
+	s.SetOnAbandonWithSummary(func(beadID string) error {
+		handled = append(handled, beadID)
+		return nil
+	})
+	s.Tick(context.Background())
+
+	if len(handled) != 0 {
+		t.Errorf("direct abandon handler called for live worker: %v", handled)
+	}
+	if len(store.enqueued) != 1 || store.enqueued[0].kind != registry.CmdAbandonWithSummary {
+		t.Fatalf("live worker abandon not enqueued: %+v", store.enqueued)
+	}
+}
+
+func TestTickStalePendingAbandonExecutesDirectly(t *testing.T) {
+	store := &fakeStore{
+		pending: []registry.Command{{
+			BeadID:    "bead-stale",
+			Kind:      registry.CmdAbandonWithSummary,
+			Payload:   "stale",
+			CreatedAt: time.Now().Add(-3 * time.Second),
+		}},
+	}
+	runner := func(ctx context.Context, cfg Config, prompt string) (string, error) {
+		return `[{"bead_id": "bead-stale", "action": "abandon-with-summary", "message": "still stuck"}]`, nil
+	}
+
+	var handled []string
+	s := New(Config{Enabled: true, Interval: time.Second, AbandonStaleThreshold: 2 * time.Second}, store, runner)
+	s.SetBlockedBeads(func() []BlockedBead {
+		return []BlockedBead{{BeadID: "bead-stale", Reason: "retry exhausted"}}
+	})
+	s.SetOnAbandonWithSummary(func(beadID string) error {
+		handled = append(handled, beadID)
+		return nil
+	})
+	s.Tick(context.Background())
+
+	if len(handled) != 1 || handled[0] != "bead-stale" {
+		t.Fatalf("stale pending abandon not handled: %v", handled)
+	}
+	if len(store.enqueued) != 0 {
+		t.Errorf("stale pending abandon enqueued another command: %+v", store.enqueued)
+	}
+}
+
+func TestTickFreshPendingAbandonStillDeduplicates(t *testing.T) {
+	store := &fakeStore{
+		pending: []registry.Command{{
+			BeadID:    "bead-fresh",
+			Kind:      registry.CmdAbandonWithSummary,
+			Payload:   "fresh",
+			CreatedAt: time.Now(),
+		}},
+		workers: []registry.WorkerRecord{hungWorker("bead-fresh")},
+	}
+	runner := func(ctx context.Context, cfg Config, prompt string) (string, error) {
+		return `[{"bead_id": "bead-fresh", "action": "abandon-with-summary", "message": "same"}]`, nil
+	}
+
+	var handled []string
+	s := New(Config{Enabled: true, Interval: time.Second, AbandonStaleThreshold: 2 * time.Second}, store, runner)
+	s.SetOnAbandonWithSummary(func(beadID string) error {
+		handled = append(handled, beadID)
+		return nil
+	})
+	s.Tick(context.Background())
+
+	if len(handled) != 0 {
+		t.Errorf("fresh pending abandon called direct handler: %v", handled)
+	}
+	if len(store.enqueued) != 0 {
+		t.Errorf("fresh pending abandon enqueued a duplicate: %+v", store.enqueued)
 	}
 }

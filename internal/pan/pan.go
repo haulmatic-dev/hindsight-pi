@@ -48,6 +48,10 @@ type BlockedBeadsFunc func() []BlockedBead
 type Config struct {
 	Enabled  bool
 	Interval time.Duration // tick rate; default 60s
+	// AbandonStaleThreshold is how long an unconsumed abandon-with-summary
+	// command can sit pending before Pan executes it daemon-side. Defaults
+	// to 2x Interval.
+	AbandonStaleThreshold time.Duration
 
 	// Attention thresholds (the ambiguous tail; everything else is handled
 	// deterministically by worker/scheduler/Charon).
@@ -88,6 +92,9 @@ type Config struct {
 func (c Config) withDefaults() Config {
 	if c.Interval <= 0 {
 		c.Interval = 60 * time.Second
+	}
+	if c.AbandonStaleThreshold <= 0 {
+		c.AbandonStaleThreshold = 2 * c.Interval
 	}
 	if c.HungAfter <= 0 {
 		c.HungAfter = 5 * time.Minute
@@ -239,6 +246,9 @@ type Shepherd struct {
 	// OnCloseSatisfied closes a bead that Pan has decided is already satisfied.
 	// Optional; nil means the close_satisfied decision is ignored.
 	OnCloseSatisfied func(beadID string) error
+	// OnAbandonWithSummary closes a workerless bead that Pan has decided to
+	// abandon. Optional; nil means the command is enqueued as before.
+	OnAbandonWithSummary func(beadID string) error
 	// RepairHandlers maps "<name>" → handler for "repair:<name>" verdicts.
 	// Optional; nil means all repair actions are rejected.
 	RepairHandlers map[string]func(beadID string) error
@@ -300,6 +310,11 @@ func (s *Shepherd) SetZeroDiff(fn func(beadID string) (bool, bool)) {
 // SetOnCloseSatisfied injects the optional close-satisfied handler.
 func (s *Shepherd) SetOnCloseSatisfied(fn func(beadID string) error) {
 	s.OnCloseSatisfied = fn
+}
+
+// SetOnAbandonWithSummary injects the optional daemon-side abandon handler.
+func (s *Shepherd) SetOnAbandonWithSummary(fn func(beadID string) error) {
+	s.OnAbandonWithSummary = fn
 }
 
 // SetRepairHandlers injects the repair handler map. The map is copied so the
@@ -432,6 +447,46 @@ func (s *Shepherd) Tick(ctx context.Context) {
 			}
 			log.Printf("[Pan] closed-satisfied %s", d.BeadID)
 			continue
+		}
+		// abandon-with-summary is terminal. If there is no live worker to
+		// consume the command, or an unconsumed abandon is older than the
+		// stale threshold, execute it daemon-side. Enqueuing a terminal
+		// verdict for a workerless bead creates a stable deadlock (iz5z7,
+		// 2026-08-30: 2-hour pending-abandon loop).
+		if kind == registry.CmdAbandonWithSummary {
+			executed := false
+			if pending, perr := s.store.PendingCommands(d.BeadID); perr == nil {
+				for _, pc := range pending {
+					if pc.Kind == kind && !pc.CreatedAt.IsZero() && time.Since(pc.CreatedAt) > s.cfg.AbandonStaleThreshold {
+						if s.OnAbandonWithSummary != nil {
+							if err := s.OnAbandonWithSummary(d.BeadID); err != nil {
+								log.Printf("[Pan] daemon-side abandon for %s failed: %v", d.BeadID, err)
+							} else {
+								log.Printf("[Pan] abandoned %s daemon-side (stale pending command)", d.BeadID)
+							}
+						} else {
+							log.Printf("[Pan] abandon-with-summary for %s has stale pending command but no daemon-side handler; ignoring", d.BeadID)
+						}
+						executed = true
+						break
+					}
+				}
+			}
+			if !executed && !s.hasLiveWorker(d.BeadID) {
+				if s.OnAbandonWithSummary != nil {
+					if err := s.OnAbandonWithSummary(d.BeadID); err != nil {
+						log.Printf("[Pan] daemon-side abandon for %s failed: %v", d.BeadID, err)
+					} else {
+						log.Printf("[Pan] abandoned %s daemon-side (no live worker)", d.BeadID)
+					}
+				} else {
+					log.Printf("[Pan] abandon-with-summary for %s has no live worker and no daemon-side handler; ignoring", d.BeadID)
+				}
+				continue
+			}
+			if executed {
+				continue
+			}
 		}
 		// Dedup against the pending queue: a dead worker never consumes its
 		// commands, so without this Pan re-queues the same verdict every tick
