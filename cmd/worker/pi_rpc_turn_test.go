@@ -151,6 +151,30 @@ func TestRPCTurn_ErrorEventFails(t *testing.T) {
 	}
 }
 
+// TestRPCTurn_TurnEndConcurrencyErrorIsCaptured is the 4u9v8 regression.
+// Kimi reports HTTP 403 concurrent-request-limit failures inside a
+// turn_end/message.errorMessage envelope, not in agent_end.messages. A worker
+// that only inspects agent_end sees a clean turn, exits 1, and burns a retry
+// fault. The error must be captured so decideParkClass can park the session.
+func TestRPCTurn_TurnEndConcurrencyErrorIsCaptured(t *testing.T) {
+	turn := newRPCTurn(false)
+	line := `{"type":"turn_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"403 {\"error\":{\"type\":\"permission_error\",\"message\":\"You've reached your concurrent request limit. Please wait for your ongoing requests to finish and try again.\"}}"}}`
+	if done := turn.handleLine(line, nil); done {
+		t.Error("turn_end must not end the turn; agent_end ends the run")
+	}
+	if !turn.Failed() {
+		t.Fatal("turn_end carrying stopReason=error must mark the turn failed")
+	}
+	if got := turn.ErrMsg(); !strings.Contains(got, "concurrent request limit") {
+		t.Errorf("ErrMsg must surface embedded 403 concurrency message, got %q", got)
+	}
+	if parkable, reason := decideParkClass(turn.ErrMsg()); !parkable {
+		t.Errorf("expected parkable provider-capacity failure, got parkable=%v", parkable)
+	} else if !strings.Contains(reason, "concurrency") {
+		t.Errorf("expected concurrency park reason, got %q", reason)
+	}
+}
+
 func TestRPCTurn_ConfirmDeniedByDefault(t *testing.T) {
 	var stdin bytes.Buffer
 	turn := newRPCTurn(false)
