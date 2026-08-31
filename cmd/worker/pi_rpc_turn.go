@@ -147,6 +147,47 @@ func (t *rpcTurn) handleLine(line string, stdin io.Writer) bool {
 			}
 		}
 
+	case "turn_end", "message_end":
+		msg, _ := event["message"].(map[string]any)
+		if msg == nil {
+			return false
+		}
+		// turn_end carries the final assistant message (and, critically, model
+		// failures via stopReason/errorMessage). message_end carries completed
+		// assistant/user messages. Neither ends the run — agent_end does — but
+		// a turn_end with stopReason==error must surface its errorMessage so
+		// the park classifier can treat provider-capacity 403s as parkable.
+		if eventType == "turn_end" {
+			stopReason, _ := msg["stopReason"].(string)
+			if stopReason == "error" || stopReason == "aborted" {
+				t.mu.Lock()
+				t.failed = true
+				if em, _ := msg["errorMessage"].(string); em != "" && t.errMsg == "" {
+					t.errMsg = em
+				} else if t.errMsg == "" {
+					t.errMsg = "stopReason: " + stopReason
+				}
+				t.mu.Unlock()
+			}
+		}
+		if role, _ := msg["role"].(string); role == "assistant" {
+			if blocks, ok := msg["content"].([]any); ok {
+				t.mu.Lock()
+				for _, raw := range blocks {
+					block, ok := raw.(map[string]any)
+					if !ok {
+						continue
+					}
+					if block["type"] == "text" {
+						if s, _ := block["text"].(string); s != "" {
+							t.text.WriteString(s)
+						}
+					}
+				}
+				t.mu.Unlock()
+			}
+		}
+
 	case "agent_end":
 		t.mu.Lock()
 		t.ended = true

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -81,5 +82,20 @@ func TestShouldRetry_TransientStillRetried(t *testing.T) {
 	policy := RetryPolicy{MaxRetries: 3}
 	if !shouldRetry(errors.New("connection reset by peer"), 1, policy) {
 		t.Error("transient network error should still be retried")
+	}
+}
+
+// The 4u9v8 regression: Kimi reports the 403 concurrency ceiling inside
+// turn_end/message.errorMessage as an embedded JSON blob. decideParkClass must
+// recognise the substring as provider-capacity and park, not let it propagate
+// as a code failure.
+func TestDecideParkClass_TurnEndConcurrency(t *testing.T) {
+	const embedded = `403 {"error":{"type":"permission_error","message":"You've reached your concurrent request limit. Please wait for your ongoing requests to finish and try again."}}`
+	park, reason := decideParkClass(embedded)
+	if !park {
+		t.Errorf("expected parkable provider-capacity failure, got park=%v", park)
+	}
+	if !strings.Contains(reason, "concurrency") {
+		t.Errorf("expected concurrency park reason, got %q", reason)
 	}
 }
