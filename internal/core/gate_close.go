@@ -95,6 +95,29 @@ func (c *BeadCloser) runDaemonGates(bead *types.Bead, projectName, projectPath, 
 		}
 		log.Printf("[DaemonGates] %s gate %s passed (exit %d)", bead.ID, g.name, a.ExitCode)
 	}
+
+	// Exception-share gate: verify the unfiltered coverage total is within
+	// the allowed gap of the enforced threshold. This catches workers that
+	// excluded low-coverage files to make the ratchet pass.
+	if gates.CoverageTruth != nil {
+		a, err := c.gateRunner.RunCoverageTruthGate(GateRequest{
+			Project: projectName, BeadID: string(bead.ID), Gate: "coverage-truth",
+			ProjectPath:  projectPath,
+			WorktreePath: worktreePath,
+		}, *gates.CoverageTruth)
+		if err != nil {
+			log.Printf("[DaemonGates] %s coverage-truth runner fault: %v", bead.ID, err)
+			return c.rejectClose(bead, projectPath, repoName, "gate-coverage-truth-fault")
+		}
+		c.events.EmitRepo(projectPath, Event{Type: "gate_run", Project: repoName,
+			Bead: bead.ID.String(), Reason: "coverage-truth",
+			Fields: map[string]any{"status": a.Status, "exit_code": a.ExitCode}})
+		if a.Status != GateStatusPassed {
+			c.annotateGateFailure(bead, projectPath, repoName, "coverage-truth", a)
+			return c.rejectClose(bead, projectPath, repoName, "gate-coverage-truth-failed")
+		}
+		log.Printf("[DaemonGates] %s coverage-truth passed (exit %d)", bead.ID, a.ExitCode)
+	}
 	return nil
 }
 

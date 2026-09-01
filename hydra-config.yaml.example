@@ -62,6 +62,24 @@ projects:
     - name: my-project
       path: /path/to/my-project
       type: single
+      # Daemon-owned deterministic gates (optional). When daemon_owned is
+      # true, Hydra runs these commands in the chain worktree before a bead
+      # can close. See AGENTS.md for the full E2E setup guide.
+      # gates:
+      #   daemon_owned: true
+      #   test:
+      #     cmd: npm run test:cov
+      #     parser: jest-coverage
+      #     threshold: 80
+      #   # Exception-share gate: verifies the *unfiltered* coverage total is
+      #   # within max_gap_points of the enforced threshold. Prevents workers
+      #   # from hiding low-coverage files behind exclusion patterns. The
+      #   # summary_json_path must point to a Jest coverage-summary.json.
+      #   coverage_truth:
+      #     cmd: npm run test:cov -- --coveragePathIgnorePatterns=''
+      #     summary_json_path: coverage/coverage-summary.json
+      #     threshold_pct: 80
+      #     max_gap_points: 5
 
 # ------------------------------------------------------------------------------
 # INTELLIGENCE — Optional AI/memory features (all can be disabled)

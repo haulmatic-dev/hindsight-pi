@@ -2,6 +2,7 @@ package core
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -134,6 +135,85 @@ func TestDaemonGates_ScopeFromTargetFiles(t *testing.T) {
 	data, _ := os.ReadFile(a.RawLog)
 	if !strings.Contains(string(data), "scoped: 'src/x/a.spec.ts'") {
 		t.Errorf("scope must come from bead target files, log: %q", data)
+	}
+}
+
+func gateTestConfigWithTruth(daemonOwned bool, testCmd string, truth *CoverageTruthGate) *Config {
+	cfg := gateTestConfig(daemonOwned, testCmd)
+	cfg.Projects[0].Gates.CoverageTruth = truth
+	return cfg
+}
+
+func TestDaemonGates_CoverageTruth_PassWithinGap(t *testing.T) {
+	wt := t.TempDir()
+	summaryPath := filepath.Join(wt, "coverage-summary.json")
+	writeJestSummary(t, summaryPath, 76.5)
+	truth := &CoverageTruthGate{
+		Cmd:             "true",
+		SummaryJSONPath: "coverage-summary.json",
+		ThresholdPct:    80,
+		MaxGapPoints:    5,
+	}
+	closer, _ := gateTestCloser(t, gateTestConfigWithTruth(true, "true", truth), wt)
+	bead := &types.Bead{ID: "proj-ctpass", Project: "proj", Status: types.StatusInProgress}
+	if err := closer.runDaemonGates(bead, "proj", t.TempDir(), "", wt); err != nil {
+		t.Fatalf("coverage-truth within gap must not block close: %v", err)
+	}
+}
+
+func TestDaemonGates_CoverageTruth_BlocksBeyondGap(t *testing.T) {
+	wt := t.TempDir()
+	summaryPath := filepath.Join(wt, "coverage-summary.json")
+	writeJestSummary(t, summaryPath, 38.74)
+	truth := &CoverageTruthGate{
+		Cmd:             "true",
+		SummaryJSONPath: "coverage-summary.json",
+		ThresholdPct:    80,
+		MaxGapPoints:    5,
+	}
+	closer, mock := gateTestCloser(t, gateTestConfigWithTruth(true, "true", truth), wt)
+	bead := &types.Bead{ID: "proj-ctblock", Project: "proj", Status: types.StatusInProgress, Description: "orig"}
+	mock.beads["proj-ctblock"] = *bead
+
+	err := closer.runDaemonGates(bead, "proj", t.TempDir(), "", wt)
+	if err == nil {
+		t.Fatal("coverage-truth gap exceeded must block close")
+	}
+	if !strings.Contains(err.Error(), "coverage-truth") {
+		t.Errorf("error must name coverage-truth, got %v", err)
+	}
+	b := mock.beads["proj-ctblock"]
+	if b.Status != types.StatusOpen {
+		t.Errorf("bead must be reopened, status = %s", b.Status)
+	}
+	if !strings.Contains(b.Description, "38.74") || !strings.Contains(b.Description, "80.00") {
+		t.Errorf("description must name threshold and true total, got %q", b.Description)
+	}
+}
+
+func TestDaemonGates_CoverageTruth_MissingConfigNoOp(t *testing.T) {
+	wt := t.TempDir()
+	closer, _ := gateTestCloser(t, gateTestConfig(true, "true"), wt)
+	bead := &types.Bead{ID: "proj-ctnoop", Project: "proj", Status: types.StatusInProgress}
+	if err := closer.runDaemonGates(bead, "proj", t.TempDir(), "", wt); err != nil {
+		t.Fatalf("absent coverage_truth must be no-op: %v", err)
+	}
+}
+
+func TestDaemonGates_CoverageTruth_CommandFailBlocks(t *testing.T) {
+	wt := t.TempDir()
+	truth := &CoverageTruthGate{
+		Cmd:             "exit 1",
+		SummaryJSONPath: "coverage-summary.json",
+		ThresholdPct:    80,
+		MaxGapPoints:    5,
+	}
+	closer, mock := gateTestCloser(t, gateTestConfigWithTruth(true, "true", truth), wt)
+	bead := &types.Bead{ID: "proj-ctcmd", Project: "proj", Status: types.StatusInProgress, Description: "orig"}
+	mock.beads["proj-ctcmd"] = *bead
+
+	if err := closer.runDaemonGates(bead, "proj", t.TempDir(), "", wt); err == nil {
+		t.Fatal("coverage-truth command failure must block close")
 	}
 }
 
