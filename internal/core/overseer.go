@@ -354,6 +354,19 @@ func NewOverseer(config *Config) *Overseer {
 		rec, ok, err := o.registryStore.GetWorker(beadID)
 		return err == nil && ok && rec.State == registry.StateParked
 	}
+	// Zero-token deaths are never task faults: read tokens_so_far from the
+	// registry so HandleFailure can classify them as infrastructure. A miss
+	// returns -1 (not zero) so lookup failures never reclassify real faults.
+	o.workerLifecycle.tokensLookup = func(beadID string) int64 {
+		if o.registryStore == nil {
+			return -1
+		}
+		rec, ok, err := o.registryStore.GetWorker(beadID)
+		if err != nil || !ok {
+			return -1
+		}
+		return rec.TokensSoFar
+	}
 
 	// Initialize bead analyzer (projects will be updated after discovery)
 	o.beadAnalyzer = NewBeadAnalyzer(o.projects)

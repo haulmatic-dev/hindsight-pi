@@ -42,6 +42,14 @@ type WorkerLifecycle struct {
 	// wall clock killed healthy workers mid-turn after long parks
 	// (hydra-code-9p7, 2026-08-07). Nil lookup counts all time.
 	parkedLookup func(beadID string) bool
+	// tokensLookup reports the worker's tokens_so_far at failure time. A
+	// worker that produced ZERO tokens never attempted the task, so its
+	// death is infrastructure by definition — defense in depth for provider
+	// capacity signals arriving in transport shapes worker-side
+	// classification has not seen yet (the RPC-turn_end 403 shape burned 3
+	// real faults each on hcj3h/nl7r3/iz5z7/ehzq2, 2026-08-30/31). Nil
+	// lookup preserves pre-change behavior.
+	tokensLookup func(beadID string) int64
 }
 
 // NewWorkerLifecycle creates a new worker lifecycle manager.
@@ -269,7 +277,7 @@ func (wl *WorkerLifecycle) HandleSuccess(worker *types.Worker, duration time.Dur
 
 func (wl *WorkerLifecycle) HandleFailure(worker *types.Worker, exitCode int, duration time.Duration) {
 	var workerErr error
-	if isInfrastructureExitCode(exitCode) {
+	if isInfrastructureExitCode(exitCode) || wl.zeroTokenFailure(worker) {
 		workerErr = fmt.Errorf("infrastructure failure (exit %d)", exitCode)
 	} else {
 		workerErr = fmt.Errorf("worker exited with code %d", exitCode)
@@ -315,6 +323,22 @@ func (wl *WorkerLifecycle) HandleFailure(worker *types.Worker, exitCode int, dur
 	if err := wl.dag.MarkFailed(worker.ID); err != nil {
 		wl.errorLogger.Error("DAG", "MarkFailed", worker.ID, err, "warn")
 	}
+}
+
+// zeroTokenFailure reports whether this failure came from a worker that never
+// produced a single token — no completed turn means no task attempt, so the
+// death cannot be a bead code fault regardless of exit code. Nil lookup or
+// lookup miss preserves the caller's classification (fall back to the old
+// behavior: count the fault).
+func (wl *WorkerLifecycle) zeroTokenFailure(worker *types.Worker) bool {
+	if wl.tokensLookup == nil {
+		return false
+	}
+	beadID := worker.BeadID
+	if beadID == "" {
+		beadID = types.BeadID(worker.ID)
+	}
+	return wl.tokensLookup(string(beadID)) == 0
 }
 
 // isConcurrencyPressureExitCode reports whether a failure is evidence that we
