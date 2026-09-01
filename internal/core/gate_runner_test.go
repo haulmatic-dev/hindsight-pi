@@ -1,7 +1,9 @@
 package core
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -156,5 +158,139 @@ func TestGateRunner_EmptyScopeFallsBackToFullCommand(t *testing.T) {
 	logData, _ := os.ReadFile(a.RawLog)
 	if strings.Contains(string(logData), "<scope>") {
 		t.Errorf("placeholder must not reach the shell, log: %q", logData)
+	}
+}
+
+func writeJestSummary(t *testing.T, path string, pct float64) {
+	t.Helper()
+	summary := map[string]any{
+		"total": map[string]any{
+			"statements": map[string]any{"total": 1000, "covered": int(pct * 10), "skipped": 0, "pct": pct},
+		},
+	}
+	data, _ := json.Marshal(summary)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write summary: %v", err)
+	}
+}
+
+func TestGateRunner_CoverageTruth_PassWithinGap(t *testing.T) {
+	root := t.TempDir()
+	wt := t.TempDir()
+	r := NewGateRunner(root)
+	summaryPath := filepath.Join(wt, "coverage-summary.json")
+	writeJestSummary(t, summaryPath, 76.5)
+
+	a, err := r.RunCoverageTruthGate(GateRequest{
+		Project: "proj", BeadID: "proj-ct1", Gate: "coverage-truth",
+		ProjectPath: t.TempDir(), WorktreePath: wt,
+	}, CoverageTruthGate{
+		Cmd:             "true",
+		SummaryJSONPath: "coverage-summary.json",
+		ThresholdPct:    80,
+		MaxGapPoints:    5,
+	})
+	if err != nil {
+		t.Fatalf("RunCoverageTruthGate: %v", err)
+	}
+	if a.Status != GateStatusPassed {
+		t.Errorf("status = %s, want passed; summary: %s", a.Status, a.Summary)
+	}
+	if !strings.Contains(a.Summary, "76.50") || !strings.Contains(a.Summary, "80.00") {
+		t.Errorf("summary must name both numbers, got %q", a.Summary)
+	}
+}
+
+func TestGateRunner_CoverageTruth_FailBeyondGap(t *testing.T) {
+	root := t.TempDir()
+	wt := t.TempDir()
+	r := NewGateRunner(root)
+	summaryPath := filepath.Join(wt, "coverage-summary.json")
+	writeJestSummary(t, summaryPath, 38.74)
+
+	a, err := r.RunCoverageTruthGate(GateRequest{
+		Project: "proj", BeadID: "proj-ct2", Gate: "coverage-truth",
+		ProjectPath: t.TempDir(), WorktreePath: wt,
+	}, CoverageTruthGate{
+		Cmd:             "true",
+		SummaryJSONPath: "coverage-summary.json",
+		ThresholdPct:    80,
+		MaxGapPoints:    5,
+	})
+	if err != nil {
+		t.Fatalf("RunCoverageTruthGate: %v", err)
+	}
+	if a.Status != GateStatusFailed {
+		t.Errorf("status = %s, want failed; summary: %s", a.Status, a.Summary)
+	}
+	if !strings.Contains(a.Summary, "38.74") || !strings.Contains(a.Summary, "80.00") {
+		t.Errorf("summary must name threshold and true total, got %q", a.Summary)
+	}
+}
+
+func TestGateRunner_CoverageTruth_CommandFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	wt := t.TempDir()
+	r := NewGateRunner(root)
+
+	a, err := r.RunCoverageTruthGate(GateRequest{
+		Project: "proj", BeadID: "proj-ct3", Gate: "coverage-truth",
+		ProjectPath: t.TempDir(), WorktreePath: wt,
+	}, CoverageTruthGate{
+		Cmd:             "exit 1",
+		SummaryJSONPath: "coverage-summary.json",
+		ThresholdPct:    80,
+		MaxGapPoints:    5,
+	})
+	if err != nil {
+		t.Fatalf("RunCoverageTruthGate: %v", err)
+	}
+	if a.Status != GateStatusFailed {
+		t.Errorf("status = %s, want failed", a.Status)
+	}
+	if !strings.Contains(a.Summary, "exit 1") {
+		t.Errorf("summary must name command failure, got %q", a.Summary)
+	}
+}
+
+func TestGateRunner_CoverageTruth_MissingSummaryFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	wt := t.TempDir()
+	r := NewGateRunner(root)
+
+	a, err := r.RunCoverageTruthGate(GateRequest{
+		Project: "proj", BeadID: "proj-ct4", Gate: "coverage-truth",
+		ProjectPath: t.TempDir(), WorktreePath: wt,
+	}, CoverageTruthGate{
+		Cmd:             "true",
+		SummaryJSONPath: "missing.json",
+		ThresholdPct:    80,
+		MaxGapPoints:    5,
+	})
+	if err != nil {
+		t.Fatalf("RunCoverageTruthGate: %v", err)
+	}
+	if a.Status != GateStatusFailed {
+		t.Errorf("status = %s, want failed", a.Status)
+	}
+	if !strings.Contains(a.Summary, "failed to parse truth summary") {
+		t.Errorf("summary must name parse failure, got %q", a.Summary)
+	}
+}
+
+func TestGateRunner_CoverageTruth_RejectMainCheckout(t *testing.T) {
+	r := NewGateRunner(t.TempDir())
+	main := t.TempDir()
+	_, err := r.RunCoverageTruthGate(GateRequest{
+		Project: "proj", BeadID: "proj-ct5", Gate: "coverage-truth",
+		ProjectPath: main, WorktreePath: main,
+	}, CoverageTruthGate{
+		Cmd:             "true",
+		SummaryJSONPath: "coverage-summary.json",
+		ThresholdPct:    80,
+		MaxGapPoints:    5,
+	})
+	if err == nil || !strings.Contains(err.Error(), "main checkout") {
+		t.Errorf("worktree == main checkout must error with 'main checkout', got %v", err)
 	}
 }

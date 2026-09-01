@@ -1,12 +1,13 @@
 package core
 
 import (
-	"strings"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -20,13 +21,26 @@ type GateSpec struct {
 	Timeout   time.Duration `yaml:"timeout,omitempty"`
 }
 
+// CoverageTruthGate verifies the *unfiltered* total coverage (no exception
+// patterns) is within MaxGapPoints of the enforced ThresholdPct. This closes
+// the loophole where workers exclude low-coverage files so a ratchet passes.
+// Config absent -> gate inert (fail-open for unconfigured projects).
+type CoverageTruthGate struct {
+	Cmd             string        `yaml:"cmd"`
+	SummaryJSONPath string        `yaml:"summary_json_path"`
+	ThresholdPct    float64       `yaml:"threshold_pct"`
+	MaxGapPoints    float64       `yaml:"max_gap_points"`
+	Timeout         time.Duration `yaml:"timeout,omitempty"`
+}
+
 // GateSet is the per-project gate block in hydra.yaml. DaemonOwned is the
 // flag: default false keeps the legacy agent-runs-verification path.
 type GateSet struct {
-	DaemonOwned bool     `yaml:"daemon_owned"`
-	Test        GateSpec `yaml:"test,omitempty"`
-	Lint        GateSpec `yaml:"lint,omitempty"`
-	Build       GateSpec `yaml:"build,omitempty"`
+	DaemonOwned   bool               `yaml:"daemon_owned"`
+	Test          GateSpec           `yaml:"test,omitempty"`
+	Lint          GateSpec           `yaml:"lint,omitempty"`
+	Build         GateSpec           `yaml:"build,omitempty"`
+	CoverageTruth *CoverageTruthGate `yaml:"coverage_truth,omitempty"`
 }
 
 const gateDefaultTimeout = 10 * time.Minute
@@ -76,6 +90,143 @@ func (r *GateRunner) projectLock(project string) *sync.Mutex {
 		r.locks[project] = l
 	}
 	return l
+}
+
+// RunCoverageTruthGate executes the unfiltered coverage command, reads the
+// produced JSON summary, and verifies the true total is within the allowed
+// gap of the enforced threshold. It persists a gate artifact and returns it.
+// The gate fails closed on any runner, command, JSON, or math fault.
+func (r *GateRunner) RunCoverageTruthGate(req GateRequest, truth CoverageTruthGate) (GateArtifact, error) {
+	if req.WorktreePath == "" || (!req.AllowMainCheckout && req.WorktreePath == req.ProjectPath) {
+		return GateArtifact{}, fmt.Errorf("coverage-truth gate for %s: refusing to run in main checkout", req.BeadID)
+	}
+	if truth.Cmd == "" {
+		return GateArtifact{}, fmt.Errorf("coverage-truth gate for %s: empty command", req.BeadID)
+	}
+	if truth.SummaryJSONPath == "" {
+		return GateArtifact{}, fmt.Errorf("coverage-truth gate for %s: empty summary_json_path", req.BeadID)
+	}
+
+	timeout := truth.Timeout
+	if timeout <= 0 {
+		timeout = gateDefaultTimeout
+	}
+
+	dir := gateDir(r.root, req.Project, req.BeadID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return GateArtifact{}, fmt.Errorf("coverage-truth artifact dir: %w", err)
+	}
+	rawLog := filepath.Join(dir, req.Gate+".log")
+
+	a := GateArtifact{
+		Project:   req.Project,
+		BeadID:    req.BeadID,
+		Gate:      req.Gate,
+		Status:    GateStatusRunning,
+		PID:       os.Getpid(),
+		StartedAt: time.Now(),
+		RawLog:    rawLog,
+	}
+	// Artifact-first: the running marker lands before the command starts.
+	if err := WriteGateArtifact(r.root, a); err != nil {
+		return GateArtifact{}, err
+	}
+
+	lock := r.projectLock(req.Project)
+	lock.Lock()
+	defer lock.Unlock()
+
+	logFile, err := os.Create(rawLog)
+	if err != nil {
+		return GateArtifact{}, fmt.Errorf("coverage-truth raw log: %w", err)
+	}
+	defer logFile.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", truth.Cmd)
+	cmd.Dir = req.WorktreePath
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+
+	runErr := cmd.Run()
+	a.EndedAt = time.Now()
+
+	exitCode := 0
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		exitCode = -1
+	case runErr != nil:
+		if ee, ok := runErr.(*exec.ExitError); ok {
+			exitCode = ee.ExitCode()
+		} else {
+			return GateArtifact{}, fmt.Errorf("coverage-truth gate for %s: exec fault: %w", req.BeadID, runErr)
+		}
+	}
+	a.ExitCode = exitCode
+
+	summaryPath := truth.SummaryJSONPath
+	if !filepath.IsAbs(summaryPath) {
+		summaryPath = filepath.Join(req.WorktreePath, summaryPath)
+	}
+
+	var summary string
+	var passed bool
+	if exitCode != 0 {
+		passed = false
+		summary = fmt.Sprintf("truth command failed: exit %d", exitCode)
+	} else {
+		total, parseErr := parseCoverageSummaryJSON(summaryPath)
+		if parseErr != nil {
+			passed = false
+			summary = fmt.Sprintf("failed to parse truth summary %s: %v", summaryPath, parseErr)
+		} else {
+			gap := truth.ThresholdPct - total
+			if gap > truth.MaxGapPoints {
+				passed = false
+				summary = fmt.Sprintf("coverage truth gap exceeded: enforced threshold %.2f%%, true total %.2f%%, gap %.2f points (max %.2f)", truth.ThresholdPct, total, gap, truth.MaxGapPoints)
+			} else {
+				passed = true
+				summary = fmt.Sprintf("coverage truth OK: threshold %.2f%%, true total %.2f%%, gap %.2f points (max %.2f)", truth.ThresholdPct, total, gap, truth.MaxGapPoints)
+			}
+		}
+	}
+
+	a.Summary = summary
+	if passed {
+		a.Status = GateStatusPassed
+	} else {
+		a.Status = GateStatusFailed
+	}
+	if len(a.Summary) > gateSummaryCap {
+		a.Summary = a.Summary[:gateSummaryCap]
+	}
+
+	if err := WriteGateArtifact(r.root, a); err != nil {
+		return a, fmt.Errorf("coverage-truth artifact final write: %w", err)
+	}
+	return a, nil
+}
+
+// parseCoverageSummaryJSON reads a Jest coverage-summary.json total
+// statements percentage. Other tools may be added; a missing or malformed
+// total is a parse failure so the gate fails closed.
+func parseCoverageSummaryJSON(path string) (float64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, fmt.Errorf("read summary: %w", err)
+	}
+	var summary struct {
+		Total struct {
+			Statements struct {
+				Pct float64 `json:"pct"`
+			} `json:"statements"`
+		} `json:"total"`
+	}
+	if err := json.Unmarshal(data, &summary); err != nil {
+		return 0, fmt.Errorf("unmarshal summary: %w", err)
+	}
+	return summary.Total.Statements.Pct, nil
 }
 
 // RunGate executes the gate and returns the final artifact. Gate failures
