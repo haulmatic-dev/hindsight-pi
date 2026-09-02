@@ -243,7 +243,11 @@ counter error never blocks the scheduler. Implemented in
 snapshot of the registry that may place steering commands (parked worker
 that overslept, working-but-stalled worker, zombie with a dead PID) or a
 `close_satisfied` verdict for a bead whose work is already on the working
-branch. Since 2026-08-24 Pan also sees scheduler-level blocked beads — beads
+branch. Since 2026-09-01 `close_satisfied` no longer closes on a green test
+suite alone when the bead names a measurable acceptance command or a
+coverageThreshold/ratchet flip; the full acceptance command must pass and
+the durable config must contain the named ratchet entry, otherwise Pan
+abstains (continue) or forbids the close. Since 2026-08-24 Pan also sees scheduler-level blocked beads — beads
 that are READY but have no live worker row because they hit retry exhaustion
 or a spawn failure. Without these candidates Pan cannot judge the blockers
 that would otherwise deadlock the fleet (e.g. a worktree conflict that

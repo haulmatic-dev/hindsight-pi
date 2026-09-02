@@ -12,6 +12,7 @@ package pan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -20,6 +21,11 @@ import (
 
 	"github.com/haulmatic-dev/hydra/internal/registry"
 )
+
+// ErrSatisfiedAbstain signals that a close_satisfied handler chose not to
+// close because the bead's full acceptance evidence is missing or incomplete.
+// Pan should treat this as a continue verdict instead of a failure.
+var ErrSatisfiedAbstain = errors.New("satisfied gate abstains: bead requires full acceptance evidence, not just a green test suite")
 
 // Store is the slice of the registry Pan needs. An interface so tests can
 // fake it; *registry.Store satisfies it.
@@ -442,6 +448,14 @@ func (s *Shepherd) Tick(ctx context.Context) {
 				continue
 			}
 			if err := s.OnCloseSatisfied(d.BeadID); err != nil {
+				if errors.Is(err, ErrSatisfiedAbstain) {
+					log.Printf("[Pan] satisfied gate for %s abstains (continuing): %v", d.BeadID, err)
+					s.recordVerdict(d.BeadID, registry.CmdContinue)
+					if err := s.store.EnqueueCommand(d.BeadID, registry.CmdContinue, ""); err != nil {
+						log.Printf("[Pan] continue enqueue for %s failed: %v", d.BeadID, err)
+					}
+					continue
+				}
 				log.Printf("[Pan] close_satisfied for %s failed: %v", d.BeadID, err)
 				continue
 			}
