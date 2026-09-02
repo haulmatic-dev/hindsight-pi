@@ -183,8 +183,11 @@ waitLoop:
 	// Infrastructure-failure guard: do not close the bead (and therefore do not
 	// create a fix bead) when the worker failed for a transient infra reason
 	// and we still have retries left.  The bead stays in_progress in the beads
-	// store; the scheduler will retry it after the cooldown.
-	if !success && isInfrastructureExitCode(exitCode) {
+	// store; the scheduler will retry it after the cooldown. Zero-token deaths
+	// are infra by definition (#194) — the guard must ask the same question as
+	// HandleFailure, else a pi-spawn ENOENT (52q9u/u93jp, 2026-09-01) closes
+	// the bead failed at 0/3 retries despite never attempting the task.
+	if !success && (isInfrastructureExitCode(exitCode) || wl.zeroTokenFailure(worker)) {
 		retryCount := wl.retryManager.GetRetryCount(worker.ID)
 		maxRetries := wl.getMaxRetries()
 		if retryCount < maxRetries {

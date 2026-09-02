@@ -1,6 +1,7 @@
 package core
 
 import (
+	"os/exec"
 	"sync"
 	"testing"
 	"time"
@@ -80,5 +81,74 @@ func TestHandleFailure_InfraExitCodeUnchanged(t *testing.T) {
 
 	if got := rm.GetRetryCount("bead-e7"); got != 0 {
 		t.Fatalf("exit 7 must remain infra: retries=%d, want 0", got)
+	}
+}
+
+// A zero-token death reaching the close path must be protected by the same
+// invariant as the accounting layer (#194): HandleFailure already records it
+// as infra, but Wait's close guard consulted only the exit code, so a
+// pi-spawn failure (fork/exec ENOENT burst, 2026-09-01: 52q9u/u93jp closed
+// failed at 0/3 retries) still closed beads failed. The guard must ask the
+// same question.
+func TestWait_ZeroTokenFailureLeavesBeadOpen(t *testing.T) {
+	rm := NewRetryManager(time.Millisecond, 10*time.Millisecond)
+	closed := false
+	wl := &WorkerLifecycle{
+		retryManager:        rm,
+		getMaxRetries:       func() int { return 3 },
+		triggerSchedule:     func() {},
+		removeWorker:        func(string) {},
+		closeBead:           func(*types.Worker, bool, int) error { closed = true; return nil },
+		tokensLookup:        func(string) int64 { return 0 },
+		dag:                 NewDAG(),
+		dagMu:               &sync.RWMutex{},
+		errorLogger:         NewErrorLogger(func(string) int { return 0 }),
+		concurrencyGovernor: NewConcurrencyGovernor(2, GovernorConfig{}),
+		workerTimeout:       30 * time.Second,
+	}
+
+	cmd := exec.Command("false") // exits 1 immediately — the pi-spawn-failure shape
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	worker := &types.Worker{ID: "bead-spawnfail", BeadID: "bead-spawnfail", PID: cmd.Process.Pid, StartTime: time.Now()}
+	wl.Wait(worker, cmd)
+
+	if closed {
+		t.Fatal("zero-token exit-1 closed the bead despite retries remaining — infra deaths must leave the bead open")
+	}
+	if got := rm.GetRetryCount("bead-spawnfail"); got != 0 {
+		t.Fatalf("fault budget burned: retries=%d, want 0", got)
+	}
+}
+
+// A REAL task failure (tokens burned) must still reach closeBead — the guard
+// must not become a blanket amnesty.
+func TestWait_RealFailureStillCloses(t *testing.T) {
+	rm := NewRetryManager(time.Millisecond, 10*time.Millisecond)
+	closed := false
+	wl := &WorkerLifecycle{
+		retryManager:        rm,
+		getMaxRetries:       func() int { return 3 },
+		triggerSchedule:     func() {},
+		removeWorker:        func(string) {},
+		closeBead:           func(*types.Worker, bool, int) error { closed = true; return nil },
+		tokensLookup:        func(string) int64 { return 50_000 },
+		dag:                 NewDAG(),
+		dagMu:               &sync.RWMutex{},
+		errorLogger:         NewErrorLogger(func(string) int { return 0 }),
+		concurrencyGovernor: NewConcurrencyGovernor(2, GovernorConfig{}),
+		workerTimeout:       30 * time.Second,
+	}
+
+	cmd := exec.Command("false")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	worker := &types.Worker{ID: "bead-realfail", BeadID: "bead-realfail", PID: cmd.Process.Pid, StartTime: time.Now()}
+	wl.Wait(worker, cmd)
+
+	if !closed {
+		t.Fatal("real task failure with 50k tokens burned must reach closeBead")
 	}
 }
