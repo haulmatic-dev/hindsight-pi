@@ -39,7 +39,15 @@ func (o *Overseer) spawnWorkerViaAgent(bead types.Bead) (*types.Worker, error) {
 	}
 
 	// Mark bead as in_progress
-	if o.beadsClient != nil && projectPath != "" {
+	if projectPath != "" && o.beadsClient != nil {
+		// Same resurrection guard as the process spawner: a bead closed while it
+		// sat in the retry queue must not be reopened by the agent path.
+		if current, err := o.beadsClient.GetBead(projectPath, "", bead.ID); err == nil && current != nil && current.Status.IsTerminal() {
+			o.retryManager.ClearRetry(beadIDStr)
+			o.emitSpawnSuppressedClosed(bead, projectPath, string(current.Status))
+			return nil, &SpawnSuppressedError{BeadID: beadIDStr, Status: current.Status}
+		}
+
 		log.Printf("[Overseer] Marking bead %s as in_progress", beadIDStr)
 		if err := o.beadsClient.UpdateBeadStatus(projectPath, bead.ID, types.StatusInProgress); err != nil {
 			log.Printf("[Overseer] Warning: failed to mark bead %s as in_progress: %v", beadIDStr, err)

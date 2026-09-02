@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -749,6 +750,24 @@ func (o *Overseer) getReadyBeadsFromBVPlan() ([]types.Bead, error) {
 // critical-path awareness, and impact scoring (unblocks count).
 // spawnWorker creates and starts a worker for a bead using the configured spawner
 func (o *Overseer) spawnWorker(bead types.Bead) error {
+	beadIDStr := bead.ID.String()
+	projectPath := o.beadAnalyzer.FindProjectPath(&bead)
+
+	// Re-check the store at the last moment. In-memory retry state can outlive
+	// the bead's real status; a bead closed by Pan, a human, or supersession
+	// while it sat in the retry queue must not be resurrected (e2lqf, 2026-09-02).
+	if projectPath != "" && o.beadsClient != nil {
+		current, err := o.beadsClient.GetBead(projectPath, "", bead.ID)
+		if err != nil {
+			log.Printf("[Spawn] %s store status read failed: %v", beadIDStr, err)
+		} else if current != nil && current.Status.IsTerminal() {
+			// Drop the stale retry entry so the scheduler stops offering it.
+			o.retryManager.ClearRetry(beadIDStr)
+			o.emitSpawnSuppressedClosed(bead, projectPath, string(current.Status))
+			return &SpawnSuppressedError{BeadID: beadIDStr, Status: current.Status}
+		}
+	}
+
 	// Pre-spawn gate probe: a bead whose scoped gates already pass on main
 	// closes at zero token cost instead of looping a worker through
 	// empty-diff rejections (srv 65wa0: 7.9M tokens, 3 rounds, suite was
@@ -757,6 +776,25 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		return nil
 	}
 	return o.workerSpawner.Spawn(bead)
+}
+
+// emitSpawnSuppressedClosed writes a structured event when a spawn is aborted
+// because the bead is already terminal. The event is mirrored into the repo so
+// operators can see why a queued bead did not run.
+func (o *Overseer) emitSpawnSuppressedClosed(bead types.Bead, projectPath, status string) {
+	ev := Event{
+		Type:    "spawn-suppressed-closed",
+		Reason:  "already-terminal",
+		Project: string(bead.Project),
+		Bead:    bead.ID.String(),
+		Detail:  fmt.Sprintf("Spawn suppressed for %s: bead is already %s", bead.ID, status),
+		Fields:  map[string]any{"status": status},
+	}
+	if o.beadCloser != nil && o.beadCloser.events != nil {
+		o.beadCloser.events.EmitRepo(projectPath, ev)
+	} else {
+		log.Printf("[Spawn] %s", ev.Detail)
+	}
 }
 
 // holdProviderSlot records the pool reservation taken for a worker so it can be
