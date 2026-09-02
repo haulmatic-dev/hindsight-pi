@@ -1,9 +1,14 @@
 package core
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/haulmatic-dev/hydra/internal/pan"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -202,5 +207,110 @@ func TestBuildCloseSatisfiedGetBeadFails(t *testing.T) {
 	handler := BuildCloseSatisfied(o)
 	if err := handler("test-project-abc"); err == nil {
 		t.Fatal("expected error when GetBead fails")
+	}
+}
+
+func TestBuildCloseSatisfiedCoverageThresholdAbstains(t *testing.T) {
+	bead := types.Bead{
+		ID:          "test-project-abc",
+		Title:       "coverage gate",
+		Description: "Acceptance: functions coverage must be >= 80%\nFiles: src/foo.test.js",
+		Status:      types.StatusInProgress,
+		Type:        "test",
+	}
+	o, mockBeads := setupSatisfiedOverseer(t, bead, "exit 0 <scope>")
+
+	handler := BuildCloseSatisfied(o)
+	err := handler("test-project-abc")
+	if !errors.Is(err, pan.ErrSatisfiedAbstain) {
+		t.Fatalf("expected ErrSatisfiedAbstain, got: %v", err)
+	}
+	if len(mockBeads.getCloseCalls()) != 0 {
+		t.Errorf("CloseBead called %d times on abstain", len(mockBeads.getCloseCalls()))
+	}
+}
+
+func TestBuildCloseSatisfiedAcceptanceCommandGreenCloses(t *testing.T) {
+	bead := types.Bead{
+		ID:    "test-project-abc",
+		Title: "coverage gate",
+		Description: "Acceptance: `sh -c 'exit 0' -- --collectCoverageFrom='src/foo' --coverageThreshold='{\"global\":{\"functions\":80}}'`\nFiles: src/foo.test.js",
+		Status: types.StatusInProgress,
+		Type:   "test",
+	}
+	o, mockBeads := setupSatisfiedOverseer(t, bead, "exit 0 <scope>")
+
+	// Satisfy the ratchet-artifact guard: coverageThreshold is present.
+	packageJSON := filepath.Join(o.config.Projects[0].Path, "package.json")
+	if err := os.WriteFile(packageJSON, []byte(`{"jest":{"coverageThreshold":{"global":{"functions":80}}}}`), 0o644); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+
+	handler := BuildCloseSatisfied(o)
+	if err := handler("test-project-abc"); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	calls := mockBeads.getCloseCalls()
+	if len(calls) != 1 {
+		t.Fatalf("CloseBead calls = %d, want 1", len(calls))
+	}
+	if calls[0].reason != "already-satisfied (Pan)" {
+		t.Errorf("reason = %q, want already-satisfied (Pan)", calls[0].reason)
+	}
+}
+
+func TestBuildCloseSatisfiedMissingRatchetEntryForbidden(t *testing.T) {
+	bead := types.Bead{
+		ID:    "test-project-abc",
+		Title: "ratchet flip",
+		Description: "Flip coverageThreshold for src/modules/evaluation-framework/** to 80/80/80/80\nFiles: src/evaluation-framework/foo.js",
+		Status: types.StatusInProgress,
+		Type:   "test",
+	}
+	o, mockBeads := setupSatisfiedOverseer(t, bead, "exit 0 <scope>")
+
+	// package.json exists but contains no coverageThreshold entry.
+	packageJSON := filepath.Join(o.config.Projects[0].Path, "package.json")
+	if err := os.WriteFile(packageJSON, []byte(`{"name":"test"}`), 0o644); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+
+	handler := BuildCloseSatisfied(o)
+	err := handler("test-project-abc")
+	if err == nil {
+		t.Fatal("expected error for missing ratchet entry")
+	}
+	if !strings.Contains(err.Error(), "coverageThreshold") {
+		t.Errorf("error message missing coverageThreshold hint: %v", err)
+	}
+	if len(mockBeads.getCloseCalls()) != 0 {
+		t.Errorf("CloseBead called %d times on forbidden close", len(mockBeads.getCloseCalls()))
+	}
+}
+
+func TestBuildCloseSatisfiedFailedDAGNodeCompletesCleanly(t *testing.T) {
+	bead := types.Bead{
+		ID:          "test-project-abc",
+		Title:       "already done",
+		Description: "Files: src/foo.test.js",
+		Status:      types.StatusInProgress,
+		Type:        "test",
+	}
+	o, mockBeads := setupSatisfiedOverseer(t, bead, "exit 0 <scope>")
+
+	// Simulate a DAG-level failure without the bead itself being terminal.
+	if err := o.dag.UpdateNodeStatus("test-project-abc", types.StatusFailed); err != nil {
+		t.Fatalf("UpdateNodeStatus: %v", err)
+	}
+
+	handler := BuildCloseSatisfied(o)
+	if err := handler("test-project-abc"); err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	calls := mockBeads.getCloseCalls()
+	if len(calls) != 1 {
+		t.Fatalf("CloseBead calls = %d, want 1", len(calls))
 	}
 }

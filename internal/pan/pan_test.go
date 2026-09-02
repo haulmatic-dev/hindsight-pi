@@ -303,6 +303,26 @@ func TestTickCloseSatisfiedHandlerErrorDoesNotEnqueue(t *testing.T) {
 	}
 }
 
+func TestTickCloseSatisfiedAbstainRecordsContinue(t *testing.T) {
+	store := &fakeStore{workers: []registry.WorkerRecord{hungWorker("bead-1")}}
+	runner := func(ctx context.Context, cfg Config, prompt string) (string, error) {
+		return `[{"bead_id": "bead-1", "action": "close_satisfied", "message": "coverage threshold missing"}]`, nil
+	}
+
+	s := New(Config{Enabled: true}, store, runner)
+	s.SetOnCloseSatisfied(func(beadID string) error {
+		return ErrSatisfiedAbstain
+	})
+	s.Tick(context.Background())
+
+	if len(store.enqueued) != 1 {
+		t.Fatalf("expected one enqueued command, got %+v", store.enqueued)
+	}
+	if store.enqueued[0].kind != registry.CmdContinue {
+		t.Errorf("expected continue verdict, got %s", store.enqueued[0].kind)
+	}
+}
+
 func TestNilDepsNoPanic(t *testing.T) {
 	// A freshly-built shepherd with nil deps must survive a no-op tick.
 	s := New(Config{Enabled: false}, nil, nil)
