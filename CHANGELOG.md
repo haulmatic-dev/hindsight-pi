@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Documentation
+- `docs/operations/host-setup.md`: complete bare-host → running-fleet provisioning guide (users/groups, layout, pi install, shared config, systemd unit + drop-ins, live config, swap + auditd resilience, deploy procedure, smoke test, day-2 recall commands). Every step carries a verification; each warning cites the incident that produced it.
+
 ### Fixed
 - Close-path guard now honors the zero-token infrastructure invariant: `Wait`'s infra-failure guard consulted only the exit code, so a pi-spawn failure (`fork/exec /usr/bin/pi: no such file or directory`, seen in bursts since 2026-08-11; killed srv-smart-engine-52q9u/u93jp on 2026-09-01) closed beads failed at 0/3 retries with fix beads minted — despite #194 already recording such deaths as infra in the fault accounting. The guard now asks `isInfrastructureExitCode(exitCode) || zeroTokenFailure(worker)`, the same question as the accounting layer, so a worker that never started leaves the bead open for retry instead of closing it failed.
 - Zero-token worker deaths are now classified as infrastructure failures and never consume a bead's 3-attempt fault budget: a worker that produced no tokens never attempted the task, so its death cannot be a code fault. This is defense in depth at the accounting layer — a provider-capacity signal arriving in a transport shape worker-side classification has not seen yet (the RPC `turn_end` 403 shape burned the fault budgets of hcj3h/nl7r3/iz5z7/ehzq2 on 2026-08-30/31 before hydra-zzb landed) can no longer kill a bead. `internal/core/worker_lifecycle.go` adds a `tokensLookup` (wired to the registry's `tokens_so_far` in `internal/core/overseer.go`); nil lookup or registry miss preserves the old behavior.
