@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Documentation
+- `AGENTS.md` Documentation & Changelog Discipline gains rule 4 (host-setup sync): any change altering host requirements (systemd unit/drop-ins, paths, binaries, OS packages, Pi config, `/etc/hydra/*`, resilience tooling, deploy procedure) must update `docs/operations/host-setup.md` in the same commit/PR; the doc itself carries a matching banner pointing at the rule.
 - `docs/operations/host-setup.md`: complete bare-host → running-fleet provisioning guide (users/groups, layout, pi install, shared config, systemd unit + drop-ins, live config, swap + auditd resilience, deploy procedure, smoke test, day-2 recall commands). Every step carries a verification; each warning cites the incident that produced it.
 
 ### Fixed

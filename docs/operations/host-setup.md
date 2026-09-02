@@ -8,6 +8,12 @@ directory is for see `docs/architecture/filesystem-layout.md`; for the
 shared-Pi-config rule see `docs/architecture/pi-config.md`. This document is
 the umbrella: follow it top to bottom and nothing important is missed.
 
+> **Keeping this file current is mandatory.** AGENTS.md (Documentation &
+> Changelog Discipline, rule 4) requires every change that alters host
+> requirements — systemd unit/drop-ins, paths, binaries, OS packages, Pi
+> config, `/etc/hydra/*`, resilience tooling, deploy procedure — to update
+> this file in the same commit/PR.
+
 Every step lists its **verification** — do not move on until it passes.
 Steps marked *(production)* are hard requirements for a real fleet but can be
 skipped for a throwaway test box.

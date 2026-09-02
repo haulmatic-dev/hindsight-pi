@@ -419,6 +419,14 @@ worker — MUST update the paper trail in the same commit/PR:
 3. **PRD-driven work** — a bead's changelog entry is part of DONE. The
    Target-Files scope gate allowlists `CHANGELOG.md` and `docs/**` so these
    updates are never counted as off-scope.
+4. **Host-setup sync** — `docs/operations/host-setup.md` is the umbrella
+   provisioning guide. ANY change that alters what a host must have for
+   Hydra to run MUST update it in the same commit/PR. That includes: the
+   systemd unit or its drop-ins, paths under `/opt/dev-tools`, binary names
+   or locations, required OS packages, the shared Pi config arrangement,
+   `/etc/hydra/*` files, provider keys, resilience tooling (swap, auditd
+   watches), and the deploy/verify procedure. If host-setup.md would mislead
+   someone rebuilding the box after your change, your change is not done.
 
 Rule of thumb: if an operator reading only `CHANGELOG.md` since the last
 release would be surprised by the system's behavior, the entry is missing or
