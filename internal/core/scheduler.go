@@ -454,6 +454,15 @@ func (s *Scheduler) Tick() error {
 			if poolRelease != nil {
 				poolRelease()
 			}
+
+			// A terminal bead was closed while it sat in the retry queue.
+			// The retry state has already been cleared and an event emitted;
+			// do not record another failure or re-queue it.
+			var suppressed *SpawnSuppressedError
+			if errors.As(err, &suppressed) {
+				continue
+			}
+
 			errMsg := err.Error()
 			isResourceConstraint := strings.Contains(errMsg, "worker limit reached") ||
 				strings.Contains(errMsg, "rate limit exceeded") ||

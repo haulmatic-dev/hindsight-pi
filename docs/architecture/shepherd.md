@@ -58,6 +58,7 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `verdict_retained` | a judgment was stored in Hindsight | `kind` (`adjudication`/`failed_close`), verdict or exit code |
 | `satisfied_closed` | Pan closes a bead whose acceptance criteria are already met on the working branch | `tokens` (`0`) |
 | `retry_exhausted` | a bead exhausts `default_retries` and has no live worker or registry row | `attempts` |
+| `spawn-suppressed-closed` | a queued retry spawn is aborted because the bead became terminal while in the retry queue | `status` |
 
 Read programmatically with `ReadEvents(path)` (torn-line tolerant; a missing
 file is an empty stream, not an error).

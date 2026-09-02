@@ -18,18 +18,18 @@ import (
 
 // WorkerSpawner creates and manages worker processes.
 type WorkerSpawner struct {
-	mu               sync.Mutex
-	activeWorkers    map[string]*types.Worker
-	workerMutex      *sync.RWMutex
-	workerTracker    *WorkerTracker
-	spawnRateLimiter *SpawnRateLimiter
-	errorLogger      *ErrorLogger
-	retryManager     *RetryManager
-	config           *Config
-	beadsClient      BeadsClient
-	beadAnalyzer     *BeadAnalyzer
-	workerEnvBuilder *WorkerEnvBuilder
-	workerLifecycle  *WorkerLifecycle
+	mu                   sync.Mutex
+	activeWorkers        map[string]*types.Worker
+	workerMutex          *sync.RWMutex
+	workerTracker        *WorkerTracker
+	spawnRateLimiter     *SpawnRateLimiter
+	errorLogger          *ErrorLogger
+	retryManager         *RetryManager
+	config               *Config
+	beadsClient          BeadsClient
+	beadAnalyzer         *BeadAnalyzer
+	workerEnvBuilder     *WorkerEnvBuilder
+	workerLifecycle      *WorkerLifecycle
 	userContexts         map[string]*UserContext // username -> context (for per-user git auth)
 	worktreeManager      *WorktreeManager        // per-chain git isolation; nil = disabled
 	chainKeyFn           func(types.Bead) string // maps a bead to its chain's worktree key
@@ -45,6 +45,18 @@ const defaultParkedRespawnTimeout = 10 * time.Minute
 type spawnFailureInfo struct {
 	err       string
 	timestamp time.Time
+}
+
+// SpawnSuppressedError is returned when a spawn is aborted because the bead is
+// already in a terminal state in the store. This prevents in-memory retry queues
+// from resurrecting closed/completed beads.
+type SpawnSuppressedError struct {
+	BeadID string
+	Status types.BeadStatus
+}
+
+func (e *SpawnSuppressedError) Error() string {
+	return fmt.Sprintf("spawn suppressed: bead %s is already terminal (%s)", e.BeadID, e.Status)
 }
 
 // SetWorktreeManager enables per-chain worktree isolation for spawned workers.
@@ -343,7 +355,14 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 		log.Printf("[Overseer] project path unresolved for %s (project %q) — spawn will fail closed", bead.ID, bead.Project)
 	}
 
-	if s.beadsClient != nil && projectPath != "" {
+	if projectPath != "" && s.beadsClient != nil {
+		// Defense in depth: refuse to mark a terminal bead as in_progress.
+		// The scheduler's pre-spawn gate should already have caught this, but
+		// store status can change between scheduling and the actual fork.
+		if current, err := s.beadsClient.GetBead(projectPath, "", bead.ID); err == nil && current != nil && current.Status.IsTerminal() {
+			return nil, &SpawnSuppressedError{BeadID: beadIDStr, Status: current.Status}
+		}
+
 		log.Printf("[Overseer] Marking bead %s as in_progress", beadIDStr)
 		if err := s.beadsClient.UpdateBeadStatus(projectPath, bead.ID, types.StatusInProgress); err != nil {
 			log.Printf("[Overseer] Debug: could not mark bead %s as in_progress: %v", beadIDStr, err)
