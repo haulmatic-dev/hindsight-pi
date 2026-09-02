@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Documentation
+- Lifetime-fit sizing rule: create-prd gains §3.2b (≤12 source files per FR for read-and-modify-each-file work, slice+flip pattern, exotic-environment separation, slice-scoped acceptance) and task-breakdown gains a matching hard rule plus a verbatim guardrail block for every bead spec (no generator scripts, no node_modules rebuilds, no config edits, slice-scoped test runs only). Driven by measured failures: whole-module beads poj8g/e2lqf demanded 539/811 turns and 66M/94M tokens and died incomplete; ≤12-file beads complete first attempt.
 - `AGENTS.md` Documentation & Changelog Discipline gains rule 4 (host-setup sync): any change altering host requirements (systemd unit/drop-ins, paths, binaries, OS packages, Pi config, `/etc/hydra/*`, resilience tooling, deploy procedure) must update `docs/operations/host-setup.md` in the same commit/PR; the doc itself carries a matching banner pointing at the rule.
 - `docs/operations/host-setup.md`: complete bare-host → running-fleet provisioning guide (users/groups, layout, pi install, shared config, systemd unit + drop-ins, live config, swap + auditd resilience, deploy procedure, smoke test, day-2 recall commands). Every step carries a verification; each warning cites the incident that produced it.
 

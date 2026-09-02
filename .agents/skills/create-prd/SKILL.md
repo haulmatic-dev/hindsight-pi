@@ -150,6 +150,45 @@ AC count as a smell signal only:
 
 ---
 
+### 3.2b Lifetime-Fit Sizing (executability bound)
+
+Disjoint file targets make FRs *parallelisable*. They say nothing about
+whether **one worker can finish one FR in one lifetime**. A Hydra worker
+lives ≈45–90 minutes of active time and ≈150–200 agent turns before the
+timeout wall; every turn re-sends the full conversation, so tokens grow
+quadratically with turn count. Measured in production (2026-09, srv-smart-engine
+coverage campaign): beads scoped to a whole module (97 and 56 source files)
+demanded 539 and 811 turns and burned 66M and 94M tokens respectively — killed
+by the timeout wall and the token backstop without completing. Beads scoped to
+≤12 files completed on first attempt.
+
+**Sizing rule:** an FR's `Target Files` must contain **≤ 12 source files**
+(or a single directory, whichever is smaller) when the work involves reading
+and modifying each file (test-writing, refactors, migrations). Estimate
+≈10–15 turns per source file; if the estimate exceeds ~150 turns, split.
+
+**Slice + flip pattern** (for coverage/ratchet/migration epics):
+
+1. **Slice FRs** — each covers ≤12 files. Acceptance criteria are
+   *slice-scoped* (e.g. `jest <dir>` green), never module-wide metrics.
+2. **Flip FR** — one terminal FR, `Depends On` all slices, tiny scope: flip
+   the ratchet/config entry and run the module-wide gate ONCE. Module-wide
+   numbers move only here.
+
+**Exotic-environment separation:** work requiring test infrastructure the repo
+has not used before (e.g. Temporal `TestWorkflowEnvironment`, a DB harness)
+gets its own FR with an in-repo exemplar pointer (`grep -rl <pattern> src/`),
+separate from bulk mechanical work. Do not bundle first-time infrastructure
+with volume work — the infrastructure risk and the volume risk must fail
+independently.
+
+**Why slice-scoped acceptance matters:** module-wide acceptance forces the
+worker to re-run the full module gate after every edit (measured: 186
+test runs in one session, each dumping megabytes into context). Slice-scoped
+runs are cheap; the expensive module-wide run happens once, in the flip FR.
+
+---
+
 ### 3.3 Same-File Conflict Resolution
 
 When two requirements must write to the same file, three resolutions exist.

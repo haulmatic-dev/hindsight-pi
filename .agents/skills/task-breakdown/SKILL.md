@@ -73,6 +73,37 @@ this tool emits (or a human writes) MUST:
 - State the verification commands the worker must run (narrow test first,
   then broad).
 
+## Lifetime-Fit Sizing (hard rule, measured 2026-09)
+
+A bead must fit one worker lifetime: ≈150–200 turns. Whole-module beads
+(97 and 56 files) demanded 539/811 turns and 66M/94M tokens and were killed
+incomplete; ≤12-file beads completed first attempt.
+
+- `Files:` MUST list **≤ 12 source files** (or one directory, whichever is
+  smaller) for read-and-modify-each-file work (tests, refactors, migrations).
+  Larger scopes MUST arrive pre-sliced from the PRD (create-prd §3.2b):
+  slice beads + a terminal flip bead that depends on all slices.
+- Acceptance criteria are **slice-scoped** (`jest <dir>` green). Module-wide
+  gates run exactly once, in the flip bead.
+
+## Standard Guardrail Block (include verbatim in every bead description)
+
+Measured worker failure modes this prevents (2026-09-01/02, srv-smart-engine):
+
+```
+## Guardrails
+- Write tests by hand. Do NOT write generator scripts to mass-produce specs
+  — generated specs have failed review every time they were tried.
+- Never `rm -rf node_modules` or reinstall the environment. If the env looks
+  broken, stop and report the blockage in the execution notes instead.
+- Iterate with slice-scoped runs only (`npx jest <your-dir>`). Do not run
+  module-wide or repo-wide coverage — that is the flip bead's job.
+- Do not edit package.json, jest config, or eslint config. If a config value
+  blocks you, report it in the execution notes and stop.
+- Stay inside the `Files:` scope. Reading elsewhere for context is fine;
+  writing elsewhere is a scope-gate rejection at close.
+```
+
 ## Files
 
 - `cli.mjs` - CLI entry point
