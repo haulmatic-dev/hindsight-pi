@@ -93,12 +93,15 @@ func TestHeartbeatAndStateTransitions(t *testing.T) {
 		t.Fatalf("UpsertWorker: %v", err)
 	}
 
-	if err := st.Heartbeat("bead-1", 99999); err != nil {
+	if err := st.Heartbeat("bead-1", 99999, 99999); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 	got, _, _ := st.GetWorker("bead-1")
 	if got.TokensSoFar != 99999 {
 		t.Errorf("tokens not updated: %d", got.TokensSoFar)
+	}
+	if got.TokensFresh != 99999 {
+		t.Errorf("fresh tokens not updated: %d", got.TokensFresh)
 	}
 
 	if err := st.SetState("bead-1", StateParked); err != nil {
@@ -113,7 +116,7 @@ func TestHeartbeatAndStateTransitions(t *testing.T) {
 	if err := st.MarkCompleted("bead-1", 7); err != nil {
 		t.Fatalf("MarkCompleted: %v", err)
 	}
-	if err := st.Heartbeat("bead-1", 1); err == nil {
+	if err := st.Heartbeat("bead-1", 1, 1); err == nil {
 		t.Errorf("heartbeat on completed worker should error")
 	}
 }

@@ -118,7 +118,7 @@ func TestCharon_TokenBudgetSoftCapSteersNotKills(t *testing.T) {
 	rec := pastTimeoutRecord("proj-burn1")
 
 	upsertLive(t, st, "proj-burn1", registry.StateWorking, 0)
-	if err := st.Heartbeat("proj-burn1", 5_000_000); err != nil {
+	if err := st.Heartbeat("proj-burn1", 5_000_000, 5_000_000); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 	// between soft (3M) and hard (6M): must NOT kill
@@ -141,7 +141,7 @@ func TestCharon_TokenBudgetHardBackstopKills(t *testing.T) {
 	c.SetMaxBeadTokens(3_000_000) // hard = 6M
 	rec := pastTimeoutRecord("proj-burn9")
 	upsertLive(t, st, "proj-burn9", registry.StateWorking, 0)
-	if err := st.Heartbeat("proj-burn9", 9_000_000); err != nil {
+	if err := st.Heartbeat("proj-burn9", 9_000_000, 9_000_000); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 	kill, reason := c.shouldKillAsStuck(rec, time.Now())
@@ -159,7 +159,7 @@ func TestCharon_TokenBudgetPanContinueStaysKill(t *testing.T) {
 	c.SetPanArbiter(func(beadID string) bool { return beadID == "proj-conv1" })
 	rec := pastTimeoutRecord("proj-conv1")
 	upsertLive(t, st, "proj-conv1", registry.StateWorking, 0)
-	if err := st.Heartbeat("proj-conv1", 9_000_000); err != nil {
+	if err := st.Heartbeat("proj-conv1", 9_000_000, 9_000_000); err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 	if kill, _ := c.shouldKillAsStuck(rec, time.Now()); kill {
@@ -167,12 +167,26 @@ func TestCharon_TokenBudgetPanContinueStaysKill(t *testing.T) {
 	}
 }
 
+func TestCharon_TokenBudgetHardBackstopUsesFreshAndSparesCacheHeavy(t *testing.T) {
+	c, st := registryCharon(t)
+	c.SetMaxBeadTokens(3_000_000) // hard = 6M
+	rec := pastTimeoutRecord("proj-cache")
+	upsertLive(t, st, "proj-cache", registry.StateWorking, 0)
+	// total 9M would trip the old backstop, but only 1M are fresh.
+	if err := st.Heartbeat("proj-cache", 9_000_000, 1_000_000); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	kill, reason := c.shouldKillAsStuck(rec, time.Now())
+	if kill {
+		t.Fatalf("cache-heavy worker must not trip hard backstop on total: %s", reason)
+	}
+}
 func TestCharon_TokenBudgetSparesParkedAndDisabled(t *testing.T) {
 	c, st := registryCharon(t)
 	c.SetMaxBeadTokens(3_000_000)
 	rec := pastTimeoutRecord("proj-park1")
 	upsertLive(t, st, "proj-park1", registry.StateParked, 0)
-	if err := st.Heartbeat("proj-park1", 9_000_000); err != nil {
+	if err := st.Heartbeat("proj-park1", 9_000_000, 9_000_000); err != nil {
 		t.Fatalf("AddTokens: %v", err)
 	}
 	if kill, _ := c.shouldKillAsStuck(rec, time.Now()); kill {
@@ -182,7 +196,7 @@ func TestCharon_TokenBudgetSparesParkedAndDisabled(t *testing.T) {
 	c2, st2 := registryCharon(t) // budget disabled (0)
 	rec2 := pastTimeoutRecord("proj-burn2")
 	upsertLive(t, st2, "proj-burn2", registry.StateWorking, 0)
-	if err := st2.Heartbeat("proj-burn2", 50_000_000); err != nil {
+	if err := st2.Heartbeat("proj-burn2", 50_000_000, 50_000_000); err != nil {
 		t.Fatalf("AddTokens: %v", err)
 	}
 	if kill, _ := c2.shouldKillAsStuck(rec2, time.Now()); kill {

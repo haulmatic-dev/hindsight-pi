@@ -257,15 +257,63 @@ func TestRPCTurn_AccumulatesAssistantText(t *testing.T) {
 	}
 }
 
-func TestRPCTurn_ParsesSessionStats(t *testing.T) {
+func TestRPCTurn_ParsesPerMessageUsage(t *testing.T) {
 	turn := newRPCTurn(false)
-	turn.handleLine(`{"type":"response","data":{"tokens":{"input":120,"output":45,"cacheRead":7,"total":172}}}`, nil)
+	turn.handleLine(`{"type":"message","message":{"usage":{"input_tokens":1200,"cache_read_input_tokens":1000,"cache_creation_input_tokens":100,"output_tokens":50}}}`, nil)
 	stats := turn.Stats()
 	if stats == nil {
-		t.Fatal("get_session_stats response must populate Stats — token counts are what make a text-vs-rpc A/B possible")
+		t.Fatal("per-message usage must populate Stats")
 	}
-	if stats.Total != 172 || stats.Input != 120 || stats.Output != 45 || stats.CacheRead != 7 {
-		t.Errorf("unexpected stats: %+v", *stats)
+	if stats.Total != 1250 {
+		t.Errorf("Total = %d, want 1250", stats.Total)
+	}
+	if stats.FreshInput != 100 {
+		t.Errorf("FreshInput = %d, want 100 (1200-1000-100)", stats.FreshInput)
+	}
+	if stats.CacheReadInput != 1000 {
+		t.Errorf("CacheReadInput = %d, want 1000", stats.CacheReadInput)
+	}
+	if stats.CacheCreation != 100 {
+		t.Errorf("CacheCreation = %d, want 100", stats.CacheCreation)
+	}
+	if stats.Output != 50 {
+		t.Errorf("Output = %d, want 50", stats.Output)
+	}
+}
+
+func TestRPCTurn_UsageAccumulatesAcrossResets(t *testing.T) {
+	turn := newRPCTurn(false)
+	turn.handleLine(`{"type":"message","message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":900,"output_tokens":10}}}`, nil)
+	turn.reset()
+	turn.handleLine(`{"type":"message","message":{"usage":{"input_tokens":500,"cache_read_input_tokens":400,"output_tokens":20}}}`, nil)
+
+	stats := turn.Stats()
+	wantFresh := (1000 - 900) + (500 - 400) // 200
+	if stats.FreshInput != wantFresh {
+		t.Errorf("FreshInput = %d, want %d", stats.FreshInput, wantFresh)
+	}
+	wantTotal := 1000 + 10 + 500 + 20 // 1530
+	if stats.Total != wantTotal {
+		t.Errorf("Total = %d, want %d", stats.Total, wantTotal)
+	}
+}
+
+func TestRPCTurn_SessionStatsCarriesPriorUsage(t *testing.T) {
+	turn := newRPCTurn(false)
+	// Prior usage events carry prior counters on resumed session.
+	turn.handleLine(`{"type":"message","message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":900,"output_tokens":10}}}`, nil)
+	// get_session_stats absolute checkpoint arrives later.
+	turn.handleLine(`{"type":"response","data":{"tokens":{"input":100,"output":10,"cacheRead":900,"total":1010}}}`, nil)
+
+	stats := turn.Stats()
+	if stats.FreshInput != 100 {
+		t.Errorf("FreshInput = %d, want 100 (carried from per-message breakdown)", stats.FreshInput)
+	}
+	if stats.CacheReadInput != 900 {
+		t.Errorf("CacheReadInput = %d, want 900", stats.CacheReadInput)
+	}
+	if stats.Total != 1010 {
+		t.Errorf("Total = %d, want 1010 (absolute checkpoint)", stats.Total)
 	}
 }
 

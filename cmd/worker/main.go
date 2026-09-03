@@ -197,6 +197,14 @@ type ExecutionResult struct {
 	// distilled outcome, ~200 tokens, and exactly what future runs need.
 	Verdict      *Verdict
 	Intelligence *IntelligenceContext
+
+	// Token accounting: total is the provider-facing total (for observability);
+	// fresh is fresh_input + output (for budgets and backstops).
+	TokensTotal        int64
+	TokensFresh        int64
+	TokensCacheRead    int64
+	TokensCacheCreation int64
+	TokensOutput       int64
 }
 
 // Note: IntelligenceContext deprecated - now using skills instead of force-feeding
@@ -1660,9 +1668,14 @@ monitorLoop:
 			result.Output = txt
 		}
 		if s := turn.Stats(); s != nil {
-			log.Printf("📊 rpc session tokens: input=%d output=%d cacheRead=%d total=%d",
-				s.Input, s.Output, s.CacheRead, s.Total)
+			log.Printf("📊 rpc session tokens: input=%d output=%d cacheRead=%d cacheCreation=%d freshInput=%d total=%d",
+				s.Input, s.Output, s.CacheReadInput, s.CacheCreation, s.FreshInput, s.Total)
 			reportTurnTokens(s)
+			result.TokensTotal = int64(s.Total)
+			result.TokensFresh = int64(s.FreshInput + s.Output)
+			result.TokensCacheRead = int64(s.CacheReadInput)
+			result.TokensCacheCreation = int64(s.CacheCreation)
+			result.TokensOutput = int64(s.Output)
 		}
 		if n := turn.Notifications(); n != "" {
 			log.Printf("[Worker:rpc] extension UI notifications: %s", n)
@@ -1738,15 +1751,20 @@ func writeExecutionOutputToFile(beadID string, result *ExecutionResult) (string,
 
 	// Build execution record
 	record := map[string]interface{}{
-		"bead_id":    beadID,
-		"timestamp":  time.Now().UTC().Format(time.RFC3339),
-		"success":    result.Success,
-		"exit_code":  result.ExitCode,
-		"duration":   result.Duration.Seconds(),
-		"attempts":   result.Attempts,
-		"agent_type": result.AgentType,
-		"output":     result.Output,
-		"error":      result.Error,
+		"bead_id":              beadID,
+		"timestamp":            time.Now().UTC().Format(time.RFC3339),
+		"success":              result.Success,
+		"exit_code":            result.ExitCode,
+		"duration":             result.Duration.Seconds(),
+		"attempts":             result.Attempts,
+		"agent_type":           result.AgentType,
+		"output":               result.Output,
+		"error":                result.Error,
+		"tokens_total":         result.TokensTotal,
+		"tokens_fresh":         result.TokensFresh,
+		"tokens_cache_read":    result.TokensCacheRead,
+		"tokens_cache_creation": result.TokensCacheCreation,
+		"tokens_output":        result.TokensOutput,
 	}
 
 	// Marshal to JSON
@@ -2743,5 +2761,16 @@ func reportTurnTokens(s *piagents.SessionStats) {
 	if s == nil || activeReporter == nil {
 		return
 	}
-	activeReporter.SetTokens(int64(s.Total))
+	fresh := int64(s.FreshInput + s.Output)
+	total := int64(s.Total)
+	if total == 0 {
+		total = fresh + int64(s.CacheReadInput+s.CacheCreation)
+	}
+	activeReporter.SetTokenBreakdown(
+		total,
+		fresh,
+		int64(s.CacheReadInput),
+		int64(s.CacheCreation),
+		int64(s.Output),
+	)
 }

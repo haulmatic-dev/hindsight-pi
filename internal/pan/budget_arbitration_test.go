@@ -16,15 +16,15 @@ import (
 // candidate; a fresh continue verdict is a stay of execution; only the hard
 // backstop (2x) with no recent continue kills.
 
-func budgetWorker(beadID string, tokens int64) registry.WorkerRecord {
+func budgetWorker(beadID string, tokens, fresh int64) registry.WorkerRecord {
 	return registry.WorkerRecord{
-		BeadID: beadID, State: registry.StateWorking, TokensSoFar: tokens,
+		BeadID: beadID, State: registry.StateWorking, TokensSoFar: tokens, TokensFresh: fresh,
 		LastHeartbeat: time.Now(), StartedAt: time.Now().Add(-time.Hour),
 	}
 }
 
 func TestCandidates_TokenBudgetExceeded(t *testing.T) {
-	st := &fakeStore{workers: []registry.WorkerRecord{budgetWorker("proj-big1", 8_000_000)}}
+	st := &fakeStore{workers: []registry.WorkerRecord{budgetWorker("proj-big1", 8_000_000, 8_000_000)}}
 	s := New(Config{Enabled: true, TokenBudget: 5_000_000}, st,
 		func(context.Context, Config, string) (string, error) { return "[]", nil })
 
@@ -46,8 +46,27 @@ func TestCandidates_TokenBudgetExceeded(t *testing.T) {
 	}
 }
 
+func TestCandidates_CacheHeavyDoesNotTripOnTotal(t *testing.T) {
+	st := &fakeStore{workers: []registry.WorkerRecord{{
+		BeadID: "proj-cache", State: registry.StateWorking,
+		TokensSoFar: 31_000_000, TokensFresh: 2_000_000,
+		LastHeartbeat: time.Now(), StartedAt: time.Now().Add(-time.Hour),
+	}}}
+	s := New(Config{Enabled: true, TokenBudget: 5_000_000}, st, nil)
+
+	cands, err := s.Candidates()
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	for _, c := range cands {
+		if c.Record.BeadID == "proj-cache" {
+			t.Errorf("cache-heavy worker must not be a candidate on total tokens: reason=%q", c.Reason)
+		}
+	}
+}
+
 func TestCandidates_TokenBudgetDisabledOrUnder(t *testing.T) {
-	st := &fakeStore{workers: []registry.WorkerRecord{budgetWorker("proj-big2", 900_000_000)}}
+	st := &fakeStore{workers: []registry.WorkerRecord{budgetWorker("proj-big2", 900_000_000, 900_000_000)}}
 	s := New(Config{Enabled: true, TokenBudget: 0}, st,
 		func(context.Context, Config, string) (string, error) { return "[]", nil })
 	cands, err := s.Candidates()

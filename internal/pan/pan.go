@@ -598,9 +598,9 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 			now.After(w.ParkWakeAt.Add(s.cfg.ParkOverdueGrace)):
 			reason = fmt.Sprintf(
 				"parked past wake_at + %v grace (reason: %s)", s.cfg.ParkOverdueGrace, w.ParkReason)
-		case w.State == registry.StateWorking && s.cfg.TokenBudget > 0 && w.TokensSoFar > s.cfg.TokenBudget:
+		case w.State == registry.StateWorking && s.cfg.TokenBudget > 0 && w.TokensFresh > s.cfg.TokenBudget:
 			reason = fmt.Sprintf(
-				"token budget exceeded (%d > %d) — converging or wandering?", w.TokensSoFar, s.cfg.TokenBudget)
+				"token budget exceeded (fresh=%d > %d, total=%d) — converging or wandering?", w.TokensFresh, s.cfg.TokenBudget, w.TokensSoFar)
 			if s.ZeroDiff != nil {
 				if zero, _ := s.ZeroDiff(w.BeadID); zero {
 					reason += "; zero diff on target files — wandering or already-satisfied?"

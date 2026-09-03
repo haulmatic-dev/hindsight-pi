@@ -134,12 +134,28 @@ func (r *stateReporter) SetPark(since, wakeAt time.Time, reason string) {
 }
 
 // SetTokens updates reported token progress.
-func (r *stateReporter) SetTokens(n int64) {
+func (r *stateReporter) SetTokens(total int64) {
 	if !r.Enabled() {
 		return
 	}
 	r.mu.Lock()
-	r.rep.TokensSoFar = n
+	r.rep.TokensSoFar = total
+	r.mu.Unlock()
+}
+
+// SetTokenBreakdown updates the cache-aware token counters that drive budgets
+// and backstops. total is the provider-facing total; fresh is fresh_input +
+// output and is what Charon/Pan arbitrate on.
+func (r *stateReporter) SetTokenBreakdown(total, fresh, cacheRead, cacheCreation, output int64) {
+	if !r.Enabled() {
+		return
+	}
+	r.mu.Lock()
+	r.rep.TokensSoFar = total
+	r.rep.TokensFresh = fresh
+	r.rep.TokensCacheRead = cacheRead
+	r.rep.TokensCacheCreation = cacheCreation
+	r.rep.TokensOutput = output
 	r.mu.Unlock()
 }
 

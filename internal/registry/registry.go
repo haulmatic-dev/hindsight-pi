@@ -39,24 +39,28 @@ const (
 
 // WorkerRecord is one row of fleet truth.
 type WorkerRecord struct {
-	BeadID        string
-	PID           int
-	PGID          int
-	Project       string
-	StartedAt     time.Time
-	LastHeartbeat time.Time
-	State         WorkerState
-	PiSessionID   string
-	ErrStatus     int
-	ErrType       string
-	ErrMessage    string
-	TokensSoFar   int64
-	ParkSince     time.Time
-	ParkWakeAt    time.Time
-	ParkReason    string
-	NudgeCount    int
-	ExitCode      int
-	CompletedAt   time.Time
+	BeadID              string
+	PID                 int
+	PGID                int
+	Project             string
+	StartedAt           time.Time
+	LastHeartbeat       time.Time
+	State               WorkerState
+	PiSessionID         string
+	ErrStatus           int
+	ErrType             string
+	ErrMessage          string
+	TokensSoFar         int64
+	TokensFresh         int64
+	TokensCacheRead     int64
+	TokensCacheCreation int64
+	TokensOutput        int64
+	ParkSince           time.Time
+	ParkWakeAt          time.Time
+	ParkReason          string
+	NudgeCount          int
+	ExitCode            int
+	CompletedAt         time.Time
 }
 
 // Command is one queued instruction for a worker.
@@ -92,6 +96,10 @@ CREATE TABLE IF NOT EXISTS workers (
   err_type       TEXT NOT NULL DEFAULT '',
   err_message    TEXT NOT NULL DEFAULT '',
   tokens_so_far  INTEGER NOT NULL DEFAULT 0,
+  tokens_fresh   INTEGER NOT NULL DEFAULT 0,
+  tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+  tokens_cache_creation INTEGER NOT NULL DEFAULT 0,
+  tokens_output  INTEGER NOT NULL DEFAULT 0,
   park_since     TEXT,
   park_wake_at   TEXT,
   park_reason    TEXT NOT NULL DEFAULT '',
@@ -126,7 +134,36 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("registry schema: %w", err)
 	}
+	if err := migrateRegistry(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("registry migrate: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+// migrateRegistry adds columns introduced after the initial schema. It is
+// idempotent and fail-open: missing columns are added; duplicate attempts are
+// ignored by SQLite.
+func migrateRegistry(db *sql.DB) error {
+	cols := []string{
+		"tokens_fresh INTEGER NOT NULL DEFAULT 0",
+		"tokens_cache_read INTEGER NOT NULL DEFAULT 0",
+		"tokens_cache_creation INTEGER NOT NULL DEFAULT 0",
+		"tokens_output INTEGER NOT NULL DEFAULT 0",
+	}
+	for _, c := range cols {
+		if _, err := db.Exec("ALTER TABLE workers ADD COLUMN " + c); err != nil {
+			// SQLite returns an error if the column already exists. The only
+			// safe way to check without parsing PRAGMA is to treat any error
+			// as "already there or broken". We cannot proceed if the schema is
+			// genuinely broken, so surface it.
+			if strings.Contains(err.Error(), "duplicate column name") || strings.Contains(err.Error(), "already exists") {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 // Close closes the underlying database.
@@ -168,22 +205,29 @@ func (s *Store) UpsertWorker(rec WorkerRecord) error {
 	_, err = tx.Exec(`
 INSERT INTO workers (bead_id, pid, pgid, project, started_at, last_heartbeat,
   state, pi_session_id, err_status, err_type, err_message, tokens_so_far,
+  tokens_fresh, tokens_cache_read, tokens_cache_creation, tokens_output,
   park_since, park_wake_at, park_reason, nudge_count, exit_code, completed_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,
+  ?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(bead_id) DO UPDATE SET
   pid=excluded.pid, pgid=excluded.pgid, project=excluded.project,
   started_at=excluded.started_at, last_heartbeat=excluded.last_heartbeat,
   state=CASE WHEN workers.state='completed' THEN workers.state ELSE excluded.state END,
   pi_session_id=excluded.pi_session_id, err_status=excluded.err_status,
   err_type=excluded.err_type, err_message=excluded.err_message,
-  tokens_so_far=excluded.tokens_so_far, park_since=excluded.park_since,
+  tokens_so_far=excluded.tokens_so_far, tokens_fresh=excluded.tokens_fresh,
+  tokens_cache_read=excluded.tokens_cache_read,
+  tokens_cache_creation=excluded.tokens_cache_creation,
+  tokens_output=excluded.tokens_output,
+  park_since=excluded.park_since,
   park_wake_at=excluded.park_wake_at, park_reason=excluded.park_reason,
   nudge_count=excluded.nudge_count, exit_code=excluded.exit_code,
   completed_at=excluded.completed_at`,
 		rec.BeadID, rec.PID, rec.PGID, rec.Project,
 		marshalTime(rec.StartedAt), marshalTime(rec.LastHeartbeat),
 		string(rec.State), rec.PiSessionID, rec.ErrStatus, rec.ErrType,
-		rec.ErrMessage, rec.TokensSoFar, marshalTime(rec.ParkSince),
+		rec.ErrMessage, rec.TokensSoFar, rec.TokensFresh, rec.TokensCacheRead,
+		rec.TokensCacheCreation, rec.TokensOutput, marshalTime(rec.ParkSince),
 		marshalTime(rec.ParkWakeAt), rec.ParkReason, rec.NudgeCount,
 		rec.ExitCode, marshalTime(rec.CompletedAt))
 	if err != nil {
@@ -199,10 +243,10 @@ ON CONFLICT(bead_id) DO UPDATE SET
 }
 
 // Heartbeat updates liveness and token progress for a worker.
-func (s *Store) Heartbeat(beadID string, tokens int64) error {
+func (s *Store) Heartbeat(beadID string, tokens, fresh int64) error {
 	res, err := s.db.Exec(
-		`UPDATE workers SET last_heartbeat=?, tokens_so_far=? WHERE bead_id=? AND state != 'completed'`,
-		time.Now().UTC().Format(timeFmt), tokens, beadID)
+		`UPDATE workers SET last_heartbeat=?, tokens_so_far=?, tokens_fresh=? WHERE bead_id=? AND state != 'completed'`,
+		time.Now().UTC().Format(timeFmt), tokens, fresh, beadID)
 	if err != nil {
 		return fmt.Errorf("heartbeat %s: %w", beadID, err)
 	}
@@ -413,6 +457,7 @@ func (s *Store) ReapStale(cutoff time.Time) (int, error) {
 
 const workerCols = `bead_id, pid, pgid, project, started_at, last_heartbeat,
   state, pi_session_id, err_status, err_type, err_message, tokens_so_far,
+  tokens_fresh, tokens_cache_read, tokens_cache_creation, tokens_output,
   park_since, park_wake_at, park_reason, nudge_count, exit_code, completed_at`
 
 func scanWorker(row *sql.Rows) (WorkerRecord, error) {
@@ -421,8 +466,10 @@ func scanWorker(row *sql.Rows) (WorkerRecord, error) {
 	var state string
 	err := row.Scan(&rec.BeadID, &rec.PID, &rec.PGID, &rec.Project,
 		&started, &heartbeat, &state, &rec.PiSessionID, &rec.ErrStatus,
-		&rec.ErrType, &rec.ErrMessage, &rec.TokensSoFar, &parkSince,
-		&parkWake, &rec.ParkReason, &rec.NudgeCount, &rec.ExitCode, &completed)
+		&rec.ErrType, &rec.ErrMessage, &rec.TokensSoFar, &rec.TokensFresh,
+		&rec.TokensCacheRead, &rec.TokensCacheCreation, &rec.TokensOutput,
+		&parkSince, &parkWake, &rec.ParkReason, &rec.NudgeCount,
+		&rec.ExitCode, &completed)
 	if err != nil {
 		return rec, err
 	}

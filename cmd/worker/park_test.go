@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -77,12 +78,38 @@ func TestParkReasonClassification(t *testing.T) {
 	}
 }
 
-// recordingWriteCloser is a bytes.Buffer that also implements io.WriteCloser.
-type recordingWriteCloser struct {
-	bytes.Buffer
+// safeBuffer wraps bytes.Buffer with a mutex so goroutine writes and test
+// reads don't race. parkSession writes the abort synchronously and the wake
+// reprompt from a goroutine, so the tests need synchronized access.
+type safeBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
 }
 
-func (recordingWriteCloser) Close() error { return nil }
+func (s *safeBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func (s *safeBuffer) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Len()
+}
+
+// recordingWriteCloser is a safeBuffer that also implements io.WriteCloser.
+type recordingWriteCloser struct {
+	safeBuffer
+}
+
+func (*recordingWriteCloser) Close() error { return nil }
 
 func TestParkAbortsInFlightTurnBeforeSleep(t *testing.T) {
 	ps := newParkState(0)
