@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,11 +11,23 @@ import (
 
 // trackedWC is an io.WriteCloser that records closure.
 type trackedWC struct {
-	bytes.Buffer
+	safeBuffer
+	mu     sync.Mutex
 	closed bool
 }
 
-func (w *trackedWC) Close() error { w.closed = true; return nil }
+func (w *trackedWC) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closed = true
+	return nil
+}
+
+func (w *trackedWC) Closed() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.closed
+}
 
 // reporterWithCommands installs a global reporter carrying the given queued
 // commands and returns a cleanup func.
@@ -41,7 +53,7 @@ func TestParkWake_SteerCommandReshapesReprompt(t *testing.T) {
 	parkSession(ps, 20*time.Millisecond, "provider-capacity", stdin, turn, "CONTINUE")
 	wakeAndWait()
 
-	out := stdin.Buffer.String()
+	out := stdin.String()
 	if !strings.Contains(out, "focus on the failing tests") {
 		t.Errorf("wake prompt must carry the steer payload, got: %q", out)
 	}
@@ -64,8 +76,8 @@ func TestParkWake_ContinueNoteAppended(t *testing.T) {
 	parkSession(ps, 20*time.Millisecond, "provider-capacity", stdin, turn, "CONTINUE")
 	wakeAndWait()
 
-	if !strings.Contains(stdin.Buffer.String(), "provider has capacity again") {
-		t.Errorf("continue payload should ride the wake prompt, got: %q", stdin.Buffer.String())
+	if !strings.Contains(stdin.String(), "provider has capacity again") {
+		t.Errorf("continue payload should ride the wake prompt, got: %q", stdin.String())
 	}
 }
 
@@ -80,10 +92,10 @@ func TestParkWake_AbandonClosesTurn(t *testing.T) {
 	parkSession(ps, 20*time.Millisecond, "credential", stdin, turn, "CONTINUE")
 	wakeAndWait()
 
-	if stdin.Buffer.Len() != 0 {
-		t.Errorf("abandon must not reprompt pi, wrote: %q", stdin.Buffer.String())
+	if stdin.Len() != 0 {
+		t.Errorf("abandon must not reprompt pi, wrote: %q", stdin.String())
 	}
-	if !stdin.closed {
+	if !stdin.Closed() {
 		t.Errorf("abandon must close stdin so pi exits")
 	}
 	if !turn.Failed() || !strings.Contains(turn.ErrMsg(), "abandoned by shepherd") {
@@ -102,7 +114,7 @@ func TestParkWake_NoCommandsKeepsReprompt(t *testing.T) {
 	parkSession(ps, 20*time.Millisecond, "provider-capacity", stdin, turn, "CONTINUE")
 	wakeAndWait()
 
-	out := stdin.Buffer.String()
+	out := stdin.String()
 	if !strings.Contains(out, "CONTINUE") || strings.Contains(out, "Shepherd") {
 		t.Errorf("clean wake must be the plain reprompt, got: %q", out)
 	}

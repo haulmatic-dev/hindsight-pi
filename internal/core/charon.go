@@ -107,7 +107,7 @@ func (j *Charon) maybeBudgetSteer(record *WorkerRecord) {
 	if err != nil || !ok || row.State != registry.StateWorking {
 		return
 	}
-	if row.TokensSoFar <= j.maxBeadTokens || row.TokensSoFar > 2*j.maxBeadTokens {
+	if row.TokensFresh <= j.maxBeadTokens || row.TokensFresh > 2*j.maxBeadTokens {
 		return
 	}
 	j.steeredMu.Lock()
@@ -123,8 +123,8 @@ func (j *Charon) maybeBudgetSteer(record *WorkerRecord) {
 			}
 		}
 	}
-	msg := fmt.Sprintf("Token budget threshold crossed (%d > %d). Converge NOW: commit your current progress, run the scoped test only, write your verdict. Do not start new exploration.",
-		row.TokensSoFar, j.maxBeadTokens)
+	msg := fmt.Sprintf("Token budget threshold crossed (fresh=%d > %d, total=%d). Converge NOW: commit your current progress, run the scoped test only, write your verdict. Do not start new exploration.",
+		row.TokensFresh, j.maxBeadTokens, row.TokensSoFar)
 	if err := j.registryStore.EnqueueCommand(record.BeadID, registry.CmdSteer, msg); err != nil {
 		log.Printf("[Charon] budget steer enqueue failed for %s (fail open): %v", record.BeadID, err)
 		return
@@ -140,7 +140,7 @@ func (j *Charon) maybeBudgetSteer(record *WorkerRecord) {
 			log.Printf("[Charon] soft-budget label failed for %s (fail open): %v", record.BeadID, err)
 		}
 	}
-	log.Printf("[Charon] %s crossed token soft cap (%d > %d) — converge steer queued, surfaced to Pan", record.BeadID, row.TokensSoFar, j.maxBeadTokens)
+	log.Printf("[Charon] %s crossed token soft cap (fresh=%d > %d, total=%d) — converge steer queued, surfaced to Pan", record.BeadID, row.TokensFresh, j.maxBeadTokens, row.TokensSoFar)
 }
 
 func NewCharon(beadsClient *beads.Client, workerTracker *WorkerTracker, workerTimeout time.Duration) *Charon {
@@ -491,11 +491,11 @@ func (j *Charon) shouldKillAsStuck(record *WorkerRecord, now time.Time) (kill bo
 			// Hard backstop only (2x soft cap); the soft cap steers + surfaces
 			// to Pan (maybeBudgetSteer). A fresh Pan continue verdict stays
 			// the kill — converging work must be allowed to finish.
-			if j.maxBeadTokens > 0 && row.State == registry.StateWorking && row.TokensSoFar > 2*j.maxBeadTokens {
+			if j.maxBeadTokens > 0 && row.State == registry.StateWorking && row.TokensFresh > 2*j.maxBeadTokens {
 				if j.panArbiter != nil && j.panArbiter(record.BeadID) {
-					return false, fmt.Sprintf("over hard backstop (%d > %d) but Pan continued recently — stay of execution", row.TokensSoFar, 2*j.maxBeadTokens)
+					return false, fmt.Sprintf("over hard backstop (fresh=%d > %d, total=%d) but Pan continued recently — stay of execution", row.TokensFresh, 2*j.maxBeadTokens, row.TokensSoFar)
 				}
-				return true, fmt.Sprintf("token budget hard backstop exceeded (%d > %d)", row.TokensSoFar, 2*j.maxBeadTokens)
+				return true, fmt.Sprintf("token budget hard backstop exceeded (fresh=%d > %d, total=%d)", row.TokensFresh, 2*j.maxBeadTokens, row.TokensSoFar)
 			}
 			age := now.Sub(row.LastHeartbeat)
 			if age > j.heartbeatHungAfter {

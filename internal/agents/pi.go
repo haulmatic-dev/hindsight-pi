@@ -82,10 +82,41 @@ type PiConfig struct {
 
 // SessionStats holds token counts reported by a get_session_stats response.
 type SessionStats struct {
-	Input     int `json:"input"`
-	Output    int `json:"output"`
-	CacheRead int `json:"cacheRead"`
-	Total     int `json:"total"`
+	Input          int `json:"input"`
+	Output         int `json:"output"`
+	CacheRead      int `json:"cacheRead"`
+	Total          int `json:"total"`
+	FreshInput     int `json:"fresh_input"`
+	CacheReadInput int `json:"cache_read_input"`
+	CacheCreation  int `json:"cache_creation"`
+}
+
+// MessageUsage is the per-message token breakdown emitted by the RPC stream
+// on message.usage. It is the source of truth for cache-aware accounting.
+type MessageUsage struct {
+	InputTokens          int `json:"input_tokens"`
+	CacheReadInputTokens int `json:"cache_read_input_tokens"`
+	CacheCreationTokens  int `json:"cache_creation_input_tokens"`
+	OutputTokens         int `json:"output_tokens"`
+}
+
+// FreshInputTokens returns the non-cache input tokens charged by the provider.
+// When the endpoint reports cache fields inside input_tokens, subtract them.
+func (u MessageUsage) FreshInputTokens() int {
+	fresh := u.InputTokens
+	if fresh > 0 {
+		fresh -= u.CacheReadInputTokens
+		fresh -= u.CacheCreationTokens
+		if fresh < 0 {
+			fresh = 0
+		}
+	}
+	return fresh
+}
+
+// Total returns the provider-facing token total for the message.
+func (u MessageUsage) Total() int {
+	return u.FreshInputTokens() + u.CacheReadInputTokens + u.CacheCreationTokens + u.OutputTokens
 }
 
 // UIRequestNeedsReply reports whether an extension_ui_request method blocks on a

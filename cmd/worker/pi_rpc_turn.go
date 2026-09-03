@@ -45,6 +45,16 @@ type rpcTurn struct {
 	uiAnswered int
 	stats      *piagents.SessionStats
 
+	// Cache-aware accumulators. These persist across turn resets (nudges) and
+	// carry forward across resumed sessions because resumed sessions emit
+	// message.usage events for the accumulated history. get_session_stats is
+	// the periodic absolute checkpoint, but per-message usage is the only
+	// place the cache breakdown appears.
+	freshInput     int
+	cacheReadInput int
+	cacheCreation  int
+	outputTokens   int
+
 	// notifications counts fire-and-forget extension_ui_request methods by name.
 	// These are the only trace an extension leaves in the event stream — rtk
 	// reports its command rewrites this way — so without tallying them there is
@@ -67,6 +77,9 @@ func newRPCTurn(autoConfirm bool) *rpcTurn {
 // another prompt, so end-of-turn state and accumulated text are cleared and
 // the next agent_end is evaluated fresh. finishOnce is deliberately NOT
 // reset: a turn that was already finished must stay finished.
+//
+// Token accumulators are intentionally preserved across resets so a resumed
+// or nudged session keeps its prior counters instead of under-reporting.
 func (t *rpcTurn) reset() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -77,9 +90,83 @@ func (t *rpcTurn) reset() {
 	t.aborting = false
 }
 
-// abort asks pi to cancel the current agent turn. In RPC mode the provider
-// request is an in-flight HTTP stream; leaving it open while parked poisons
-// the lane and causes the next wake prompt to 403 on a concurrency limit.
+// addUsage folds a per-message usage block into the turn's running counters.
+// It is safe to call with a zero usage block.
+func (t *rpcTurn) addUsage(u piagents.MessageUsage) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.freshInput += u.FreshInputTokens()
+	t.cacheReadInput += u.CacheReadInputTokens
+	t.cacheCreation += u.CacheCreationTokens
+	t.outputTokens += u.OutputTokens
+}
+
+// extractUsage pulls a MessageUsage out of common event shapes. It checks
+// event["usage"] first, then event["message"]["usage"], because Pi's RPC
+// stream may carry usage either at the top level of a message event or nested
+// inside the message object depending on the event type.
+func extractUsage(event map[string]any) (piagents.MessageUsage, bool) {
+	var raw map[string]any
+	if u, ok := event["usage"].(map[string]any); ok {
+		raw = u
+	} else if msg, ok := event["message"].(map[string]any); ok {
+		if u, ok := msg["usage"].(map[string]any); ok {
+			raw = u
+		}
+	}
+	if raw == nil {
+		return piagents.MessageUsage{}, false
+	}
+	num := func(k string) int {
+		v, ok := raw[k]
+		if !ok {
+			return 0
+		}
+		switch n := v.(type) {
+		case float64:
+			return int(n)
+		case int:
+			return n
+		case int64:
+			return int(n)
+		default:
+			return 0
+		}
+	}
+	u := piagents.MessageUsage{
+		InputTokens:          num("input_tokens"),
+		CacheReadInputTokens: num("cache_read_input_tokens"),
+		CacheCreationTokens:  num("cache_creation_input_tokens"),
+		OutputTokens:         num("output_tokens"),
+	}
+	// If the block has no countable fields, treat it as absent.
+	if u.InputTokens == 0 && u.CacheReadInputTokens == 0 && u.CacheCreationTokens == 0 && u.OutputTokens == 0 {
+		return piagents.MessageUsage{}, false
+	}
+	return u, true
+}
+
+// currentStatsLocked builds a SessionStats snapshot assuming the caller holds t.mu.
+func (t *rpcTurn) currentStatsLocked() piagents.SessionStats {
+	return piagents.SessionStats{
+		Input:          t.freshInput + t.cacheReadInput + t.cacheCreation,
+		Output:         t.outputTokens,
+		CacheRead:      t.cacheReadInput,
+		Total:          t.freshInput + t.cacheReadInput + t.cacheCreation + t.outputTokens,
+		FreshInput:     t.freshInput,
+		CacheReadInput: t.cacheReadInput,
+		CacheCreation:  t.cacheCreation,
+	}
+}
+
+// currentStats builds a SessionStats snapshot from the accumulated per-message
+// counters. It is the checkpoint that feeds the registry heartbeat and the
+// execution record.
+func (t *rpcTurn) currentStats() piagents.SessionStats {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.currentStatsLocked()
+}
 func (t *rpcTurn) abort(stdin io.Writer) {
 	t.mu.Lock()
 	t.aborting = true
@@ -269,14 +356,27 @@ func (t *rpcTurn) handleLine(line string, stdin io.Writer) bool {
 		return true
 
 	default:
+		// Per-message usage is the only place the cache breakdown appears.
+		// Accumulate it before falling through to the absolute get_session_stats
+		// checkpoint so resumed sessions carry prior counters forward.
+		if u, ok := extractUsage(event); ok {
+			t.addUsage(u)
+		}
 		// Command responses (get_session_stats) carry a data object. Only
 		// attempt a stats parse when one is present, so ordinary events cannot
 		// be misread as stats.
 		if _, hasData := event["data"]; hasData {
 			if s, err := piagents.ParseSessionStats([]byte(line)); err == nil && s.Total > 0 {
-				t.mu.Lock()
+				// Prefer the accumulated breakdown for fresh/cache columns, but
+				// trust the provider's absolute total if it differs.
+				cur := t.currentStatsLocked()
+				s.FreshInput = cur.FreshInput
+				s.CacheReadInput = cur.CacheReadInput
+				s.CacheCreation = cur.CacheCreation
+				if s.Output == 0 {
+					s.Output = cur.Output
+				}
 				t.stats = &s
-				t.mu.Unlock()
 			}
 		}
 	}
@@ -365,7 +465,32 @@ func (t *rpcTurn) UIAnswered() int {
 func (t *rpcTurn) Stats() *piagents.SessionStats {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.stats
+	if t.stats == nil {
+		cur := t.currentStatsLocked()
+		return &cur
+	}
+	// get_session_stats gave us an absolute checkpoint, but its breakdown may
+	// be empty; overlay the accumulated breakdown and output.
+	s := *t.stats
+	cur := t.currentStatsLocked()
+	if s.FreshInput == 0 {
+		s.FreshInput = cur.FreshInput
+	}
+	if s.CacheReadInput == 0 {
+		s.CacheReadInput = cur.CacheReadInput
+	}
+	if s.CacheCreation == 0 {
+		s.CacheCreation = cur.CacheCreation
+	}
+	if s.Output == 0 {
+		s.Output = cur.Output
+	}
+	// Reconcile totals: trust the provider absolute, but if it is missing use
+	// the accumulated sum so budget decisions still see real consumption.
+	if s.Total == 0 {
+		s.Total = cur.Total
+	}
+	return &s
 }
 
 // Notifications returns a stable "method=count" summary of the fire-and-forget

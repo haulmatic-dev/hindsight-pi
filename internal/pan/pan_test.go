@@ -212,7 +212,7 @@ func TestParseDecisionsToleratesFencesAndProse(t *testing.T) {
 func TestCandidatesZeroDiffMarkerAppendsReason(t *testing.T) {
 	store := &fakeStore{workers: []registry.WorkerRecord{{
 		BeadID: "over-budget-zero", State: registry.StateWorking,
-		LastHeartbeat: time.Now(), TokensSoFar: 200,
+		LastHeartbeat: time.Now(), TokensSoFar: 200, TokensFresh: 200,
 	}}}
 
 	s := New(Config{Enabled: true, TokenBudget: 100}, store, nil)
@@ -234,7 +234,7 @@ func TestCandidatesZeroDiffMarkerAppendsReason(t *testing.T) {
 func TestCandidatesZeroDiffUnknownNoMarker(t *testing.T) {
 	store := &fakeStore{workers: []registry.WorkerRecord{{
 		BeadID: "over-budget-unknown", State: registry.StateWorking,
-		LastHeartbeat: time.Now(), TokensSoFar: 200,
+		LastHeartbeat: time.Now(), TokensSoFar: 200, TokensFresh: 200,
 	}}}
 
 	s := New(Config{Enabled: true, TokenBudget: 100}, store, nil)
