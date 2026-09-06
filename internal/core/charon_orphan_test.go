@@ -261,6 +261,38 @@ func TestRecoverOrphanInProgressBeads_ReopensOldOrphan(t *testing.T) {
 	}
 }
 
+// TestRecoverOrphanInProgressBeads_SkipsEscalatedLabel guards the churn-loop
+// fix: a bead parked in_progress by verified-close escalation (durable
+// `escalated` label) must NOT be reopened by orphan recovery, or it respawns
+// into the same empty-diff death the escalation stopped.
+func TestRecoverOrphanInProgressBeads_SkipsEscalatedLabel(t *testing.T) {
+	beadID := "test-orphan-escalated"
+	old := time.Now().Add(-10 * time.Minute)
+
+	list := beadListJSON(beadID, old)
+	var page struct {
+		Issues []map[string]any `json:"issues"`
+	}
+	if err := json.Unmarshal(list, &page); err != nil || len(page.Issues) != 1 {
+		t.Fatalf("beadListJSON shape changed: %v", err)
+	}
+	page.Issues[0]["labels"] = []string{"needs-human", "escalated"}
+	list, _ = json.Marshal(page)
+
+	charon, exec := setupOrphanCharon(t, list, 5*time.Minute)
+
+	got := charon.recoverOrphanInProgressBeads()
+	if got != 0 {
+		t.Fatalf("recovered = %d, want 0 for escalated bead", got)
+	}
+	if n := exec.CountCalls("br update " + beadID + " --status open"); n != 0 {
+		t.Errorf("expected zero UpdateBeadStatus(open) calls for escalated bead, got %d; calls:\n%v", n, exec.Calls())
+	}
+	if n := exec.CountCalls("br close"); n != 0 {
+		t.Errorf("expected zero CloseBead calls, got %d; calls:\n%v", n, exec.Calls())
+	}
+}
+
 func TestRecoverOrphanInProgressBeads_RespectsGrace(t *testing.T) {
 	beadID := "test-orphan-young"
 	charon, exec := setupOrphanCharon(t, beadListJSON(beadID, time.Now().Add(-1*time.Minute)), 5*time.Minute)

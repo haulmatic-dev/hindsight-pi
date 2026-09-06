@@ -87,6 +87,17 @@ state" — a chain whose beads closed *failed* integrated exactly like a
 successful one. A known-answer testbed run proved it by landing a
 deliberately red test on the working branch.
 
+The same durability rule applies to **escalation**: when verified-close
+rejects a bead at max rounds, the bead is left `in_progress` (parked, not
+reopened) and stamped **`escalated`** (with `needs-human` and
+`verified-close-escalated`), and a typed **`bead.escalated`** event is
+emitted. Every consumer that decides respawn must skip labeled beads:
+Charon orphan recovery (`[OrphanRetry] ... skipping reopen`), the scheduler
+ready filter (`GetReadyBeads`), and the retry-eligible path. Without the
+label, bare `in_progress` is exactly the signal orphan recovery keys on and
+the bead respawns into the same death the escalation stopped (2026-09-06
+empty-diff churn loop: c01hq/65xy7/48bdq).
+
 **Inspecting quarantined work:**
 
 ```bash

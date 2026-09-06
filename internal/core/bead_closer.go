@@ -350,6 +350,24 @@ const fixRecursionCappedLabel = "fix-recursion-capped"
 // components (chain verdicts, the Shepherd cron) read.
 const closedFailedLabel = "closed-failed"
 
+// escalatedLabel is the durable marker for beads a verified-close rejection
+// escalated to a human at max attempts. Unlike a status, a label is visible
+// to every consumer that decides respawn: Charon orphan recovery, the
+// scheduler ready filter, and the retry-eligible path must all skip beads
+// carrying it (2026-09-06: empty-diff churn loop — escalation left the bead
+// bare in_progress, Charon reopened it, it respawned into the same death).
+const escalatedLabel = "escalated"
+
+// hasBeadLabel reports whether labels contains label.
+func hasBeadLabel(labels []string, label string) bool {
+	for _, l := range labels {
+		if l == label {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *BeadCloser) createFixBeadForFailedClose(bead *types.Bead, projectPath, repoName, workerBeadID string) error {
 	return c.createFixBeadForFailedCloseWithExitCode(bead, projectPath, repoName, workerBeadID, 0)
 }
@@ -708,10 +726,14 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		c.logCloseEvent(bead, "escalated", reason, currentAttempts)
 		log.Printf("[VerifiedClose] Bead %s rejected %d/%d times (%s); escalating to human", beadID, currentAttempts, maxRounds, reason)
 		if c.beadsClient != nil {
-			if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"needs-human", "verified-close-escalated"}); err != nil {
+			if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"needs-human", "verified-close-escalated", escalatedLabel}); err != nil {
 				log.Printf("[VerifiedClose] Failed to label %s for escalation: %v", beadID, err)
 			}
 		}
+		c.events.EmitRepo(projectPath, Event{Type: "bead.escalated", Project: repoName,
+			Bead: beadID, Reason: reason,
+			Detail: fmt.Sprintf("verified-close rejected %d/%d times (%s); escalated to human, bead left in_progress", currentAttempts, maxRounds, reason),
+			Fields: map[string]any{"attempts": currentAttempts, "max_rounds": maxRounds}})
 		return fmt.Errorf("verified-close: bead %s escalated after %d rejections (%s)", beadID, currentAttempts, reason)
 	}
 

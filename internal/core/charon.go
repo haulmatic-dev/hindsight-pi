@@ -699,6 +699,14 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 				}
 				continue
 			}
+			// An escalated bead is parked for a human by design (verified-close
+			// rejected it at max attempts). It is in_progress with no worker by
+			// definition — reopening it would respawn the exact death the
+			// escalation stopped (2026-09-06 empty-diff churn loop).
+			if hasBeadLabel(fresh.Labels, escalatedLabel) {
+				log.Printf("[OrphanRetry] bead %s carries the %q label (escalated to human); skipping reopen", beadIDStr, escalatedLabel)
+				continue
+			}
 
 			log.Printf("[Charon] 🔧 Recovering orphan in_progress bead %s (project: %s)", beadIDStr, project.Path)
 

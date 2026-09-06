@@ -98,6 +98,11 @@ func (n *DAGNavigator) GetReadyBeads(completed map[string]bool) []types.Bead {
 			// Human gates are never worker-executed, whatever their status.
 			continue
 		}
+		if hasBeadLabel(node.Bead.Labels, escalatedLabel) {
+			// Escalated beads are parked for a human; never hand them to a
+			// worker even if a stale status/label refresh made them look ready.
+			continue
+		}
 		if completed != nil && completed[string(node.Bead.ID)] {
 			continue
 		}

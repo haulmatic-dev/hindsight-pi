@@ -174,6 +174,13 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 		count, _, _, _ := o.retryManager.RetryInfo(beadID)
 
 		if bead, err := s.getBeadFromDAG(beadID); err == nil {
+			if hasBeadLabel(bead.Labels, escalatedLabel) {
+				// The bead was escalated to a human after max close rejections.
+				// Retry entries from earlier worker failures must not resurrect
+				// it into the same death the escalation stopped.
+				log.Printf("[Retry] Bead %s carries the %q label (escalated to human); skipping retry queue", beadID, escalatedLabel)
+				continue
+			}
 			readyBeads = append(readyBeads, bead)
 			log.Printf("[Retry] Bead %s added to retry queue (attempt %d/%d)",
 				beadID, count+1, maxRetries)

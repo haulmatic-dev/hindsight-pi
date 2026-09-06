@@ -1695,6 +1695,14 @@ monitorLoop:
 		} else {
 			result.Success = true
 			result.ExitCode = 0
+			// The turn closed cleanly; any SIGTERM in cmdErr is our own
+			// finish() kill — pi cannot exit on its own after agent_end, so
+			// the process ALWAYS dies by signal even on a perfect run. The
+			// event stream is the verdict, not the exit status. Suppress it:
+			// callers treat a non-nil error as failure and would retry (and
+			// the daemon re-prompt) an already-good verdict — hydra-xnx was
+			// re-prompted 4x after done:true verdicts on 2026-09-06.
+			cmdErr = nil
 			log.Printf("✅ Pi rpc turn completed (agent_end, last activity %v ago)", activityMonitor.TimeSinceActivity())
 		}
 	} else if cmdErr == nil && result.ExitCode == 0 {
