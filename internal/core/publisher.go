@@ -68,6 +68,9 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, activeKeys map[s
 		if strings.HasPrefix(reason, "remote at") {
 			log.Printf("[Publish] push verification FAILED for %s/%s: %s", projectPath, branch, reason)
 		}
+		if IsProtectedBranchRejection(reason) {
+			log.Printf("[Publish] push rejected by branch protection for %s/%s: %s", projectPath, branch, reason)
+		}
 		log.Printf("[Publish] push skipped for %s: %s", projectPath, reason)
 		AppendActivity(projectPath, "publish", "push skipped: "+reason)
 	}
@@ -82,27 +85,29 @@ var (
 )
 
 // maybeOpenAutoPR creates a PR when a push to the protected base branch was
-// rejected. It is fail-open: any error is logged and the integration result is
-// left unchanged.
-func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName, branch string, bead *types.Bead) {
+// rejected. It is fail-open: any error is logged and false is returned (the
+// caller then fails the integration closed). Returns true only when the PR was
+// actually created — the caller may then treat the integration as preserved
+// via the PR.
+func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName, branch string, bead *types.Bead) bool {
 	if cfg == nil || !cfg.AutoPREnabled() || beadsClient == nil || bead == nil || branch == "" {
-		return
+		return false
 	}
 	head := "dogfood/" + string(bead.ID)
 	for _, l := range bead.Labels {
 		if l == "pr-open" {
 			log.Printf("[AutoPR] skipping %s: already has pr-open label", bead.ID)
-			return
+			return false
 		}
 	}
 	if out, err := autoPRLsRemote(projectPath, "origin", "refs/heads/"+head); err == nil && strings.TrimSpace(out) != "" {
 		log.Printf("[AutoPR] skipping %s: %s already exists on origin", bead.ID, head)
-		return
+		return false
 	}
 	token := autoPRResolveToken()
 	if err := autoPRGitPush(projectPath, "refs/heads/"+head, token); err != nil {
 		log.Printf("[AutoPR] failed for %s: push %s: %v", bead.ID, head, err)
-		return
+		return false
 	}
 	title := bead.Title
 	if title == "" {
@@ -112,7 +117,7 @@ func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName
 	url, err := autoPRGhCreate(projectPath, branch, head, title, body, token)
 	if err != nil {
 		log.Printf("[AutoPR] failed for %s: %v", bead.ID, err)
-		return
+		return false
 	}
 	newLabels := make([]string, 0, len(bead.Labels)+1)
 	hasOpen := false
@@ -137,6 +142,7 @@ func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName
 		log.Printf("[AutoPR] failed for %s: update description: %v (fail open)", bead.ID, err)
 	}
 	log.Printf("[Output] auto-PR created: %s", url)
+	return true
 }
 
 // autoPRResolveToken prefers GH_TOKEN, then parses x-access-token from the

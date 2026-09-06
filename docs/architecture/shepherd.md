@@ -59,6 +59,7 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `satisfied_closed` | Pan closes a bead whose acceptance criteria are already met on the working branch | `tokens` (`0`) |
 | `retry_exhausted` | a bead exhausts `default_retries` and has no live worker or registry row | `attempts` |
 | `spawn-suppressed-closed` | a queued retry spawn is aborted because the bead became terminal while in the retry queue | `status` |
+| `integration-failed` | singleton integrate/push failed verification (merge not contained in HEAD, or push rejected / remote ref did not advance) — bead reopened with `integration-failed` label, worktree preserved | `stage` (`integrate`/`push`), `error` (exact remote stderr) |
 
 Read programmatically with `ReadEvents(path)` (torn-line tolerant; a missing
 file is an empty stream, not an error).
@@ -66,6 +67,20 @@ file is an empty stream, not an error).
 ---
 
 ## 2. Close verdicts & quarantine (A1) — `bead_closer.go`, `worktree_manager.go`, `chain_completion_*.go`
+
+Singleton close is fail-closed end to end (2026-09-06, hydra-xnx incident): the
+merge is verified (`git merge-base --is-ancestor <wt-branch> HEAD`) before
+"integrated singleton" is logged, the push is verified (`ls-remote` ref match
+inside `PushBranch`) before "pushed" is logged, and the worktree is removed
+only after both land. Either failure emits `integration-failed`, reopens the
+bead, and leaves the worktree in place. Two root-cause guards sit underneath:
+`EnsureWorktree` reuse-reset only fires when the worktree tip is already
+contained in HEAD (an unguarded reset rewound branches holding gate-verified
+worker commits, after which the integrate silently no-opped), and push
+rejections return the exact remote stderr (GH006 included) instead of a
+collapsed "protected branch" summary. A rejected push routes to `maybeOpenAutoPR`
+when `output.auto_pr` is on; a created PR preserves the work via the dogfood
+branch and the close proceeds, otherwise the close fails.
 
 The beads store (`issues.jsonl`) has **no close-reason field**, so the close
 verdict is made durable as a label: a bead that closes `failed` gets

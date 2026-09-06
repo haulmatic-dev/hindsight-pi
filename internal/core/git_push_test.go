@@ -59,7 +59,7 @@ func TestPushBranch(t *testing.T) {
 		}
 	})
 
-	t.Run("pre-receive hook returns protected branch", func(t *testing.T) {
+	t.Run("pre-receive hook rejection surfaces exact remote error", func(t *testing.T) {
 		t.Parallel()
 		repo, remote := setupReachableRemote(t)
 		writeHook(t, remote, "pre-receive", "#!/bin/sh\necho 'pre-receive hook declined' >&2\nexit 1\n")
@@ -69,8 +69,32 @@ func TestPushBranch(t *testing.T) {
 		if pushed {
 			t.Errorf("PushBranch(repo, \"origin\", \"main\") pushed = true; want false")
 		}
-		if reason != "protected branch" {
-			t.Errorf("PushBranch(repo, \"origin\", \"main\") reason = %q; want %q", reason, "protected branch")
+		// The exact remote stderr must surface — never a collapsed summary —
+		// so operators see why the push was rejected.
+		if !strings.Contains(reason, "pre-receive hook declined") {
+			t.Errorf("PushBranch reason = %q; want it to contain the remote stderr %q", reason, "pre-receive hook declined")
+		}
+		if !IsProtectedBranchRejection(reason) {
+			t.Errorf("IsProtectedBranchRejection(%q) = false; want true", reason)
+		}
+	})
+
+	t.Run("GH006 branch protection rejection surfaces verbatim", func(t *testing.T) {
+		t.Parallel()
+		repo, remote := setupReachableRemote(t)
+		gh006 := "remote: error: GH006: Protected branch update failed. Changes must be made through a pull request."
+		writeHook(t, remote, "pre-receive", "#!/bin/sh\necho '"+gh006+"' >&2\nexit 1\n")
+		commitFile(t, repo, "file.txt", "content")
+
+		pushed, reason := PushBranch(repo, "origin", "main")
+		if pushed {
+			t.Errorf("PushBranch pushed = true; want false")
+		}
+		if !strings.Contains(reason, "GH006") || !strings.Contains(reason, "Changes must be made through a pull request") {
+			t.Errorf("PushBranch reason = %q; want verbatim GH006 branch-protection error", reason)
+		}
+		if !IsProtectedBranchRejection(reason) {
+			t.Errorf("IsProtectedBranchRejection(%q) = false; want true", reason)
 		}
 	})
 
