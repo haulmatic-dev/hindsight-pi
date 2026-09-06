@@ -295,6 +295,18 @@ await loader.reload();
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G | (system default) |
 | `PI_OFFLINE` | Enable offline mode | `false` |
 
+Hydra sets `PI_CACHE_RETENTION=long` on every worker spawn (daemon env
+builder + `cmd/worker` launch site, 2026-09-06), so pi-ai marks cache blocks
+`cache_control {type:ephemeral, ttl:"1h"}` instead of the default 5m TTL.
+Whether the coding endpoint honors the ttl marker for cache expiry is
+measured by `scripts/cache-ttl-probe.sh` (warms a ~26K-token prefix with the
+ttl:1h marker, probes `cache_read` at +35min and +65min, prints HIT/MISS).
+Prior TTL measurements only covered `[300s, 1800s)` with default markers; if
+the probe shows MISS at 35min the env var stays set (harmless — providers
+ignore markers they do not support) but cache retention beyond 5m must not be
+relied on. The probe needs ~65 minutes and must run outside a worker turn
+(`systemd-run`/`nohup`).
+
 ### 4.2 API Key Environment Variables
 
 Pi automatically reads API keys from environment variables:

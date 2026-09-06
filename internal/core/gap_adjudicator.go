@@ -174,9 +174,13 @@ func normalizeThinking(level string) string {
 }
 
 // adjudicatorArgs builds the pi argv for an adjudication call. Extracted so the
-// model/thinking overrides are testable without spawning pi.
-func adjudicatorArgs(provider, model, thinking string) []string {
-	args := []string{"--no-session"}
+// model/thinking overrides are testable without spawning pi. sessionID names
+// the per-bead-purpose pi session (hydra-adjud-<bead>): naming the session
+// keeps the adjudication transcript resumable and its prompt-cache prefix
+// warm, while per-bead scoping prevents verdict bias from prior unrelated
+// adjudications that a shared session would accumulate.
+func adjudicatorArgs(provider, model, thinking, sessionID string) []string {
+	args := []string{"--session-id", sessionID}
 	if provider != "" {
 		args = append(args, "--provider", provider)
 	}
@@ -187,6 +191,22 @@ func adjudicatorArgs(provider, model, thinking string) []string {
 		args = append(args, "--thinking-level", t)
 	}
 	return args
+}
+
+// adjudicatorSessionID derives the per-bead-purpose pi session name for a
+// gap. Uses the suggested bead when present (one session per bead, shared
+// only across cycles adjudicating the same bead); falls back to the gap ID.
+// Path-hostile characters are replaced so the id is safe as a session name.
+func adjudicatorSessionID(g gap) string {
+	base := g.SuggestedBead
+	if base == "" {
+		base = g.ID
+	}
+	if base == "" {
+		base = "unknown"
+	}
+	r := strings.NewReplacer("/", "-", "\\", "-", " ", "-", ":", "-")
+	return "hydra-adjud-" + r.Replace(base)
 }
 
 func (cm *ComplianceCycleManager) adjudicateGap(ctx context.Context, g gap) adjudication {
@@ -200,7 +220,7 @@ func (cm *ComplianceCycleManager) adjudicateGap(ctx context.Context, g gap) adju
 	if piPath == "" {
 		piPath = "pi"
 	}
-	args := adjudicatorArgs(core.Provider, model, cm.config.AdjudicatorThinking)
+	args := adjudicatorArgs(core.Provider, model, cm.config.AdjudicatorThinking, adjudicatorSessionID(g))
 
 	// The adjudicator holds a provider slot for minutes at adjudicator_thinking:
 	// max, so it must be inside the shared pool rather than beside it — this is

@@ -244,7 +244,7 @@ func NewPiConnector(config PiConfig, logger *log.Logger) *PiConnector {
 }
 
 // Start initializes a Pi RPC session
-// Spawns: pi --mode rpc --provider <provider> --model <model> --no-session
+// Spawns: pi --mode rpc --provider <provider> --model <model> --session-id hydra-<bead>
 func (c *PiConnector) Start(ctx context.Context, bead types.Bead, opts AgentOptions) (*AgentSession, error) {
 	// Check if Pi is installed
 	if err := c.ensureInstalled(); err != nil {
@@ -274,6 +274,28 @@ func (c *PiConnector) Start(ctx context.Context, bead types.Bead, opts AgentOpti
 	return session, nil
 }
 
+// rpcArgs builds the head of the pi argv: offline RPC mode under a named,
+// per-bead session. --offline skips Pi's startup provider-list network fetch
+// (flaky under concurrency) in favor of the local models.json cache.
+// --session-id (not --no-session) gives the run a stable session: pi creates
+// it if missing, and the named session keeps the transcript on disk so a
+// replacement worker can resume it and prompt-cache prefixes stay warm across
+// respawns. Extracted from Execute for testability.
+func (c *PiConnector) rpcArgs(sessionID string) []string {
+	args := []string{
+		"--offline",
+		"--mode", "rpc",
+		"--session-id", sessionID,
+	}
+	if c.provider != "" {
+		args = append(args, "--provider", c.provider)
+	}
+	if c.model != "" {
+		args = append(args, "--model", c.model)
+	}
+	return args
+}
+
 // Execute sends the prompt to Pi and waits for completion
 // Uses JSONL protocol over stdin/stdout
 func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt string) (*AgentResult, error) {
@@ -282,21 +304,7 @@ func (c *PiConnector) Execute(ctx context.Context, session *AgentSession, prompt
 	// Query Hindsight for context enrichment before execution
 	enhancedPrompt := c.enrichPromptWithHindsight(session, prompt)
 
-	// Build command. --offline skips Pi's startup provider-list network fetch
-	// (flaky under concurrency) in favor of the local models.json cache.
-	args := []string{
-		"--offline",
-		"--mode", "rpc",
-		"--no-session",
-	}
-
-	if c.provider != "" {
-		args = append(args, "--provider", c.provider)
-	}
-
-	if c.model != "" {
-		args = append(args, "--model", c.model)
-	}
+	args := c.rpcArgs(session.ID)
 
 	// Get project path from session metadata (used both for skill scoping and
 	// as the command's working directory).

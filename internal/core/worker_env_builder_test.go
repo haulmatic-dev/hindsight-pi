@@ -167,3 +167,23 @@ func TestWorkerEnv_PhaseModelRoutingBreakerOverrides(t *testing.T) {
 		t.Errorf("open breaker should override phase route, model = %q, want fallback-m", got)
 	}
 }
+
+// TestWorkerEnv_SetsPiCacheRetention verifies workers run Pi with
+// PI_CACHE_RETENTION=long so pi-ai marks cache blocks with ttl:1h instead of
+// the default 5m TTL, keeping re-prompts of the same bead cache-warm past the
+// default expiry (cache hardening, 2026-09-06).
+func TestWorkerEnv_SetsPiCacheRetention(t *testing.T) {
+	b := NewWorkerEnvBuilder(DefaultConfig())
+	env := b.Build(types.Bead{ID: "x", Project: "p"}, "/tmp/p", "orchestrator", 0)
+
+	found := false
+	for _, e := range env {
+		if e == "PI_CACHE_RETENTION=long" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("worker env must set PI_CACHE_RETENTION=long")
+	}
+}

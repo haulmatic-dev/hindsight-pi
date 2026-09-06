@@ -70,6 +70,11 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 		// the local models.json cache instead. Verified: 3 concurrent offline
 		// Pi calls all succeed where online mode failed.
 		"PI_OFFLINE=1",
+		// Ask Pi for long prompt-cache retention: pi-ai then marks cache
+		// blocks cache_control {type:ephemeral, ttl:1h} instead of the default
+		// 5m TTL, so respawns/re-prompts of the same bead still hit cache past
+		// the default expiry. Harmless when the provider ignores the marker.
+		"PI_CACHE_RETENTION=long",
 		fmt.Sprintf("HYDRA_BEAD_ID=%s", bead.ID),
 		fmt.Sprintf("HYDRA_PROJECT=%s", bead.Project),
 		fmt.Sprintf("HYDRA_PROJECT_PATH=%s", projectPath),
