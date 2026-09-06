@@ -4,6 +4,8 @@ import (
 
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1930,6 +1933,12 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 	// here rather than relying on inheritance so it always reaches Pi.
 	envVars = append(envVars, "PI_OFFLINE=1")
 
+	// Long prompt-cache retention: pi-ai sends cache_control
+	// {type:ephemeral, ttl:1h} for cache blocks instead of the default 5m TTL,
+	// keeping re-prompts of the same bead warm past the default expiry.
+	// Harmless when the provider ignores the marker.
+	envVars = append(envVars, "PI_CACHE_RETENTION=long")
+
 	// Set PI_CODING_AGENT_DIR if configDir is set. resolvePiAgentDir picks the
 	// directory that actually holds the package set rather than blindly appending
 	// "agent" — appending it on the VPS layout pointed Pi at an empty directory,
@@ -2039,6 +2048,28 @@ func phaseGuidance(bead types.Bead) string {
 	return ""
 }
 
+// contentHash returns a short stable hash of a string, used to order prompt
+// tail items deterministically regardless of the (unstable) server rank.
+func contentHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:8])
+}
+
+// stableByContentHash returns items sorted by contentHash. The sort is
+// stable: items with equal hashes keep their input relative order, so the
+// server's relevance ranking survives as tiebreak. Because the hash order is
+// a total order over distinct contents, the output is byte-identical for any
+// input permutation of the same set — which keeps respawn prompts cache-warm
+// from turn 0 (cache hardening, 2026-09-06).
+func stableByContentHash(items []string) []string {
+	out := make([]string, len(items))
+	copy(out, items)
+	sort.SliceStable(out, func(i, j int) bool {
+		return contentHash(out[i]) < contentHash(out[j])
+	})
+	return out
+}
+
 func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, extras promptExtras) string {
 	var promptParts []string
 
@@ -2142,23 +2173,35 @@ A turn ending without this block is treated as unfinished and you will be re-pro
 		promptParts = append(promptParts, fmt.Sprintf("Files to modify: %v", targetFiles))
 	}
 
-	// Add Hindsight context if available. Memories arrive server-ranked and
-	// already truncated to the configured limit; the recall API sends no
-	// per-memory score, so none is shown (a phantom 0.00 was displayed
-	// before). Memory IDs are internal noise — content only.
+	// Add Hindsight context if available. Memories arrive server-ranked, but
+	// the server rank is not stable across identical recall calls, and an
+	// unstable tail defeats prompt caching on respawn. Sort by content hash
+	// (stable, so equal hashes keep server rank) so the prompt is byte-
+	// identical whenever the underlying memory set is unchanged. Memory IDs
+	// are internal noise — content only.
 	if hindsightContext != nil && len(hindsightContext.Memories) > 0 {
-		promptParts = append(promptParts, "\nRelevant past executions (most relevant first):")
+		contents := make([]string, 0, len(hindsightContext.Memories))
 		for _, mem := range hindsightContext.Memories {
-			promptParts = append(promptParts, "- "+truncateString(mem.Content, 200))
+			contents = append(contents, truncateString(mem.Content, 200))
+		}
+		promptParts = append(promptParts, "\nRelevant past executions (deterministic order):")
+		for _, c := range stableByContentHash(contents) {
+			promptParts = append(promptParts, "- "+c)
 		}
 	}
 
 	// Distilled institutional rules, injected deterministically (the agent is
 	// also told to query CASS itself, but that instruction is skippable).
+	// Same story as memories: CASS relevance scores shift between calls, so
+	// order by content hash for cache-stable prompts.
 	if len(extras.CassBullets) > 0 {
-		promptParts = append(promptParts, "\nProven rules from this codebase's playbook — follow them:")
+		bullets := make([]string, 0, len(extras.CassBullets))
 		for _, b := range extras.CassBullets {
-			promptParts = append(promptParts, "- "+truncateString(b, 300))
+			bullets = append(bullets, truncateString(b, 300))
+		}
+		promptParts = append(promptParts, "\nProven rules from this codebase's playbook — follow them:")
+		for _, b := range stableByContentHash(bullets) {
+			promptParts = append(promptParts, "- "+b)
 		}
 	}
 

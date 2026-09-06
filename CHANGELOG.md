@@ -7,6 +7,12 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Cache hardening pack for prompt-cache reuse across respawns: workers now spawn Pi with `PI_CACHE_RETENTION=long` (pi-ai sends `cache_control {type:ephemeral, ttl:1h}` instead of the default 5m TTL; harmless if the provider ignores the marker), respawn prompts sort Hindsight memories and CASS bullets by content hash with server rank as tiebreak so prompts are byte-identical whenever the underlying set is unchanged (warm cache from turn 0), and `scripts/cache-ttl-probe.sh` measures whether the coding endpoint actually honors the ttl:1h marker (probes `cache_read` at +35min/+65min). Operators: full probe takes ~65min — run under `systemd-run`/`nohup`, not inside a worker turn. *Authored by a Hydra dogfood run.*
+
+### Fixed
+- Dead session plumbing removed: `internal/agents` PiConnector built a `hydra-<bead>` session ID but passed `--no-session`, so every RPC run was ephemeral and unresumable — it now launches `pi --session-id hydra-<bead>`; gap adjudication likewise moves from `--no-session` to a per-bead-purpose `--session-id hydra-adjud-<bead>` (never shared across beads, so prior adjudications cannot bias later verdicts). *Authored by a Hydra dogfood run.*
+
 ### Documentation
 - Lifetime-fit sizing rule: create-prd gains §3.2b (≤12 source files per FR for read-and-modify-each-file work, slice+flip pattern, exotic-environment separation, slice-scoped acceptance) and task-breakdown gains a matching hard rule plus a verbatim guardrail block for every bead spec (no generator scripts, no node_modules rebuilds, no config edits, slice-scoped test runs only). Driven by measured failures: whole-module beads poj8g/e2lqf demanded 539/811 turns and 66M/94M tokens and died incomplete; ≤12-file beads complete first attempt.
 - `AGENTS.md` Documentation & Changelog Discipline gains rule 4 (host-setup sync): any change altering host requirements (systemd unit/drop-ins, paths, binaries, OS packages, Pi config, `/etc/hydra/*`, resilience tooling, deploy procedure) must update `docs/operations/host-setup.md` in the same commit/PR; the doc itself carries a matching banner pointing at the rule.
