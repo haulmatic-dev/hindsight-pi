@@ -304,3 +304,140 @@ func TestWorktreeManager_ConcurrentChainsIsolated(t *testing.T) {
 		}
 	}
 }
+
+// TestWorktreeManager_EnsureWorktree_KeepsUnintegratedCommits: the reuse-reset
+// must only fire when the worktree tip is already contained in the working
+// branch. The unguarded reset rewound branches holding committed worker work
+// (hydra-xnx f6269c0/d61ae5d, 2026-09-06) and the integrate then silently
+// no-opped while the bead closed.
+func TestWorktreeManager_EnsureWorktree_KeepsUnintegratedCommits(t *testing.T) {
+	proj := gitInitRepo(t)
+	t.Setenv("HYDRA_HOME", t.TempDir())
+	m := NewWorktreeManager()
+
+	wt, err := m.EnsureWorktree(proj, "k1")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	// Worker commits its own work and leaves the worktree clean.
+	if err := os.WriteFile(filepath.Join(wt, "worker.txt"), []byte("worker work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitDir(t, wt, "add", "-A")
+	gitDir(t, wt, "commit", "-m", "worker commit")
+	workSHA := head(t, wt)
+
+	// Main advances while the worktree sits unintegrated.
+	if err := os.WriteFile(filepath.Join(proj, "main2.txt"), []byte("main moves\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitDir(t, proj, "add", "-A")
+	gitDir(t, proj, "commit", "-m", "main advances")
+
+	// Re-ensure: the committed work is NOT contained in HEAD, so no reset.
+	wt2, err := m.EnsureWorktree(proj, "k1")
+	if err != nil {
+		t.Fatalf("EnsureWorktree (reuse): %v", err)
+	}
+	if got := head(t, wt2); got != workSHA {
+		t.Fatalf("reuse-reset destroyed unintegrated commits: head = %s, want %s", got, workSHA)
+	}
+
+	// Once the work IS integrated (contained in HEAD), reuse-reset is safe
+	// and syncs the worktree back to the base.
+	gitDir(t, proj, "merge", "--no-ff", "-m", "integrate k1", m.branchName("k1"))
+	wt3, err := m.EnsureWorktree(proj, "k1")
+	if err != nil {
+		t.Fatalf("EnsureWorktree (post-integrate): %v", err)
+	}
+	if got, want := head(t, wt3), head(t, proj); got != want {
+		t.Fatalf("post-integrate reuse did not sync to base: head = %s, want %s", got, want)
+	}
+}
+
+// TestWorktreeManager_Integrate_VerifiesAndPreserves: Integrate merges and
+// verifies containment but leaves the worktree + branch in place; Remove is
+// the explicit teardown after post-merge steps (push) succeed.
+func TestWorktreeManager_Integrate_VerifiesAndPreserves(t *testing.T) {
+	proj := gitInitRepo(t)
+	t.Setenv("HYDRA_HOME", t.TempDir())
+	m := NewWorktreeManager()
+
+	wt, err := m.EnsureWorktree(proj, "k2")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "feat.txt"), []byte("feat\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	committed, err := m.Commit(wt, "feat: k2")
+	if err != nil || !committed {
+		t.Fatalf("Commit: committed=%v err=%v", committed, err)
+	}
+
+	if err := m.Integrate(proj, "k2"); err != nil {
+		t.Fatalf("Integrate: %v", err)
+	}
+
+	// Merge landed on the working branch...
+	if _, err := os.Stat(filepath.Join(proj, "feat.txt")); err != nil {
+		t.Fatalf("expected feat.txt on working branch after Integrate: %v", err)
+	}
+	// ...but the worktree + branch are preserved until Remove.
+	if !isGitWorktree(m.worktreePath(proj, "k2")) {
+		t.Fatal("Integrate removed the worktree; caller-driven Remove must do that")
+	}
+	if !branchExists(proj, m.branchName("k2")) {
+		t.Fatal("Integrate removed the branch; caller-driven Remove must do that")
+	}
+	if !isAncestorOf(proj, m.branchName("k2"), "HEAD") {
+		t.Fatal("post-merge verification failed: branch tip not contained in HEAD")
+	}
+
+	m.Remove(proj, "k2")
+	if branchExists(proj, m.branchName("k2")) {
+		t.Fatal("Remove did not tear down the branch")
+	}
+}
+
+func TestIsAncestorOf(t *testing.T) {
+	proj := gitInitRepo(t)
+	base := head(t, proj)
+	// Advance HEAD so base and HEAD are genuinely different commits.
+	if err := os.WriteFile(filepath.Join(proj, "second.txt"), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitDir(t, proj, "add", "-A")
+	gitDir(t, proj, "commit", "-m", "second")
+	if !isAncestorOf(proj, base, "HEAD") {
+		t.Fatal("base should be ancestor of HEAD")
+	}
+	if isAncestorOf(proj, "HEAD", base) {
+		t.Fatal("HEAD should not be ancestor of base")
+	}
+	if !isAncestorOf(proj, "HEAD", "HEAD") {
+		t.Fatal("a ref is its own ancestor (equality must pass)")
+	}
+	if isAncestorOf(proj, "", "HEAD") {
+		t.Fatal("empty ancestor must be false")
+	}
+	if isAncestorOf(proj, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD") {
+		t.Fatal("unknown sha must be false")
+	}
+}
+
+func gitDir(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+	return string(out)
+}
+
+func head(t *testing.T, dir string) string {
+	t.Helper()
+	return strings.TrimSpace(gitDir(t, dir, "rev-parse", "HEAD"))
+}

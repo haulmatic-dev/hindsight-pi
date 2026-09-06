@@ -232,14 +232,22 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 
 			// Singletons (beads that belong to no registered multi-bead chain) have
 			// no chain-completion event to trigger integration, so integrate now.
+			// Fail-closed: the merge is verified inside Integrate, the push is
+			// verified inside publishAfterIntegrate (ls-remote), and the worktree
+			// is removed ONLY after both land. Either failure aborts the close,
+			// emits integration-failed, and leaves the bead open with the
+			// worktree preserved (hydra-xnx 2026-09-06: cleanup ran after a fake
+			// success and the gate-verified commits dangled unreferenced).
 			if !c.isChainMember(bead.ID) {
-				if iErr := c.worktreeManager.IntegrateAndRemove(projectPath, key); iErr != nil {
-					log.Printf("[Worktree] integrate failed for %s: %v", bead.ID, iErr)
-				} else {
-					log.Printf("[Worktree] integrated singleton %s", bead.ID)
-					AppendActivity(projectPath, string(bead.ID), "integrated")
-					c.publishAfterIntegrate(projectPath, bead)
+				if iErr := c.worktreeManager.Integrate(projectPath, key); iErr != nil {
+					return c.failIntegration(bead, projectPath, repoName, "integrate", iErr)
 				}
+				if pErr := c.publishAfterIntegrate(projectPath, bead); pErr != nil {
+					return c.failIntegration(bead, projectPath, repoName, "push", pErr)
+				}
+				c.worktreeManager.Remove(projectPath, key)
+				log.Printf("[Worktree] integrated singleton %s", bead.ID)
+				AppendActivity(projectPath, string(bead.ID), "integrated")
 			}
 		} else {
 			log.Printf("[Worktree] worktree lookup failed for %s: %v", bead.ID, err)
@@ -504,33 +512,81 @@ func (c *BeadCloser) verifiedCloseEnabled() bool {
 }
 
 // publishAfterIntegrate pushes the working branch to the configured remote
-// after a singleton bead integrates, when output push is enabled. Fail-open
-// and SILENT: a push that is rejected (protected branch), unauthenticated, or
-// otherwise fails is recorded in the per-repo activity log and never affects
-// the close outcome. No-op when push is disabled or no worktree manager.
-func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead) {
+// after a singleton bead integrates, when output push is enabled. The push is
+// fail-closed: PushBranch verifies the remote ref advanced (ls-remote), and
+// any rejection (GH006 branch protection, non-FF) is returned as an error
+// carrying the exact remote stderr. Returns nil when push is disabled or when
+// a rejected push was routed to a successfully created auto-PR (work is then
+// preserved on the dogfood branch + PR instead of the working branch).
+func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead) error {
 	if c.config == nil || !c.config.OutputPushEnabled() || c.worktreeManager == nil {
-		return
+		return nil
 	}
 	branch, err := c.worktreeManager.WorkingBranch(projectPath)
 	if err != nil || branch == "" {
 		AppendActivity(projectPath, string(bead.ID), "push skipped: no branch")
-		return
+		if err != nil {
+			return fmt.Errorf("push %s: no working branch: %w", bead.ID, err)
+		}
+		return fmt.Errorf("push %s: no working branch", bead.ID)
 	}
 	remote := c.config.OutputPushRemote()
-	if pushed, reason := PushBranch(projectPath, remote, branch); pushed {
+	pushed, reason := PushBranch(projectPath, remote, branch)
+	if pushed {
+		// Logged only after PushBranch's ls-remote verification confirmed the
+		// remote ref matches the local head — never on command exit alone.
 		log.Printf("[Output] pushed %s to %s/%s", bead.ID, remote, branch)
 		AppendActivity(projectPath, string(bead.ID), "pushed")
-	} else {
-		if strings.HasPrefix(reason, "remote at") {
-			log.Printf("[Output] push verification FAILED for %s: %s", bead.ID, reason)
-		}
-		log.Printf("[Output] push skipped for %s: %s", bead.ID, reason)
-		AppendActivity(projectPath, string(bead.ID), "push skipped: "+reason)
-		if reason == "protected branch" || strings.HasPrefix(reason, "remote at") {
-			maybeOpenAutoPR(c.beadsClient, c.config, projectPath, bead.ID.Repo(), branch, bead)
+		return nil
+	}
+	if strings.HasPrefix(reason, "remote at") {
+		log.Printf("[Output] push verification FAILED for %s: %s", bead.ID, reason)
+	}
+	log.Printf("[Output] push skipped for %s: %s", bead.ID, reason)
+	AppendActivity(projectPath, string(bead.ID), "push skipped: "+reason)
+	if IsProtectedBranchRejection(reason) || strings.HasPrefix(reason, "remote at") {
+		if maybeOpenAutoPR(c.beadsClient, c.config, projectPath, bead.ID.Repo(), branch, bead) {
+			log.Printf("[Output] push rejected for %s (%s); auto-PR opened — closing via PR", bead.ID, reason)
+			AppendActivity(projectPath, string(bead.ID), "pushed via auto-PR")
+			return nil
 		}
 	}
+	return fmt.Errorf("push %s to %s/%s: %s", bead.ID, remote, branch, reason)
+}
+
+// failIntegration aborts a close whose integrate/push step failed
+// verification. The bead is left open (reopened when not terminal), a typed
+// integration-failed event carries the exact error, and the worktree is
+// preserved for inspection/retry. Always returns a non-nil error so the
+// caller aborts the close.
+func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, stage string, cause error) error {
+	beadID := string(bead.ID)
+	detail := cause.Error()
+	log.Printf("[Integrate] FAILED %s at %s: %s — bead left open, worktree preserved", beadID, stage, detail)
+
+	// Terminal bead: integration already happened on a previous close attempt;
+	// do not resurrect (same guard as rejectClose).
+	if c.beadsClient != nil {
+		if fresh, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID); err == nil && fresh != nil && fresh.Status.IsTerminal() {
+			log.Printf("[Integrate] Bead %s already terminal (%s); skipping integration-failed reopen (%s)", beadID, fresh.Status, stage)
+			return fmt.Errorf("integration-failed: bead %s %s: %w", beadID, stage, cause)
+		}
+	}
+
+	c.events.EmitRepo(projectPath, Event{Type: "integration-failed", Project: repoName,
+		Bead: beadID, Reason: stage + "_failed",
+		Detail: fmt.Sprintf("singleton integration failed at %s: %s", stage, detail),
+		Fields: map[string]any{"stage": stage, "error": detail}})
+	AppendActivity(projectPath, beadID, "integration-failed: "+stage)
+	if c.beadsClient != nil {
+		if err := c.beadsClient.UpdateBeadStatus(projectPath, bead.ID, types.StatusOpen); err != nil {
+			log.Printf("[Integrate] Failed to reopen %s: %v", beadID, err)
+		}
+		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"integration-failed"}); err != nil {
+			log.Printf("[Integrate] Failed to label %s: %v", beadID, err)
+		}
+	}
+	return fmt.Errorf("integration-failed: bead %s %s: %w", beadID, stage, cause)
 }
 
 // verifyBeforeClose runs the verified-close checks for a completed bead.

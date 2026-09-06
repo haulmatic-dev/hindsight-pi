@@ -93,10 +93,20 @@ func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error
 			baseCommit, _ := gitOut(projectPath, "rev-parse", base)
 			wtHead, _ := gitOut(wtPath, "rev-parse", "HEAD")
 			if strings.TrimSpace(wtHead) != strings.TrimSpace(baseCommit) && worktreeClean(wtPath) {
-				if err := resetWorktree(wtPath, base); err != nil {
-					return "", fmt.Errorf("worktree reuse reset %s: %w", wtPath, err)
+				// Reuse-reset ONLY when the worktree tip is already contained in
+				// the working branch. The unguarded reset rewound branches that
+				// held gate-verified worker commits (f6269c0/d61ae5d hydra-xnx,
+				// bf4e468d 2026-09-05/06): the integrate then silently no-opped
+				// ("Already up to date"), the push verified equal, the bead
+				// closed, and the work dangled unreferenced.
+				if isAncestorOf(projectPath, strings.TrimSpace(wtHead), "HEAD") {
+					if err := resetWorktree(wtPath, base); err != nil {
+						return "", fmt.Errorf("worktree reuse reset %s: %w", wtPath, err)
+					}
+					log.Printf("[Worktree] recovered stale path %s (reuse)", wtPath)
+				} else {
+					log.Printf("[Worktree] keeping %s: unintegrated commits at %s (reuse-reset skipped)", wtPath, strings.TrimSpace(wtHead))
 				}
-				log.Printf("[Worktree] recovered stale path %s (reuse)", wtPath)
 			}
 			return wtPath, nil
 		}
@@ -161,10 +171,19 @@ func (m *WorktreeManager) Commit(worktreePath, message string) (bool, error) {
 	return true, nil
 }
 
-// IntegrateAndRemove merges the chain's branch into the working branch (in the
-// main checkout) and removes the worktree + branch. On merge conflict it
-// aborts the merge, leaves the worktree in place for inspection, and errors.
-func (m *WorktreeManager) IntegrateAndRemove(projectPath, key string) error {
+// Integrate merges the chain's branch into the working branch (in the main
+// checkout) and verifies the merge actually landed, but does NOT remove the
+// worktree or branch — the caller runs post-merge steps (push) first and
+// tears down via Remove once everything is verified. On merge conflict it
+// aborts the merge and errors, leaving the worktree in place.
+//
+// Fail-closed verification: after a successful `git merge` the worktree
+// branch tip must be contained in HEAD (`git merge-base --is-ancestor`). A
+// merge that exits 0 without containing the branch (e.g. an "Already up to
+// date" no-op on a rewound branch) is treated as an integration failure, not
+// a success — the exact swallow that logged "integrated singleton" while no
+// merge commit existed (hydra-xnx, 2026-09-06).
+func (m *WorktreeManager) Integrate(projectPath, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -199,12 +218,43 @@ func (m *WorktreeManager) IntegrateAndRemove(projectPath, key string) error {
 
 merged:
 
+	// Verify the effect, not the command: the branch tip must be contained in
+	// HEAD now. Failure keeps worktree + branch and reports an error so the
+	// caller never logs "integrated" over a no-op merge.
+	if !isAncestorOf(projectPath, branch, "HEAD") {
+		tip, _ := gitOut(projectPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+		head, _ := gitOut(projectPath, "rev-parse", "HEAD")
+		return fmt.Errorf("integrate %s: merge verification failed: branch tip %s not contained in HEAD %s (worktree left at %s)",
+			branch, strings.TrimSpace(tip), strings.TrimSpace(head), wtPath)
+	}
+	return nil
+}
+
+// IntegrateAndRemove merges the chain's branch into the working branch,
+// verifies the merge landed, and removes the worktree + branch. It is the
+// teardown-only variant for callers with no post-merge push step; the
+// singleton close path uses Integrate + Remove so a rejected push still
+// finds the worktree present.
+func (m *WorktreeManager) IntegrateAndRemove(projectPath, key string) error {
+	if err := m.Integrate(projectPath, key); err != nil {
+		return err
+	}
+	m.removeWorktreeAndBranch(projectPath, key)
+	return nil
+}
+
+// removeWorktreeAndBranch tears down a chain's worktree + branch. Called by
+// IntegrateAndRemove and Remove after their respective gates pass.
+func (m *WorktreeManager) removeWorktreeAndBranch(projectPath, key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	wtPath := m.worktreePath(projectPath, key)
+	branch := m.branchName(key)
 	if isGitWorktree(wtPath) {
 		_, _ = gitOut(projectPath, "worktree", "remove", wtPath, "--force")
 	}
 	_, _ = gitOut(projectPath, "branch", "-D", branch)
 	_, _ = gitOut(projectPath, "worktree", "prune")
-	return nil
 }
 
 // beadsOnlyConflict reports whether every unmerged path in a failed merge
@@ -259,14 +309,7 @@ func (m *WorktreeManager) QuarantineAndRemove(projectPath, key string) (string, 
 // Remove tears down a chain's worktree + branch without integrating (used to
 // discard abandoned/failed chains).
 func (m *WorktreeManager) Remove(projectPath, key string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	wtPath := m.worktreePath(projectPath, key)
-	if isGitWorktree(wtPath) {
-		_, _ = gitOut(projectPath, "worktree", "remove", wtPath, "--force")
-	}
-	_, _ = gitOut(projectPath, "branch", "-D", m.branchName(key))
-	_, _ = gitOut(projectPath, "worktree", "prune")
+	m.removeWorktreeAndBranch(projectPath, key)
 }
 
 // CleanupStaleWorktrees removes per-chain worktrees that are older than
@@ -371,6 +414,18 @@ func isGitWorktree(path string) bool {
 
 func branchExists(projectPath, branch string) bool {
 	_, err := gitOut(projectPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+	return err == nil
+}
+
+// isAncestorOf reports whether ancestor is contained in descendant
+// (`git merge-base --is-ancestor`). Exit 1 (not an ancestor) is a definitive
+// false; any git error is also false — callers bias toward preservation on
+// uncertainty (never reset/remove unverified work).
+func isAncestorOf(repoPath, ancestor, descendant string) bool {
+	if ancestor == "" || descendant == "" {
+		return false
+	}
+	_, err := gitOut(repoPath, "merge-base", "--is-ancestor", ancestor, descendant)
 	return err == nil
 }
 

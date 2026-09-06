@@ -63,8 +63,7 @@ func redactToken(text, token string) string {
 // remoteSHA) on mismatch or error. The comparison uses ls-remote so it does not
 // trust the local remote-tracking ref, which can be updated even when the
 // remote silently ignores the push.
-func verifyRemoteHead(repoPath, remote, branch string) (bool, string, string) {
-	localOut, err := gitOut(repoPath, "rev-parse", "--verify", "refs/heads/"+branch)
+func verifyRemoteHead(repoPath, remote, branch string) (bool, string, string) {	localOut, err := gitOut(repoPath, "rev-parse", "--verify", "refs/heads/"+branch)
 	if err != nil {
 		return false, "", ""
 	}
@@ -84,13 +83,30 @@ func verifyRemoteHead(repoPath, remote, branch string) (bool, string, string) {
 	return false, localSHA, remoteSHA
 }
 
+// IsProtectedBranchRejection reports whether a push-failure reason indicates
+// the remote rejected the push via branch protection (GH006, pre-receive hook
+// decline, or a non-FF "remote rejected"). Callers use it to route the
+// failure to the auto-PR fallback; the full reason text is kept verbatim so
+// the exact remote error always reaches logs and events.
+func IsProtectedBranchRejection(reason string) bool {
+	lower := strings.ToLower(reason)
+	return strings.Contains(lower, "protected branch") ||
+		strings.Contains(lower, "gh006") ||
+		strings.Contains(lower, "pre-receive hook declined") ||
+		strings.Contains(lower, "remote rejected") ||
+		strings.Contains(lower, "changes must be made through a pull request")
+}
+
 // PushBranchWithToken pushes branch from repoPath to the repo's origin,
 // authenticating with the given personal access token (the project owner's).
 // It resolves origin, injects the token into a one-shot HTTPS URL (never
 // persisted to config), and pushes. Fail-open and SILENT like PushBranch:
 // returns (false, reason) on any failure, never errors/panics, and the token
-// is redacted from every returned reason. Falls back to a plain `origin` push
-// when the token is empty or the origin URL cannot be parsed.
+// is redacted from every returned reason. The reason carries the exact
+// (redacted) remote stderr on rejection — never a collapsed summary — so
+// branch-protection rejections (GH006) surface verbatim. Falls back to a
+// plain `origin` push when the token is empty or the origin URL cannot be
+// parsed.
 func PushBranchWithToken(repoPath, branch, token string) (bool, string) {
 	if branch == "" {
 		return false, "not configured"
@@ -114,16 +130,6 @@ func PushBranchWithToken(repoPath, branch, token string) (bool, string) {
 		return true, ""
 	}
 	msg := redactToken(string(out), token)
-	lower := strings.ToLower(msg)
-	if strings.Contains(lower, "pre-receive hook declined") ||
-		strings.Contains(lower, "protected branch") ||
-		strings.Contains(lower, "remote rejected") {
-		return false, "protected branch"
-	}
-	if strings.Contains(lower, "authentication") || strings.Contains(lower, "403") ||
-		strings.Contains(lower, "could not read username") {
-		return false, "auth"
-	}
 	reason := strings.TrimSpace(msg)
 	if reason == "" {
 		reason = "push failed"
@@ -133,7 +139,9 @@ func PushBranchWithToken(repoPath, branch, token string) (bool, string) {
 
 // PushBranch attempts to push branch from repoPath to the named remote.
 // It returns (true, "") on success and (false, reason) on any failure.
-// It never returns an error value or panics.
+// It never returns an error value or panics. The reason carries the exact
+// remote stderr on rejection (e.g. GH006 branch-protection text) so callers
+// can log it verbatim; use IsProtectedBranchRejection to classify it.
 func PushBranch(repoPath, remote, branch string) (bool, string) {
 	if remote == "" {
 		return false, "not configured"
@@ -148,15 +156,7 @@ func PushBranch(repoPath, remote, branch string) (bool, string) {
 		return true, ""
 	}
 
-	msg := string(out)
-	lower := strings.ToLower(msg)
-	if strings.Contains(lower, "pre-receive hook declined") ||
-		strings.Contains(lower, "protected branch") ||
-		strings.Contains(lower, "remote rejected") {
-		return false, "protected branch"
-	}
-
-	reason := strings.TrimSpace(msg)
+	reason := strings.TrimSpace(string(out))
 	if reason == "" {
 		reason = "push failed"
 	}

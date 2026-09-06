@@ -45,7 +45,13 @@
 **Exports:**
 - `(*BeadCloser) Close(worker *types.Worker, success bool, exitCode int) error`
 
-In `(*BeadCloser).Close`, inside the existing commit-on-close block (the `success && reason == "completed" && c.worktreeManager != nil && c.chainKeyFn != nil && bead != nil` branch), after a successful `Commit`: compute `key := c.chainKeyFn(*bead)`; if `key == bead.ID.String()` the bead is a singleton chain (it belongs to no registered multi-bead chain — the chain-completion event that would normally trigger integration will never fire for it), so call `c.worktreeManager.IntegrateAndRemove(projectPath, key)` immediately. Log `[Worktree] integrated singleton <bead-id>` on success; on error log `[Worktree] integrate failed for <bead-id>: <err>` and continue (the close itself must not fail — the reconciler is the retry path). Multi-bead chains (`key != bead.ID.String()`) keep the existing event-driven integration and are NOT integrated here.
+In `(*BeadCloser).Close`, inside the existing commit-on-close block (the `success && reason == "completed" && c.worktreeManager != nil && c.chainKeyFn != nil && bead != nil` branch), after a successful `Commit`: compute `key := c.chainKeyFn(*bead)`; if `key == bead.ID.String()` the bead is a singleton chain (it belongs to no registered multi-bead chain — the chain-completion event that would normally trigger integration will never fire for it), so call `c.worktreeManager.IntegrateAndRemove(projectPath, key)` immediately. Log `[Worktree] integrated singleton <bead-id>` on success; on error log `[Worktree] integrate failed for <bead-id>: <err>` and continue (the close itself must not fail — the reconciler is the retry path).
+
+> **Superseded 2026-09-06 (hydra-xnx incident):** the fail-open close above is
+> reversed — integrate/push now fails closed. `Integrate` verifies the merge
+> is contained in HEAD, the push is verified via `ls-remote`, the worktree is
+> removed only after both land, and either failure emits `integration-failed`,
+> reopens the bead, and preserves the worktree. See `docs/architecture/shepherd.md` §2. Multi-bead chains (`key != bead.ID.String()`) keep the existing event-driven integration and are NOT integrated here.
 
 **Acceptance Criteria:**
 - With a real git repo fixture: a singleton bead whose worktree has a commit, on the commit-on-close path, ends with its `hydra/wt-<bead-id>` branch merged into the working branch and the worktree removed
