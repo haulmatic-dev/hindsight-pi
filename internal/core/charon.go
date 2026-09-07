@@ -255,7 +255,7 @@ func (j *Charon) performCleanup() {
 					ReconcileOrphanedWorktrees(NewWorktreeManager(), project.Path, active, j.terminalBeadChecker(project.Path))
 				}
 			}
-			CleanupStaleWorktrees(24*time.Hour, active)
+			CleanupStaleWorktrees(24*time.Hour, active, j.events)
 		}()
 	}
 

@@ -446,6 +446,7 @@ func NewOverseer(config *Config) *Overseer {
 	// per-repo .hydra/events.jsonl mirrors.
 	o.beadCloser.SetEventSink(NewEventSink(DefaultEventsDir()))
 	o.providerPool.SetEventSink(NewEventSink(DefaultEventsDir()))
+	o.orphanJanitor.SetEventSink(NewEventSink(DefaultEventsDir()))
 	retainer := NewVerdictRetainer(o.hindsightClient)
 	o.beadCloser.SetVerdictRetainer(retainer)
 

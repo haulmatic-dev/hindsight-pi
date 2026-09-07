@@ -60,6 +60,7 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `retry_exhausted` | a bead exhausts `default_retries` and has no live worker or registry row | `attempts` |
 | `spawn-suppressed-closed` | a queued retry spawn is aborted because the bead became terminal while in the retry queue | `status` |
 | `integration-failed` | singleton integrate/push failed verification (merge not contained in HEAD, or push rejected / remote ref did not advance) — bead reopened with `integration-failed` label, worktree preserved | `stage` (`integrate`/`push`), `error` (exact remote stderr) |
+| `worktree-preserved-unintegrated` | janitorial GC refused to remove a stale worktree: its branch carries commits not yet in the working branch, or it has uncommitted tracked changes — reconciler integrates on its next sweep | `worktree`, `branch`, `cause` |
 
 Read programmatically with `ReadEvents(path)` (torn-line tolerant; a missing
 file is an empty stream, not an error).
