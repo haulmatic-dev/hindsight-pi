@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -318,10 +319,21 @@ func (m *WorktreeManager) Remove(projectPath, key string) {
 // integration removes a worktree only when its chain completes cleanly, so
 // failed/abandoned chains leak. Returns the number of worktrees removed.
 //
+// Fail-closed on in-flight work: a stale worktree whose branch carries commits
+// not yet contained in the working branch, or that has uncommitted tracked
+// changes, is PRESERVED (not removed) and a worktree-preserved-unintegrated
+// event is emitted — the janitorial sweep wiped deliverables twice between
+// verdict and verified-close (48bdq, 2026-09-06/07): "Integration commit
+// b1b9b32df, specs wiped, jest missing. Repair both." The reconciler lands the
+// preserved branch on its next sweep; the event makes the preservation
+// visible instead of silent. The check fails open only when the source repo
+// or git queries are unavailable (never wedge the sweep on a broken check).
+//
 // Staleness is judged by the worktree's .git file mtime (set at creation).
-// The source repository (needed for `git worktree prune`) is recovered from
-// the .git file's "gitdir: <src>/.git/worktrees/<name>" pointer.
-func CleanupStaleWorktrees(maxAge time.Duration, activeKeys map[string]bool) int {
+// The source repository (needed for `git worktree prune` and the unintegrated
+// check) is recovered from the .git file's "gitdir: <src>/.git/worktrees/<name>"
+// pointer.
+func CleanupStaleWorktrees(maxAge time.Duration, activeKeys map[string]bool, events *EventSink) int {
 	base := os.Getenv("HYDRA_HOME")
 	if base == "" {
 		base = os.TempDir()
@@ -362,6 +374,14 @@ func CleanupStaleWorktrees(maxAge time.Duration, activeKeys map[string]bool) int
 				continue
 			}
 			if src := worktreeSourceRepo(gitFile); src != "" {
+				if reason, preserve := unintegratedWorkReason(src, "hydra/wt-"+e.Name(), wt); preserve {
+					log.Printf("[WorktreeGC] preserving %s: %s (reconciler will integrate)", wt, reason)
+					events.EmitRepo(src, Event{Type: "worktree-preserved-unintegrated", Project: filepath.Base(src),
+						Bead: e.Name(), Reason: "unintegrated_work",
+						Detail: fmt.Sprintf("stale worktree %s preserved: %s", wt, reason),
+						Fields: map[string]any{"worktree": wt, "branch": "hydra/wt-" + e.Name(), "cause": reason}})
+					continue
+				}
 				pruneRepos[src] = true
 			}
 			if err := os.RemoveAll(wt); err != nil {
@@ -378,6 +398,27 @@ func CleanupStaleWorktrees(maxAge time.Duration, activeKeys map[string]bool) int
 		log.Printf("[WorktreeGC] removed %d stale worktree(s) under %s", removed, root)
 	}
 	return removed
+}
+
+// unintegratedWorkReason reports why a stale worktree must be preserved
+// rather than GC'd: commits on its branch not contained in the working
+// branch, or uncommitted tracked changes. Untracked files (node_modules,
+// build output) are deliberately ignored — GC would otherwise never fire on
+// any Node worktree. Returns ok=false when nothing provable is unintegrated,
+// including when git queries fail (fail-open: a broken check must not wedge
+// the janitorial sweep — only a definitive positive preserves).
+func unintegratedWorkReason(src, branch, wtPath string) (reason string, ok bool) {
+	if branchExists(src, branch) {
+		if out, err := gitOut(src, "rev-list", "--count", "HEAD..refs/heads/"+branch); err == nil {
+			if n, err := strconv.Atoi(strings.TrimSpace(out)); err == nil && n > 0 {
+				return fmt.Sprintf("%d commit(s) on %s not in working branch", n, branch), true
+			}
+		}
+	}
+	if out, err := gitOut(wtPath, "status", "--porcelain", "--untracked-files=no"); err == nil && strings.TrimSpace(out) != "" {
+		return "uncommitted tracked changes in worktree", true
+	}
+	return "", false
 }
 
 // worktreeSourceRepo extracts the source repository path from a worktree's
