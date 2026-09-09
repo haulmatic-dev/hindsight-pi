@@ -98,6 +98,15 @@ func (d *BeadDiscovery) findFromBR(activeWorkers map[string]bool) ([]types.Bead,
 		allReadyBeads = append(allReadyBeads, beads...)
 	}
 
+	// The completed set is a cache of "bead closed in the store". A close
+	// that was later rejected/escalated (bead left in_progress) or a bead
+	// reopened externally leaves a stale entry that would filter the bead
+	// from scheduling until daemon restart (gybo4 2026-09-09: 'Filtered out
+	// 1 beads: completed=1' for a bead whose last verdict was escalated;
+	// spawned instantly after restart). Re-validate membership against the
+	// store status we just listed before filtering.
+	d.pruneStaleCompleted(allReadyBeads)
+
 	filteredCounts := map[string]int{}
 	var readyBeads []types.Bead
 
@@ -141,6 +150,45 @@ func (d *BeadDiscovery) findFromBR(activeWorkers map[string]bool) ([]types.Bead,
 	return d.filterByDAG(readyBeads), nil
 }
 
+// pruneStaleCompleted drops completed-set entries whose listed store status
+// is non-terminal. Terminal statuses (closed/completed/failed) genuinely
+// belong in the set; anything else contradicts "closed" and means the close
+// was rejected/escalated or the bead was reopened after being cached.
+func (d *BeadDiscovery) pruneStaleCompleted(listed []types.Bead) {
+	for _, bead := range listed {
+		id := string(bead.ID)
+		if !d.completed[id] || bead.Status.IsTerminal() {
+			continue
+		}
+		delete(d.completed, id)
+		log.Printf("[FilterDebug] Pruned stale completed entry for %s (store status %q; close rejected/escalated or reopened) — bead is schedulable again", id, bead.Status)
+	}
+}
+
+// stillCompleted reports whether a completed-set entry is backed by a
+// terminal store status. The set is a cache of "bead closed in the store";
+// a close later rejected/escalated (bead left in_progress) or an external
+// reopen leaves a stale entry that would filter the bead from scheduling
+// until daemon restart (gybo4 2026-09-09). Non-terminal store evidence prunes
+// the entry and reports not-completed so the bead schedules again. A store
+// read failure keeps the cached entry (fail closed toward the filter) and
+// re-checks next tick.
+func (d *BeadDiscovery) stillCompleted(projectPath, repoName, beadIDStr string) bool {
+	if !d.completed[beadIDStr] {
+		return false
+	}
+	bead, err := d.beadsClient.GetBead(projectPath, repoName, types.BeadID(beadIDStr))
+	if err != nil || bead == nil {
+		return true
+	}
+	if bead.Status.IsTerminal() {
+		return true
+	}
+	delete(d.completed, beadIDStr)
+	log.Printf("[FilterDebug] Pruned stale completed entry for %s (store status %q; close rejected/escalated or reopened) — bead is schedulable again", beadIDStr, bead.Status)
+	return false
+}
+
 // findFromBV retrieves beads using bv --robot-triage.
 func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead, error) {
 	if d.bvClient == nil {
@@ -169,7 +217,13 @@ func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead,
 			if activeWorkers[beadIDStr] {
 				continue
 			}
-			if d.completed[beadIDStr] {
+
+			var repoName string
+			if project.Type != types.RepoTypeSingle && len(project.Repos) > 0 {
+				repoName = project.Repos[0].Name
+			}
+
+			if d.stillCompleted(project.Path, repoName, beadIDStr) {
 				continue
 			}
 			if len(rec.BlockedBy) > 0 {
@@ -179,11 +233,6 @@ func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead,
 			if rec.Type == "approval-gate" {
 				log.Printf("⏸️  [BV] Skipping approval gate: %s", beadID)
 				continue
-			}
-
-			var repoName string
-			if project.Type != types.RepoTypeSingle && len(project.Repos) > 0 {
-				repoName = project.Repos[0].Name
 			}
 
 			bead, err := d.beadsClient.GetBead(project.Path, repoName, beadID)
@@ -231,7 +280,13 @@ func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead,
 			if activeWorkers[beadIDStr] {
 				continue
 			}
-			if d.completed[beadIDStr] {
+
+			var repoName string
+			if project.Type != types.RepoTypeSingle && len(project.Repos) > 0 {
+				repoName = project.Repos[0].Name
+			}
+
+			if d.stillCompleted(project.Path, repoName, beadIDStr) {
 				continue
 			}
 
@@ -249,11 +304,6 @@ func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead,
 			if len(blocker.BlockedBy) > 0 {
 				log.Printf("⏸️  [BV] Skipping blocked bead from blockers_to_clear: %s (blocked by: %v)", beadID, blocker.BlockedBy)
 				continue
-			}
-
-			var repoName string
-			if project.Type != types.RepoTypeSingle && len(project.Repos) > 0 {
-				repoName = project.Repos[0].Name
 			}
 
 			bead, err := d.beadsClient.GetBead(project.Path, repoName, beadID)
@@ -329,16 +379,16 @@ func (d *BeadDiscovery) findFromBVPlan(activeWorkers map[string]bool) ([]types.B
 				beadID := types.BeadID(item.ID)
 				beadIDStr := string(beadID)
 
-				if activeWorkers[beadIDStr] {
-					continue
-				}
-				if d.completed[beadIDStr] {
-					continue
-				}
-
 				var repoName string
 				if project.Type != types.RepoTypeSingle && len(project.Repos) > 0 {
 					repoName = project.Repos[0].Name
+				}
+
+				if activeWorkers[beadIDStr] {
+					continue
+				}
+				if d.stillCompleted(project.Path, repoName, beadIDStr) {
+					continue
 				}
 
 				bead, err := d.beadsClient.GetBead(project.Path, repoName, beadID)
