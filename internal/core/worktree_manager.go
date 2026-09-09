@@ -143,7 +143,17 @@ func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error
 	}
 
 	// A stale branch may carry old commits; reset the (possibly reattached)
-	// worktree to the current base so the chain starts from a clean, known HEAD.
+	// worktree to the current base so the chain starts from a clean, known
+	// HEAD — but ONLY when those commits are already integrated into the
+	// working branch. The unguarded reset orphaned gate-verified worker
+	// commits on every respawn after worktree cleanup (srv af7v7/udasa/
+	// 80ro0/q8awv 2026-09-08: commits dangled, worktree matched base,
+	// verified-close rejected empty-diff, beads wrongfully escalated).
+	reattachedTip, terr := gitOut(wtPath, "rev-parse", "HEAD")
+	if terr == nil && !isAncestorOf(projectPath, strings.TrimSpace(reattachedTip), "HEAD") {
+		log.Printf("[Worktree] keeping %s: unintegrated commits at %s (post-add reset skipped)", wtPath, strings.TrimSpace(reattachedTip))
+		return wtPath, nil
+	}
 	if err := resetWorktree(wtPath, base); err != nil {
 		return "", fmt.Errorf("worktree reset after add %s: %w", wtPath, err)
 	}

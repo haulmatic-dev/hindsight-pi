@@ -166,7 +166,7 @@ func TestWorktreeManager_EnsureWorktree_ReusesValidWorktree(t *testing.T) {
 	}
 }
 
-func TestWorktreeManager_EnsureWorktree_ReattachesStaleBranch(t *testing.T) {
+func TestWorktreeManager_EnsureWorktree_ReattachPreservesUnintegratedCommits(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -185,19 +185,22 @@ func TestWorktreeManager_EnsureWorktree_ReattachesStaleBranch(t *testing.T) {
 	if _, err := m.Commit(wt, "chain commit"); err != nil {
 		t.Fatalf("commit in worktree: %v", err)
 	}
+	workerTip, err := gitOut(wt, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	// Remove the worktree directory but keep the branch (stale branch, absent path).
+	// Remove the worktree directory but keep the branch (stale branch, absent
+	// path) — the state every respawn hits after worktree cleanup between
+	// attempts (srv-smart-engine-af7v7, 2026-09-08: worker commits 9d5076c2f
+	// and 46eea63ca were orphaned by the unconditional post-add reset,
+	// producing empty-diff rejections of gate-verified work).
 	runGitCmd(t, proj, "worktree", "remove", wt)
 	if _, err := os.Stat(wt); err == nil {
 		t.Fatal("worktree path still exists after remove")
 	}
 	if !branchExists(proj, m.branchName(key)) {
 		t.Fatal("chain branch should still exist")
-	}
-
-	mainHead, err := gitOut(proj, "rev-parse", "HEAD")
-	if err != nil {
-		t.Fatal(err)
 	}
 
 	wt2, err := m.EnsureWorktree(proj, key)
@@ -210,12 +213,58 @@ func TestWorktreeManager_EnsureWorktree_ReattachesStaleBranch(t *testing.T) {
 	if !isGitWorktree(wt2) {
 		t.Fatalf("reattached path is not a worktree: %s", wt2)
 	}
+	// The branch carried commits NOT integrated into main: the reset must be
+	// skipped and the worker's tip preserved.
+	wtHead, err := gitOut(wt2, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(wtHead) != strings.TrimSpace(workerTip) {
+		t.Fatalf("reattach rewound unintegrated worker commits: worktree=%s worker tip=%s", wtHead, workerTip)
+	}
+	if _, err := os.Stat(filepath.Join(wt2, "chain.txt")); err != nil {
+		t.Fatal("worker deliverable missing after reattach")
+	}
+}
+
+func TestWorktreeManager_EnsureWorktree_ResetsIntegratedStaleBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	proj := gitInitRepo(t)
+	m := NewWorktreeManager()
+	key := "chain-reattach-integrated"
+
+	wt, err := m.EnsureWorktree(proj, key)
+	if err != nil {
+		t.Fatalf("first EnsureWorktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "chain.txt"), []byte("c\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Commit(wt, "chain commit"); err != nil {
+		t.Fatalf("commit in worktree: %v", err)
+	}
+
+	// Integrate the branch into main so its tip is fully contained — the
+	// reset-to-base cleanup is then safe and still desired.
+	runGitCmd(t, proj, "merge", "--no-ff", "-m", "integrate", m.branchName(key))
+	runGitCmd(t, proj, "worktree", "remove", wt)
+
+	mainHead, err := gitOut(proj, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt2, err := m.EnsureWorktree(proj, key)
+	if err != nil {
+		t.Fatalf("reattach EnsureWorktree: %v", err)
+	}
 	wtHead, err := gitOut(wt2, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.TrimSpace(wtHead) != strings.TrimSpace(mainHead) {
-		t.Fatalf("reattached worktree not reset to base: worktree=%s main=%s", wtHead, mainHead)
+		t.Fatalf("integrated stale branch should reset to base: worktree=%s main=%s", wtHead, mainHead)
 	}
 }
 

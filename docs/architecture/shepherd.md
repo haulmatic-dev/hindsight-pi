@@ -74,10 +74,14 @@ merge is verified (`git merge-base --is-ancestor <wt-branch> HEAD`) before
 "integrated singleton" is logged, the push is verified (`ls-remote` ref match
 inside `PushBranch`) before "pushed" is logged, and the worktree is removed
 only after both land. Either failure emits `integration-failed`, reopens the
-bead, and leaves the worktree in place. Two root-cause guards sit underneath:
+bead, and leaves the worktree in place. Three root-cause guards sit underneath:
 `EnsureWorktree` reuse-reset only fires when the worktree tip is already
 contained in HEAD (an unguarded reset rewound branches holding gate-verified
-worker commits, after which the integrate silently no-opped), and push
+worker commits, after which the integrate silently no-opped); the post-add
+reset after reattaching an existing branch is guarded the same way — skip when
+the branch tip carries commits not in HEAD, since that path otherwise orphaned
+work on every respawn after path cleanup (2026-09-08 srv slice wipe loop); and
+push
 rejections return the exact remote stderr (GH006 included) instead of a
 collapsed "protected branch" summary. A rejected push routes to `maybeOpenAutoPR`
 when `output.auto_pr` is on; a created PR preserves the work via the dogfood
