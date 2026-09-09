@@ -120,6 +120,14 @@ single most confusing fleet failure (workers exit in seconds with
 `fork/exec /usr/bin/pi: no such file or directory`) — see §9 for the watch
 that catches whatever replaces it.
 
+> **Never let hydra run `npm install -g` itself.** npm rewrites
+> `/usr/lib/node_modules` and the `/usr/bin` symlinks during a global install;
+> a worker spawning `/usr/bin/pi` mid-swap dies with ENOENT (every pi-ENOENT
+> burst 2026-08-11→09 was hydra's own hourly LSP install — auditd
+> `pi_nodemodules` watch). Hydra installs LSP servers with
+> `npm install -g --prefix $HYDRA_HOME/npm` (`internal/pi/lsp.go`) and
+> resolves their binaries from that prefix first.
+
 ## 6. Shared Pi config (one directory, read-only to hydra)
 
 The Pi config is shared between workers and humans and **hydra must never

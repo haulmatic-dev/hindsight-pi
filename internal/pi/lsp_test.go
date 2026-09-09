@@ -289,6 +289,10 @@ func TestInstallLSPComponents_PartialFailure(t *testing.T) {
 		t.Skip("Skipping network-dependent test")
 	}
 
+	// Isolate HYDRA_HOME so prefix binaries installed by a real daemon in the
+	// surrounding environment cannot make the missing-tools path look installed.
+	setHydraHomeTemp(t)
+
 	// Reset cache to avoid interference from other tests
 	ResetCache()
 
@@ -1555,6 +1559,9 @@ func TestLSP_installLSPPackage(t *testing.T) {
 	}
 
 	t.Run("fails when npm not available", func(t *testing.T) {
+		// Isolate HYDRA_HOME: a real daemon-installed prefix binary would
+		// short-circuit the install and this test expects failure.
+		setHydraHomeTemp(t)
 		cleanup := setIsolatedPath(t)
 		defer cleanup()
 
