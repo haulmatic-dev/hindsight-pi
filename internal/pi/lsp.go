@@ -52,6 +52,49 @@ var RequiredLSPPackages = []LSPPackage{
 	},
 }
 
+// lspNPMPrefix returns the hydra-owned npm prefix used for LSP installs.
+//
+// Why not the global prefix: npm rewrites /usr/lib/node_modules and the
+// /usr/bin symlinks during `npm install -g`. A worker spawning /usr/bin/pi
+// mid-swap dies with "fork/exec /usr/bin/pi: no such file or directory" —
+// every ENOENT burst since 2026-08-11 traced to hydra's own hourly LSP
+// install (auditd pi_nodemodules watch, 2026-09-09). Installing LSP servers
+// under HYDRA_HOME keeps every npm rename away from pi's global install.
+func lspNPMPrefix() string {
+	if home := os.Getenv("HYDRA_HOME"); home != "" {
+		return filepath.Join(home, "npm")
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil || homeDir == "" {
+		return filepath.Join(os.TempDir(), "hydra-npm")
+	}
+	return filepath.Join(homeDir, ".hydra", "npm")
+}
+
+// lspCommandPath resolves an LSP binary, preferring the hydra-owned npm
+// prefix over PATH so installs and launches agree on one location. Falls
+// back to the bare command name (PATH resolution) when the prefix binary
+// does not exist.
+func lspCommandPath(command string) string {
+	name := command
+	if runtime.GOOS == "windows" && !strings.HasSuffix(name, ".exe") {
+		name += ".exe"
+	}
+	p := filepath.Join(lspNPMPrefix(), "bin", name)
+	if info, err := os.Stat(p); err == nil && !info.IsDir() {
+		if runtime.GOOS == "windows" || info.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	return command
+}
+
+// npmInstallPrefixArgs builds `npm install -g --prefix <hydra prefix>`
+// arguments so LSP installs never write to /usr/lib/node_modules or /usr/bin.
+func npmInstallPrefixArgs(pkg string) []string {
+	return []string{"install", "-g", "--prefix", lspNPMPrefix(), pkg}
+}
+
 // LSPCache provides thread-safe caching for LSP installation status
 type LSPCache struct {
 	mu      sync.RWMutex
@@ -189,6 +232,12 @@ func (sm *SetupManager) isLSPPackageInstalled(pkg LSPPackage) bool {
 
 // checkLSPPackageInstalledInternal performs the actual installation check
 func (sm *SetupManager) checkLSPPackageInstalledInternal(pkg LSPPackage) bool {
+	// Hydra-owned prefix binary first — this is the install target since the
+	// ENOENT fix, so a hit here is authoritative even if PATH is mid-swap.
+	if p := lspCommandPath(pkg.Command); p != pkg.Command {
+		return true
+	}
+
 	// Try "which" command first (fastest)
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -288,12 +337,20 @@ func (sm *SetupManager) CheckAndInstallLSP() error {
 func (sm *SetupManager) installLSPPackage(pkg LSPPackage) error {
 	var cmd *exec.Cmd
 
-	// Try global npm install first
-	log.Printf("[PiSetup] Installing %s via npm...", pkg.NPMName)
+	// Install into the hydra-owned npm prefix. Never the global prefix:
+	// its /usr/lib/node_modules + /usr/bin swap kills concurrent pi spawns
+	// with ENOENT (root cause of the 2026-08..09 pi-ENOENT bursts).
+	prefix := lspNPMPrefix()
+	if err := os.MkdirAll(prefix, 0o755); err != nil {
+		return fmt.Errorf("failed to create npm prefix %s: %w", prefix, err)
+	}
+
+	// Install via npm into the hydra-owned prefix
+	log.Printf("[PiSetup] Installing %s via npm (prefix %s)...", pkg.NPMName, prefix)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	cmd = exec.CommandContext(ctx, "npm", "install", "-g", pkg.NPMName)
+	cmd = exec.CommandContext(ctx, "npm", npmInstallPrefixArgs(pkg.NPMName)...)
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {
@@ -479,14 +536,16 @@ func ExecuteLSPCommand(command, filePath string, line, column int) (*LSPCommandR
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	lspPath := lspCommandPath("lsp")
+
 	var cmd *exec.Cmd
 	switch command {
 	case "definition":
-		cmd = exec.CommandContext(ctx, "lsp", "definition", filePath, fmt.Sprintf("%d:%d", line, column))
+		cmd = exec.CommandContext(ctx, lspPath, "definition", filePath, fmt.Sprintf("%d:%d", line, column))
 	case "reference":
-		cmd = exec.CommandContext(ctx, "lsp", "reference", filePath, fmt.Sprintf("%d:%d", line, column))
+		cmd = exec.CommandContext(ctx, lspPath, "reference", filePath, fmt.Sprintf("%d:%d", line, column))
 	case "outline":
-		cmd = exec.CommandContext(ctx, "lsp", "outline", filePath)
+		cmd = exec.CommandContext(ctx, lspPath, "outline", filePath)
 	default:
 		return nil, fmt.Errorf("unknown LSP command: %s", command)
 	}
@@ -682,10 +741,18 @@ func (sm *SetupManager) InstallLSPComponents() error {
 				installed = true
 
 			case "typescript-language-server":
-				// Install typescript-language-server via npm
-				log.Printf("[LSP] Installing typescript-language-server via npm...")
+				// Install typescript-language-server via npm into the hydra-owned
+				// prefix (never global — the global swap is the pi-ENOENT root cause)
+				log.Printf("[LSP] Installing typescript-language-server via npm (prefix %s)...", lspNPMPrefix())
+				if err := os.MkdirAll(lspNPMPrefix(), 0o755); err != nil {
+					log.Printf("[LSP] ❌ Failed to create npm prefix: %v", err)
+					mu.Lock()
+					failedComponents = append(failedComponents, p.Name)
+					mu.Unlock()
+					return
+				}
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				cmd := exec.CommandContext(ctx, "npm", "install", "-g", "typescript-language-server")
+				cmd := exec.CommandContext(ctx, "npm", npmInstallPrefixArgs("typescript-language-server")...)
 				output, err := cmd.CombinedOutput()
 				cancel()
 				if err != nil {
@@ -735,10 +802,17 @@ func (sm *SetupManager) InstallLSPComponents() error {
 				installed = true
 
 			default:
-				// Default to npm install for other packages
-				log.Printf("[LSP] Installing %s via npm...", p.Name)
+				// Install via npm into the hydra-owned prefix (never global)
+				log.Printf("[LSP] Installing %s via npm (prefix %s)...", p.Name, lspNPMPrefix())
+				if err := os.MkdirAll(lspNPMPrefix(), 0o755); err != nil {
+					log.Printf("[LSP] ❌ Failed to create npm prefix: %v", err)
+					mu.Lock()
+					failedComponents = append(failedComponents, p.Name)
+					mu.Unlock()
+					return
+				}
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				cmd := exec.CommandContext(ctx, "npm", "install", "-g", p.NPMName)
+				cmd := exec.CommandContext(ctx, "npm", npmInstallPrefixArgs(p.NPMName)...)
 				output, err := cmd.CombinedOutput()
 				cancel()
 				if err != nil {
