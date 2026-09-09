@@ -59,6 +59,29 @@ func TestPushBranch(t *testing.T) {
 		}
 	})
 
+	t.Run("failing client-side pre-push hook is bypassed", func(t *testing.T) {
+		t.Parallel()
+		repo, remote := setupReachableRemote(t)
+		// Client-side pre-push hook that always fails — simulates a husky hook
+		// whose node_modules was gutted ("husky: command not found"). The
+		// daemon is a headless release pipeline and re-runs its own gates, so
+		// its pushes must not be gated by interactive-dev hooks.
+		hook := filepath.Join(repo, ".git", "hooks", "pre-push")
+		if err := os.WriteFile(hook, []byte("#!/bin/sh\necho 'husky: command not found' >&2\nexit 127\n"), 0o755); err != nil {
+			t.Fatalf("write pre-push hook: %v", err)
+		}
+		commitFile(t, repo, "README.md", "hello")
+
+		pushed, reason := PushBranch(repo, "origin", "main")
+		if !pushed {
+			t.Errorf("PushBranch(repo, \"origin\", \"main\") pushed = false; want true (reason: %q)", reason)
+		}
+		commit := headCommit(t, repo)
+		if !remoteHas(t, remote, "main", commit) {
+			t.Errorf("commit %s not found on remote main", commit)
+		}
+	})
+
 	t.Run("pre-receive hook rejection surfaces exact remote error", func(t *testing.T) {
 		t.Parallel()
 		repo, remote := setupReachableRemote(t)
