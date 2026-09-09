@@ -230,6 +230,13 @@ func (wl *WorkerLifecycle) HandleCompletion(comp workerCompletion) {
 
 	if comp.closeError != nil {
 		wl.errorLogger.Error("beadsClient", "CloseBead", comp.worker.ID, comp.closeError, "warn")
+		// A close that was rejected or escalated must never linger in the
+		// completed set: the entry can predate a reopen (bead closed, reopened
+		// externally, retried, close rejected again), and a stale entry there
+		// silently filters the bead from scheduling until restart (gybo4,
+		// 2026-09-09). Filter-time revalidation in BeadDiscovery is the primary
+		// defense; this prunes the entry at the write site.
+		delete(wl.completed, comp.worker.ID)
 		if isDependencyError(comp.closeError) {
 			log.Printf("[Worker] Bead %s processed but not closed due to dependencies - will retry later", comp.worker.BeadID.String())
 			success = false
