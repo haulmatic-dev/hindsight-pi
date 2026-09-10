@@ -21,12 +21,18 @@ func (d *ChainCompletionDetector) FindChainByBead(beadID types.BeadID) (*ChainIn
 // root bead ID, or the bead's own ID when it belongs to no registered chain
 // (singleton beads are not registered as chains).
 func (o *Overseer) chainKeyForBead(bead types.Bead) string {
+	return o.chainKeyForBeadID(bead.ID)
+}
+
+// chainKeyForBeadID is the BeadID-only form of chainKeyForBead, for callers
+// (e.g. Charon's worktree sweeps) that hold an ID, not a full bead.
+func (o *Overseer) chainKeyForBeadID(beadID types.BeadID) string {
 	if o.chainCompletionDetector != nil {
-		if ch, ok := o.chainCompletionDetector.FindChainByBead(bead.ID); ok {
+		if ch, ok := o.chainCompletionDetector.FindChainByBead(beadID); ok {
 			return ch.RootBeadID.String()
 		}
 	}
-	return bead.ID.String()
+	return beadID.String()
 }
 
 // isChainMember reports whether a bead is part of a registered multi-bead chain.
