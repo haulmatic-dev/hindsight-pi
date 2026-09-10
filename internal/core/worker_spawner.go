@@ -380,7 +380,13 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 	// do not set cmd.Dir (which would break the `go run` fallback path).
 	runDir := projectPath
 	if s.worktreeManager != nil && s.chainKeyFn != nil {
-		if wt, wtErr := s.worktreeManager.EnsureWorktree(projectPath, s.chainKeyFn(bead)); wtErr != nil {
+		key := s.chainKeyFn(bead)
+		// Outcome is logged per spawn (gybo4, 2026-09-10: EnsureWorktree was
+		// silent and the missing-dir failure surfaced 8s later as a bogus
+		// 'fork/exec /usr/bin/pi' error). created/reused is derived from a
+		// pre-check so EnsureWorktree's signature stays unchanged.
+		_, existed := s.worktreeManager.ExistingWorktree(projectPath, key)
+		if wt, wtErr := s.worktreeManager.EnsureWorktree(projectPath, key); wtErr != nil {
 			// Daemon-owned gates require isolation: the close-path gate runs in
 			// the chain worktree and refuses main-checkout execution. Falling
 			// back to the shared checkout also let hydra-5cl edit the daemon's
@@ -390,6 +396,11 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 			}
 			log.Printf("[Worktree] setup failed for %s (using shared checkout): %v", bead.ID, wtErr)
 		} else {
+			if existed {
+				log.Printf("[Worktree] bead %s: reused worktree %s", bead.ID, wt)
+			} else {
+				log.Printf("[Worktree] bead %s: created worktree %s", bead.ID, wt)
+			}
 			// Fail-early dependency gate (bead hydra-code-jwrh): never spawn a
 			// worker into an environment it cannot succeed in. A preflight
 			// failure aborts the spawn; the bead stays open for retry.

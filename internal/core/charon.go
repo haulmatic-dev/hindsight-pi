@@ -30,6 +30,14 @@ type Charon struct {
 	stats                 JanitorStats
 	getProjects           func() []types.Project
 	activeWorkersSnapshot func() map[string]*types.Worker
+	// chainKeyForBeadID maps a bead to its chain's worktree key (chain root
+	// bead ID, or the bead's own ID). Worktree branches are keyed by chain
+	// key while the active-workers map is keyed by the member bead actually
+	// running; without this mapping the reconciler's active-worker skip never
+	// matches for chain members (gybo4, 2026-09-10: a live chain worktree was
+	// integrated while its worker was spawning, and the worker's pi exec died
+	// with a chdir ENOENT misattributed to the pi binary).
+	chainKeyForBeadID     func(types.BeadID) string
 	onStaleActiveWorker   func(beadID string)
 	lastWorktreeGC        time.Time // throttles the stale-worktree sweep
 	lastRegistryReap      time.Time // throttles the ghost-registry-row sweep
@@ -232,6 +240,48 @@ func (j *Charon) terminalBeadChecker(projectPath string) func(string) bool {
 	}
 }
 
+// worktreeSpawnGrace is how long after a worker's recorded start its bead's
+// worktree is protected from the reconciler/GC sweeps even if the in-memory
+// active-workers snapshot has lost it (daemon restart, placeholder race).
+// A just-spawned worker execs pi within seconds; yanking its worktree in
+// that window is the gybo4 failure (2026-09-10).
+const worktreeSpawnGrace = 10 * time.Minute
+
+// SetChainKeyForBeadID injects the bead→chain-worktree-key mapping used to
+// protect live chain worktrees from the reconciler sweep.
+func (j *Charon) SetChainKeyForBeadID(fn func(types.BeadID) string) {
+	j.chainKeyForBeadID = fn
+}
+
+// worktreeActiveKeys builds the set of worktree keys the reconciler and
+// stale-worktree GC must never touch: every active worker's bead ID, its
+// chain key, and any tracked worker spawned within worktreeSpawnGrace.
+func (j *Charon) worktreeActiveKeys() map[string]bool {
+	active := map[string]bool{}
+	if j.activeWorkersSnapshot != nil {
+		for beadID := range j.activeWorkersSnapshot() {
+			active[beadID] = true
+			if j.chainKeyForBeadID != nil {
+				active[j.chainKeyForBeadID(types.BeadID(beadID))] = true
+			}
+		}
+	}
+	// Grace window: tracked workers the in-memory snapshot lost (daemon
+	// restart, respawn race) are still running — keep their worktrees.
+	if j.workerTracker != nil {
+		for _, rec := range j.workerTracker.GetRunningWorkerRecords() {
+			if time.Since(rec.StartedAt) >= worktreeSpawnGrace {
+				continue
+			}
+			active[rec.BeadID] = true
+			if j.chainKeyForBeadID != nil {
+				active[j.chainKeyForBeadID(types.BeadID(rec.BeadID))] = true
+			}
+		}
+	}
+	return active
+}
+
 // performCleanup scans for and kills orphaned and stuck processes
 func (j *Charon) performCleanup() {
 	j.stats.TotalScans++
@@ -243,12 +293,7 @@ func (j *Charon) performCleanup() {
 	// worktree per bead (integration only removes them on clean completion).
 	if time.Since(j.lastWorktreeGC) > time.Hour {
 		j.lastWorktreeGC = time.Now()
-		active := map[string]bool{}
-		if j.activeWorkersSnapshot != nil {
-			for beadID := range j.activeWorkersSnapshot() {
-				active[beadID] = true
-			}
-		}
+		active := j.worktreeActiveKeys()
 		go func() {
 			if j.getProjects != nil {
 				for _, project := range j.getProjects() {

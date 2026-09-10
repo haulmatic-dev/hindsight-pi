@@ -1440,6 +1440,21 @@ func executeWithPi(
 	log.Printf("⏱️  Activity timeout: %v (resets on any output)", activityTimeout)
 	streamLog(mcpClient, "info", fmt.Sprintf("Executing Pi agent in %s with activity monitoring", cmd.Dir))
 
+	// Pre-flight the working directory. When cmd.Dir was removed between
+	// spawn and exec (reconciler integrate/quarantine, worktree GC), Go's
+	// fork/exec attributes the chdir ENOENT to the BINARY path
+	// ("fork/exec /usr/bin/pi: no such file or directory") — a healthy pi
+	// binary gets diagnosed as missing (gybo4, 2026-09-10: 148 'provider
+	// failures', hour-long chase). Stat the dir so the true cause is what is
+	// logged and classified.
+	if st, statErr := os.Stat(cmd.Dir); statErr != nil {
+		result.Error = fmt.Sprintf("worktree dir missing: %s: %v", cmd.Dir, statErr)
+		return result, errors.New(result.Error)
+	} else if !st.IsDir() {
+		result.Error = fmt.Sprintf("worktree dir missing: %s: not a directory", cmd.Dir)
+		return result, errors.New(result.Error)
+	}
+
 	// Create pipes for stdout and stderr
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -2719,6 +2734,7 @@ func classifyFailure(result *ExecutionResult) int {
 		strings.Contains(err, "exit status 8") ||
 		strings.Contains(err, "bead get failed") ||
 		strings.Contains(err, "no such host") ||
+		strings.Contains(err, "worktree dir missing") ||
 		strings.Contains(err, "tls handshake"):
 		return 4
 	}

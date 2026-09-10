@@ -322,6 +322,10 @@ func NewOverseer(config *Config) *Overseer {
 		}
 		return snapshot
 	})
+	// Map active beads to their chain worktree keys so the worktree sweeps
+	// never integrate/remove a live chain worktree (member bead ID ≠ chain
+	// root key — gybo4, 2026-09-10).
+	o.orphanJanitor.SetChainKeyForBeadID(o.chainKeyForBeadID)
 	// When Charon detects a stale PID-0 entry, it invokes this callback to
 	// actually delete the entry from the in-memory map (since Charon does not
 	// own the map).
