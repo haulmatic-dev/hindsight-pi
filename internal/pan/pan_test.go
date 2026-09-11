@@ -568,3 +568,71 @@ func TestTickFreshPendingAbandonStillDeduplicates(t *testing.T) {
 		t.Errorf("fresh pending abandon enqueued a duplicate: %+v", store.enqueued)
 	}
 }
+
+// Regression (2026-09-11, br-4y5): Pan queued abandon-with-summary for a bead
+// whose BLOCKED reason was "worker limit 1/1 already saturated" while the
+// bead's own worker held that slot. The worker row registered between
+// Candidates() and decision execution, so the blocked-origin decision must be
+// refused once a live row is observed.
+func TestTickAbandonBlockedOriginRefusedWhenBeadAcquiresLiveWorker(t *testing.T) {
+	store := &fakeStore{} // no workers at scan time → blocked bead becomes a candidate
+	runner := func(ctx context.Context, cfg Config, prompt string) (string, error) {
+		// mid-judgment the bead's real worker registers (the slot occupant)
+		store.workers = []registry.WorkerRecord{
+			{BeadID: "br-4y5", State: registry.StateWorking, PID: 4242,
+				StartedAt: time.Now(), LastHeartbeat: time.Now()},
+		}
+		return `[{"bead_id": "br-4y5", "action": "abandon-with-summary", "message": "worker limit 1/1 already saturated, preventing spawn"}]`, nil
+	}
+
+	var handled []string
+	s := New(Config{Enabled: true, Interval: time.Second}, store, runner)
+	s.SetBlockedBeads(func() []BlockedBead {
+		return []BlockedBead{{BeadID: "br-4y5", Reason: "spawn failed: worker limit reached: 1/1 workers active", Since: time.Now().Add(-2 * time.Minute)}}
+	})
+	s.SetOnAbandonWithSummary(func(beadID string) error {
+		handled = append(handled, beadID)
+		return nil
+	})
+	s.Tick(context.Background())
+
+	if len(handled) != 0 {
+		t.Errorf("blocked-origin abandon executed daemon-side despite live worker row: %v", handled)
+	}
+	if len(store.enqueued) != 0 {
+		t.Errorf("blocked-origin abandon enqueued for a live worker (silent kill of healthy work): %+v", store.enqueued)
+	}
+}
+
+// Regression (2026-09-11, br-4y5 class): a stale pending abandon must not be
+// executed daemon-side while the target holds a live worker row — that kills
+// healthy work the worker is still producing.
+func TestTickStalePendingAbandonRefusedWithLiveWorker(t *testing.T) {
+	store := &fakeStore{
+		workers: []registry.WorkerRecord{hungWorker("bead-stuck")},
+		pending: []registry.Command{{
+			BeadID:    "bead-stuck",
+			Kind:      registry.CmdAbandonWithSummary,
+			Payload:   "old",
+			CreatedAt: time.Now().Add(-time.Hour),
+		}},
+	}
+	runner := func(ctx context.Context, cfg Config, prompt string) (string, error) {
+		return `[{"bead_id": "bead-stuck", "action": "abandon-with-summary", "message": "still stuck"}]`, nil
+	}
+
+	var handled []string
+	s := New(Config{Enabled: true, Interval: time.Second, AbandonStaleThreshold: 2 * time.Second}, store, runner)
+	s.SetOnAbandonWithSummary(func(beadID string) error {
+		handled = append(handled, beadID)
+		return nil
+	})
+	s.Tick(context.Background())
+
+	if len(handled) != 0 {
+		t.Errorf("stale pending abandon executed daemon-side despite live worker row: %v", handled)
+	}
+	if len(store.enqueued) != 0 {
+		t.Errorf("stale pending abandon enqueued a duplicate: %+v", store.enqueued)
+	}
+}

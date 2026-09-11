@@ -288,6 +288,22 @@ Pan down or unparseable advice → the deterministic rules below still run. **Di
 (`shepherd.pan` in config; see `hydra-config.yaml.example` for a `minimax` / `MiniMax-M2.7` configuration) — it must not
 share the fleet's Kimi account.
 
+**Pan abandon audit and live-slot refusal.** Since 2026-09-11 every
+`abandon-with-summary` decision is audited with its rationale: one
+`[Pan] abandon-with-summary audit` line per decision logging the bead, the
+decision origin (`worker` = the bead had a live worker row at candidate-scan
+time, `blocked` = it came from the scheduler-level blocked list), the reason,
+and the slot holders (`bead:state(pid=N)` for every live worker row). Two
+refusal guards prevent a silent kill of healthy work (br-4y5, 2026-09-11: an
+abandon was queued citing `worker limit 1/1 already saturated` while br-4y5's
+own worker held that slot — the row registered between `Candidates()` and
+judgment execution): a *blocked-origin* abandon is refused when the bead now
+holds a live worker row (the blocked evidence is stale — the bead itself
+occupies a slot), and a *stale pending* abandon is never executed daemon-side
+while a live worker row exists. Worker-origin abandons (e.g. hung workers) are
+still enqueued for the live worker to consume; truly workerless beads are
+still closed daemon-side.
+
 **Pan repair verdict.** Since 2026-08-24 Pan can also issue whitelisted
 `repair:<name>` actions for *blocked* candidates. These are daemon-side
 repairs, not worker commands: the daemon executes the handler, verifies the

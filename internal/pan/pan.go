@@ -167,22 +167,47 @@ func parseRepairName(action string) (string, bool) {
 
 // hasLiveWorker reports whether the bead has any non-completed worker row.
 // A live row means the bead is not a scheduler-level blocker and must not be
-// repaired.
+// repaired or abandoned daemon-side.
 func (s *Shepherd) hasLiveWorker(beadID string) bool {
+	return len(s.liveWorkerRows(beadID)) > 0
+}
+
+// liveWorkerRows returns the bead's non-completed worker rows. A store error
+// is logged and reported as no rows (fail open, matching prior behavior).
+func (s *Shepherd) liveWorkerRows(beadID string) []registry.WorkerRecord {
 	if s.store == nil {
-		return false
+		return nil
 	}
 	workers, err := s.store.ListWorkers() // non-completed only
 	if err != nil {
-		log.Printf("[Pan] repair live-worker check failed for %s: %v", beadID, err)
-		return false
+		log.Printf("[Pan] live-worker check failed for %s: %v", beadID, err)
+		return nil
 	}
+	var out []registry.WorkerRecord
 	for _, w := range workers {
 		if w.BeadID == beadID {
-			return true
+			out = append(out, w)
 		}
 	}
-	return false
+	return out
+}
+
+// liveAtLastScan reports whether the bead had a live worker row when
+// Candidates() last ran. Empty (no scan yet) means false.
+func (s *Shepherd) liveAtLastScan(beadID string) bool {
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	return s.scanLive[beadID]
+}
+
+// describeHolders renders worker rows as "bead:state(pid=N)" for audit logs —
+// the "which slot, which holder" half of the abandon rationale.
+func describeHolders(workers []registry.WorkerRecord) string {
+	parts := make([]string, 0, len(workers))
+	for _, w := range workers {
+		parts = append(parts, fmt.Sprintf("%s:%s(pid=%d)", w.BeadID, w.State, w.PID))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
 }
 
 // canRepair checks the one-repair-per-bead-per-hour rate limit.
@@ -268,6 +293,14 @@ type Shepherd struct {
 	repairMu      sync.Mutex
 	repairLimits  map[string]time.Time // bead → last repair run
 	repairResults map[string]error     // bead → last repair error (for rate-limit detail)
+
+	// scanLive records which beads held a live (working/parked) worker row at
+	// the most recent Candidates() scan. Tick uses it to tell worker-origin
+	// decisions from blocked-origin ones at decision-execution time (br-4y5,
+	// 2026-09-11: a blocked-bead abandon executed after the bead's own worker
+	// row registered mid-judgment — a near-miss silent kill of healthy work).
+	scanMu   sync.Mutex
+	scanLive map[string]bool
 
 	rejectedMu      sync.Mutex
 	rejectedActions map[string]bool // beadID + "/" + action; unknown repair actions remembered per session
@@ -462,17 +495,40 @@ func (s *Shepherd) Tick(ctx context.Context) {
 			log.Printf("[Pan] closed-satisfied %s", d.BeadID)
 			continue
 		}
-		// abandon-with-summary is terminal. If there is no live worker to
-		// consume the command, or an unconsumed abandon is older than the
-		// stale threshold, execute it daemon-side. Enqueuing a terminal
-		// verdict for a workerless bead creates a stable deadlock (iz5z7,
-		// 2026-08-30: 2-hour pending-abandon loop).
+		// abandon-with-summary is terminal. Audit every abandon decision with
+		// its rationale (reason, live rows, slot holders) and refuse it when
+		// the target holds a live worker row it did not have at candidate-scan
+		// time — the blocked evidence is then stale and executing it kills
+		// healthy work (br-4y5, 2026-09-11: abandon queued citing "worker limit
+		// 1/1 already saturated" while br-4y5's own worker held that slot).
 		if kind == registry.CmdAbandonWithSummary {
+			rows := s.liveWorkerRows(d.BeadID)
+			all, lerr := s.store.ListWorkers()
+			if lerr != nil {
+				log.Printf("[Pan] abandon audit slot-holder check for %s failed (fail open): %v", d.BeadID, lerr)
+				all = nil
+			}
+			origin := "blocked"
+			if s.liveAtLastScan(d.BeadID) {
+				origin = "worker"
+			}
+			log.Printf("[Pan] abandon-with-summary audit: bead=%s origin=%s reason=%q live_rows=%d holders=%s",
+				d.BeadID, origin, truncate(d.Message, 120), len(rows), describeHolders(all))
+			if origin == "blocked" && len(rows) > 0 {
+				log.Printf("[Pan] abandon-with-summary for %s REFUSED: blocked-bead decision but the bead now holds a live worker row %s — the bead itself occupies a slot; blocked evidence is stale",
+					d.BeadID, describeHolders(rows))
+				continue
+			}
 			executed := false
 			if pending, perr := s.store.PendingCommands(d.BeadID); perr == nil {
 				for _, pc := range pending {
 					if pc.Kind == kind && !pc.CreatedAt.IsZero() && time.Since(pc.CreatedAt) > s.cfg.AbandonStaleThreshold {
-						if s.OnAbandonWithSummary != nil {
+						if len(rows) > 0 {
+							// Daemon-side abandon with a live row is a silent kill
+							// of whatever the worker is still producing.
+							log.Printf("[Pan] stale pending abandon for %s NOT executed daemon-side: live worker row %s still holds the slot",
+								d.BeadID, describeHolders(rows))
+						} else if s.OnAbandonWithSummary != nil {
 							if err := s.OnAbandonWithSummary(d.BeadID); err != nil {
 								log.Printf("[Pan] daemon-side abandon for %s failed: %v", d.BeadID, err)
 							} else {
@@ -486,7 +542,7 @@ func (s *Shepherd) Tick(ctx context.Context) {
 					}
 				}
 			}
-			if !executed && !s.hasLiveWorker(d.BeadID) {
+			if !executed && len(rows) == 0 {
 				if s.OnAbandonWithSummary != nil {
 					if err := s.OnAbandonWithSummary(d.BeadID); err != nil {
 						log.Printf("[Pan] daemon-side abandon for %s failed: %v", d.BeadID, err)
@@ -582,6 +638,11 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 	now := time.Now()
 	var out []Candidate
 	live := make(map[string]bool)
+	defer func() {
+		s.scanMu.Lock()
+		s.scanLive = live
+		s.scanMu.Unlock()
+	}()
 	for _, w := range workers {
 		// Any live worker row suppresses the bead's blocked candidacy below —
 		// a stale spawn-failure/retry record must not speak over a running
