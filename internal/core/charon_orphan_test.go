@@ -331,7 +331,11 @@ func TestRecoverOrphanInProgressBeads_SkipsLiveWorker(t *testing.T) {
 	beadID := "test-orphan-live"
 	charon, exec := setupOrphanCharon(t, beadListJSON(beadID, time.Now().Add(-10*time.Minute)), 5*time.Minute)
 
-	if err := charon.workerTracker.TrackWorkerWithPGID(12345, 12345, beadID, t.TempDir()); err != nil {
+	// Use this test process's own PID: genuinely running, so the bead counts
+	// as handled. A tracked row with a dead PID must NOT count (see
+	// TestRecoverOrphanInProgressBeads_ReopensDeadTrackerRow).
+	livePID := os.Getpid()
+	if err := charon.workerTracker.TrackWorkerWithPGID(livePID, livePID, beadID, t.TempDir()); err != nil {
 		t.Fatalf("TrackWorkerWithPGID: %v", err)
 	}
 
@@ -345,6 +349,36 @@ func TestRecoverOrphanInProgressBeads_SkipsLiveWorker(t *testing.T) {
 	}
 	if n := exec.CountCalls("br close"); n != 0 {
 		t.Errorf("expected zero CloseBead calls, got %d; calls:\n%v", n, exec.Calls())
+	}
+}
+
+// TestRecoverOrphanInProgressBeads_ReopensDeadTrackerRow guards the
+// 2026-09-11 hang-wave fix: a killed worker leaves a "running" tracker row
+// with a dead PID behind. Orphan recovery must treat that row as a ghost and
+// reopen the stranded in_progress bead instead of skipping it forever.
+func TestRecoverOrphanInProgressBeads_ReopensDeadTrackerRow(t *testing.T) {
+	beadID := "test-orphan-dead-row"
+	charon, exec := setupOrphanCharon(t, beadListJSON(beadID, time.Now().Add(-10*time.Minute)), 5*time.Minute)
+
+	// Stale "running" row whose PID no longer exists.
+	if err := charon.workerTracker.TrackWorkerWithPGID(12345, 12345, beadID, t.TempDir()); err != nil {
+		t.Fatalf("TrackWorkerWithPGID: %v", err)
+	}
+
+	got := charon.recoverOrphanInProgressBeads()
+	if got != 1 {
+		t.Fatalf("recovered = %d, want 1 for dead-PID tracker row", got)
+	}
+
+	if n := exec.CountCalls("br update " + beadID + " --status open"); n != 1 {
+		t.Errorf("expected one UpdateBeadStatus(open) call for dead-PID row, got %d; calls:\n%v", n, exec.Calls())
+	}
+	if n := exec.CountCalls("br close"); n != 0 {
+		t.Errorf("expected zero CloseBead calls, got %d; calls:\n%v", n, exec.Calls())
+	}
+	// The ghost row must be freed so the respawn is not blocked by a phantom slot.
+	if rec, ok := charon.workerTracker.GetWorkerByBead(beadID); ok && rec.Status == "running" {
+		t.Errorf("expected stale running row to be reaped after reopen, still running: %+v", rec)
 	}
 }
 

@@ -304,11 +304,20 @@ func TestCharon_ClearStaleActiveWorkers(t *testing.T) {
 
 	var clearedIDs []string
 	old := time.Now().Add(-11 * time.Minute)
+	// bead-running must carry a PID that is genuinely alive: the reconciler
+	// now reaps real-PID slots whose process is dead (2026-09-11 wedge fix),
+	// so a hardcoded PID that happens not to exist would be reaped too.
+	liveCmd := exec.Command("sleep", "30")
+	if err := liveCmd.Start(); err != nil {
+		t.Fatalf("start live sleep process: %v", err)
+	}
+	t.Cleanup(func() { liveCmd.Process.Kill() })
+	livePID := liveCmd.Process.Pid
 	j.SetActiveWorkersSnapshot(func() map[string]*types.Worker {
 		return map[string]*types.Worker{
 			"bead-stale-1": {ID: "bead-stale-1", PID: 0, Status: "spawning", StartTime: old},
 			"bead-stale-2": {ID: "bead-stale-2", PID: 0, Status: "spawning", StartTime: old},
-			"bead-running": {ID: "bead-running", PID: 1234, Status: "running", StartTime: old},
+			"bead-running": {ID: "bead-running", PID: livePID, Status: "running", StartTime: old},
 			"bead-young":   {ID: "bead-young", PID: 0, Status: "spawning", StartTime: time.Now().Add(-2 * time.Minute)},
 		}
 	})

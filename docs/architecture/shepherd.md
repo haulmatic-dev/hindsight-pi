@@ -61,6 +61,9 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `spawn-suppressed-closed` | a queued retry spawn is aborted because the bead became terminal while in the retry queue | `status` |
 | `integration-failed` | singleton integrate/push failed verification (merge not contained in HEAD, or push rejected / remote ref did not advance) — bead reopened with `integration-failed` label, worktree preserved | `stage` (`integrate`/`push`), `error` (exact remote stderr) |
 | `worktree-preserved-unintegrated` | janitorial GC refused to remove a stale worktree: its branch carries commits not yet in the working branch, or it has uncommitted tracked changes — reconciler integrates on its next sweep | `worktree`, `branch`, `cause` |
+| `bead_store_suspect` | a project's open-bead count collapsed to 0 or >80% in one discovery tick (or `br list` failed after a healthy baseline) — store presumed corrupt, project excluded from scheduling | `project_path`, `previous`, `current`, `list_error` |
+| `bead_store_restored` | `.beads/issues.jsonl` rebuilt from the newest `.br_history` snapshot and the re-listed open count verified recovered — scheduling unblocked | `project_path`, `snapshot`, `open`, `baseline` |
+| `bead_store_restore_failed` | snapshot restore could not verify recovery (no snapshot, copy error, re-list failure, or count still collapsed) — project stays blocked | `project_path`, `snapshot`, `error` |
 
 Read programmatically with `ReadEvents(path)` (torn-line tolerant; a missing
 file is an empty stream, not an error).
@@ -316,6 +319,27 @@ outcome, and emits a `[PanRepair]` JSON audit event (`bead_id`, `action`,
 | `repair-worktree` | `WorktreeManager.Remove` then `EnsureWorktree` for the bead's chain key | refuses if the project path or worktree manager is missing |
 | `reap-placeholder` | `WorkerSpawner.ClearSpawningPlaceholder` | no-op if no placeholder exists |
 | `reset-retries` | `RetryManager.ResetRetryCount` | returns the previous fault count in the audit detail |
+| `repair-bead-store` | `BeadStoreGuard.Restore` for the bead's project | refuses if the project path or guard is missing; unblocks only when a re-list verifies the open count recovered |
+
+**Bead-store integrity guard (2026-09-11).** `BeadStoreGuard`
+(`internal/core/bead_store_guard.go`) detects a corrupted `.beads` store that
+would otherwise blind scheduling silently (srv-smart-engine incident:
+`issues.jsonl` deleted by a raced `br` rebuild, 0 issues in `beads.db`, hours
+of silent blindness). The guard is fed every discovery tick's per-project
+listing; a collapse of the open-bead count to 0 or >80% in one tick — or a
+`br list` failure after a healthy baseline — is corruption, never legitimate
+mid-campaign. The project is then excluded from all discovery paths
+(fail-closed scheduling) until resolved. On the signal the guard emits
+`bead_store_suspect` and attempts one automatic restore: copy the newest
+`.beads/.br_history/issues.*.jsonl` over `.beads/issues.jsonl` (temp file +
+rename), then **verify the effect** by re-listing — the project is unblocked
+only if the open count recovered to at least half the pre-corruption
+baseline. Success emits `bead_store_restored`; any failure emits
+`bead_store_restore_failed` and the project stays blocked (fail-open on
+restore failure means "stay blocked and alert", never "unblock anyway").
+Further retries happen only via the `repair-bead-store` Pan action above or a
+manual restore. This is the detect/self-heal complement to the hydra-50k
+write-path fix; the stream events are the shepherd's visibility into both.
 
 Pan rejects a repair if the bead has any non-completed worker row (live worker
 safety), if the handler is unknown or nil, or if the same bead was repaired

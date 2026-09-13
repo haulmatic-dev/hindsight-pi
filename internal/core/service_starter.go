@@ -203,6 +203,24 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				log.Printf("[PanRepair] reset-retries for %s (previous fault count: %d)", beadID, prev)
 				return nil
 			},
+			"repair-bead-store": func(beadID string) error {
+				id := types.BeadID(beadID)
+				projectPath := projectPathForID(id)
+				if projectPath == "" {
+					return fmt.Errorf("repair-bead-store: project path unresolved for %s", beadID)
+				}
+				if o.storeGuard == nil {
+					return fmt.Errorf("repair-bead-store: no store guard")
+				}
+				// Restores .beads/issues.jsonl from the newest .br_history
+				// snapshot and unblocks the project only if the open-count
+				// verifies recovered. Failure leaves the project blocked.
+				if err := o.storeGuard.Restore(projectPath); err != nil {
+					return fmt.Errorf("repair-bead-store: %w", err)
+				}
+				log.Printf("[PanRepair] repair-bead-store succeeded for %s (project %s)", beadID, projectPath)
+				return nil
+			},
 		})
 
 		// Pan should not judge beads that have already reached a terminal

@@ -21,6 +21,7 @@ type BeadDiscovery struct {
 	useBV       bool
 	dag         *DAG
 	dagMu       *sync.RWMutex
+	storeGuard  *BeadStoreGuard // nil = corruption guard disabled
 }
 
 // NewBeadDiscovery creates a new bead discovery service.
@@ -39,6 +40,18 @@ func NewBeadDiscovery(beadsClient BeadsClient, bvClient *bv.Client, projects []t
 // Must be called after project discovery to ensure beads can be found.
 func (d *BeadDiscovery) SetProjects(projects []types.Project) {
 	d.projects = projects
+}
+
+// SetStoreGuard attaches the bead-store corruption guard. When set, projects
+// whose store the guard has blocked are excluded from every discovery path
+// (fail-closed scheduling) until a verified restore unblocks them.
+func (d *BeadDiscovery) SetStoreGuard(g *BeadStoreGuard) {
+	d.storeGuard = g
+}
+
+// guardBlocked reports whether the store guard has excluded this project.
+func (d *BeadDiscovery) guardBlocked(project types.Project) bool {
+	return d.storeGuard != nil && d.storeGuard.IsBlocked(project.Path)
 }
 
 // FindReadyBeads retrieves beads that are ready to execute.
@@ -87,13 +100,28 @@ func (d *BeadDiscovery) FindReadyBeads(activeWorkers map[string]bool) ([]types.B
 func (d *BeadDiscovery) findFromBR(activeWorkers map[string]bool) ([]types.Bead, error) {
 	var allReadyBeads []types.Bead
 	for _, project := range d.projects {
+		if d.guardBlocked(project) {
+			// Fail-closed: store presumed corrupt, excluded until restored.
+			continue
+		}
 		beads, err := d.beadsClient.ListBeads(project.Path, "")
 		if err != nil {
 			// A single project's list failure (e.g. a stale path, a parent dir
 			// with no .beads, or a transient br error) must not abort discovery
 			// for every other project. Skip it this tick and continue.
 			log.Printf("⚠️  [br] list failed for project %s: %v — skipping this project this tick", project.Name, err)
+			if d.storeGuard != nil {
+				d.storeGuard.NoteListFailure(project, err)
+			}
 			continue
+		}
+		if d.storeGuard != nil {
+			d.storeGuard.Check(project, beads)
+			if d.guardBlocked(project) {
+				// Signal fired this tick: exclude the project's beads
+				// immediately rather than scheduling from a corrupt store.
+				continue
+			}
 		}
 		allReadyBeads = append(allReadyBeads, beads...)
 	}
@@ -198,6 +226,10 @@ func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead,
 	var allReadyBeads []types.Bead
 
 	for _, project := range d.projects {
+		if d.guardBlocked(project) {
+			// Fail-closed: store presumed corrupt, excluded until restored.
+			continue
+		}
 		triage, err := d.bvClient.GetTriage(project.Path)
 		if err != nil {
 			// Per-project isolation: one project's triage failure must not
@@ -361,6 +393,10 @@ func (d *BeadDiscovery) findFromBVPlan(activeWorkers map[string]bool) ([]types.B
 	var allReadyBeads []types.Bead
 
 	for _, project := range d.projects {
+		if d.guardBlocked(project) {
+			// Fail-closed: store presumed corrupt, excluded until restored.
+			continue
+		}
 		plan, err := d.bvClient.GetPlan(project.Path)
 		if err != nil {
 			// Per-project isolation: skip a project whose plan failed rather

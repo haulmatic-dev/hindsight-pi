@@ -349,6 +349,23 @@ func (j *Charon) performCleanup() {
 		log.Printf("[Charon] 🔧 Recovered %d orphan in_progress beads (reopened orphan bead for retry)", recovered)
 	}
 
+	// Clean up stale in-memory worker entries BEFORE the no-tracked-workers
+	// early return. The phantom-slot wedge this prevents (2026-09-11: registry
+	// row removed by the completion path, in-memory active set never
+	// decremented, "slots filled 2/2" with 0 live processes) is exactly the
+	// state where every tracked worker is dead — so a cleanup that only runs
+	// after the early return can never fire in the wedge. Same reasoning as
+	// the registry ghost reap above.
+	if cleared := j.clearStaleActiveWorkers(); cleared > 0 {
+		log.Printf("[Charon] 🧹 Cleared %d stale in-memory worker entries", cleared)
+	}
+
+	// Belt-and-braces: if the pool reports full occupancy with zero live
+	// PIDs for two consecutive scans, reap stale phantom slots.
+	if reaped := j.checkAndReapPoolDeadlock(); reaped > 0 {
+		log.Printf("[Charon] 🧹 Pool deadlock reaper removed %d phantom slots", reaped)
+	}
+
 	if len(liveWorkers) == 0 {
 		log.Printf("[Charon] ✅ No tracked workers to check")
 		return
@@ -461,24 +478,6 @@ func (j *Charon) performCleanup() {
 		log.Printf("[Charon] ✅ No orphaned or stuck workers found")
 	}
 
-	// Clean up stale in-memory worker entries. The persistent worker tracker
-	// already handles PID-based orphans, but a worker whose process dies before
-	// its PID is recorded (so the tracker has PID 0) leaves a stuck "spawning"
-	// entry in the overseer's activeWorkers map. That entry blocks all new
-	// spawns for that bead with "worker already exists". We use the injected
-	// snapshot to detect PID-0 entries, but only reap placeholders older than
-	// 10 minutes to avoid racing with an in-flight spawn (the double-spawn
-	// guard from PR #163).
-	if cleared := j.clearStaleActiveWorkers(); cleared > 0 {
-		log.Printf("[Charon] 🧹 Cleared %d stale in-memory worker entries (PID 0 placeholder)", cleared)
-	}
-
-	// Belt-and-braces: if the pool reports full occupancy with zero live
-	// PIDs for two consecutive scans, reap stale phantom slots.
-	if reaped := j.checkAndReapPoolDeadlock(); reaped > 0 {
-		log.Printf("[Charon] 🧹 Pool deadlock reaper removed %d phantom slots", reaped)
-	}
-
 	j.logStats()
 
 	// Cleanup old records periodically (older than 24 hours)
@@ -588,10 +587,19 @@ func (j *Charon) markBeadFailed(beadID string, reason string) {
 	log.Printf("[Charon] ✅ Marked bead %s as failed (close succeeded)", beadID)
 }
 
-// clearStaleActiveWorkers removes in-memory active worker entries that are stuck
-// with a placeholder PID (0). These entries block all new spawns for the same
+// clearStaleActiveWorkers removes in-memory active worker entries that are
+// stuck with a placeholder PID (0). These entries block all new spawns for the same
 // bead with "worker already exists" because the persistent worker tracker
 // shows them as status="running" even though no real process is alive.
+//
+// It also reaps entries whose real PID is dead: that is the 2026-09-11
+// phantom-slot wedge, where the completion path removed the registry row
+// but never decremented the in-memory active set ("tracked=2 running" /
+// "slots filled 2/2" with 0 live processes and an empty registry). A dead
+// PID is reaped unless another source proves the bead still has a live
+// worker: the tracker knowing a live replacement PID (respawn), or a fresh
+// registry heartbeat (the heartbeat is the liveness truth — reaping a
+// heartbeat-fresh row would double-spawn a live worker).
 //
 // Placeholders younger than 10 minutes are NEVER reaped: they are proof of an
 // in-flight spawn (the double-spawn race fixed by PR #163). A placeholder
@@ -615,8 +623,8 @@ func (j *Charon) clearStaleActiveWorkers() int {
 		if w == nil {
 			continue
 		}
-		// Only reap placeholder / PID-0 entries.
 		if w.PID != 0 {
+			cleared += j.reapDeadPIDSlot(beadID, w)
 			continue
 		}
 		// Young placeholders are in-flight spawns, not orphans.
@@ -648,6 +656,48 @@ func (j *Charon) clearStaleActiveWorkers() int {
 		log.Printf("[Spawn] reaped stale placeholder %s (age %v)", beadID, age)
 	}
 	return cleared
+}
+
+// reapDeadPIDSlot reaps one in-memory slot whose recorded PID is no longer
+// running, unless the tracker or the registry proves the bead still has a
+// live worker. It mirrors the liveness precedence used by shouldKillAsStuck:
+// a fresh registry heartbeat outranks everything, because only a live worker
+// process can heartbeat. Returns 1 when the slot was reaped.
+func (j *Charon) reapDeadPIDSlot(beadID string, w *types.Worker) int {
+	if j.isProcessRunning(w.PID) {
+		return 0
+	}
+	// The tracker may know a replacement PID (respawn under a new PID): if
+	// that one is alive, the bead has a worker even though this slot's PID
+	// is dead.
+	if j.workerTracker != nil {
+		if record, ok := j.workerTracker.GetWorkerByBead(beadID); ok &&
+			record.PID != w.PID && record.Status == "running" && record.PID > 0 &&
+			j.isProcessRunning(record.PID) {
+			return 0
+		}
+	}
+	// A fresh registry heartbeat means the reporter process is alive; the
+	// PID view is stale (re-exec, PID reuse). Reaping would double-spawn.
+	if j.registryStore != nil {
+		if row, ok, err := j.registryStore.GetWorker(beadID); err == nil && ok &&
+			time.Since(row.LastHeartbeat) < j.heartbeatHungAfter {
+			return 0
+		}
+	}
+	// Dead worker holding a slot: mirror the tick sweep by closing the
+	// tracker record, then free the in-memory slot. removeActiveWorker is
+	// idempotent, so a concurrent completion path re-deleting is harmless.
+	if j.workerTracker != nil {
+		if err := j.workerTracker.MarkWorkerCompleted(w.PID, -1); err != nil {
+			log.Printf("[Charon] Failed to mark dead worker %s (PID %d) completed: %v", beadID, w.PID, err)
+		}
+	}
+	if j.onStaleActiveWorker != nil {
+		j.onStaleActiveWorker(beadID)
+	}
+	log.Printf("[Spawn] reaped dead worker slot %s (PID %d not running)", beadID, w.PID)
+	return 1
 }
 
 // collectProjects returns the list of projects to scan for orphan beads. It prefers
@@ -700,15 +750,12 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 
 			beadIDStr := string(bead.ID)
 
-			// Check if any live tracked worker exists for this bead
-			hasLive := false
-			for _, trackedBeadID := range liveWorkers {
-				if trackedBeadID == beadIDStr {
-					hasLive = true
-					break
-				}
-			}
-			if hasLive {
+			// A tracker row alone is not liveness: killed workers leave
+			// "running" rows behind (2026-09-11 hang wave stranded 14 webapp
+			// beads in_progress this way). The bead counts as handled only if
+			// a tracked PID is actually running or the registry heartbeat is
+			// fresh.
+			if j.beadHasLiveWorker(beadIDStr, liveWorkers) {
 				continue
 			}
 
@@ -766,10 +813,53 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 			j.stats.LastOrphanBeadTime = time.Now()
 			recovered++
 			log.Printf("[Charon] ✅ reopened orphan bead %s for retry", beadIDStr)
+
+			// Free the stale "running" row the dead worker left behind so the
+			// respawn is not blocked by a phantom slot.
+			if rec, ok := j.workerTracker.GetWorkerByBead(beadIDStr); ok && rec.Status == "running" {
+				if err := j.workerTracker.MarkWorkerCompleted(rec.PID, -1); err != nil {
+					log.Printf("[Charon] failed to mark stale worker row completed for reopened bead %s (fail open): %v", beadIDStr, err)
+				}
+			}
+			if j.events != nil {
+				j.events.Emit(Event{
+					Type:   "charon_orphan_reopened",
+					Reason: "dead_worker",
+					Detail: fmt.Sprintf("reopened orphan in_progress bead %s (no live worker)", beadIDStr),
+					Fields: map[string]any{"bead": beadIDStr, "project": project.Path},
+				})
+			}
 		}
 	}
 
 	return recovered
+}
+
+// beadHasLiveWorker reports whether a bead has a genuinely live worker.
+// Liveness precedence mirrors reapDeadPIDSlot: a live tracked PID outranks
+// everything; a fresh registry heartbeat covers PID-reuse/re-exec cases where
+// the row's PID is stale but the reporter process is still alive. A mere
+// "running" tracker row with a dead PID is NOT liveness — that is exactly the
+// ghost state left by killed workers (2026-09-11 hang wave).
+func (j *Charon) beadHasLiveWorker(beadID string, liveWorkers map[int]string) bool {
+	for pid, id := range liveWorkers {
+		if id == beadID && pid > 0 && j.isProcessRunning(pid) {
+			return true
+		}
+	}
+	if j.workerTracker != nil {
+		if rec, ok := j.workerTracker.GetWorkerByBead(beadID); ok &&
+			rec.Status == "running" && rec.PID > 0 && j.isProcessRunning(rec.PID) {
+			return true
+		}
+	}
+	if j.registryStore != nil {
+		if row, ok, err := j.registryStore.GetWorker(beadID); err == nil && ok &&
+			time.Since(row.LastHeartbeat) < j.heartbeatHungAfter {
+			return true
+		}
+	}
+	return false
 }
 
 // checkAndReapPoolDeadlock is the belt-and-braces detector for the

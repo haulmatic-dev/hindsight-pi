@@ -169,6 +169,7 @@ type Overseer struct {
 
 	// BeadDiscovery finds beads ready to execute from various sources
 	beadDiscovery *BeadDiscovery
+	storeGuard    *BeadStoreGuard // corruption detector; nil when disabled
 
 	// ProjectResolver resolves project and repo paths for beads
 	projectResolver *ProjectResolver
@@ -263,6 +264,26 @@ func NewOverseer(config *Config) *Overseer {
 	}
 
 	o.beadDiscovery = NewBeadDiscovery(o.beadsClient, o.bvClient, o.projects, o.completed, o.dag, &o.dagMu)
+
+	// Bead-store integrity guard (detect + self-heal): tracks per-project
+	// open-bead counts across discovery ticks and fails scheduling closed on
+	// anomalous collapse (0 or >80% in one tick). Restore verifies the effect
+	// by re-listing, never the command.
+	o.storeGuard = NewBeadStoreGuard(func(projectPath string) (int, error) {
+		beads, err := o.beadsClient.ListBeads(projectPath, "")
+		if err != nil {
+			return 0, err
+		}
+		open := 0
+		for _, b := range beads {
+			if !b.Status.IsTerminal() {
+				open++
+			}
+		}
+		return open, nil
+	})
+	o.storeGuard.SetEventSink(NewEventSink(DefaultEventsDir()))
+	o.beadDiscovery.SetStoreGuard(o.storeGuard)
 
 	// Initialize project resolver
 	o.projectResolver = NewProjectResolver(o.projects)

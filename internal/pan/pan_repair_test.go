@@ -192,3 +192,40 @@ func TestTickRepairHandlerError(t *testing.T) {
 		t.Errorf("event detail = %q, want handler error", lastEvent.detail)
 	}
 }
+
+// TestRepairBeadStoreWhitelisted: the bead-store corruption repair must be
+// an allowed repair action and must route to a registered daemon-side
+// handler (which restores .beads/issues.jsonl from a .br_history snapshot
+// and unblocks the project only on verified open-count recovery).
+func TestRepairBeadStoreWhitelisted(t *testing.T) {
+	if !isAllowedAction("repair:repair-bead-store") {
+		t.Fatal("repair:repair-bead-store not allowed by isAllowedAction")
+	}
+
+	store := &fakeStore{}
+	var handled []string
+	runner := func(ctx context.Context, cfg Config, prompt string) (string, error) {
+		return `[{"bead_id": "proj-abc", "action": "repair:repair-bead-store", "message": ""}]`, nil
+	}
+
+	s := New(Config{Enabled: true}, store, runner)
+	s.SetBlockedBeads(func() []BlockedBead {
+		return []BlockedBead{{BeadID: "proj-abc", Reason: "bead store corrupt", Since: time.Now()}}
+	})
+	s.SetRepairHandlers(map[string]func(beadID string) error{
+		"repair-bead-store": func(beadID string) error {
+			handled = append(handled, beadID)
+			return nil
+		},
+	})
+	s.SetOnRepairEvent(func(beadID, action, result, detail string) {})
+
+	s.Tick(context.Background())
+
+	if len(handled) != 1 || handled[0] != "proj-abc" {
+		t.Fatalf("handler called %v, want [proj-abc]", handled)
+	}
+	if len(store.enqueued) != 0 {
+		t.Errorf("repair enqueued a worker command: %+v", store.enqueued)
+	}
+}

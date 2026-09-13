@@ -139,9 +139,10 @@ var allowedActions = map[registry.CommandKind]bool{
 // The prompt lists these names explicitly; the parser rejects anything else so
 // the model cannot invent action names and burn MiniMax calls.
 var repairWhitelist = map[string]bool{
-	"repair-worktree":  true,
-	"reap-placeholder": true,
-	"reset-retries":    true,
+	"repair-worktree":   true,
+	"reap-placeholder":  true,
+	"reset-retries":     true,
+	"repair-bead-store": true,
 }
 
 // isAllowedAction returns true for known worker command kinds and for
