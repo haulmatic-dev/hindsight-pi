@@ -358,6 +358,13 @@ const fixRecursionCappedLabel = "fix-recursion-capped"
 // components (chain verdicts, the Shepherd cron) read.
 const closedFailedLabel = "closed-failed"
 
+// integrationExhaustedLabel marks a bead whose singleton integrate/push
+// failed maxConsecutiveIntegrationFailures times in a row. Like
+// fix-recursion-capped it is a durable cap: every respawn path (scheduler
+// retry queue, DAG ready filter, Charon orphan recovery) must skip beads
+// carrying it until Pan repair or a human clears the label.
+const integrationExhaustedLabel = "integration-exhausted"
+
 // escalatedLabel is the durable marker for beads a verified-close rejection
 // escalated to a human at max attempts. Unlike a status, a label is visible
 // to every consumer that decides respawn: Charon orphan recovery, the
@@ -515,9 +522,13 @@ func (c *BeadCloser) verifiedCloseEnabled() bool {
 // after a singleton bead integrates, when output push is enabled. The push is
 // fail-closed: PushBranch verifies the remote ref advanced (ls-remote), and
 // any rejection (GH006 branch protection, non-FF) is returned as an error
-// carrying the exact remote stderr. Returns nil when push is disabled or when
-// a rejected push was routed to a successfully created auto-PR (work is then
-// preserved on the dogfood branch + PR instead of the working branch).
+// carrying the exact remote stderr. When output.pr_merge is set (permanent
+// branch protection on the working branch), the direct push is skipped
+// entirely and the work lands via PublishViaPR — feature branch + gh pr
+// create + gh pr merge --admin, verified MERGED — instead. Returns nil when
+// push is disabled or when a rejected push was routed to a successfully
+// created auto-PR (work is then preserved on the dogfood branch + PR instead
+// of the working branch).
 func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead) error {
 	if c.config == nil || !c.config.OutputPushEnabled() || c.worktreeManager == nil {
 		return nil
@@ -531,6 +542,20 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 		return fmt.Errorf("push %s: no working branch", bead.ID)
 	}
 	remote := c.config.OutputPushRemote()
+	if c.config.PRMergeEnabled() {
+		head := "dogfood/" + string(bead.ID)
+		url, err := PublishViaPR(projectPath, branch, head, bead.Title, autoPRResolveToken())
+		if err != nil {
+			log.Printf("[Output] PR merge failed for %s: %s", bead.ID, err)
+			AppendActivity(projectPath, string(bead.ID), "PR merge failed: "+err.Error())
+			return fmt.Errorf("push %s via PR to %s/%s: %w", bead.ID, remote, branch, err)
+		}
+		// Logged only after gh pr view confirmed the PR reached MERGED state —
+		// never on gh exit alone.
+		log.Printf("[Output] landed via PR for %s: %s (%s → %s)", bead.ID, url, head, branch)
+		AppendActivity(projectPath, string(bead.ID), "landed via PR")
+		return nil
+	}
 	pushed, reason := PushBranch(projectPath, remote, branch)
 	if pushed {
 		// Logged only after PushBranch's ls-remote verification confirmed the

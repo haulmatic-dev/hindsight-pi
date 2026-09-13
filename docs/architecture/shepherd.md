@@ -88,7 +88,14 @@ push
 rejections return the exact remote stderr (GH006 included) instead of a
 collapsed "protected branch" summary. A rejected push routes to `maybeOpenAutoPR`
 when `output.auto_pr` is on; a created PR preserves the work via the dogfood
-branch and the close proceeds, otherwise the close fails.
+branch and the close proceeds, otherwise the close fails. When branch
+protection on the working branch is permanent, `output.pr_merge: true` skips
+the futile direct push entirely: the publisher force-pushes HEAD to
+`dogfood/<bead-id>`, runs `gh pr create` + `gh pr merge --merge --admin`, and
+only logs "landed via PR" after `gh pr view` reports MERGED — a
+created-but-unmerged PR fails the close closed, same as a rejected push. The
+periodic `PublishRepo` tick uses the same PR route with a
+`dogfood/publish-<project>` branch when `pr_merge` is set.
 
 The beads store (`issues.jsonl`) has **no close-reason field**, so the close
 verdict is made durable as a label: a bead that closes `failed` gets
@@ -120,6 +127,19 @@ ready filter (`GetReadyBeads`), and the retry-eligible path. Without the
 label, bare `in_progress` is exactly the signal orphan recovery keys on and
 the bead respawns into the same death the escalation stopped (2026-09-06
 empty-diff churn loop: c01hq/65xy7/48bdq).
+
+**Worktree-unavailable hard-park (2026-09-13).** The same durability rule now
+covers the spawn path: when `EnsureWorktree` fails (dubious-ownership,
+foreign-repo path, unresolvable base), `SpawnInternal` fails the spawn
+CLOSED for every project — there is no shared-checkout fallback. The prior
+fallback ran the worker loose in the user's main checkout; observed
+2026-09-11/12: merge-conflict markers committed into `webapp/.beads/issues.jsonl`,
+a project's `.beads` dir wiped by a `git clean -fdx` "fix the repo" worker,
+janitorial commits landing on the user's working branch. The bead is stamped
+**`worktree-unavailable`** and every respawn consumer skips it (retry queue,
+`GetReadyBeads`, Charon orphan recovery), exactly like `escalated`. Recovery
+is human: fix the worktree (Pan's whitelisted `repair-worktree` repair runs
+`Remove`+`EnsureWorktree` daemon-side), then clear the label.
 
 **Worktree-unavailable hard-park (2026-09-13).** The same durability rule now
 covers the spawn path: when `EnsureWorktree` fails (dubious-ownership,

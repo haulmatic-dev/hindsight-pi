@@ -206,7 +206,7 @@ when wrong:
 | `overseer.max_workers` | Must not exceed the provider's real concurrency. A 2nd worker against a 1-lane provider causes 403 lease ping-pong. |
 | `overseer.worker_timeout` | Active-time cap (parked excluded). 15m = zero completions on real tasks; 45m proven. |
 | `overseer.max_bead_tokens` | Soft cap (15M) + hard backstop (30M). Budget is a signal for Pan, not an axe. The cap is evaluated against **fresh tokens** (`tokens_fresh` = fresh input + output); cache-read and cache-creation tokens count toward `tokens_so_far` for observability only. |
-| `output.push` | Off = finished work never reaches origin. |
+| `output.push` | Off = finished work never reaches origin. When the working branch has permanent branch protection, pair it with `output.pr_merge: true` — direct pushes can never succeed, and the PR route (`dogfood/<id>` branch + `gh pr create` + `gh pr merge --merge --admin`, MERGED-state verified) is the only path that lands work. |
 | `pi.config_dir` | Wrong dir = 0 skills loaded, degraded generation (see §6). |
 | `projects.list[].path` | Workers run `br`/gates inside these repos; permissions per §2. |
 

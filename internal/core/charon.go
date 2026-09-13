@@ -852,6 +852,12 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 				}
 				// A worktree-unavailable bead was hard-parked by a fail-closed spawn:
 				// reopening it would retry the same worktree failure (and previously
+				// Same parking for integration-failure caps: reopening would
+				// respawn a full worker into the same integrate/push rejection.
+				if hasBeadLabel(fresh.Labels, integrationExhaustedLabel) {
+					log.Printf("[OrphanRetry] bead %s carries the %q label (integration failures capped); skipping reopen", beadIDStr, integrationExhaustedLabel)
+					continue
+				}
 				// resurrected the shared-checkout corruption path, 2026-09-11/12).
 				if hasBeadLabel(fresh.Labels, worktreeUnavailableLabel) {
 					log.Printf("[OrphanRetry] bead %s carries the %q label (worktree hard-parked); skipping reopen", beadIDStr, worktreeUnavailableLabel)

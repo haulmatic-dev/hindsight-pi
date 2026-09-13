@@ -262,9 +262,10 @@ type PiSkillsConfig struct {
 
 // OutputConfig controls publishable output behaviour for a repository.
 type OutputConfig struct {
-	Push   bool   `yaml:"push"`
-	Remote string `yaml:"remote"`
-	AutoPR bool   `yaml:"auto_pr"`
+	Push    bool   `yaml:"push"`
+	Remote  string `yaml:"remote"`
+	AutoPR  bool   `yaml:"auto_pr"`
+	PRMerge bool   `yaml:"pr_merge"`
 }
 
 // WorktreeConfig controls git-worktree behaviour used by the daemon.
@@ -308,6 +309,17 @@ func (c *Config) AutoPREnabled() bool {
 		return false
 	}
 	return c.Output.AutoPR
+}
+
+// PRMergeEnabled reports whether integrates must land via PR + gh pr merge
+// instead of a direct push. Set this when the working branch has permanent
+// branch protection: the direct push can never succeed, so the publisher
+// goes straight to the dogfood/<id> feature branch + PR route.
+func (c *Config) PRMergeEnabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.Output.PRMerge
 }
 
 // rawConfig is used for YAML parsing to handle the nested projects structure

@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -54,7 +55,7 @@ func TestBranchAheadOfRemote(t *testing.T) {
 }
 
 func TestPublishRepo_NilManager(t *testing.T) {
-	if ok, reason := PublishRepo(nil, "/x", "tok", nil, nil); ok || reason != "no worktree manager" {
+	if ok, reason := PublishRepo(nil, "/x", "tok", false, nil, nil); ok || reason != "no worktree manager" {
 		t.Errorf("nil manager: got (%v,%q)", ok, reason)
 	}
 }
@@ -72,7 +73,7 @@ func TestPublishRepo_PushesAheadBranch(t *testing.T) {
 	gitRun(t, repo, "config", "user.name", "T")
 	gitRun(t, repo, "commit", "--allow-empty", "-m", "c1")
 
-	pushed, reason := PublishRepo(NewWorktreeManager(), repo, "", nil, func(string) bool { return true })
+	pushed, reason := PublishRepo(NewWorktreeManager(), repo, "", false, nil, func(string) bool { return true })
 	if !pushed {
 		t.Fatalf("expected push, got (false, %q)", reason)
 	}
@@ -122,12 +123,19 @@ func (m *autoPRFakeBeadsClient) UpdateBeadDescription(projectPath, repoName stri
 }
 
 type autoPRFakeExec struct {
-	pushes   []autoPRPushArgs
-	lsRemote []autoPRLsArgs
-	ghCreate []autoPRGhArgs
-	ghURL    string
-	ghErr    error
-	lsFound  bool
+	pushes    []autoPRPushArgs
+	lsRemote  []autoPRLsArgs
+	ghCreate  []autoPRGhArgs
+	prPushes  []autoPRPushArgs
+	ghMerge   []prMergeGhArgs
+	ghURL     string
+	ghErr     error
+	mergeErr  error
+	lsFound   bool
+}
+
+type prMergeGhArgs struct {
+	repoPath, head, token string
 }
 
 type autoPRPushArgs struct {
@@ -168,6 +176,25 @@ func installAutoPRFake(f *autoPRFakeExec) func() {
 		autoPRGitPush = origPush
 		autoPRLsRemote = origLs
 		autoPRGhCreate = origGh
+	}
+}
+
+// installPRMergeFake overrides the PR-merge exec hooks (force push + gh pr
+// merge). Returning nil from the merge hook simulates a verified MERGED PR.
+func installPRMergeFake(f *autoPRFakeExec) func() {
+	origPush := prMergeGitPush
+	origMerge := autoPRGhMerge
+	prMergeGitPush = func(repoPath, ref, token string) error {
+		f.prPushes = append(f.prPushes, autoPRPushArgs{repoPath, ref, token})
+		return nil
+	}
+	autoPRGhMerge = func(repoPath, head, token string) error {
+		f.ghMerge = append(f.ghMerge, prMergeGhArgs{repoPath, head, token})
+		return f.mergeErr
+	}
+	return func() {
+		prMergeGitPush = origPush
+		autoPRGhMerge = origMerge
 	}
 }
 
@@ -305,4 +332,133 @@ func sliceStrEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestPublishAfterIntegrate_PRMergeSkipsDirectPush: with output.pr_merge on
+// and no branch protection in the way, a direct push would succeed — so the
+// assertion is negative on the remote: main must NOT advance via PushBranch,
+// and the PR-merge hooks must carry the integrate.
+func TestPublishAfterIntegrate_PRMergeSkipsDirectPush(t *testing.T) {
+	repo, remote := setupReachableRemote(t)
+	commitFile(t, repo, "file.txt", "a")
+	git(t, repo, "push", "-u", "origin", "main")
+	remoteMain := git(t, remote, "rev-parse", "refs/heads/main")
+	commitFile(t, repo, "file.txt", "b")
+
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/7"}
+	restore := installAutoPRFake(fake)
+	restoreMerge := installPRMergeFake(fake)
+	defer restore()
+	defer restoreMerge()
+
+	closer := NewBeadCloser(&autoPRFakeBeadsClient{}, nil, nil, nil,
+		&Config{Output: OutputConfig{Push: true, PRMerge: true}})
+	closer.SetWorktreeManager(NewWorktreeManager(), nil, nil)
+	if err := closer.publishAfterIntegrate(repo, &types.Bead{ID: "bead-7", Title: "Fix things"}); err != nil {
+		t.Fatalf("publishAfterIntegrate: %v", err)
+	}
+
+	if git(t, remote, "rev-parse", "refs/heads/main") != remoteMain {
+		t.Fatalf("direct push advanced remote main — PR route must not push main directly")
+	}
+	if len(fake.prPushes) != 1 || fake.prPushes[0].ref != "refs/heads/dogfood/bead-7" {
+		t.Fatalf("expected force push to dogfood/bead-7, got %+v", fake.prPushes)
+	}
+	if len(fake.ghCreate) != 1 || fake.ghCreate[0].base != "main" || fake.ghCreate[0].head != "dogfood/bead-7" {
+		t.Fatalf("unexpected gh create args: %+v", fake.ghCreate)
+	}
+	if len(fake.ghMerge) != 1 || fake.ghMerge[0].head != "dogfood/bead-7" {
+		t.Fatalf("expected gh pr merge for dogfood/bead-7, got %+v", fake.ghMerge)
+	}
+}
+
+// TestPublishAfterIntegrate_PRMergeFailsClosed: an unmerged PR (merge hook
+// error — e.g. gh exit 1 from branch protection) must surface as a push
+// error so the close aborts and the worktree survives.
+func TestPublishAfterIntegrate_PRMergeFailsClosed(t *testing.T) {
+	repo, _ := setupReachableRemote(t)
+	commitFile(t, repo, "file.txt", "a")
+	git(t, repo, "push", "-u", "origin", "main")
+	commitFile(t, repo, "file.txt", "b")
+
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/8", mergeErr: errors.New("gh pr merge: GraphQL: Protected branch")}
+	restore := installAutoPRFake(fake)
+	restoreMerge := installPRMergeFake(fake)
+	defer restore()
+	defer restoreMerge()
+
+	closer := NewBeadCloser(&autoPRFakeBeadsClient{}, nil, nil, nil,
+		&Config{Output: OutputConfig{Push: true, PRMerge: true}})
+	closer.SetWorktreeManager(NewWorktreeManager(), nil, nil)
+	err := closer.publishAfterIntegrate(repo, &types.Bead{ID: "bead-8", Title: "Fix things"})
+	if err == nil {
+		t.Fatal("expected error when PR merge fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "Protected branch") {
+		t.Errorf("error must carry the gh failure verbatim, got: %v", err)
+	}
+	if len(fake.ghMerge) != 1 {
+		t.Fatalf("expected one merge attempt, got %d", len(fake.ghMerge))
+	}
+}
+
+// TestPublishRepo_PRMergeRoutesViaPR: the periodic publisher with pr_merge
+// on must not direct-push the working branch; it goes through the PR hooks.
+func TestPublishRepo_PRMergeRoutesViaPR(t *testing.T) {
+	base := t.TempDir()
+	bare := filepath.Join(base, "remote.git")
+	repo := filepath.Join(base, "work")
+	gitRun(t, base, "init", "--bare", bare)
+	gitRun(t, base, "clone", bare, repo)
+	gitRun(t, repo, "config", "user.email", "t@e.co")
+	gitRun(t, repo, "config", "user.name", "T")
+	gitRun(t, repo, "commit", "--allow-empty", "-m", "c1")
+	gitRun(t, repo, "push", "origin", "master")
+
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/9"}
+	restore := installAutoPRFake(fake)
+	restoreMerge := installPRMergeFake(fake)
+	defer restore()
+	defer restoreMerge()
+
+	commitFile := filepath.Join(repo, "more.txt")
+	if err := os.WriteFile(commitFile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-m", "c2")
+
+	pushed, reason := PublishRepo(NewWorktreeManager(), repo, "", true, nil, func(string) bool { return true })
+	if !pushed {
+		t.Fatalf("expected PR-route publish, got (false, %q)", reason)
+	}
+	if len(fake.prPushes) != 1 || fake.prPushes[0].ref != "refs/heads/dogfood/publish-work" {
+		t.Fatalf("expected force push to dogfood/publish-work, got %+v", fake.prPushes)
+	}
+	if len(fake.ghMerge) != 1 {
+		t.Fatalf("expected gh pr merge, got %+v", fake.ghMerge)
+	}
+	// Direct push must not have landed on the remote either.
+	out, err := exec.Command("git", "-C", bare, "rev-list", "--count", "master").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "1" {
+		t.Fatalf("remote master advanced without a PR: count=%q err=%v", strings.TrimSpace(string(out)), err)
+	}
+}
+
+// TestPublishViaPR_PropagatesCreateFailure: a PR that never gets created
+// returns no URL and the push error, so nothing downstream can claim success.
+func TestPublishViaPR_PropagatesCreateFailure(t *testing.T) {
+	fake := &autoPRFakeExec{ghErr: errors.New("gh pr create: HTTP 403")}
+	restore := installAutoPRFake(fake)
+	restoreMerge := installPRMergeFake(fake)
+	defer restore()
+	defer restoreMerge()
+
+	url, err := PublishViaPR("/tmp/x", "main", "dogfood/z", "T", "")
+	if err == nil || url != "" {
+		t.Fatalf("expected error + empty URL, got (%q, %v)", url, err)
+	}
+	if len(fake.ghMerge) != 0 {
+		t.Fatalf("merge must not run when PR creation failed, got %+v", fake.ghMerge)
+	}
 }
