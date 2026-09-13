@@ -110,6 +110,104 @@ func TestCommit_ExcludesBeadsDir(t *testing.T) {
 	}
 }
 
+// Janitorial auto-commit must exclude .beads/** from its scope — it is
+// daemon machinery state (br-owned mirror), same as worktree commits.
+func TestAutoCommitDirtyMain_ExcludesBeadsDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	proj := gitInitRepo(t)
+	m := NewWorktreeManager()
+	if _, err := m.EnsureWorktree(proj, "proj-dirtyb"); err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	// dirty main with a product file AND a beads write
+	if err := os.WriteFile(filepath.Join(proj, "loose.go"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(proj, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, ".beads", "issues.jsonl"), []byte(`{"id":"main-loose"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	autoCommitDirtyMain(proj)
+
+	log, _ := exec.Command("git", "-C", proj, "show", "--stat", "--format=", "HEAD").Output()
+	if !strings.Contains(string(log), "loose.go") {
+		t.Errorf("janitorial commit must include the product file: %s", log)
+	}
+	if strings.Contains(string(log), "issues.jsonl") {
+		t.Errorf("janitorial commit must exclude .beads machinery: %s", log)
+	}
+}
+
+// Janitorial auto-commit must refuse (skip + alarm) when the dirty main
+// checkout carries conflict markers — it has committed marker states into
+// git 3+ times across repos (846bdd1 mid-merge capture, 9f74f940 unparseable
+// package.json), poisoning every downstream gate.
+func TestAutoCommitDirtyMain_RefusesConflictMarkers(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	proj := gitInitRepo(t)
+	if err := os.WriteFile(filepath.Join(proj, "clean.go"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, "conflicted.go"),
+		[]byte("package x\n\n<<<<<<< HEAD\na := 1\n=======\na := 2\n>>>>>>> branch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	autoCommitDirtyMain(proj)
+
+	// no janitorial commit must exist
+	log, _ := exec.Command("git", "-C", proj, "log", "--oneline").Output()
+	if strings.Contains(string(log), "wip: hydra auto-commit") {
+		t.Errorf("janitorial commit must be refused on conflict markers, log:\n%s", log)
+	}
+	// markers must remain unstaged (reset), working tree intact
+	content, _ := os.ReadFile(filepath.Join(proj, "conflicted.go"))
+	if !strings.Contains(string(content), "<<<<<<<") {
+		t.Errorf("working tree file must be untouched, got %q", content)
+	}
+	staged, _ := exec.Command("git", "-C", proj, "diff", "--cached", "--name-only").Output()
+	if strings.TrimSpace(string(staged)) != "" {
+		t.Errorf("nothing must remain staged after refusal, got %q", staged)
+	}
+}
+
+// WorktreeManager.Commit must refuse a commit whose staged content carries
+// conflict markers, so the shepherd quarantines the bead instead of baking
+// marker states into history.
+func TestCommit_RefusesConflictMarkers(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	proj := gitInitRepo(t)
+	m := NewWorktreeManager()
+	wt, err := m.EnsureWorktree(proj, "proj-marker1")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "main.go"),
+		[]byte("package x\n\n<<<<<<< HEAD\nf()\n=======\ng()\n>>>>>>> other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.Commit(wt, "bead(b1): work")
+	if err == nil {
+		t.Fatal("Commit must refuse files containing conflict markers")
+	}
+	if !strings.Contains(err.Error(), "conflict markers") {
+		t.Errorf("error must name the cause, got: %v", err)
+	}
+	log, _ := exec.Command("git", "-C", wt, "log", "--oneline").Output()
+	if strings.Contains(string(log), "bead(b1)") {
+		t.Errorf("marker-bearing commit must not exist, log:\n%s", log)
+	}
+}
+
 // .beads/issues.jsonl is a br-owned mirror: both main and the chain worktree
 // write it, so it conflicts on EVERY integration that carries beads writes
 // (65wa0's gate-proven suite fix quarantined on a .beads-only conflict,
