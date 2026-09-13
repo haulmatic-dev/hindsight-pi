@@ -327,6 +327,14 @@ func (s *WorkerSpawner) Spawn(bead types.Bead) (err error) {
 	return nil
 }
 
+// worktreeUnavailableLabel is the durable hard-park marker for a bead whose
+// chain worktree could not be created or verified. Unlike a status, a label
+// is visible to every consumer that decides respawn (retry queue, DAG ready
+// filter, Charon orphan recovery), so the bead cannot be silently retried
+// into the same spawn failure until a human fixes the worktree and clears
+// the label.
+const worktreeUnavailableLabel = "worktree-unavailable"
+
 // SpawnInternal creates and starts a real worker process for a bead.
 func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 	beadIDStr := bead.ID.String()
@@ -387,14 +395,20 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 		// pre-check so EnsureWorktree's signature stays unchanged.
 		_, existed := s.worktreeManager.ExistingWorktree(projectPath, key)
 		if wt, wtErr := s.worktreeManager.EnsureWorktree(projectPath, key); wtErr != nil {
-			// Daemon-owned gates require isolation: the close-path gate runs in
-			// the chain worktree and refuses main-checkout execution. Falling
-			// back to the shared checkout also let hydra-5cl edit the daemon's
-			// own live repo directly (2026-08-20). Fail closed instead.
-			if daemonOwnedGates(s.config, bead.Project) {
-				return nil, fmt.Errorf("worktree setup failed for %s and project has daemon_owned gates (no shared-checkout fallback): %w", bead.ID, wtErr)
+			// Fail closed, ALWAYS — never silently downgrade isolation by running
+			// the worker in the shared (main) checkout. Observed 2026-09-11/12:
+			// fallback workers committed merge-conflict markers into
+			// .beads/issues.jsonl, wiped a project's .beads dir via git clean -fdx,
+			// and landed janitorial commits on the user's working branch. The
+			// daemon-owned-gates-only variant of this guard (hydra-5cl, 2026-08-20)
+			// left the corruption door open for every non-gated project. Hard-park
+			// the bead with a durable label so no respawn path retries it.
+			if s.beadsClient != nil && projectPath != "" {
+				if lblErr := s.beadsClient.UpdateBeadLabels(projectPath, "", bead.ID, []string{worktreeUnavailableLabel}); lblErr != nil {
+					log.Printf("[Worktree] failed to hard-park %s with %q label: %v", bead.ID, worktreeUnavailableLabel, lblErr)
+				}
 			}
-			log.Printf("[Worktree] setup failed for %s (using shared checkout): %v", bead.ID, wtErr)
+			return nil, fmt.Errorf("worktree setup failed for %s (%s, hard-parked): %w", bead.ID, worktreeUnavailableLabel, wtErr)
 		} else {
 			if existed {
 				log.Printf("[Worktree] bead %s: reused worktree %s", bead.ID, wt)

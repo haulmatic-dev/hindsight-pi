@@ -198,9 +198,22 @@ func TestCleanupStaleWorktrees_RemovesCleanIntegrated(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := timeNowMinus48h()
+	// Backdate the whole tree, not just the .git pointer: production-stale
+	// worktrees are uniformly old (creation backdates every checkout file),
+	// and the activity gate compares file mtimes against creation time.
 	if err := os.Chtimes(filepath.Join(wt, ".git"), old, old); err != nil {
 		t.Fatal(err)
 	}
+	filepath.WalkDir(wt, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if path == filepath.Join(wt, ".git") {
+			return nil
+		}
+		_ = os.Chtimes(path, old, old)
+		return nil
+	})
 
 	removed := CleanupStaleWorktrees(24*time.Hour, map[string]bool{}, nil)
 	if removed != 1 {

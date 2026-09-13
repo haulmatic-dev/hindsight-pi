@@ -104,26 +104,36 @@ func (d *BeadDiscovery) findFromBR(activeWorkers map[string]bool) ([]types.Bead,
 			// Fail-closed: store presumed corrupt, excluded until restored.
 			continue
 		}
-		beads, err := d.beadsClient.ListBeads(project.Path, "")
-		if err != nil {
-			// A single project's list failure (e.g. a stale path, a parent dir
-			// with no .beads, or a transient br error) must not abort discovery
-			// for every other project. Skip it this tick and continue.
-			log.Printf("⚠️  [br] list failed for project %s: %v — skipping this project this tick", project.Name, err)
-			if d.storeGuard != nil {
-				d.storeGuard.NoteListFailure(project, err)
+		// Multi projects: br must run per-repo, never in the parent dir (which
+		// has no .beads and would fail every list — 2026-09-11 webapp kills).
+		// The store guard sees the project aggregate and only when every repo
+		// listed cleanly — a partial list would corrupt the open-count baseline.
+		var projectBeads []types.Bead
+		allReposListed := true
+		for _, target := range repoScanTargets(project) {
+			beads, err := d.beadsClient.ListBeads(target, "")
+			if err != nil {
+				// A single repo's list failure (e.g. a stale path, a parent dir
+				// with no .beads, or a transient br error) must not abort discovery
+				// for every other project. Skip it this tick and continue.
+				log.Printf("⚠️  [br] list failed for project %s (path %s): %v — skipping this repo this tick", project.Name, target, err)
+				if d.storeGuard != nil {
+					d.storeGuard.NoteListFailure(project, err)
+				}
+				allReposListed = false
+				continue
 			}
-			continue
+			projectBeads = append(projectBeads, beads...)
 		}
-		if d.storeGuard != nil {
-			d.storeGuard.Check(project, beads)
+		if allReposListed && d.storeGuard != nil {
+			d.storeGuard.Check(project, projectBeads)
 			if d.guardBlocked(project) {
 				// Signal fired this tick: exclude the project's beads
 				// immediately rather than scheduling from a corrupt store.
 				continue
 			}
 		}
-		allReadyBeads = append(allReadyBeads, beads...)
+		allReadyBeads = append(allReadyBeads, projectBeads...)
 	}
 
 	// The completed set is a cache of "bead closed in the store". A close

@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -383,6 +384,22 @@ func CleanupStaleWorktrees(maxAge time.Duration, activeKeys map[string]bool, eve
 			if time.Since(info.ModTime()) <= maxAge {
 				continue
 			}
+			// Recent activity inside the worktree overrides .git-file staleness:
+			// the pointer file's mtime is creation-time only and never reflects
+			// later edits. A merge-conflict resolution, untracked worker output,
+			// or an in-progress rebase all touch files without necessarily
+			// dirtying TRACKED status (untracked files are deliberately ignored
+			// by the dirty check below). Losing that work is never acceptable
+			// (hydra-q3p reaped mid-merge on a dep-parked bead, 2026-09-12), so
+			// anything touched within the staleness window is preserved outright.
+			if worktreeRecentlyActive(wt, info.ModTime(), maxAge) {
+				log.Printf("[WorktreeGC] preserving %s: file activity within %s (work in progress)", wt, maxAge)
+				events.EmitRepo("", Event{Type: "worktree-preserved-unintegrated", Project: filepath.Base(projDir),
+					Bead: e.Name(), Reason: "recent_activity",
+					Detail: fmt.Sprintf("stale-looking worktree %s preserved: files touched within %s", wt, maxAge),
+					Fields: map[string]any{"worktree": wt, "cause": "recent_activity"}})
+				continue
+			}
 			if src := worktreeSourceRepo(gitFile); src != "" {
 				if reason, preserve := unintegratedWorkReason(src, "hydra/wt-"+e.Name(), wt); preserve {
 					log.Printf("[WorktreeGC] preserving %s: %s (reconciler will integrate)", wt, reason)
@@ -430,6 +447,38 @@ func unintegratedWorkReason(src, branch, wtPath string) (reason string, ok bool)
 	}
 	return "", false
 }
+
+// worktreeRecentlyActive reports whether any regular file under wt (excluding
+// the .git pointer file) was modified BOTH after the worktree was created
+// (gitMtime, the .git pointer file's mtime — checkout files are written
+// moments after it, so a creation-time margin excludes the pristine checkout)
+// AND within maxAge of now. Directories are ignored: their mtimes change on
+// transient operations and a lone directory holds no work. Never follows
+// symlinks (WalkDir does not descend into them).
+func worktreeRecentlyActive(wt string, gitMtime time.Time, maxAge time.Duration) bool {
+	newest := gitMtime.Add(worktreeCheckoutMargin)
+	cutoff := time.Now().Add(-maxAge)
+	active := false
+	_ = filepath.WalkDir(wt, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || active || d.IsDir() {
+			return nil
+		}
+		if path == filepath.Join(wt, ".git") {
+			return nil
+		}
+		if fi, err := d.Info(); err == nil && fi.ModTime().After(newest) && fi.ModTime().After(cutoff) {
+			active = true
+		}
+		return nil
+	})
+	return active
+}
+
+// worktreeCheckoutMargin is the creation-time slack between the .git pointer
+// file's mtime and the checkout files materialized by `git worktree add`.
+// A file must be modified at least this long after creation to count as
+// activity, so a pristine checkout never looks live.
+const worktreeCheckoutMargin = 2 * time.Minute
 
 // worktreeSourceRepo extracts the source repository path from a worktree's
 // .git pointer file ("gitdir: <src>/.git/worktrees/<name>").

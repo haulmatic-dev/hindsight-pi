@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -37,20 +38,20 @@ type Charon struct {
 	// matches for chain members (gybo4, 2026-09-10: a live chain worktree was
 	// integrated while its worker was spawning, and the worker's pi exec died
 	// with a chdir ENOENT misattributed to the pi binary).
-	chainKeyForBeadID     func(types.BeadID) string
-	onStaleActiveWorker   func(beadID string)
-	lastWorktreeGC        time.Time // throttles the stale-worktree sweep
-	lastRegistryReap      time.Time // throttles the ghost-registry-row sweep
-	registryStore         *registry.Store
-	heartbeatHungAfter    time.Duration            // stale registry heartbeat → hung worker
-	maxBeadTokens         int64                    // soft cap: steer + Pan candidate (0 = disabled); hard backstop = 2x
-	panArbiter            func(beadID string) bool // fresh Pan continue verdict = stay of execution
-	steeredMu             sync.Mutex
-	steeredAt             map[string]time.Time // bead → last budget steer (rate limit)
-	retryManager          *RetryManager        // Charon kills consume retry budget (else infra-classified free respawns loop)
-	maxWorkers            int                  // pool size ceiling for phantom-slot deadlock detection
-	events                *EventSink           // structured event stream; nil-safe
-	deadlockScans         int                  // consecutive scans seeing active>=max and zero live PIDs
+	chainKeyForBeadID   func(types.BeadID) string
+	onStaleActiveWorker func(beadID string)
+	lastWorktreeGC      time.Time // throttles the stale-worktree sweep
+	lastRegistryReap    time.Time // throttles the ghost-registry-row sweep
+	registryStore       *registry.Store
+	heartbeatHungAfter  time.Duration            // stale registry heartbeat → hung worker
+	maxBeadTokens       int64                    // soft cap: steer + Pan candidate (0 = disabled); hard backstop = 2x
+	panArbiter          func(beadID string) bool // fresh Pan continue verdict = stay of execution
+	steeredMu           sync.Mutex
+	steeredAt           map[string]time.Time // bead → last budget steer (rate limit)
+	retryManager        *RetryManager        // Charon kills consume retry budget (else infra-classified free respawns loop)
+	maxWorkers          int                  // pool size ceiling for phantom-slot deadlock detection
+	events              *EventSink           // structured event stream; nil-safe
+	deadlockScans       int                  // consecutive scans seeing active>=max and zero live PIDs
 }
 
 // JanitorStats tracks cleanup statistics
@@ -297,7 +298,9 @@ func (j *Charon) performCleanup() {
 		go func() {
 			if j.getProjects != nil {
 				for _, project := range j.getProjects() {
-					ReconcileOrphanedWorktrees(NewWorktreeManager(), project.Path, active, j.terminalBeadChecker(project.Path))
+					for _, target := range repoScanTargets(project) {
+						ReconcileOrphanedWorktrees(NewWorktreeManager(), target, active, j.terminalBeadChecker(target))
+					}
 				}
 			}
 			CleanupStaleWorktrees(24*time.Hour, active, j.events)
@@ -384,11 +387,12 @@ func (j *Charon) performCleanup() {
 		beadID := record.BeadID
 
 		// Check if bead is still open
-		if !openBeads[beadID] {
-			if failedProjects[record.ProjectPath] {
-				log.Printf("[Charon] ⚠️  Skipping orphan decision for PID %d (bead %s): bead list unavailable for project path %s", pid, beadID, record.ProjectPath)
-				continue
+		kill, verdictReason := j.orphanVerdict(record, openBeads, failedProjects)
+		if !kill {
+			if strings.Contains(verdictReason, "fail-open") || strings.Contains(verdictReason, "heartbeat fresh") {
+				log.Printf("[Charon] ⚠️  Skipping orphan decision for PID %d (bead %s): %s", pid, beadID, verdictReason)
 			}
+		} else {
 			// Bead is closed but process still running = orphan!
 			j.stats.OrphansFound++
 			j.stats.LastOrphanTime = time.Now()
@@ -486,6 +490,22 @@ func (j *Charon) performCleanup() {
 	}
 }
 
+// repoScanTargets returns the br working directories for a project. For a
+// multi project this is one path PER REPO (project.Path joined with the repo
+// name, matching beads.repoCwd) — never the parent dir, which has no .beads
+// and would fail every br call. Keys align with WorkerRecord.ProjectPath so
+// the fail-open failedProjects guard in orphanVerdict matches live workers.
+func repoScanTargets(project types.Project) []string {
+	if project.Type == types.RepoTypeMulti && len(project.Repos) > 0 {
+		targets := make([]string, 0, len(project.Repos))
+		for _, repo := range project.Repos {
+			targets = append(targets, filepath.Join(project.Path, repo.Name))
+		}
+		return targets
+	}
+	return []string{project.Path}
+}
+
 // getOpenBeads returns the set of open bead IDs across every configured
 // project plus the set of project paths whose bead list could not be read.
 // Iterating over projects (instead of just ".") lets Charon run from any
@@ -498,22 +518,52 @@ func (j *Charon) getOpenBeads() (map[string]bool, map[string]bool) {
 
 	projects := j.collectProjects()
 	for _, project := range projects {
-		beadList, err := j.beadsClient.ListBeads(project.Path, "")
-		if err != nil {
-			log.Printf("[Charon] Failed to list beads for project %s (path: %s): %v", project.Name, project.Path, err)
-			failedProjects[project.Path] = true
-			continue
-		}
+		for _, target := range repoScanTargets(project) {
+			beadList, err := j.beadsClient.ListBeads(target, "")
+			if err != nil {
+				log.Printf("[Charon] Failed to list beads for project %s (path: %s): %v", project.Name, target, err)
+				failedProjects[target] = true
+				continue
+			}
 
-		for _, bead := range beadList {
-			// Only consider beads that are not terminal (completed, closed, failed)
-			if !bead.Status.IsTerminal() {
-				openBeads[string(bead.ID)] = true
+			for _, bead := range beadList {
+				// Only consider beads that are not terminal (completed, closed, failed)
+				if !bead.Status.IsTerminal() {
+					openBeads[string(bead.ID)] = true
+				}
 			}
 		}
 	}
 
 	return openBeads, failedProjects
+}
+
+// orphanVerdict decides whether a live tracked worker whose bead is absent
+// from the open set is a true orphan (bead closed while process runs on) or
+// must be spared. The verdict is fail-open in both directions of uncertainty:
+//
+//  1. br-list failure for the worker's project/repo path → skip. A missing
+//     bead in the open set proves nothing when the list itself failed (the
+//     2026-09-11 multi-repo bug: parent-dir list failure + repo-path worker
+//     records let Charon kill 10 live webapp workers).
+//  2. A registry row with a fresh heartbeat → skip. The reporter heartbeats
+//     every 30s even while parked, so a fresh row is liveness proof; an
+//     orphan verdict requires ABSENCE from the registry (or a stale
+//     heartbeat), never br-list failure alone.
+func (j *Charon) orphanVerdict(record *WorkerRecord, openBeads map[string]bool, failedProjects map[string]bool) (kill bool, reason string) {
+	if openBeads[record.BeadID] {
+		return false, "bead open"
+	}
+	if failedProjects[record.ProjectPath] {
+		return false, fmt.Sprintf("bead list unavailable for %s — fail-open", record.ProjectPath)
+	}
+	if j.registryStore != nil {
+		row, ok, err := j.registryStore.GetWorker(record.BeadID)
+		if err == nil && ok && time.Since(row.LastHeartbeat) < j.heartbeatHungAfter {
+			return false, fmt.Sprintf("registry heartbeat fresh (%v ago) — registry row proves liveness", time.Since(row.LastHeartbeat))
+		}
+	}
+	return true, "bead closed but process still running"
 }
 
 // shouldKillAsStuck decides whether a live tracked worker must be killed
@@ -737,97 +787,104 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 	recovered := 0
 
 	for _, project := range projects {
-		beadList, err := j.beadsClient.ListBeads(project.Path, "")
-		if err != nil {
-			log.Printf("[Charon] ❌ Failed to list beads for orphan recovery in project %s (path: %s): %v", project.Name, project.Path, err)
-			continue
-		}
-
-		for _, bead := range beadList {
-			if bead.Status != types.StatusInProgress {
-				continue
-			}
-
-			beadIDStr := string(bead.ID)
-
-			// A tracker row alone is not liveness: killed workers leave
-			// "running" rows behind (2026-09-11 hang wave stranded 14 webapp
-			// beads in_progress this way). The bead counts as handled only if
-			// a tracked PID is actually running or the registry heartbeat is
-			// fresh.
-			if j.beadHasLiveWorker(beadIDStr, liveWorkers) {
-				continue
-			}
-
-			j.stats.OrphanInProgressBeads++
-
-			// Fail-closed on the destructive decision: without a usable timestamp we
-			// cannot know whether the bead is older than the grace period, so we
-			// must not race a worker that has spawned but not yet registered.
-			if bead.UpdatedAt.IsZero() {
-				log.Printf("[Charon] ⚠️  Skipping orphan recovery for bead %s: no UpdatedAt timestamp", beadIDStr)
-				continue
-			}
-			if age := time.Since(bead.UpdatedAt); age < grace {
-				log.Printf("[Charon] ⏳ Bead %s is only %v old, within %v grace period; leaving in_progress", beadIDStr, age, grace)
-				continue
-			}
-
-			// The bead list can be stale. Re-read the canonical bead before the
-			// destructive reopen: if it has already reached a terminal state,
-			// the worker row is the orphan, not the bead. Reap the row and leave
-			// the bead closed.
-			fresh, err := j.beadsClient.GetBead(project.Path, "", bead.ID)
+		for _, target := range repoScanTargets(project) {
+			beadList, err := j.beadsClient.ListBeads(target, "")
 			if err != nil {
-				log.Printf("[Charon] ⚠️  Skipping orphan recovery for bead %s: failed to refresh canonical status: %v", beadIDStr, err)
+				log.Printf("[Charon] ❌ Failed to list beads for orphan recovery in project %s (path: %s): %v", project.Name, target, err)
 				continue
 			}
-			if fresh.Status.IsTerminal() {
-				log.Printf("[OrphanRetry] bead %s already terminal (%s); skipping reopen", beadIDStr, fresh.Status)
-				if removed, rmErr := j.workerTracker.RemoveWorkerByBeadID(beadIDStr); rmErr != nil {
-					log.Printf("[OrphanRetry] failed to reap worker row for terminal bead %s (fail open): %v", beadIDStr, rmErr)
-				} else if removed {
-					log.Printf("[OrphanRetry] reaped stale worker row for terminal bead %s", beadIDStr)
+
+			for _, bead := range beadList {
+				if bead.Status != types.StatusInProgress {
+					continue
 				}
-				continue
-			}
-			// An escalated bead is parked for a human by design (verified-close
-			// rejected it at max attempts). It is in_progress with no worker by
-			// definition — reopening it would respawn the exact death the
-			// escalation stopped (2026-09-06 empty-diff churn loop).
-			if hasBeadLabel(fresh.Labels, escalatedLabel) {
-				log.Printf("[OrphanRetry] bead %s carries the %q label (escalated to human); skipping reopen", beadIDStr, escalatedLabel)
-				continue
-			}
 
-			log.Printf("[Charon] 🔧 Recovering orphan in_progress bead %s (project: %s)", beadIDStr, project.Path)
+				beadIDStr := string(bead.ID)
 
-			// Reopen the bead so the scheduler retries it. Never close here: closing
-			// would mark incomplete work as done and falsely unblock dependents.
-			if err := j.beadsClient.UpdateBeadStatus(project.Path, bead.ID, types.StatusOpen); err != nil {
-				log.Printf("[Charon] ❌ Failed to reopen orphan bead %s: %v", beadIDStr, err)
-				continue
-			}
-
-			j.stats.OrphanBeadsRecovered++
-			j.stats.LastOrphanBeadTime = time.Now()
-			recovered++
-			log.Printf("[Charon] ✅ reopened orphan bead %s for retry", beadIDStr)
-
-			// Free the stale "running" row the dead worker left behind so the
-			// respawn is not blocked by a phantom slot.
-			if rec, ok := j.workerTracker.GetWorkerByBead(beadIDStr); ok && rec.Status == "running" {
-				if err := j.workerTracker.MarkWorkerCompleted(rec.PID, -1); err != nil {
-					log.Printf("[Charon] failed to mark stale worker row completed for reopened bead %s (fail open): %v", beadIDStr, err)
+				// A tracker row alone is not liveness: killed workers leave
+				// "running" rows behind (2026-09-11 hang wave stranded 14 webapp
+				// beads in_progress this way). The bead counts as handled only if
+				// a tracked PID is actually running or the registry heartbeat is
+				// fresh.
+				if j.beadHasLiveWorker(beadIDStr, liveWorkers) {
+					continue
 				}
-			}
-			if j.events != nil {
-				j.events.Emit(Event{
-					Type:   "charon_orphan_reopened",
-					Reason: "dead_worker",
-					Detail: fmt.Sprintf("reopened orphan in_progress bead %s (no live worker)", beadIDStr),
-					Fields: map[string]any{"bead": beadIDStr, "project": project.Path},
-				})
+
+				j.stats.OrphanInProgressBeads++
+
+				// Fail-closed on the destructive decision: without a usable timestamp we
+				// cannot know whether the bead is older than the grace period, so we
+				// must not race a worker that has spawned but not yet registered.
+				if bead.UpdatedAt.IsZero() {
+					log.Printf("[Charon] ⚠️  Skipping orphan recovery for bead %s: no UpdatedAt timestamp", beadIDStr)
+					continue
+				}
+				if age := time.Since(bead.UpdatedAt); age < grace {
+					log.Printf("[Charon] ⏳ Bead %s is only %v old, within %v grace period; leaving in_progress", beadIDStr, age, grace)
+					continue
+				}
+
+				// The bead list can be stale. Re-read the canonical bead before the
+				// destructive reopen: if it has already reached a terminal state,
+				// the worker row is the orphan, not the bead. Reap the row and leave
+				// the bead closed.
+				fresh, err := j.beadsClient.GetBead(target, "", bead.ID)
+				if err != nil {
+					log.Printf("[Charon] ⚠️  Skipping orphan recovery for bead %s: failed to refresh canonical status: %v", beadIDStr, err)
+					continue
+				}
+				if fresh.Status.IsTerminal() {
+					log.Printf("[OrphanRetry] bead %s already terminal (%s); skipping reopen", beadIDStr, fresh.Status)
+					if removed, rmErr := j.workerTracker.RemoveWorkerByBeadID(beadIDStr); rmErr != nil {
+						log.Printf("[OrphanRetry] failed to reap worker row for terminal bead %s (fail open): %v", beadIDStr, rmErr)
+					} else if removed {
+						log.Printf("[OrphanRetry] reaped stale worker row for terminal bead %s", beadIDStr)
+					}
+					continue
+				}
+				// An escalated bead is parked for a human by design (verified-close
+				// rejected it at max attempts). It is in_progress with no worker by
+				// definition — reopening it would respawn the exact death the
+				// escalation stopped (2026-09-06 empty-diff churn loop).
+				if hasBeadLabel(fresh.Labels, escalatedLabel) {
+					log.Printf("[OrphanRetry] bead %s carries the %q label (escalated to human); skipping reopen", beadIDStr, escalatedLabel)
+					continue
+				}
+				// A worktree-unavailable bead was hard-parked by a fail-closed spawn:
+				// reopening it would retry the same worktree failure (and previously
+				// resurrected the shared-checkout corruption path, 2026-09-11/12).
+				if hasBeadLabel(fresh.Labels, worktreeUnavailableLabel) {
+					log.Printf("[OrphanRetry] bead %s carries the %q label (worktree hard-parked); skipping reopen", beadIDStr, worktreeUnavailableLabel)
+					continue
+				}
+
+				log.Printf("[Charon] 🔧 Recovering orphan in_progress bead %s (project: %s)", beadIDStr, target)
+
+				// Reopen the bead so the scheduler retries it. Never close here: closing
+				// would mark incomplete work as done and falsely unblock dependents.
+				if err := j.beadsClient.UpdateBeadStatus(target, bead.ID, types.StatusOpen); err != nil {
+					log.Printf("[Charon] ❌ Failed to reopen orphan bead %s: %v", beadIDStr, err)
+					continue
+				}
+
+				j.stats.OrphanBeadsRecovered++
+				j.stats.LastOrphanBeadTime = time.Now()
+				recovered++
+				// Free the stale "running" row the dead worker left behind so the
+				// respawn is not blocked by a phantom slot.
+				if rec, ok := j.workerTracker.GetWorkerByBead(beadIDStr); ok && rec.Status == "running" {
+					if err := j.workerTracker.MarkWorkerCompleted(rec.PID, -1); err != nil {
+						log.Printf("[Charon] failed to mark stale worker row completed for reopened bead %s (fail open): %v", beadIDStr, err)
+					}
+				}
+				if j.events != nil {
+					j.events.Emit(Event{
+						Type:   "charon_orphan_reopened",
+						Reason: "dead_worker",
+						Detail: fmt.Sprintf("reopened orphan in_progress bead %s (no live worker)", beadIDStr),
+						Fields: map[string]any{"bead": beadIDStr, "project": project.Path},
+					})
+				}
 			}
 		}
 	}

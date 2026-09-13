@@ -60,7 +60,7 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `retry_exhausted` | a bead exhausts `default_retries` and has no live worker or registry row | `attempts` |
 | `spawn-suppressed-closed` | a queued retry spawn is aborted because the bead became terminal while in the retry queue | `status` |
 | `integration-failed` | singleton integrate/push failed verification (merge not contained in HEAD, or push rejected / remote ref did not advance) — bead reopened with `integration-failed` label, worktree preserved | `stage` (`integrate`/`push`), `error` (exact remote stderr) |
-| `worktree-preserved-unintegrated` | janitorial GC refused to remove a stale worktree: its branch carries commits not yet in the working branch, or it has uncommitted tracked changes — reconciler integrates on its next sweep | `worktree`, `branch`, `cause` |
+| `worktree-preserved-unintegrated` | janitorial GC refused to remove a stale worktree: its branch carries commits not yet in the working branch, it has uncommitted tracked changes, or files under it were modified after creation and within the staleness window (merge-resolution edits, untracked output — hydra-q3p mid-merge reap, 2026-09-12) — reconciler integrates on its next sweep | `worktree`, `branch`, `cause` (`unintegrated_work`/`recent_activity`) |
 | `bead_store_suspect` | a project's open-bead count collapsed to 0 or >80% in one discovery tick (or `br list` failed after a healthy baseline) — store presumed corrupt, project excluded from scheduling | `project_path`, `previous`, `current`, `list_error` |
 | `bead_store_restored` | `.beads/issues.jsonl` rebuilt from the newest `.br_history` snapshot and the re-listed open count verified recovered — scheduling unblocked | `project_path`, `snapshot`, `open`, `baseline` |
 | `bead_store_restore_failed` | snapshot restore could not verify recovery (no snapshot, copy error, re-list failure, or count still collapsed) — project stays blocked | `project_path`, `snapshot`, `error` |
@@ -120,6 +120,19 @@ ready filter (`GetReadyBeads`), and the retry-eligible path. Without the
 label, bare `in_progress` is exactly the signal orphan recovery keys on and
 the bead respawns into the same death the escalation stopped (2026-09-06
 empty-diff churn loop: c01hq/65xy7/48bdq).
+
+**Worktree-unavailable hard-park (2026-09-13).** The same durability rule now
+covers the spawn path: when `EnsureWorktree` fails (dubious-ownership,
+foreign-repo path, unresolvable base), `SpawnInternal` fails the spawn
+CLOSED for every project — there is no shared-checkout fallback. The prior
+fallback ran the worker loose in the user's main checkout; observed
+2026-09-11/12: merge-conflict markers committed into `webapp/.beads/issues.jsonl`,
+a project's `.beads` dir wiped by a `git clean -fdx` "fix the repo" worker,
+janitorial commits landing on the user's working branch. The bead is stamped
+**`worktree-unavailable`** and every respawn consumer skips it (retry queue,
+`GetReadyBeads`, Charon orphan recovery), exactly like `escalated`. Recovery
+is human: fix the worktree (Pan's whitelisted `repair-worktree` repair runs
+`Remove`+`EnsureWorktree` daemon-side), then clear the label.
 
 **Inspecting quarantined work:**
 

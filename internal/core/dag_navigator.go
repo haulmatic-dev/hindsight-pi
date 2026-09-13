@@ -103,6 +103,12 @@ func (n *DAGNavigator) GetReadyBeads(completed map[string]bool) []types.Bead {
 			// worker even if a stale status/label refresh made them look ready.
 			continue
 		}
+		if hasBeadLabel(node.Bead.Labels, worktreeUnavailableLabel) {
+			// Hard-parked by a fail-closed worktree spawn: the chain worktree
+			// was unavailable and isolation must never silently downgrade to
+			// the shared main checkout (2026-09-11/12 corruption incidents).
+			continue
+		}
 		if completed != nil && completed[string(node.Bead.ID)] {
 			continue
 		}
