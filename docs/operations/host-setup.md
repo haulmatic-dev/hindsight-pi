@@ -164,6 +164,23 @@ improves provider-side cache reuse for both interactive and worker sessions;
 its per-instance stats shards live under `pi-cache-optimizer-stats.d/` in the
 shared config.
 
+## 6b. llm-router (provider proxy)
+
+`/opt/llm-router` runs [llm-router](https://github.com/haulmatic-dev/llm-router)
+as `llm-router.service` (system user `llm-router`, listens 127.0.0.1:9900,
+state in `./data/router.db` under its cwd). It fronts the Kimi coding account
+as a single local endpoint so worker traffic gets lane gating, per-account
+budgets, affinity pins, and prefix-SHA logging without Hydra knowing account
+details. Config `/opt/llm-router/config.json` (accounts/models, no keys);
+keys in `/opt/llm-router/llm-router.env` (0600). Hydra workers call it via
+the `kimi-router` provider in the shared `models.json` (baseUrl
+`http://127.0.0.1:9900/direct`). Pan (MiniMax) stays direct. Two gotchas
+cost hours: models.json per-model `baseUrl` SHADOWS the provider-level
+`baseUrl`, and a models.json entry cannot reroute a pi built-in provider
+(`kimi-coding`) because the built-in stream implementation keeps its own
+baseUrl — a fresh provider id (`kimi-router`) is required. Also remove stale
+`KIMI_CODE_API_BASE_URL`-style exports: pi ignores them.
+
 ## 7. systemd unit + drop-ins
 
 Install `scripts/hydra.service` per `docs/operations/SERVICE_SETUP.md`
