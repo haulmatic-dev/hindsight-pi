@@ -148,6 +148,11 @@ var repairWhitelist = map[string]bool{
 	"re-push-integration":         true,
 }
 
+// pseudoBeadSuffix marks synthetic project-level candidates (e.g.
+// "<project>-push-pending") that are not real beads: close/abandon/worker
+// commands can never succeed for them — only repair:<name> applies.
+const pseudoBeadSuffix = "-push-pending"
+
 // projectScopedRepairs rate-limit against the project, not the bead: one
 // shared-wedge repair covers every bead parked by the same cause, so a
 // per-bead limit would take hours to clear a fleet-wide wedge (2026-09-13:
@@ -203,6 +208,28 @@ func (s *Shepherd) liveWorkerRows(beadID string) []registry.WorkerRecord {
 		}
 	}
 	return out
+}
+
+// shouldPresentPseudo rate-limits pseudo-bead candidacy: an unchanged
+// reason is re-presented at most once per 30 minutes, so a human-only
+// condition (diverged push, protection) does not consume a judgment call
+// every tick. A changed reason (new failure mode) is presented immediately.
+func (s *Shepherd) shouldPresentPseudo(beadID, reason string) bool {
+	s.pseudoMu.Lock()
+	defer s.pseudoMu.Unlock()
+	if s.pseudoSeen == nil {
+		s.pseudoSeen = make(map[string]pseudoSeenEntry)
+	}
+	if e, ok := s.pseudoSeen[beadID]; ok && e.reason == reason && time.Since(e.at) < 30*time.Minute {
+		return false
+	}
+	s.pseudoSeen[beadID] = pseudoSeenEntry{reason: reason, at: time.Now()}
+	return true
+}
+
+type pseudoSeenEntry struct {
+	reason string
+	at     time.Time
 }
 
 // liveAtLastScan reports whether the bead had a live worker row when
@@ -337,6 +364,9 @@ type Shepherd struct {
 
 	rejectedMu      sync.Mutex
 	rejectedActions map[string]bool // beadID + "/" + action; unknown repair actions remembered per session
+
+	pseudoMu   sync.Mutex
+	pseudoSeen map[string]pseudoSeenEntry // pseudo-bead → last presented reason
 }
 
 // recordVerdict notes a non-terminal decision (continue/steer/compact) so
@@ -509,6 +539,16 @@ func (s *Shepherd) Tick(ctx context.Context) {
 		if name, ok := parseRepairName(d.Action); ok {
 			s.handleRepair(d.BeadID, name)
 			repaired++
+			continue
+		}
+
+		// Pseudo-beads are project-level signals, not beads: abandoning or
+		// closing them can never succeed, and a worker command has no worker
+		// to consume it (observed 2026-09-14: Pan abandoned
+		// webapp-push-pending every tick; each abandon failed and the
+		// judgment repeated forever). Repairs above already passed through.
+		if strings.HasSuffix(d.BeadID, pseudoBeadSuffix) {
+			log.Printf("[Pan] ignoring %s for pseudo-bead %s (project-level signal; repair-only)", d.Action, d.BeadID)
 			continue
 		}
 
@@ -737,6 +777,9 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 			if !strings.HasPrefix(reason, "BLOCKED: ") {
 				reason = "BLOCKED: " + reason
 			}
+			if strings.HasSuffix(b.BeadID, pseudoBeadSuffix) && !s.shouldPresentPseudo(b.BeadID, reason) {
+				continue
+			}
 			if !b.Since.IsZero() {
 				reason += fmt.Sprintf(" (since %s)", time.Since(b.Since).Round(time.Second))
 			}
@@ -860,6 +903,7 @@ Rescue recipes (hard-won; prefer the repair matching the cause):
 - repair:reset-retries clears the retry counter after the underlying cause is fixed; useless while the cause persists.
 - repair:repair-bead-store restores a corrupted issues.jsonl from the newest clean backup; pick it when the reason mentions conflict markers or parse errors.
 - PUSH-PENDING candidates mean commits exist locally but not on origin. Prefer repair:re-push-integration once; if the reason is branch protection or permissions and a retry already failed, that is a human problem — say so in reasoning instead of looping repairs.
+- Candidates ending in -push-pending are project-level pseudo-beads, not beads: never abandon-with-summary or close_satisfied them — only repair:re-push-integration applies. If the reason is divergence or permissions, it is a human problem; say so in reasoning and move on.
 - Never repair for merges, PRs, deploys, or repo content edits — those are human-only; if the state needs one, explain it in reasoning.
 
 Rules:
