@@ -150,6 +150,20 @@ second config.
 a Pi package root, every allowlisted extension resolves, each `~/.pi/agent`
 points at it, and no retired copy is referenced.
 
+Worker extension allowlist (`agents.pi.extensions` in `/etc/hydra/hydra.yaml`,
+2026-09-14): `rtk`, `caveman`, `context-mode`, `hindsight`,
+`pi-cache-optimizer`. Workers resolve each name from the shared config — npm
+packages under `npm/node_modules/`, git packages under `git/<host>/<org>/` by
+repo segment — so installing a new worker extension means `pi install
+npm:<pkg>` (or a git package) into the shared config plus one allowlist line;
+humans pick it up automatically from the same directory. Note:
+`verify-pi-config.sh` only checks the npm path, so git-installed entries
+(e.g. `hindsight`) report a false failure there.
+`pi-cache-optimizer` (prompt/KV cache hit-rate optimizer, requires Pi 0.82+)
+improves provider-side cache reuse for both interactive and worker sessions;
+its per-instance stats shards live under `pi-cache-optimizer-stats.d/` in the
+shared config.
+
 ## 7. systemd unit + drop-ins
 
 Install `scripts/hydra.service` per `docs/operations/SERVICE_SETUP.md`
