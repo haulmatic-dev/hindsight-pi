@@ -208,6 +208,27 @@ func (m *mockBeadsClient) UpdateBeadLabels(projectPath, repoName string, beadID 
 	return nil
 }
 
+func (m *mockBeadsClient) RemoveBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if bead, exists := m.beads[string(beadID)]; exists {
+		remove := make(map[string]bool, len(labels))
+		for _, l := range labels {
+			remove[l] = true
+		}
+		kept := bead.Labels[:0]
+		for _, l := range bead.Labels {
+			if !remove[l] {
+				kept = append(kept, l)
+			}
+		}
+		bead.Labels = kept
+		m.beads[string(beadID)] = bead
+	}
+	return nil
+}
+
 func (m *mockBeadsClient) UpdateBeadDescription(projectPath, repoName string, beadID types.BeadID, description string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -353,6 +353,9 @@ outcome, and emits a `[PanRepair]` JSON audit event (`bead_id`, `action`,
 | `reap-placeholder` | `WorkerSpawner.ClearSpawningPlaceholder` | no-op if no placeholder exists |
 | `reset-retries` | `RetryManager.ResetRetryCount` | returns the previous fault count in the audit detail |
 | `repair-bead-store` | `BeadStoreGuard.Restore` for the bead's project | refuses if the project path or guard is missing; unblocks only when a re-list verifies the open count recovered |
+| `clear-hard-park` | prunes stale worktree registrations, removes `worktree-unavailable`/`integration-exhausted` labels, reopens the bead, resets its retry counter | refuses when the bead carries no hard-park label — not a generic reopen |
+| `prune-worktree-registration` | `git worktree prune` on the bead's project | project-scoped: rate-limited per project (30m), not per bead — one repair clears a fleet-wide registered-but-missing wedge (13 webapp beads from one stale registration, 2026-09-13) |
+| `re-push-integration` | reruns the publisher (`PublishRepo`) for a `<project>-push-pending` pseudo-bead | fail-closed: errors unless the stranded push actually cleared; project-scoped rate limit |
 
 **Bead-store integrity guard (2026-09-11).** `BeadStoreGuard`
 (`internal/core/bead_store_guard.go`) detects a corrupted `.beads` store that
@@ -376,9 +379,44 @@ write-path fix; the stream events are the shepherd's visibility into both.
 
 Pan rejects a repair if the bead has any non-completed worker row (live worker
 safety), if the handler is unknown or nil, or if the same bead was repaired
-within the last hour. The prompt documents `repair:<name>` as BLOCKED-only.
-Handlers are fail-open: a failed repair is logged and emitted, but never blocks
-the pipeline.
+within the last hour (project-scoped repairs share a per-project 30-minute
+window instead). The prompt documents `repair:<name>` as BLOCKED-only, lists
+every whitelisted repair (a test pins prompt↔whitelist parity —
+`repair-bead-store` sat whitelisted but unlisted for weeks, so the model could
+never choose it), and carries the rescue-recipe catalog: hard-park labels are
+durable by design and cleared only when the cause is fixed; many BLOCKED beads
+with the same reason mean a shared wedge and prefer one project-scoped repair;
+PUSH-PENDING means commits exist locally but not on origin; merges, PRs,
+deploys, and repo content edits are human-only.
+
+**Stuck-bead candidacy (2026-09-13).** Pan's candidate set used to cover only
+worker-origin problems and scheduler-level blocked records — a hard-parked
+bead with no retry record (e.g. after a restart cleared in-memory retry state)
+was invisible to the shepherd. The `BlockedBeads` provider now also scans
+project stores for non-terminal beads carrying `worktree-unavailable`,
+`integration-exhausted`, or a >24h `escalated` label, and surfaces stranded
+pushes (below) as `<project>-push-pending` pseudo-beads. When ≥3 BLOCKED
+candidates share a normalized reason, `collapseWedges` replaces them with one
+PROJECT-WEDGE candidate so Pan issues a single project-scoped repair instead
+of N rate-limited per-bead ones.
+
+**Push-pending visibility (2026-09-13).** `publishProjects` previously
+discarded `PublishRepo`'s `(pushed, reason)` result, so a push rejected by
+branch protection or a failing pre-push hook retried silently forever — the
+"commits not pushed properly" class ajantha reported. A non-benign result now
+records a per-project push-pending state (surfaced to Pan as a PUSH-PENDING
+candidate with the failure reason) and clears on the first successful or
+benign publish. Detection is deterministic; Pan owns only the judgment tail
+(`re-push-integration` vs explaining that protection/permission failures need
+a human).
+
+**Project-path resolution (2026-09-13).** Multi-user discovery registers
+projects as `<user>/<repo>` while bead IDs carry only the repo name, and both
+close-path resolvers (`resolveProjectPathByName`, service_starter's
+`projectPathForID`) were exact-match only — Pan's abandon/close/repair paths
+failed 100% with "project path not found" for every discovered project. Both
+resolvers now fall back to repo-name matches inside multi projects and
+path-basename matches; exact matches still win.
 
 **Charon is liveness-based now.** The stuck-worker sweep used to kill on
 wall-clock time alone and on 2026-08-01 killed every fleet worker at ~15m —

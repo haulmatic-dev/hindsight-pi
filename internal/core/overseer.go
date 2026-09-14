@@ -67,6 +67,7 @@ type BeadsClient interface {
 	UpdateBeadStatus(projectPath string, beadID types.BeadID, status types.BeadStatus) error
 	CreateBead(projectPath string, req types.CreateBeadRequest) (types.BeadID, error)
 	UpdateBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error
+	RemoveBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error
 	UpdateBeadDescription(projectPath, repoName string, beadID types.BeadID, description string) error
 }
 
@@ -81,6 +82,8 @@ type Overseer struct {
 	configManager   *ConfigManager   // Dynamic configuration management
 	beadsClient     BeadsClient
 	workerSpawner   *WorkerSpawner
+	pushPendingMu   sync.Mutex
+	pushPending     map[string]*PushPendingEntry // projectPath → stranded-push state
 	dag             *DAG
 	dagMu           sync.RWMutex
 	dagNavigator    *DAGNavigator
@@ -626,17 +629,87 @@ func (o *Overseer) publishProjects() {
 		active[beadID] = true
 	}
 	for _, project := range o.projects {
-		token := ""
-		if uc := o.getUserContextForProject(project.Path); uc != nil {
-			token = uc.Token
-		}
-		PublishRepo(o.worktreeManager, project.Path, token, o.config.PRMergeEnabled(), active, o.terminalBeadChecker(project.Path))
+		o.publishOneProject(project, active)
 		if o.config != nil && o.config.Worktree.QuarantineAutoDrain {
 			if _, _, err := DrainQuarantineBranches(project.Path, false); err != nil {
 				log.Printf("[publishProjects] drain quarantine for %s: %v", project.Path, err)
 			}
 		}
 	}
+}
+
+// PushPendingEntry records a project whose integration/working branch holds
+// commits that have not landed on origin. publishProjects previously
+// discarded PublishRepo's (pushed, reason) result, so a failing push retried
+// silently forever — the "commits not pushed properly" class ajantha reported
+// (2026-09-13). The entry feeds Pan as a PUSH-PENDING candidate.
+type PushPendingEntry struct {
+	ProjectPath string
+	ProjectName string
+	Since       time.Time
+	Reason      string
+}
+
+// benignPublishReasons are PublishRepo results that mean "nothing stranded".
+var benignPublishReasons = map[string]bool{
+	"up to date":          true,
+	"no branch":           true,
+	"no worktree manager": true,
+}
+
+// publishOneProject runs PublishRepo for a single project and tracks the
+// push-pending state. Returns PublishRepo's result verbatim.
+func (o *Overseer) publishOneProject(project types.Project, active map[string]bool) (bool, string) {
+	token := ""
+	if uc := o.getUserContextForProject(project.Path); uc != nil {
+		token = uc.Token
+	}
+	pushed, reason := PublishRepo(o.worktreeManager, project.Path, token, o.config.PRMergeEnabled(), active, o.terminalBeadChecker(project.Path))
+	if pushed || benignPublishReasons[reason] {
+		o.clearPushPending(project.Path)
+	} else {
+		o.notePushPending(project, reason)
+	}
+	return pushed, reason
+}
+
+func (o *Overseer) notePushPending(project types.Project, reason string) {
+	o.pushPendingMu.Lock()
+	defer o.pushPendingMu.Unlock()
+	if o.pushPending == nil {
+		o.pushPending = make(map[string]*PushPendingEntry)
+	}
+	if e, ok := o.pushPending[project.Path]; ok {
+		e.Reason = reason
+		return
+	}
+	o.pushPending[project.Path] = &PushPendingEntry{
+		ProjectPath: project.Path,
+		ProjectName: project.Name,
+		Since:       time.Now(),
+		Reason:      reason,
+	}
+	log.Printf("[Publish] push pending for %s: %s (surfaced to Pan as PUSH-PENDING)", project.Path, reason)
+}
+
+func (o *Overseer) clearPushPending(projectPath string) {
+	o.pushPendingMu.Lock()
+	defer o.pushPendingMu.Unlock()
+	if _, ok := o.pushPending[projectPath]; ok {
+		log.Printf("[Publish] push pending cleared for %s", projectPath)
+		delete(o.pushPending, projectPath)
+	}
+}
+
+// PushPending returns a snapshot of projects with stranded pushes.
+func (o *Overseer) PushPending() []PushPendingEntry {
+	o.pushPendingMu.Lock()
+	defer o.pushPendingMu.Unlock()
+	out := make([]PushPendingEntry, 0, len(o.pushPending))
+	for _, e := range o.pushPending {
+		out = append(out, *e)
+	}
+	return out
 }
 
 // terminalBeadChecker reports whether a worktree key's bead is terminal.

@@ -158,6 +158,10 @@ func (m *e2eMockBeadsClient) UpdateBeadLabels(projectPath, repoName string, bead
 	return nil
 }
 
+func (m *e2eMockBeadsClient) RemoveBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error {
+	return nil
+}
+
 func (m *e2eMockBeadsClient) UpdateBeadDescription(projectPath, repoName string, beadID types.BeadID, description string) error {
 	return nil
 }
