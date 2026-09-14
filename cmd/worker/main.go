@@ -1208,6 +1208,10 @@ func calculateBackoff(attempt int, policy RetryPolicy) time.Duration {
 type promptExtras struct {
 	PrevFailure string
 	CassBullets []string
+	// ChainContext holds frozen prior-phase handoffs (docs/hydra/handoff/*.md,
+	// filename-sorted by the loader). Tail content — the invariant doctrine
+	// head must not depend on it (prompt_cache_test.go pins that).
+	ChainContext []string
 }
 
 // summarizeFailure distills a failed attempt into a short blob the next
@@ -1477,6 +1481,11 @@ func executeWithPi(
 	if err := cmd.Start(); err != nil {
 		return result, fmt.Errorf("failed to start pi: %w", err)
 	}
+
+	// Frozen chain handoffs from prior phases live on the integration branch
+	// this worktree was cut from; embed them so this phase builds on verified
+	// outcomes instead of re-deriving them (prefix-stability programme #2).
+	extras.ChainContext = loadChainContext(cmd.Dir)
 
 	// Build the prompt message
 	prompt := buildPiPrompt(bead, hindsightContext, extras)
@@ -2158,6 +2167,12 @@ When you cannot complete it:
 HYDRA_VERDICT: {"done": false, "summary": "what was done and what remains"}
 A turn ending without this block is treated as unfinished and you will be re-prompted.`)
 
+	// Chain handoff: the next phase of a TDD chain reads this phase's outcome
+	// from docs/hydra/handoff/<phase>.md instead of re-deriving it. Facts,
+	// not narration — the reader acts on this verbatim.
+	promptParts = append(promptParts,
+		"CHAIN HANDOFF: if your bead is a TDD-chain phase (test/red, green, refactor) and you changed files, also write docs/hydra/handoff/<phase>.md before finishing — <phase> is your bead type lowercased (e.g. red.md, green.md). Fixed template: # <PHASE> handoff / ## What changed (files + one line each) / ## Verification (commands run + pass/fail) / ## Open edges for the next phase. Later phases read these files; record verified facts only, no narration.")
+
 	// ---- Per-bead variable tail --------------------------------------------------
 
 	// Add bead type and title
@@ -2234,6 +2249,17 @@ A turn ending without this block is treated as unfinished and you will be re-pro
 		promptParts = append(promptParts, "\nProven rules from this codebase's playbook — follow them:")
 		for _, b := range stableByContentHash(bullets) {
 			promptParts = append(promptParts, "- "+b)
+		}
+	}
+
+	// Frozen chain handoffs from prior phases (docs/hydra/handoff/*.md,
+	// committed on this branch by the phases that came before). Sorted by
+	// filename upstream so identical files always yield identical bytes.
+	if len(extras.ChainContext) > 0 {
+		promptParts = append(promptParts,
+			"\nFROZEN CHAIN CONTEXT — handoffs from prior phases of this chain, committed on this branch. They record verified outcomes; build on them. Do NOT re-derive what they record — re-running discovery for a known answer wastes turns and tokens.")
+		for _, c := range extras.ChainContext {
+			promptParts = append(promptParts, "--- handoff ---\n"+c)
 		}
 	}
 
