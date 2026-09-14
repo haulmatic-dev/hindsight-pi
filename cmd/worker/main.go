@@ -1,7 +1,6 @@
 package main
 
 import (
-
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -203,11 +202,11 @@ type ExecutionResult struct {
 
 	// Token accounting: total is the provider-facing total (for observability);
 	// fresh is fresh_input + output (for budgets and backstops).
-	TokensTotal        int64
-	TokensFresh        int64
-	TokensCacheRead    int64
+	TokensTotal         int64
+	TokensFresh         int64
+	TokensCacheRead     int64
 	TokensCacheCreation int64
-	TokensOutput       int64
+	TokensOutput        int64
 }
 
 // Note: IntelligenceContext deprecated - now using skills instead of force-feeding
@@ -1481,6 +1480,12 @@ func executeWithPi(
 
 	// Build the prompt message
 	prompt := buildPiPrompt(bead, hindsightContext, extras)
+	fullSha, headSha := promptPrefixDigest(prompt)
+	// Prefix-stability metric (2026-09-14): identical digests across beads of
+	// a project mean the provider-side prefix cache pays. The `account` field
+	// is reserved for the multi-account router: single credential today, so
+	// it is logged empty rather than omitted, keeping the format stable.
+	log.Printf("[Worker] prompt_sha256=%s head8k_sha256=%s prompt_bytes=%d bead=%s account=", fullSha, headSha, len(prompt), bead.ID)
 
 	// turn is non-nil only in rpc mode, where it owns the protocol state and the
 	// verdict. It stays nil in text mode so that path is byte-for-byte unchanged.
@@ -1777,20 +1782,20 @@ func writeExecutionOutputToFile(beadID string, result *ExecutionResult) (string,
 
 	// Build execution record
 	record := map[string]interface{}{
-		"bead_id":              beadID,
-		"timestamp":            time.Now().UTC().Format(time.RFC3339),
-		"success":              result.Success,
-		"exit_code":            result.ExitCode,
-		"duration":             result.Duration.Seconds(),
-		"attempts":             result.Attempts,
-		"agent_type":           result.AgentType,
-		"output":               result.Output,
-		"error":                result.Error,
-		"tokens_total":         result.TokensTotal,
-		"tokens_fresh":         result.TokensFresh,
-		"tokens_cache_read":    result.TokensCacheRead,
+		"bead_id":               beadID,
+		"timestamp":             time.Now().UTC().Format(time.RFC3339),
+		"success":               result.Success,
+		"exit_code":             result.ExitCode,
+		"duration":              result.Duration.Seconds(),
+		"attempts":              result.Attempts,
+		"agent_type":            result.AgentType,
+		"output":                result.Output,
+		"error":                 result.Error,
+		"tokens_total":          result.TokensTotal,
+		"tokens_fresh":          result.TokensFresh,
+		"tokens_cache_read":     result.TokensCacheRead,
 		"tokens_cache_creation": result.TokensCacheCreation,
-		"tokens_output":        result.TokensOutput,
+		"tokens_output":         result.TokensOutput,
 	}
 
 	// Marshal to JSON
@@ -2088,50 +2093,21 @@ func stableByContentHash(items []string) []string {
 func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, extras promptExtras) string {
 	var promptParts []string
 
-	// Add bead type and title
-	if bead.Title != "" {
-		promptParts = append(promptParts, fmt.Sprintf("%s: %s", bead.Type, bead.Title))
-	} else {
-		promptParts = append(promptParts, bead.Type)
-	}
-
-	// Add description
-	if bead.Description != "" {
-		promptParts = append(promptParts, bead.Description)
-	}
-
-	// Per-phase working doctrine: each TDD phase (and fix beads) gets the
-	// discipline that phase actually needs, instead of one generic prompt.
-	if g := phaseGuidance(bead); g != "" {
-		promptParts = append(promptParts, g)
-	}
+	// ---- Invariant doctrine head -------------------------------------------------
+	// These blocks are byte-identical for every bead (the daemon-gates switch
+	// is fixed per fleet). They MUST precede all per-bead content: the coding
+	// endpoint caches server-side by prefix hash, so this shared head is what
+	// makes cross-bead and cross-retry cache hits possible (2026-09-14
+	// prefix-stability dogfood). Per-bead fields — type, title, description,
+	// phase doctrine, memories, CASS bullets — live in the tail below.
 
 	// Deterministic discovery directives (session forensics 2026-08-24):
 	// workers never invoked graphify and only rarely ran hindsight_search
 	// because skills are discretionary. Convert the two most valuable
-	// discovery tools into protocol so they cannot be skipped.
+	// discovery tools into protocol so they cannot be skipped. The per-bead
+	// graphify query line ships in the variable tail (it embeds the title).
 	promptParts = append(promptParts,
 		"DISCOVERY PROTOCOL: at bead start run `hindsight_search` once with this bead's key terms; skip silently if the tool is unavailable.")
-	if !hasFilesLine(bead.Description) {
-		keywords := bead.Title
-		if keywords == "" {
-			keywords = bead.Type
-		}
-		promptParts = append(promptParts,
-			fmt.Sprintf("CODE DISCOVERY (mandatory): run `graphify query %q --budget 2000` BEFORE exploring files.", keywords),
-			"- If graphify-out/graph.json is missing in cwd, fall back to `rg`.",
-			"- Reuse the existing target-file parsing; do not add a second parser.")
-	}
-
-	// Anti-consultant guard: implementation-type beads must produce file
-	// edits. Observed failure mode (2026-07-17): doctrine-tuned workers
-	// honestly delivered PLANS with "NOT VERIFIED" labels and zero changes —
-	// every close was then rejected as empty-diff. State the contract.
-	switch strings.ToLower(strings.TrimSpace(bead.Type)) {
-	case "fr", "fix", "implement", "green", "refactor", "task", "us-heavy":
-		promptParts = append(promptParts,
-			"DELIVERABLE CONTRACT: this task is complete only when the required file edits exist on disk and verification commands ran. A plan or analysis without edits will be rejected as an empty diff.")
-	}
 
 	// Workspace guard (incident 2jjz8, 2026-08-24): a worker cd'd out of
 	// its worktree and wrote a spec file into the main checkout. The
@@ -2149,10 +2125,10 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 	// levers are early compaction (project .pi/settings.json) and the
 	// turn-level 403 breaker.
 	promptParts = append(promptParts,
-		"TURN ECONOMY: every turn re-sends the entire conversation to the model — turns are the cost multiplier.\n" +
-			"- Batch independent tool calls in the same message (multiple reads, one search+read pair, etc.).\n" +
-			"- Prefer one comprehensive command over a probe sequence (e.g. one script that gathers everything over five separate calls).\n" +
-			"- Do NOT re-run the full test suite between micro-edits: run the narrowest failing test until it passes, then the full suite ONCE at the end.\n" +
+		"TURN ECONOMY: every turn re-sends the entire conversation to the model — turns are the cost multiplier.\n"+
+			"- Batch independent tool calls in the same message (multiple reads, one search+read pair, etc.).\n"+
+			"- Prefer one comprehensive command over a probe sequence (e.g. one script that gathers everything over five separate calls).\n"+
+			"- Do NOT re-run the full test suite between micro-edits: run the narrowest failing test until it passes, then the full suite ONCE at the end.\n"+
 			"- Read files at the offsets you need instead of re-reading whole files.")
 
 	// Turn horizon (2026-08-22): the economy block says turns are expensive
@@ -2181,6 +2157,47 @@ HYDRA_VERDICT: {"done": true, "ac_met": [...], "ac_unmet": [], "files_changed": 
 When you cannot complete it:
 HYDRA_VERDICT: {"done": false, "summary": "what was done and what remains"}
 A turn ending without this block is treated as unfinished and you will be re-prompted.`)
+
+	// ---- Per-bead variable tail --------------------------------------------------
+
+	// Add bead type and title
+	if bead.Title != "" {
+		promptParts = append(promptParts, fmt.Sprintf("%s: %s", bead.Type, bead.Title))
+	} else {
+		promptParts = append(promptParts, bead.Type)
+	}
+
+	// Add description
+	if bead.Description != "" {
+		promptParts = append(promptParts, bead.Description)
+	}
+
+	// Per-phase working doctrine: each TDD phase (and fix beads) gets the
+	// discipline that phase actually needs, instead of one generic prompt.
+	if g := phaseGuidance(bead); g != "" {
+		promptParts = append(promptParts, g)
+	}
+
+	if !hasFilesLine(bead.Description) {
+		keywords := bead.Title
+		if keywords == "" {
+			keywords = bead.Type
+		}
+		promptParts = append(promptParts,
+			fmt.Sprintf("CODE DISCOVERY (mandatory): run `graphify query %q --budget 2000` BEFORE exploring files.", keywords),
+			"- If graphify-out/graph.json is missing in cwd, fall back to `rg`.",
+			"- Reuse the existing target-file parsing; do not add a second parser.")
+	}
+
+	// Anti-consultant guard: implementation-type beads must produce file
+	// edits. Observed failure mode (2026-07-17): doctrine-tuned workers
+	// honestly delivered PLANS with "NOT VERIFIED" labels and zero changes —
+	// every close was then rejected as empty-diff. State the contract.
+	switch strings.ToLower(strings.TrimSpace(bead.Type)) {
+	case "fr", "fix", "implement", "green", "refactor", "task", "us-heavy":
+		promptParts = append(promptParts,
+			"DELIVERABLE CONTRACT: this task is complete only when the required file edits exist on disk and verification commands ran. A plan or analysis without edits will be rejected as an empty diff.")
+	}
 
 	// Add target files if available
 	targetFiles := extractTargetFiles(bead)
@@ -2668,6 +2685,7 @@ func closeBeadFromWorker(bead types.Bead, projectPath, repoName, reason string) 
 //	4 – infrastructure (network, daemon lock, permissions, etc.)
 //	5 – stub / placeholder detected
 //	6 – quota / billing limit exhausted (long cooldown, not a failover)
+//
 // appendForcedKillReason surfaces the worker watchdog's kill reason into
 // result.Error. The reason (activity timeout, max total runtime) is built in
 // the monitor loop as a plain error and never reaches pi's stderr — without
