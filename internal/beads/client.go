@@ -473,6 +473,18 @@ func (c *Client) UpdateBeadLabels(projectPath, repoName string, beadID types.Bea
 	return nil
 }
 
+// RemoveBeadLabels removes labels from a bead using br label remove. Used by
+// Pan's clear-hard-park repair to un-park beads whose durable park label
+// (worktree-unavailable, integration-exhausted) has outlived its cause.
+func (c *Client) RemoveBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error {
+	for _, label := range labels {
+		if _, err := c.execInDir(projectPath, "br", "label", "remove", string(beadID), "-l", label); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // UpdateBeadDescription replaces a bead's description via br update.
 // Used by the daemon gate runner to hand a failed gate's parsed summary +
 // raw log path to the retry worker (FR-002 slice 2).

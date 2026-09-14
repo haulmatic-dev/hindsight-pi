@@ -161,6 +161,25 @@ func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error
 	return wtPath, nil
 }
 
+// stagedConflictMarkerFiles lists staged files whose added lines contain git
+// merge-conflict markers (<<<<<<< / ======= / >>>>>>> at line start). Janitorial
+// auto-commits have committed marker states into git 3+ times across repos
+// (846bdd1 mid-merge capture, 9f74f940 unparseable package.json) — a commit
+// that bakes markers in poisons every gate downstream.
+func stagedConflictMarkerFiles(dir string) []string {
+	out, err := gitOut(dir, "diff", "--cached", "--name-only", "-G", "^<<<<<<<|^=======|^>>>>>>>")
+	if err != nil {
+		return nil
+	}
+	var files []string
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			files = append(files, l)
+		}
+	}
+	return files
+}
+
 // Commit stages everything in the worktree and commits it. Returns
 // (false, nil) when there is nothing to commit (no work was done).
 func (m *WorktreeManager) Commit(worktreePath, message string) (bool, error) {
@@ -176,6 +195,12 @@ func (m *WorktreeManager) Commit(worktreePath, message string) (bool, error) {
 	// `diff --cached --quiet` exits 0 when nothing is staged.
 	if _, err := gitOut(worktreePath, "diff", "--cached", "--quiet"); err == nil {
 		return false, nil
+	}
+	// Refuse to bake conflict markers into history — alarm and fail so the
+	// shepherd quarantines instead of poisoning every downstream gate.
+	if files := stagedConflictMarkerFiles(worktreePath); len(files) > 0 {
+		log.Printf("[Worktree] REFUSING commit in %s: conflict markers in %s", worktreePath, strings.Join(files, ", "))
+		return false, fmt.Errorf("conflict markers in %s — refusing to commit", strings.Join(files, ", "))
 	}
 	if _, err := gitOut(worktreePath, "commit", "-m", message); err != nil {
 		return false, fmt.Errorf("commit in %s: %w", worktreePath, err)
@@ -592,8 +617,20 @@ func autoCommitDirtyMain(projectPath string) {
 	if err != nil || strings.TrimSpace(out) == "" {
 		return
 	}
-	if _, err := gitOut(projectPath, "add", "-A"); err != nil {
+	// .beads is daemon machinery state, same exclusion as worktree commits.
+	if _, err := gitOut(projectPath, "add", "-A", "--", ".", ":(exclude).beads"); err != nil {
 		log.Printf("[Worktree] auto-commit dirty main: add failed (continuing): %v", err)
+		return
+	}
+	// Skip + alarm rather than bake markers into the branch: marker states
+	// committed by janitorial runs poisoned every gate downstream (846bdd1,
+	// 9f74f940). Better a dirty main that fails the merge loudly than a
+	// branch whose files are unparseable.
+	if files := stagedConflictMarkerFiles(projectPath); len(files) > 0 {
+		if _, err := gitOut(projectPath, "reset"); err != nil {
+			log.Printf("[Worktree] auto-commit dirty main: unstage after marker refusal failed: %v", err)
+		}
+		log.Printf("[Worktree] ALARM auto-commit dirty main: refusing janitorial commit in %s — conflict markers in %s", projectPath, strings.Join(files, ", "))
 		return
 	}
 	if _, err := gitOut(projectPath, "commit", "-m", "wip: hydra auto-commit of uncommitted main-checkout changes before integration"); err != nil {

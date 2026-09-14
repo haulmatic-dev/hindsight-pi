@@ -114,6 +114,14 @@ func (m *autoPRFakeBeadsClient) UpdateBeadLabels(projectPath, repoName string, b
 	m.labels[string(beadID)] = labels
 	return nil
 }
+
+func (m *autoPRFakeBeadsClient) RemoveBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error {
+	if m.labels == nil {
+		m.labels = make(map[string][]string)
+	}
+	m.labels[string(beadID)] = labels
+	return nil
+}
 func (m *autoPRFakeBeadsClient) UpdateBeadDescription(projectPath, repoName string, beadID types.BeadID, description string) error {
 	if m.descriptions == nil {
 		m.descriptions = make(map[string]string)
@@ -123,15 +131,15 @@ func (m *autoPRFakeBeadsClient) UpdateBeadDescription(projectPath, repoName stri
 }
 
 type autoPRFakeExec struct {
-	pushes    []autoPRPushArgs
-	lsRemote  []autoPRLsArgs
-	ghCreate  []autoPRGhArgs
-	prPushes  []autoPRPushArgs
-	ghMerge   []prMergeGhArgs
-	ghURL     string
-	ghErr     error
-	mergeErr  error
-	lsFound   bool
+	pushes   []autoPRPushArgs
+	lsRemote []autoPRLsArgs
+	ghCreate []autoPRGhArgs
+	prPushes []autoPRPushArgs
+	ghMerge  []prMergeGhArgs
+	ghURL    string
+	ghErr    error
+	mergeErr error
+	lsFound  bool
 }
 
 type prMergeGhArgs struct {

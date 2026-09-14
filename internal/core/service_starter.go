@@ -123,11 +123,61 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 						})
 					}
 				}
+				// Hard-parked beads: durable labels the scheduler never retries.
+				// Without this, a labeled bead with no retry record (e.g. after a
+				// restart cleared in-memory retry state) is invisible to Pan — the
+				// 2026-09-13 webapp wedge needed manual label clearing twice.
+				if o.beadsClient != nil {
+					for _, project := range o.projects {
+						for _, target := range repoScanTargets(project) {
+							beads, err := o.beadsClient.ListBeads(target, "")
+							if err != nil {
+								continue // fail open: one unreadable store must not blind the scan
+							}
+							for _, b := range beads {
+								if b.Status.IsTerminal() {
+									continue
+								}
+								for _, lbl := range b.Labels {
+									switch lbl {
+									case worktreeUnavailableLabel, integrationExhaustedLabel:
+										blocked = append(blocked, pan.BlockedBead{
+											BeadID: b.ID.String(),
+											Reason: fmt.Sprintf("hard-parked by label %s (durable; scheduler never retries — clear only when the cause is fixed)", lbl),
+											Since:  b.UpdatedAt,
+										})
+									case escalatedLabel:
+										if time.Since(b.UpdatedAt) > 24*time.Hour {
+											blocked = append(blocked, pan.BlockedBead{
+												BeadID: b.ID.String(),
+												Reason: "escalated to a human over 24h ago — stale escalation or genuinely waiting?",
+												Since:  b.UpdatedAt,
+											})
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+				// Stranded pushes: commits on the integration/working branch that never
+				// reached origin (branch protection, husky hook failures, dead pushes).
+				for _, pp := range o.PushPending() {
+					blocked = append(blocked, pan.BlockedBead{
+						BeadID: pp.ProjectName + "-push-pending",
+						Reason: fmt.Sprintf("PUSH-PENDING: %s holds commits not on origin: %s", pp.ProjectPath, pp.Reason),
+						Since:  pp.Since,
+					})
+				}
 				return blocked
 			},
 		}, o.registryStore, nil)
 
 		// Resolve project path for a bead ID using the configured projects.
+		// Falls back to repo-name and path-basename matches: multi-user discovery
+		// registers projects as "<user>/<repo>" while bead IDs carry only the repo
+		// name — the exact mismatch that made Pan's close paths fail 100% with
+		// "project path not found" (2026-09-11/13).
 		projectPathForID := func(id types.BeadID) string {
 			projectName := id.Project()
 			repoName := id.Repo()
@@ -139,6 +189,21 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 					return filepath.Join(p.Path, repoName)
 				}
 				return p.Path
+			}
+			for _, p := range o.projects {
+				if p.Type == "multi" {
+					for _, r := range p.Repos {
+						if r.Name == projectName || (repoName != "" && r.Name == repoName) {
+							if r.Path != "" {
+								return r.Path
+							}
+							return filepath.Join(p.Path, r.Name)
+						}
+					}
+				}
+				if filepath.Base(p.Path) == projectName {
+					return p.Path
+				}
 			}
 			return ""
 		}
@@ -221,6 +286,102 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				log.Printf("[PanRepair] repair-bead-store succeeded for %s (project %s)", beadID, projectPath)
 				return nil
 			},
+			// clear-hard-park un-parks a bead whose durable park label has
+			// outlived its cause: prunes stale worktree registrations (the cheap
+			// shared cause — xw3 class), removes the label, reopens the bead,
+			// and resets its retry counter. Refuses when no hard-park label is
+			// present so Pan cannot use it as a generic reopen.
+			"clear-hard-park": func(beadID string) error {
+				id := types.BeadID(beadID)
+				projectPath := projectPathForID(id)
+				if projectPath == "" {
+					return fmt.Errorf("clear-hard-park: project path unresolved for %s", beadID)
+				}
+				bead, err := o.beadsClient.GetBead(projectPath, id.Repo(), id)
+				if err != nil {
+					return fmt.Errorf("clear-hard-park: GetBead %s: %w", beadID, err)
+				}
+				if bead == nil {
+					return fmt.Errorf("clear-hard-park: %s not found", beadID)
+				}
+				var toClear []string
+				for _, lbl := range bead.Labels {
+					if lbl == worktreeUnavailableLabel || lbl == integrationExhaustedLabel {
+						toClear = append(toClear, lbl)
+					}
+				}
+				if len(toClear) == 0 {
+					return fmt.Errorf("clear-hard-park: %s carries no hard-park label", beadID)
+				}
+				if _, err := gitOut(projectPath, "worktree", "prune"); err != nil {
+					log.Printf("[PanRepair] clear-hard-park: worktree prune for %s failed (continuing): %v", projectPath, err)
+				}
+				if err := o.beadsClient.RemoveBeadLabels(projectPath, id.Repo(), id, toClear); err != nil {
+					return fmt.Errorf("clear-hard-park: remove labels on %s: %w", beadID, err)
+				}
+				if bead.Status != types.StatusOpen {
+					if err := o.beadsClient.UpdateBeadStatus(projectPath, id, types.StatusOpen); err != nil {
+						log.Printf("[PanRepair] clear-hard-park: reopen %s failed (continuing): %v", beadID, err)
+					}
+				}
+				if o.retryManager != nil {
+					o.retryManager.ResetRetryCount(beadID)
+				}
+				log.Printf("[PanRepair] clear-hard-park cleared %v on %s", toClear, beadID)
+				return nil
+			},
+			// prune-worktree-registration runs git worktree prune on the bead's
+			// project — the project-scoped fix for the registered-but-missing
+			// wedge class. Rate-limited per project, not per bead.
+			"prune-worktree-registration": func(beadID string) error {
+				id := types.BeadID(beadID)
+				projectPath := projectPathForID(id)
+				if projectPath == "" {
+					return fmt.Errorf("prune-worktree-registration: project path unresolved for %s", beadID)
+				}
+				if _, err := gitOut(projectPath, "worktree", "prune"); err != nil {
+					return fmt.Errorf("prune-worktree-registration: %w", err)
+				}
+				log.Printf("[PanRepair] prune-worktree-registration pruned %s", projectPath)
+				return nil
+			},
+			// re-push-integration reruns the publisher for the project of a
+			// "<project>-push-pending" pseudo-bead and fails unless the stranded
+			// push actually cleared.
+			"re-push-integration": func(beadID string) error {
+				name := strings.TrimSuffix(beadID, "-push-pending")
+				for _, project := range o.projects {
+					if project.Name != name {
+						continue
+					}
+					active := make(map[string]bool, len(o.activeWorkers))
+					for wid := range o.activeWorkers {
+						active[wid] = true
+					}
+					pushed, reason := o.publishOneProject(project, active)
+					if !pushed && !benignPublishReasons[reason] {
+						return fmt.Errorf("re-push-integration: still pending for %s: %s", project.Path, reason)
+					}
+					log.Printf("[PanRepair] re-push-integration %s: pushed=%v reason=%q", project.Path, pushed, reason)
+					return nil
+				}
+				return fmt.Errorf("re-push-integration: no project named %s", name)
+			},
+		})
+
+		// Project-scoped repairs (prune, re-push) rate-limit per project path;
+		// the pseudo-bead form "<project>-push-pending" resolves by name.
+		o.panShepherd.SetProjectScope(func(beadID string) string {
+			if strings.HasSuffix(beadID, "-push-pending") {
+				name := strings.TrimSuffix(beadID, "-push-pending")
+				for _, project := range o.projects {
+					if project.Name == name {
+						return project.Path
+					}
+				}
+				return ""
+			}
+			return projectPathForID(types.BeadID(beadID))
 		})
 
 		// Pan should not judge beads that have already reached a terminal

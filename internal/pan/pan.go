@@ -139,10 +139,22 @@ var allowedActions = map[registry.CommandKind]bool{
 // The prompt lists these names explicitly; the parser rejects anything else so
 // the model cannot invent action names and burn MiniMax calls.
 var repairWhitelist = map[string]bool{
-	"repair-worktree":   true,
-	"reap-placeholder":  true,
-	"reset-retries":     true,
-	"repair-bead-store": true,
+	"repair-worktree":             true,
+	"reap-placeholder":            true,
+	"reset-retries":               true,
+	"repair-bead-store":           true,
+	"clear-hard-park":             true,
+	"prune-worktree-registration": true,
+	"re-push-integration":         true,
+}
+
+// projectScopedRepairs rate-limit against the project, not the bead: one
+// shared-wedge repair covers every bead parked by the same cause, so a
+// per-bead limit would take hours to clear a fleet-wide wedge (2026-09-13:
+// one stale webapp-xw3 registration wedged 13 beads).
+var projectScopedRepairs = map[string]bool{
+	"prune-worktree-registration": true,
+	"re-push-integration":         true,
 }
 
 // isAllowedAction returns true for known worker command kinds and for
@@ -211,22 +223,38 @@ func describeHolders(workers []registry.WorkerRecord) string {
 	return "[" + strings.Join(parts, ", ") + "]"
 }
 
-// canRepair checks the one-repair-per-bead-per-hour rate limit.
-func (s *Shepherd) canRepair(beadID string) (bool, time.Duration) {
+// canRepair checks the repair rate limit. Per-bead repairs are limited to
+// one per bead per hour; project-scoped repairs (projectScopedRepairs) are
+// limited per project with a shorter window — one shared-wedge repair must be
+// able to run once per project without waiting an hour per parked bead
+// (2026-09-13: one stale webapp-xw3 registration wedged 13 beads).
+func (s *Shepherd) canRepair(beadID, name string) (bool, time.Duration) {
+	key := beadID + "|" + name
+	window := time.Hour
+	if projectScopedRepairs[name] {
+		if s.ProjectScope != nil {
+			key = s.ProjectScope(beadID) + "|" + name
+		}
+		window = 30 * time.Minute
+	}
 	s.repairMu.Lock()
 	defer s.repairMu.Unlock()
 	if s.repairLimits == nil {
 		s.repairLimits = make(map[string]time.Time)
 	}
-	if last, ok := s.repairLimits[beadID]; ok && time.Since(last) < time.Hour {
-		return false, time.Hour - time.Since(last)
+	if last, ok := s.repairLimits[key]; ok && time.Since(last) < window {
+		return false, window - time.Since(last)
 	}
 	return true, 0
 }
 
 // recordRepair notes that a repair ran for the bead, capturing the error
 // (nil = ok) so the rate-limit detail can report the last outcome.
-func (s *Shepherd) recordRepair(beadID string, err error) {
+func (s *Shepherd) recordRepair(beadID, name string, err error) {
+	key := beadID + "|" + name
+	if projectScopedRepairs[name] && s.ProjectScope != nil {
+		key = s.ProjectScope(beadID) + "|" + name
+	}
 	s.repairMu.Lock()
 	defer s.repairMu.Unlock()
 	if s.repairLimits == nil {
@@ -235,8 +263,8 @@ func (s *Shepherd) recordRepair(beadID string, err error) {
 	if s.repairResults == nil {
 		s.repairResults = make(map[string]error)
 	}
-	s.repairLimits[beadID] = time.Now()
-	s.repairResults[beadID] = err
+	s.repairLimits[key] = time.Now()
+	s.repairResults[key] = err
 }
 
 // emitRepairEvent emits the audit event for a repair attempt. It is fail-open:
@@ -287,6 +315,10 @@ type Shepherd struct {
 	// OnRepairEvent is called after a repair handler runs. If nil, Pan logs
 	// the event with log.Printf. Optional; used by tests to capture events.
 	OnRepairEvent func(beadID, action, result, detail string)
+	// ProjectScope maps a bead (or pseudo-bead like "<project>-push-pending")
+	// to its project path. Used to rate-limit project-scoped repairs per
+	// project instead of per bead. Optional; nil means per-bead keying.
+	ProjectScope func(beadID string) string
 
 	verdictsMu sync.Mutex
 	verdicts   map[string]time.Time // bead → last life-continuing verdict
@@ -364,6 +396,12 @@ func (s *Shepherd) SetRepairHandlers(handlers map[string]func(beadID string) err
 	for k, v := range handlers {
 		s.RepairHandlers[k] = v
 	}
+}
+
+// SetProjectScope installs the bead→project-path resolver used to rate-limit
+// project-scoped repairs per project.
+func (s *Shepherd) SetProjectScope(fn func(beadID string) string) {
+	s.ProjectScope = fn
 }
 
 // SetOnRepairEvent injects the optional repair event hook.
@@ -602,8 +640,8 @@ func (s *Shepherd) handleRepair(beadID, name string) {
 		log.Printf("[Pan] repair %s for %s refused: live worker row exists", name, beadID)
 		return
 	}
-	// Rate limit: one repair per bead per hour.
-	if ok, remaining := s.canRepair(beadID); !ok {
+	// Rate limit: per-bead hourly; project-scoped repairs share a project key.
+	if ok, remaining := s.canRepair(beadID, name); !ok {
 		detail := fmt.Sprintf("rate limited: %v until next repair", remaining)
 		s.emitRepairEvent(beadID, name, "error", detail)
 		log.Printf("[Pan] repair %s for %s rate limited (%v remaining)", name, beadID, remaining)
@@ -617,12 +655,12 @@ func (s *Shepherd) handleRepair(beadID, name string) {
 	}
 
 	if err := handler(beadID); err != nil {
-		s.recordRepair(beadID, err)
+		s.recordRepair(beadID, name, err)
 		s.emitRepairEvent(beadID, name, "error", err.Error())
 		log.Printf("[Pan] repair %s for %s failed: %v", name, beadID, err)
 		return
 	}
-	s.recordRepair(beadID, nil)
+	s.recordRepair(beadID, name, nil)
 	s.emitRepairEvent(beadID, name, "ok", "")
 	log.Printf("[Pan] repair %s for %s succeeded", name, beadID)
 }
@@ -709,6 +747,13 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 		}
 	}
 
+	// Wedge collapse: when >=3 BLOCKED candidates share a normalized reason,
+	// they are one shared-wedge fault, not N per-bead faults. Collapse them
+	// into a single candidate so Pan issues ONE project-scoped repair instead
+	// of N rate-limited per-bead ones (2026-09-13: one stale worktree
+	// registration wedged 13 webapp beads; per-bead clearing would take 13h).
+	out = collapseWedges(out)
+
 	// Belt-and-braces: retry-manager and spawn-failure residue can survive a
 	// verified close, and a stale TerminalBead cache or unresolved project path
 	// can let a terminal bead leak into the judgment prompt. Re-check terminal
@@ -727,6 +772,75 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 	return out, nil
 }
 
+// collapseWedges replaces >=3 BLOCKED candidates sharing a normalized reason
+// with one synthetic wedge candidate. The first candidate's bead ID is kept
+// as the repair target — project-scoped repairs resolve the project from any
+// bead of the wedge. Non-BLOCKED candidates pass through untouched.
+func collapseWedges(cands []Candidate) []Candidate {
+	const wedgeThreshold = 3
+	type group struct {
+		first int
+		count int
+	}
+	groups := make(map[string]*group)
+	for i, c := range cands {
+		key, ok := wedgeKey(c.Reason)
+		if !ok {
+			continue
+		}
+		if g, ok := groups[key]; ok {
+			g.count++
+		} else {
+			groups[key] = &group{first: i, count: 1}
+		}
+	}
+	wedged := make(map[string]bool)
+	for key, g := range groups {
+		if g.count >= wedgeThreshold {
+			wedged[key] = true
+		}
+	}
+	if len(wedged) == 0 {
+		return cands
+	}
+	out := make([]Candidate, 0, len(cands))
+	emitted := make(map[string]bool)
+	for _, c := range cands {
+		key, ok := wedgeKey(c.Reason)
+		if !ok || !wedged[key] {
+			out = append(out, c)
+			continue
+		}
+		if emitted[key] {
+			continue
+		}
+		emitted[key] = true
+		out = append(out, Candidate{
+			Record: c.Record,
+			Reason: fmt.Sprintf("BLOCKED: PROJECT-WEDGE: %d beads blocked by %q — prefer ONE project-scoped repair (e.g. repair:prune-worktree-registration) over per-bead repairs", groups[key].count, key),
+		})
+	}
+	return out
+}
+
+// wedgeKey normalizes a BLOCKED reason into a grouping key: the phrase
+// between "BLOCKED: " and the first colon. Returns ok=false for non-BLOCKED
+// candidates.
+func wedgeKey(reason string) (string, bool) {
+	if !strings.HasPrefix(reason, "BLOCKED: ") {
+		return "", false
+	}
+	rest := strings.TrimPrefix(reason, "BLOCKED: ")
+	if idx := strings.Index(rest, ":"); idx > 0 {
+		rest = rest[:idx]
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return "", false
+	}
+	return rest, true
+}
+
 // BuildPrompt renders candidates into a judgment prompt for pi.
 func BuildPrompt(cands []Candidate) string {
 	payload, _ := json.MarshalIndent(cands, "", "  ")
@@ -738,7 +852,15 @@ needs a judgment call. For EVERY worker decide exactly one action:
 - "compact-and-continue": session context is exhausted; compact then continue
 - "abandon-with-summary": give up gracefully (payload: what was done and what remains)
 - "close_satisfied": the bead's acceptance criteria are already met on the working branch and the worker found nothing to do; close it without a worker
-- "repair:<name>": execute a whitelisted daemon-side repair (payload: ignored). Only for BLOCKED beads with no live worker row. The only valid repair names are: repair-worktree, reap-placeholder, reset-retries. No other repair:<name> strings exist; if none fit, choose continue or abandon-with-summary.
+- "repair:<name>": execute a whitelisted daemon-side repair (payload: ignored). Only for BLOCKED beads with no live worker row. The only valid repair names are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park, prune-worktree-registration, re-push-integration. No other repair:<name> strings exist; if none fit, choose continue or abandon-with-summary.
+
+Rescue recipes (hard-won; prefer the repair matching the cause):
+- Hard-park labels (worktree-unavailable, integration-exhausted) are durable by design — the scheduler never retries them. Use repair:clear-hard-park when the named cause is plausibly fixed or transient (worktree directory exists, store parses clean, push path repaired). Do not clear a park whose cause is still present.
+- Many BLOCKED beads with the same reason = a shared wedge. Prefer one repair:prune-worktree-registration (project-scoped) over per-bead repairs.
+- repair:reset-retries clears the retry counter after the underlying cause is fixed; useless while the cause persists.
+- repair:repair-bead-store restores a corrupted issues.jsonl from the newest clean backup; pick it when the reason mentions conflict markers or parse errors.
+- PUSH-PENDING candidates mean commits exist locally but not on origin. Prefer repair:re-push-integration once; if the reason is branch protection or permissions and a retry already failed, that is a human problem — say so in reasoning instead of looping repairs.
+- Never repair for merges, PRs, deploys, or repo content edits — those are human-only; if the state needs one, explain it in reasoning.
 
 Rules:
 - Parked on provider-capacity errors: prefer "continue" unless the park reason

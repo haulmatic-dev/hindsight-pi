@@ -296,6 +296,27 @@ func resolveProjectPathByName(cfg *Config, projectName, repoName string) string 
 		}
 		return p.Path
 	}
+	// Fallback: multi-user discovery registers projects as "<user>/<repo>"
+	// (e.g. "ajantha/webapp") while bead IDs carry only the repo name
+	// ("webapp-0fc" -> project "webapp"). Pan's close paths failed 100% with
+	// "project path not found" for every such project (2026-09-11/13). Match by
+	// repo name inside a multi project, then by path basename. Exact matches
+	// above always win over these fallbacks.
+	for _, p := range cfg.Projects {
+		if p.Type == "multi" {
+			for _, r := range p.Repos {
+				if r.Name == projectName || (repoName != "" && r.Name == repoName) {
+					if r.Path != "" {
+						return r.Path
+					}
+					return filepath.Join(p.Path, r.Name)
+				}
+			}
+		}
+		if filepath.Base(p.Path) == projectName {
+			return p.Path
+		}
+	}
 	return ""
 }
 
