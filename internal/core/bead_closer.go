@@ -10,6 +10,7 @@ import (
 
 // BeadCloser closes beads via beadsClient based on worker completion status.
 type BeadCloser struct {
+	sourceIndex       *BeadProvenanceIndex // nil-safe; bead->store provenance
 	beadsClient       BeadsClient
 	intelligenceHub   *IntelligenceHub
 	projectResolver   *ProjectResolver
@@ -110,6 +111,11 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 		worker.BeadID.String(), projectName, repoName)
 
 	projectPath := c.projectResolver.ResolveProjectPathByWorker(worker, projectName)
+	if projectPath == "" && c.sourceIndex != nil {
+		// Provenance: the store that listed this bead wins over name
+		// matching when several projects share a repo name.
+		projectPath = c.sourceIndex.Lookup(worker.BeadID.String())
+	}
 	if projectPath == "" {
 		// Synthetic workers (Pan's abandon-with-summary builds one with no
 		// registry row and no ProjectPath) cannot resolve through the
@@ -901,4 +907,10 @@ func splitFileList(s string) []string {
 		}
 	}
 	return out
+}
+
+// SetSourceIndex wires the bead->store provenance index (index consulted
+// after the worker's own ProjectPath, before config name matching).
+func (c *BeadCloser) SetSourceIndex(idx *BeadProvenanceIndex) {
+	c.sourceIndex = idx
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -11,6 +12,10 @@ import (
 // DAGBuilder fetches beads and builds the dependency graph.
 type DAGBuilder struct {
 	errorLogger *ErrorLogger
+	// Provenance records bead ID -> source project path for every successful
+	// listing so later resolution uses the real store even when several
+	// projects share a repo name.
+	Provenance *BeadProvenanceIndex
 }
 
 // NewDAGBuilder creates a new DAG builder.
@@ -18,6 +23,18 @@ func NewDAGBuilder(errorLogger *ErrorLogger) *DAGBuilder {
 	return &DAGBuilder{
 		errorLogger: errorLogger,
 	}
+}
+
+// note records the listed bead IDs against their source path.
+func (b *DAGBuilder) note(path string, beads []types.Bead) {
+	if b.Provenance == nil || path == "" {
+		return
+	}
+	ids := make([]string, 0, len(beads))
+	for _, bead := range beads {
+		ids = append(ids, string(bead.ID))
+	}
+	b.Provenance.Note(path, ids)
 }
 
 // Build fetches all beads from projects and builds the DAG.
@@ -49,6 +66,7 @@ func (b *DAGBuilder) Build(dag *DAG, beadsClient BeadsClient, projects []types.P
 				fetchErrors = append(fetchErrors, fetchErr)
 				continue
 			}
+			b.note(project.Path, beads)
 
 			for _, bead := range beads {
 				fullBead, err := beadsClient.GetBead(project.Path, "", bead.ID)
@@ -80,6 +98,11 @@ func (b *DAGBuilder) Build(dag *DAG, beadsClient BeadsClient, projects []types.P
 					fetchErrors = append(fetchErrors, fetchErr)
 					continue
 				}
+				sourcePath := repo.Path
+				if sourcePath == "" {
+					sourcePath = filepath.Join(project.Path, repo.Name)
+				}
+				b.note(sourcePath, beads)
 
 				for _, bead := range beads {
 					fullBead, err := beadsClient.GetBead(project.Path, repo.Name, bead.ID)

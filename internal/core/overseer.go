@@ -73,6 +73,10 @@ type BeadsClient interface {
 
 // Overseer is the main scheduler daemon
 type Overseer struct {
+	// beadSource maps bead ID -> the project path whose store listed it
+	// (rebuilt every DAG build). The only unambiguous resolution when
+	// several projects share a repo name (ajantha/webapp vs nipuna.j/webapp).
+	beadSource      *BeadProvenanceIndex
 	config          *Config
 	projects        []types.Project
 	userContexts    map[string]*UserContext // Multi-user contexts (username -> context)
@@ -398,7 +402,12 @@ func NewOverseer(config *Config) *Overseer {
 	}
 
 	// Initialize bead analyzer (projects will be updated after discovery)
+	o.beadSource = &BeadProvenanceIndex{}
 	o.beadAnalyzer = NewBeadAnalyzer(o.projects)
+	o.beadAnalyzer.SetProvenanceIndex(o.beadSource)
+	if o.dagBuilder != nil {
+		o.dagBuilder.Provenance = o.beadSource
+	}
 
 	// Initialize worker spawner
 	o.workerSpawner = NewWorkerSpawner(
@@ -457,6 +466,7 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize bead closer
 	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o.validationService, config)
+	o.beadCloser.SetSourceIndex(o.beadSource)
 
 	// Daemon gate runner (FR-002): attach to the close path and recover any
 	// artifacts the previous daemon incarnation died inside (running + dead
@@ -747,6 +757,10 @@ func (o *Overseer) buildDAG() error {
 	}
 	o.dagNavigator = NewDAGNavigator(o.dag)
 
+	o.beadSource.Reset()
+	if o.dagBuilder != nil {
+		o.dagBuilder.Provenance = o.beadSource
+	}
 	if err := o.dagBuilder.Build(o.dag, o.beadsClient, o.projects, o.completed); err != nil {
 		return err
 	}

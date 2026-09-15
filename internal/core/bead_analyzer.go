@@ -10,11 +10,20 @@ import (
 // BeadAnalyzer provides utility functions for analyzing bead metadata.
 type BeadAnalyzer struct {
 	projects []types.Project
+	// Provenance, when set, resolves beads to the store that listed them —
+	// the only unambiguous answer when several projects share a repo name
+	// (ajantha/webapp vs nipuna.j/webapp). Consulted BEFORE name matching.
+	provenance *BeadProvenanceIndex
 }
 
 // NewBeadAnalyzer creates a new bead analyzer for the given projects.
 func NewBeadAnalyzer(projects []types.Project) *BeadAnalyzer {
 	return &BeadAnalyzer{projects: projects}
+}
+
+// SetProvenanceIndex wires the bead→store provenance index.
+func (ba *BeadAnalyzer) SetProvenanceIndex(idx *BeadProvenanceIndex) {
+	ba.provenance = idx
 }
 
 // SetProjects updates the projects list.
@@ -61,6 +70,11 @@ func (ba *BeadAnalyzer) ExtractTargetFiles(bead *types.Bead) []string {
 
 // FindProjectPath finds the project path for a given bead.
 func (ba *BeadAnalyzer) FindProjectPath(bead *types.Bead) string {
+	// Provenance first: the index knows which store listed this bead, which
+	// is the only correct answer when multiple projects share a repo name.
+	if p := ba.provenance.Lookup(string(bead.ID)); p != "" {
+		return p
+	}
 	// Scheduler-path beads carry an empty Project field — derive it from the
 	// ID prefix (1xs7z: empty match -> empty path -> worktree created in the
 	// daemon's cwd, a dev-tools checkout for a srv bead, 51.6M tokens lost).
