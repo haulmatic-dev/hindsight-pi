@@ -111,6 +111,17 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 
 	projectPath := c.projectResolver.ResolveProjectPathByWorker(worker, projectName)
 	if projectPath == "" {
+		// Synthetic workers (Pan's abandon-with-summary builds one with no
+		// registry row and no ProjectPath) cannot resolve through the
+		// registry-backed resolver. Fall back to the config resolver — the
+		// same #225-fixed resolution family the Pan close paths use — so
+		// shepherd-initiated closes work for every registered project.
+		// Observed live 2026-09-15: abandoning stale hydra beads failed
+		// with "project hydra not found" even though the config registers
+		// it.
+		projectPath = resolveProjectPathByName(c.config, projectName, repoName)
+	}
+	if projectPath == "" {
 		return &ProjectNotFoundError{Project: projectName}
 	}
 
