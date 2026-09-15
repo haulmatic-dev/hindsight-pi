@@ -407,6 +407,11 @@ func (d *BeadDiscovery) findFromBVPlan(activeWorkers map[string]bool) ([]types.B
 			// Fail-closed: store presumed corrupt, excluded until restored.
 			continue
 		}
+		if project.Type == types.RepoTypeMulti && len(project.Repos) == 0 {
+			// Empty multi (no discovered repos with stores yet): bv has
+			// nothing to plan and exits non-zero every tick. Skip quietly.
+			continue
+		}
 		plan, err := d.bvClient.GetPlan(project.Path)
 		if err != nil {
 			// Per-project isolation: skip a project whose plan failed rather

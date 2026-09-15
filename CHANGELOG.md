@@ -111,7 +111,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 
-### Added
+- Dynamic multi-user re-discovery: the scheduler tick re-runs multi-user discovery every 5 minutes, so edited `~/.hydra/config.yaml` files (e.g. pointing a multi project at `~/projects/source-2-pay`) and repos added under a multi dir onboard without a daemon restart. New (name,path) projects append; existing multis pick up new repos in place; removal is conservative (vanished entries list empty rather than risking active work). Also: empty multi projects (zero discovered repos) are now skipped by the bv planner and Charon scans instead of failing non-zero every tick — closes hydra-code-rkps. *Authored by a Hydra dogfood run.*
+
 - Worker prompt now injects deterministic discovery directives as protocol: every bead is told to run `hindsight_search` once at start, and beads without a `Files:` line (discovery-class beads) are required to run `graphify query` before exploring files, with a fallback to `rg`. Session forensics showed workers skipped graphify entirely and rarely used hindsight_search because both were discretionary skills.
 
 ### Added

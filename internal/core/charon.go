@@ -518,6 +518,9 @@ func (j *Charon) getOpenBeads() (map[string]bool, map[string]bool) {
 
 	projects := j.collectProjects()
 	for _, project := range projects {
+		if project.Type == types.RepoTypeMulti && len(project.Repos) == 0 {
+			continue // empty multi: nothing to scan, bv/br exit non-zero
+		}
 		for _, target := range repoScanTargets(project) {
 			beadList, err := j.beadsClient.ListBeads(target, "")
 			if err != nil {
@@ -787,6 +790,9 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 	recovered := 0
 
 	for _, project := range projects {
+		if project.Type == types.RepoTypeMulti && len(project.Repos) == 0 {
+			continue // empty multi: nothing to scan, bv/br exit non-zero
+		}
 		for _, target := range repoScanTargets(project) {
 			beadList, err := j.beadsClient.ListBeads(target, "")
 			if err != nil {
