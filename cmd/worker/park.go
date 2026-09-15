@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -164,7 +166,26 @@ func parkSession(ps *parkState, wait time.Duration, reason string, stdin io.Writ
 		reason, wait, ps.totalParked(), ps.cap)
 
 	go func() {
-		time.Sleep(wait)
+		for {
+			time.Sleep(wait)
+			// Provider-capacity parks only: waking into a saturated pool
+			// burns a denied request and re-parks for another full
+			// backoff. Hold the park (with growing backoff) while the
+			// router reports zero free lanes. Other park classes and any
+			// probe failure resume normally.
+			if strings.Contains(reason, "provider-capacity") && routerCapacityFull() {
+				next, _ := ps.nextWait(reason)
+				ps.begin(next, reason)
+				_, wakeAt, _ := ps.parkInfo()
+				if activeReporter != nil {
+					activeReporter.SetPark(time.Now(), wakeAt, reason)
+				}
+				wait = next
+				log.Printf("[Worker:rpc] ⏸️  park extended %v (pool saturated)", next)
+				continue
+			}
+			break
+		}
 		ps.end()
 		if activeReporter != nil {
 			activeReporter.SetState("working")
@@ -203,4 +224,41 @@ func parkSession(ps *parkState, wait time.Duration, reason string, stdin io.Writ
 		log.Printf("[Worker:rpc] ▶️  park wake after %v — resuming session", wait)
 		turn.reset()
 	}()
+}
+
+// routerCapacityFull probes the llm-router /capacity endpoint before a
+// provider-capacity park wakes: resuming into a saturated pool burns a
+// denied request and re-parks for another full backoff (the
+// wake-denied-repark loop). Returns true only when the probe SUCCEEDS and
+// reports zero free lanes. Every failure mode - no URL configured, probe
+// error, bad JSON, missing field - returns false: the park must never be
+// held because the probe itself broke (fail open). The URL is opt-in via
+// LLM_ROUTER_CAPACITY_URL so workers without a router are unaffected.
+func routerCapacityFull() bool {
+	url := strings.TrimSpace(os.Getenv("LLM_ROUTER_CAPACITY_URL"))
+	if url == "" {
+		url = strings.TrimSpace(os.Getenv("HYDRA_LLM_ROUTER_CAPACITY_URL"))
+	}
+	if url == "" {
+		return false
+	}
+	client := http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		log.Printf("[Worker:rpc] capacity probe failed (fail open): %v", err)
+		return false
+	}
+	defer resp.Body.Close()
+	var body struct {
+		FreeLanes int `json:"free_lanes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		log.Printf("[Worker:rpc] capacity probe unreadable (fail open): %v", err)
+		return false
+	}
+	if body.FreeLanes <= 0 {
+		log.Printf("[Worker:rpc] capacity probe: pool saturated (free_lanes=%d) - holding park", body.FreeLanes)
+		return true
+	}
+	return false
 }
