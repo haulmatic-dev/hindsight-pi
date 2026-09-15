@@ -291,7 +291,9 @@ func defaultAutoPRGitPush(repoPath, ref, token string) error {
 	if target == "" {
 		target = "origin"
 	}
-	if _, err := gitOut(repoPath, "push", target, "HEAD:"+ref); err != nil {
+	// --no-verify: same rationale as PushBranch — client-side hooks are
+	// interactive-dev affordances that break in headless daemon checkouts.
+	if _, err := gitOut(repoPath, "push", "--no-verify", target, "HEAD:"+ref); err != nil {
 		return fmt.Errorf("push HEAD:%s: %w", ref, err)
 	}
 	return nil
