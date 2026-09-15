@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -218,6 +219,29 @@ func (s *Shepherd) liveWorkerRows(beadID string) []registry.WorkerRecord {
 	return out
 }
 
+// maxConsecutiveRepairs caps how often the same repair may be attempted for
+// the same (action, scope, normalized reason) before Pan classifies the
+// condition human-only and stops burning attempts (66 prunes on one wedge
+// in a day, 2026-09-15). A changed reason is a new key — the natural reset.
+const maxConsecutiveRepairs = 3
+
+var (
+	volatileDurationRe = regexp.MustCompile(`\d+(?:\.\d+)?(?:d|h|m|s)(?:\d+m?)?\b`)
+	volatileDateTimeRe = regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?`)
+	volatileUnitsRe    = regexp.MustCompile(`\d+\s+(?:seconds?|minutes?|hours?|days?|weeks?)\b`)
+)
+
+// normalizeReason strips volatile substrings — ages ("94h27m"), timestamps,
+// "N minutes" phrasings — from a candidate reason. Used ONLY for signatures
+// and repair-efficacy keys, never for the judgment prompt: the model still
+// sees the raw reason with its fresh age.
+func normalizeReason(reason string) string {
+	r := volatileDateTimeRe.ReplaceAllString(reason, "#")
+	r = volatileDurationRe.ReplaceAllString(r, "#")
+	r = volatileUnitsRe.ReplaceAllString(r, "# units")
+	return r
+}
+
 // candidateSignature hashes the stable identity of a candidate set: IDs,
 // states, and reasons — everything that could change the verdict. Volatile
 // fields (token counts, heartbeats, ages) are excluded on purpose: they
@@ -225,7 +249,7 @@ func (s *Shepherd) liveWorkerRows(beadID string) []registry.WorkerRecord {
 func candidateSignature(cands []Candidate) string {
 	parts := make([]string, 0, len(cands))
 	for _, c := range cands {
-		parts = append(parts, c.Record.BeadID+"\x00"+string(c.Record.State)+"\x00"+c.Reason)
+		parts = append(parts, c.Record.BeadID+"\x00"+string(c.Record.State)+"\x00"+normalizeReason(c.Reason))
 	}
 	sort.Strings(parts)
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x01")))
@@ -409,6 +433,9 @@ type Shepherd struct {
 	dedupMu      sync.Mutex
 	lastSig      string    // candidate-set signature of the last judgment
 	lastJudgedAt time.Time // when the last judgment ran (valve backstop)
+
+	efficacyMu     sync.Mutex
+	repairEfficacy map[string]int // repair key → consecutive attempts
 }
 
 // recordVerdict notes a non-terminal decision (continue/steer/compact) so
@@ -718,6 +745,48 @@ func (s *Shepherd) Tick(ctx context.Context) {
 
 // handleRepair executes a whitelisted repair handler for a blocked bead.
 // It is fail-open: errors are logged and emitted as audit events only.
+// repairEfficacyKey builds the (action, scope, normalized reason) identity
+// for efficacy counting. Scope is the project for project-scoped repairs
+// (a shared wedge counts collectively), the bead otherwise. Reason is the
+// candidate's current blocked reason, normalized; lookup failure yields ""
+// and simply counts under an empty reason.
+func (s *Shepherd) repairEfficacyKey(beadID, name string) string {
+	scope := beadID
+	if projectScopedRepairs[name] && s.ProjectScope != nil {
+		scope = s.ProjectScope(beadID)
+	}
+	return name + "|" + scope + "|" + normalizeReason(s.blockedReasonFor(beadID))
+}
+
+// blockedReasonFor finds the bead's current blocked reason via the
+// BlockedBeads provider. Fail-open: nil provider or missing bead → "".
+func (s *Shepherd) blockedReasonFor(beadID string) string {
+	if s.cfg.BlockedBeads == nil {
+		return ""
+	}
+	for _, b := range s.cfg.BlockedBeads() {
+		if b.BeadID == beadID {
+			return b.Reason
+		}
+	}
+	return ""
+}
+
+// noteRepairAttempt records an attempt under the key and reports whether
+// the attempt is allowed (below the consecutive-attempt cap).
+func (s *Shepherd) noteRepairAttempt(key string) bool {
+	s.efficacyMu.Lock()
+	defer s.efficacyMu.Unlock()
+	if s.repairEfficacy == nil {
+		s.repairEfficacy = make(map[string]int)
+	}
+	if s.repairEfficacy[key] >= maxConsecutiveRepairs {
+		return false
+	}
+	s.repairEfficacy[key]++
+	return true
+}
+
 func (s *Shepherd) handleRepair(beadID, name string) {
 	// Safety gate: never repair a bead that still has a live worker row.
 	if s.hasLiveWorker(beadID) {
@@ -732,6 +801,16 @@ func (s *Shepherd) handleRepair(beadID, name string) {
 		log.Printf("[Pan] repair %s for %s rate limited (%v remaining)", name, beadID, remaining)
 		return
 	}
+	// Efficacy gate: refuse after maxConsecutiveRepairs attempts on the same
+	// (action, scope, normalized reason). The wedge that spams repairs never
+	// gets fixed by the 4th identical attempt either — classify human-only.
+	if key := s.repairEfficacyKey(beadID, name); !s.noteRepairAttempt(key) {
+		detail := "ineffective: same repair attempted " + itoa(maxConsecutiveRepairs) + "+ times without the condition changing; human-only"
+		s.emitRepairEvent(beadID, name, "refused", detail)
+		log.Printf("[Pan] repair %s for %s refused (ineffective — condition unchanged across %d attempts)", name, beadID, maxConsecutiveRepairs)
+		return
+	}
+
 	handler, ok := s.RepairHandlers[name]
 	if !ok || handler == nil {
 		s.emitRepairEvent(beadID, name, "error", "unknown repair handler")
@@ -1006,3 +1085,5 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
+
+func itoa(n int) string { return fmt.Sprintf("%d", n) }
