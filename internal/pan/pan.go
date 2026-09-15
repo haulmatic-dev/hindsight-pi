@@ -11,10 +11,13 @@ package pan
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -153,6 +156,11 @@ var repairWhitelist = map[string]bool{
 // commands can never succeed for them — only repair:<name> applies.
 const pseudoBeadSuffix = "-push-pending"
 
+// reJudgeInterval is the valve that re-judges an unchanged candidate set
+// anyway: a permanently stuck candidate must never become permanently blind,
+// and verdict memory (ContinuedRecently etc.) decays on this horizon.
+var reJudgeInterval = 15 * time.Minute
+
 // projectScopedRepairs rate-limit against the project, not the bead: one
 // shared-wedge repair covers every bead parked by the same cause, so a
 // per-bead limit would take hours to clear a fleet-wide wedge (2026-09-13:
@@ -208,6 +216,36 @@ func (s *Shepherd) liveWorkerRows(beadID string) []registry.WorkerRecord {
 		}
 	}
 	return out
+}
+
+// candidateSignature hashes the stable identity of a candidate set: IDs,
+// states, and reasons — everything that could change the verdict. Volatile
+// fields (token counts, heartbeats, ages) are excluded on purpose: they
+// change every tick and would defeat the dedup.
+func candidateSignature(cands []Candidate) string {
+	parts := make([]string, 0, len(cands))
+	for _, c := range cands {
+		parts = append(parts, c.Record.BeadID+"\x00"+string(c.Record.State)+"\x00"+c.Reason)
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x01")))
+	return hex.EncodeToString(sum[:8])
+}
+
+// judgmentUnchanged reports whether this candidate set is byte-identical
+// (by signature) to the last judged one AND the re-judge valve has not
+// expired. On skip it logs once; on change (or valve expiry) it records the
+// new signature and lets the tick proceed to judgment.
+func (s *Shepherd) judgmentUnchanged(cands []Candidate) bool {
+	sig := candidateSignature(cands)
+	s.dedupMu.Lock()
+	defer s.dedupMu.Unlock()
+	if sig == s.lastSig && time.Since(s.lastJudgedAt) < reJudgeInterval {
+		return true
+	}
+	s.lastSig = sig
+	s.lastJudgedAt = time.Now()
+	return false
 }
 
 // shouldPresentPseudo rate-limits pseudo-bead candidacy: an unchanged
@@ -367,6 +405,10 @@ type Shepherd struct {
 
 	pseudoMu   sync.Mutex
 	pseudoSeen map[string]pseudoSeenEntry // pseudo-bead → last presented reason
+
+	dedupMu      sync.Mutex
+	lastSig      string    // candidate-set signature of the last judgment
+	lastJudgedAt time.Time // when the last judgment ran (valve backstop)
 }
 
 // recordVerdict notes a non-terminal decision (continue/steer/compact) so
@@ -488,6 +530,9 @@ func (s *Shepherd) Tick(ctx context.Context) {
 		return
 	}
 	if len(cands) == 0 {
+		return
+	}
+	if s.judgmentUnchanged(cands) {
 		return
 	}
 	log.Printf("[Pan] %d candidate(s) need judgment", len(cands))

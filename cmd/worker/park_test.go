@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -148,5 +150,43 @@ func TestParkAbortsInFlightTurnBeforeSleep(t *testing.T) {
 	}
 	if !strings.Contains(stdin.String(), "continue your task from where you stopped") {
 		t.Errorf("wake must reprompt with the resume message, got: %q", stdin.String())
+	}
+}
+
+// routerCapacityFull: the park-wake probe. A parked worker must hold its
+// park while the llm-router pool is saturated (waking burns a denied
+// request and re-parks for another full backoff). Any probe failure must
+// fail OPEN — never hold a park because the probe itself broke.
+func TestRouterCapacityFull(t *testing.T) {
+	// No URL configured → feature off → never full.
+	t.Setenv("LLM_ROUTER_CAPACITY_URL", "")
+	if routerCapacityFull() {
+		t.Error("no capacity URL configured: routerCapacityFull = true, want false (feature off)")
+	}
+
+	// Saturated pool → full.
+	saturated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"free_lanes": 0}`))
+	}))
+	defer saturated.Close()
+	t.Setenv("LLM_ROUTER_CAPACITY_URL", saturated.URL)
+	if !routerCapacityFull() {
+		t.Error("free_lanes=0: routerCapacityFull = false, want true")
+	}
+
+	// Free lanes → not full.
+	free := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"free_lanes": 3}`))
+	}))
+	defer free.Close()
+	t.Setenv("LLM_ROUTER_CAPACITY_URL", free.URL)
+	if routerCapacityFull() {
+		t.Error("free_lanes=3: routerCapacityFull = true, want false")
+	}
+
+	// Unreachable router → fail open.
+	t.Setenv("LLM_ROUTER_CAPACITY_URL", "http://127.0.0.1:1/nope")
+	if routerCapacityFull() {
+		t.Error("unreachable probe: routerCapacityFull = true, want false (fail open)")
 	}
 }

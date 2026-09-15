@@ -75,6 +75,13 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 		// 5m TTL, so respawns/re-prompts of the same bead still hit cache past
 		// the default expiry. Harmless when the provider ignores the marker.
 		"PI_CACHE_RETENTION=long",
+		// Park-wake capacity probe: provider-capacity parks hold their wake
+		// while the llm-router pool is saturated (free_lanes=0), instead of
+		// burning a denied request and re-parking for another full backoff.
+		// The worker fails open on any probe error. Fleet-standard router
+		// address; override via HYDRA_LLM_ROUTER_CAPACITY_URL if a fleet
+		// moves its router.
+		"LLM_ROUTER_CAPACITY_URL=http://127.0.0.1:9900/capacity",
 		fmt.Sprintf("HYDRA_BEAD_ID=%s", bead.ID),
 		fmt.Sprintf("HYDRA_PROJECT=%s", bead.Project),
 		fmt.Sprintf("HYDRA_PROJECT_PATH=%s", projectPath),
