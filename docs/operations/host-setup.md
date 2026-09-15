@@ -181,6 +181,27 @@ cost hours: models.json per-model `baseUrl` SHADOWS the provider-level
 baseUrl — a fresh provider id (`kimi-router`) is required. Also remove stale
 `KIMI_CODE_API_BASE_URL`-style exports: pi ignores them.
 
+## 6c. Log rotation and retention
+
+Two mechanisms cover fleet logs (set 2026-09-15):
+
+- **Hydra file logs** (`/var/log/hydra/*.log`, written via the unit's
+  `StandardOutput`/`StandardError` append directives): rotated by
+  `/etc/logrotate.d/hydra` — daily or at 100MB, 14 archives, gzip-compressed
+  (`delaycompress` keeps the newest archive plain for grep), `copytruncate`
+  (no daemon restart needed), **`maxage 365` deletes anything older than a
+  year**. Per-bead worker logs under `/opt/dev-tools/var/hydra/logs/workers/`
+  age out after 7 days (write-once, rotate-in-place is wrong for them).
+  `logrotate.timer` drives the schedule.
+- **journald** (everything else, including **llm-router** — its `slog`
+  output goes to stderr/journald, not a file): bounded by
+  `/etc/systemd/journald.conf.d/99-size-retention.conf` —
+  `SystemMaxUse=500M`, `MaxRetentionSec=365day`. journald rotates/vacuums
+  itself; no per-service config needed.
+
+Verify: `journalctl --disk-usage`, `logrotate -d /etc/logrotate.d/hydra`,
+`ls -la /var/log/hydra/`.
+
 ## 7. systemd unit + drop-ins
 
 Install `scripts/hydra.service` per `docs/operations/SERVICE_SETUP.md`
