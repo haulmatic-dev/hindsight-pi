@@ -76,24 +76,31 @@ type Overseer struct {
 	// beadSource maps bead ID -> the project path whose store listed it
 	// (rebuilt every DAG build). The only unambiguous resolution when
 	// several projects share a repo name (ajantha/webapp vs nipuna.j/webapp).
-	beadSource      *BeadProvenanceIndex
-	config          *Config
-	projects        []types.Project
-	userContexts    map[string]*UserContext // Multi-user contexts (username -> context)
-	activeWorkers   map[string]*types.Worker
-	workerMutex     sync.RWMutex
-	stateController *StateController // Runtime state (running, paused, maxWorkers, interval)
-	configManager   *ConfigManager   // Dynamic configuration management
-	beadsClient     BeadsClient
-	workerSpawner   *WorkerSpawner
-	pushPendingMu   sync.Mutex
-	pushPending     map[string]*PushPendingEntry // projectPath → stranded-push state
-	dag             *DAG
-	dagMu           sync.RWMutex
-	dagNavigator    *DAGNavigator
-	completed       map[string]bool  // Track completed beads for this session
-	retryManager    *RetryManager    // Retry and validation-retry tracking
-	intelligenceHub *IntelligenceHub // Encapsulates TLDR, GPTCache, Hindsight clients
+	beadSource *BeadProvenanceIndex
+	// discoveryRefreshInterval gates how often multi-user discovery re-runs
+	// inside tick() so edited ~/.hydra/config.yaml files and repos added
+	// under a multi dir onboard without a daemon restart.
+	discoveryRefreshInterval time.Duration
+	lastDiscoveryRefresh     time.Time
+	// discoveryHomeDir overrides the discovery scan root in tests.
+	discoveryHomeDir string
+	config           *Config
+	projects         []types.Project
+	userContexts     map[string]*UserContext // Multi-user contexts (username -> context)
+	activeWorkers    map[string]*types.Worker
+	workerMutex      sync.RWMutex
+	stateController  *StateController // Runtime state (running, paused, maxWorkers, interval)
+	configManager    *ConfigManager   // Dynamic configuration management
+	beadsClient      BeadsClient
+	workerSpawner    *WorkerSpawner
+	pushPendingMu    sync.Mutex
+	pushPending      map[string]*PushPendingEntry // projectPath → stranded-push state
+	dag              *DAG
+	dagMu            sync.RWMutex
+	dagNavigator     *DAGNavigator
+	completed        map[string]bool  // Track completed beads for this session
+	retryManager     *RetryManager    // Retry and validation-retry tracking
+	intelligenceHub  *IntelligenceHub // Encapsulates TLDR, GPTCache, Hindsight clients
 	// These clients remain direct fields until IntelligenceHub fully exposes their APIs.
 	gptCache              *GPTCacheClient                 // GPTCache client for caching
 	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
@@ -613,8 +620,86 @@ func (o *Overseer) Start(ctx context.Context) error {
 	}
 }
 
+// refreshDiscoveredProjects re-runs multi-user discovery and converges the
+// overseer's project set: new (name,path) projects are appended, existing
+// multi projects pick up newly discovered repos in place. Removal is
+// conservative — vanished entries are left alone (they list empty and cost
+// nothing) rather than risking active work. All downstream consumers
+// (analyzer, resolver, file reader, discovery, spawner contexts) are
+// re-pointed at the merged list.
+func (o *Overseer) refreshDiscoveredProjects() {
+	if o.config == nil || !o.config.MultiUserDiscovery {
+		return
+	}
+	d := NewMultiUserDiscovery()
+	d.HomeDir = o.discoveryHomeDir
+	d.SetExclude(o.config.AutoDiscoverExclude)
+	if err := d.Discover(); err != nil {
+		log.Printf("[MultiUser] re-discovery error (keeping existing projects): %v", err)
+		return
+	}
+	fresh := d.Projects()
+
+	existing := make(map[string]bool, len(o.projects))
+	for _, p := range o.projects {
+		existing[p.Name+"|"+p.Path] = true
+	}
+
+	var added []types.Project
+	for _, fp := range fresh {
+		key := fp.Name + "|" + fp.Path
+		if existing[key] {
+			continue
+		}
+		existing[key] = true
+		added = append(added, fp)
+	}
+
+	// Refresh repo lists of already-registered multi projects in place so
+	// repos added under a multi dir start scheduling without a restart.
+	for i := range o.projects {
+		for _, fp := range fresh {
+			if fp.Name == o.projects[i].Name && fp.Path == o.projects[i].Path && len(fp.Repos) > 0 {
+				o.projects[i].Repos = fp.Repos
+			}
+		}
+	}
+
+	if len(added) > 0 {
+		names := make([]string, 0, len(added))
+		for _, p := range added {
+			names = append(names, p.Name)
+		}
+		o.projects = append(o.projects, added...)
+		log.Printf("[MultiUser] Dynamically added %d project(s): %v", len(added), names)
+	}
+
+	o.beadAnalyzer.SetProjects(o.projects)
+	o.projectResolver = NewProjectResolver(o.projects)
+	if o.beadFileReader != nil {
+		o.beadFileReader.SetProjects(o.projects)
+	}
+	if o.beadDiscovery != nil {
+		o.beadDiscovery.SetProjects(o.projects)
+	}
+	o.userContexts = d.Users()
+	if o.workerSpawner != nil {
+		o.workerSpawner.SetUserContexts(o.userContexts)
+	}
+}
+
 // tick performs one iteration of the scheduling loop.
 func (o *Overseer) tick() error {
+	// Periodic multi-user re-discovery: new users, edited configs, and repos
+	// added under a multi dir onboard here — no daemon restart needed.
+	interval := o.discoveryRefreshInterval
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	if time.Since(o.lastDiscoveryRefresh) >= interval {
+		o.lastDiscoveryRefresh = time.Now()
+		o.refreshDiscoveredProjects()
+	}
 	err := o.scheduler.Tick()
 	// After scheduling, publish each project's working branch to its remote
 	// (opt-in via output.push). This consolidates completed worktree commits
