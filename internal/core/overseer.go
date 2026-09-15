@@ -682,7 +682,15 @@ func (o *Overseer) refreshDiscoveredProjects() {
 	if o.beadDiscovery != nil {
 		o.beadDiscovery.SetProjects(o.projects)
 	}
-	o.userContexts = d.Users()
+	// Merge user contexts, never replace: a user whose config is temporarily
+	// unreadable (or who lives outside the scan root, as in tests) must not
+	// vanish mid-run — that would strand attribution and block their spawns.
+	if o.userContexts == nil {
+		o.userContexts = make(map[string]*UserContext)
+	}
+	for name, ctx := range d.Users() {
+		o.userContexts[name] = ctx
+	}
 	if o.workerSpawner != nil {
 		o.workerSpawner.SetUserContexts(o.userContexts)
 	}
