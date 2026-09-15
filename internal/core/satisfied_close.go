@@ -264,7 +264,10 @@ func finalizeSatisfiedClose(o *Overseer, bead *types.Bead, projectPath, repoName
 // prefix when the bead's Project field is empty (scheduler-path beads).
 func resolveSatisfiedBead(o *Overseer, id types.BeadID) (*types.Bead, string, string, error) {
 	repoName := id.Repo()
-	projectPath := resolveProjectPathByName(o.config, id.Project(), repoName)
+	projectPath := o.beadSource.Lookup(id.String())
+	if projectPath == "" {
+		projectPath = resolveProjectPathByName(o.config, id.Project(), repoName)
+	}
 	if projectPath == "" {
 		return nil, "", "", fmt.Errorf("close_satisfied %s: project path not found", id)
 	}

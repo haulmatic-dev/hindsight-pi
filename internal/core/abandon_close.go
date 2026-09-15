@@ -20,7 +20,10 @@ func BuildAbandonWithSummary(o *Overseer) func(beadID string) error {
 	return func(beadID string) error {
 		id := types.BeadID(beadID)
 		repoName := id.Repo()
-		projectPath := resolveProjectPathByName(o.config, id.Project(), repoName)
+		projectPath := o.beadSource.Lookup(id.String())
+		if projectPath == "" {
+			projectPath = resolveProjectPathByName(o.config, id.Project(), repoName)
+		}
 		if projectPath == "" {
 			return fmt.Errorf("abandon-with-summary %s: project path not found", id)
 		}

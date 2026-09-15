@@ -179,6 +179,11 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 		// name — the exact mismatch that made Pan's close paths fail 100% with
 		// "project path not found" (2026-09-11/13).
 		projectPathForID := func(id types.BeadID) string {
+			// Provenance first: the index knows which store listed this bead,
+			// the only correct answer when several projects share a repo name.
+			if p := o.beadSource.Lookup(id.String()); p != "" {
+				return p
+			}
 			projectName := id.Project()
 			repoName := id.Repo()
 			for _, p := range o.projects {
