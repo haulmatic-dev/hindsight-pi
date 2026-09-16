@@ -60,6 +60,23 @@ func NewScheduler(overseer *Overseer) *Scheduler {
 	return s
 }
 
+// campaignParked reports whether Pan froze the project's campaign. Nil
+// registry or unknown project fails open (not parked).
+func (o *Overseer) campaignParked(bead types.Bead) bool {
+	if o.registryStore == nil {
+		return false
+	}
+	projectPath := o.beadAnalyzer.FindProjectPath(&bead)
+	if projectPath == "" {
+		return false
+	}
+	info, ok, err := o.registryStore.ProjectParkInfo(projectKey(projectPath))
+	if err != nil || !ok {
+		return false
+	}
+	return info.Parked
+}
+
 const (
 	congestionPauseThreshold   = 3
 	congestionPauseDuration    = 5 * time.Minute
@@ -655,6 +672,11 @@ func (s *Scheduler) SpawnWorkersForNodes(nodes []*Node, maxSlots int) int {
 				log.Printf("No available slots (active: %d/%d), stopping", currentActive, maxWorkers)
 			}
 			break
+		}
+		// Campaign park: Pan may have frozen the whole project campaign.
+		if o.campaignParked(node.Bead) {
+			log.Printf("⏸️  Skipping bead %s: campaign parked (Pan)", node.Bead.ID)
+			continue
 		}
 		if !s.ShouldSpawnWorker(node) {
 			continue

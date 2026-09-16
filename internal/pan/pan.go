@@ -159,6 +159,7 @@ var repairWhitelist = map[string]bool{
 	"prune-worktree-registration": true,
 	"re-push-integration":         true,
 	"park-campaign":               true,
+	"unpark-campaign":             true,
 	"log-improvement":             true,
 }
 
@@ -1108,7 +1109,7 @@ Rescue recipes (hard-won; prefer the repair matching the cause):
 - repair:repair-bead-store restores a corrupted issues.jsonl from the newest clean backup; pick it when the reason mentions conflict markers or parse errors.
 - PUSH-PENDING candidates mean commits exist locally but not on origin. Prefer repair:re-push-integration once; if the reason is branch protection or permissions and a retry already failed, that is a human problem — say so in reasoning instead of looping repairs.
 - Candidates ending in -push-pending are project-level pseudo-beads, not beads: never abandon-with-summary or close_satisfied them — only repair:re-push-integration applies. If the reason is divergence or permissions, it is a human problem; say so in reasoning and move on.
-- Candidates ending in -campaign-anomaly are fleet-level findings from the health digest (their reason carries the anomaly and a compact fleet snapshot). Only two verbs apply: repair:park-campaign to freeze that project's campaign behind a hold gate (reversible; the default for chain-discipline violations), and repair:log-improvement to record a hydra improvement proposal for human review (payload = the proposal). Never abandon or close them. Prefer log-improvement when the right fix is a hydra code change rather than a containment.
+- Candidates ending in -campaign-anomaly are fleet-level findings from the health digest (their reason carries the anomaly and a compact fleet snapshot). Three verbs apply: repair:park-campaign to freeze that project's campaign (the scheduler skips all spawns for the project; reversible; the default for chain-discipline violations), repair:unpark-campaign to release the campaign once the anomaly is understood, and repair:log-improvement to record a hydra improvement proposal for human review (payload = the proposal). Never abandon or close them. Prefer log-improvement when the right fix is a hydra code change rather than a containment.
 - Never repair for merges, PRs, deploys, or repo content edits — those are human-only; if the state needs one, explain it in reasoning.
 
 Rules:

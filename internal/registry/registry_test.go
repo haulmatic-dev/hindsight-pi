@@ -30,6 +30,57 @@ func liveRecord(beadID string) WorkerRecord {
 	}
 }
 
+func TestSetProjectPark(t *testing.T) {
+	st := openTest(t)
+
+	if err := st.SetProjectPark("acme/webapp", true, "chain discipline violation"); err != nil {
+		t.Fatalf("SetProjectPark: %v", err)
+	}
+	info, ok, err := st.ProjectParkInfo("acme/webapp")
+	if err != nil {
+		t.Fatalf("ProjectParkInfo: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected parked row to exist")
+	}
+	if !info.Parked {
+		t.Errorf("Parked = false, want true")
+	}
+	if info.Reason != "chain discipline violation" {
+		t.Errorf("Reason = %q, want %q", info.Reason, "chain discipline violation")
+	}
+	if info.Project != "acme/webapp" {
+		t.Errorf("Project = %q, want %q", info.Project, "acme/webapp")
+	}
+	if info.ParkedAt.IsZero() {
+		t.Error("ParkedAt must be set")
+	}
+
+	// Idempotent update: unpark keeps the row, just clears the flag.
+	if err := st.SetProjectPark("acme/webapp", false, ""); err != nil {
+		t.Fatalf("SetProjectPark unpark: %v", err)
+	}
+	info, ok, err = st.ProjectParkInfo("acme/webapp")
+	if err != nil {
+		t.Fatalf("ProjectParkInfo after unpark: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected row to still exist after unpark")
+	}
+	if info.Parked {
+		t.Errorf("Parked = true after unpark, want false")
+	}
+
+	// Unknown project is not parked.
+	_, ok, err = st.ProjectParkInfo("does/not/exist")
+	if err != nil {
+		t.Fatalf("ProjectParkInfo unknown: %v", err)
+	}
+	if ok {
+		t.Error("unknown project must report ok=false")
+	}
+}
+
 func TestUpsertAndGetWorker(t *testing.T) {
 	st := openTest(t)
 	rec := liveRecord("bead-1")
