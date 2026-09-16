@@ -3,6 +3,7 @@ package core
 import (
 	"log"
 	"strings"
+	"time"
 )
 
 // ReconcileOrphanedWorktrees scans a project's `hydra/wt-*` branches and merges
@@ -23,6 +24,10 @@ import (
 // Returns the number of successfully integrated branches and the number that
 // conflicted. If projectPath is not a git repository, or the working branch
 // has no hydra worktree branches, it returns (0, 0) without error.
+// reconcileMinIdle is the age floor for the reconciler: a worktree whose
+// contents changed within this window is treated as live and skipped.
+const reconcileMinIdle = 30 * time.Minute
+
 func ReconcileOrphanedWorktrees(m *WorktreeManager, projectPath string, activeKeys map[string]bool, isTerminal func(key string) bool) (integrated int, conflicts int) {
 	// Not a git repo — nothing to reconcile.
 	if _, err := gitOut(projectPath, "rev-parse", "--git-dir"); err != nil {
@@ -46,6 +51,14 @@ func ReconcileOrphanedWorktrees(m *WorktreeManager, projectPath string, activeKe
 		}
 		if isTerminal == nil || !isTerminal(key) {
 			continue // live, resumable, or unverifiable work: never touch
+		}
+
+		// Age floor: a worktree with writes younger than reconcileMinIdle is
+		// in active use — never integrate/remove it, regardless of what any
+		// registry row, chain registration, or bead status claims. Defense in
+		// depth after the 2026-09-16 live-sandbox deletion (webapp-zpf).
+		if m.WorktreeRecentlyActive(projectPath, key, reconcileMinIdle) {
+			continue
 		}
 
 		if err := m.IntegrateAndRemove(projectPath, key); err != nil {

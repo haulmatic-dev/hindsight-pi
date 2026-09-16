@@ -23,6 +23,7 @@ type WorkerReport struct {
 	ParkWakeAt            time.Time `json:"park_wake_at"`
 	ParkReason            string    `json:"park_reason"`
 	NudgeCount            int       `json:"nudge_count"`
+	WorktreeKey           string    `json:"worktree_key"`
 }
 
 // CmdCloseSatisfied tells Pan to close a bead whose acceptance criteria are

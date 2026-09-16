@@ -61,6 +61,12 @@ type WorkerRecord struct {
 	NudgeCount          int
 	ExitCode            int
 	CompletedAt         time.Time
+	// WorktreeKey is the chain worktree key (hydra/wt-<key>) the worker was
+	// spawned into, reported by the worker itself. The reconciler/GC use it
+	// to protect live sandboxes without depending on in-memory chain
+	// registration (2026-09-16: chain timeout unregistered the chain and the
+	// sweep deleted a live worker's worktree mid-run).
+	WorktreeKey string
 }
 
 // Command is one queued instruction for a worker.
@@ -150,6 +156,7 @@ func migrateRegistry(db *sql.DB) error {
 		"tokens_cache_read INTEGER NOT NULL DEFAULT 0",
 		"tokens_cache_creation INTEGER NOT NULL DEFAULT 0",
 		"tokens_output INTEGER NOT NULL DEFAULT 0",
+		"worktree_key TEXT NOT NULL DEFAULT ''",
 	}
 	for _, c := range cols {
 		if _, err := db.Exec("ALTER TABLE workers ADD COLUMN " + c); err != nil {
@@ -206,9 +213,10 @@ func (s *Store) UpsertWorker(rec WorkerRecord) error {
 INSERT INTO workers (bead_id, pid, pgid, project, started_at, last_heartbeat,
   state, pi_session_id, err_status, err_type, err_message, tokens_so_far,
   tokens_fresh, tokens_cache_read, tokens_cache_creation, tokens_output,
-  park_since, park_wake_at, park_reason, nudge_count, exit_code, completed_at)
+  park_since, park_wake_at, park_reason, nudge_count, exit_code, completed_at,
+  worktree_key)
 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,
-  ?,?,?,?,?,?,?,?,?,?)
+  ?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(bead_id) DO UPDATE SET
   pid=excluded.pid, pgid=excluded.pgid, project=excluded.project,
   started_at=excluded.started_at, last_heartbeat=excluded.last_heartbeat,
@@ -222,14 +230,15 @@ ON CONFLICT(bead_id) DO UPDATE SET
   park_since=excluded.park_since,
   park_wake_at=excluded.park_wake_at, park_reason=excluded.park_reason,
   nudge_count=excluded.nudge_count, exit_code=excluded.exit_code,
-  completed_at=excluded.completed_at`,
+  completed_at=excluded.completed_at,
+  worktree_key=CASE WHEN excluded.worktree_key != '' THEN excluded.worktree_key ELSE workers.worktree_key END`,
 		rec.BeadID, rec.PID, rec.PGID, rec.Project,
 		marshalTime(rec.StartedAt), marshalTime(rec.LastHeartbeat),
 		string(rec.State), rec.PiSessionID, rec.ErrStatus, rec.ErrType,
 		rec.ErrMessage, rec.TokensSoFar, rec.TokensFresh, rec.TokensCacheRead,
 		rec.TokensCacheCreation, rec.TokensOutput, marshalTime(rec.ParkSince),
 		marshalTime(rec.ParkWakeAt), rec.ParkReason, rec.NudgeCount,
-		rec.ExitCode, marshalTime(rec.CompletedAt))
+		rec.ExitCode, marshalTime(rec.CompletedAt), rec.WorktreeKey)
 	if err != nil {
 		return fmt.Errorf("upsert worker %s: %w", rec.BeadID, err)
 	}
@@ -458,7 +467,8 @@ func (s *Store) ReapStale(cutoff time.Time) (int, error) {
 const workerCols = `bead_id, pid, pgid, project, started_at, last_heartbeat,
   state, pi_session_id, err_status, err_type, err_message, tokens_so_far,
   tokens_fresh, tokens_cache_read, tokens_cache_creation, tokens_output,
-  park_since, park_wake_at, park_reason, nudge_count, exit_code, completed_at`
+  park_since, park_wake_at, park_reason, nudge_count, exit_code, completed_at,
+  worktree_key`
 
 func scanWorker(row *sql.Rows) (WorkerRecord, error) {
 	var rec WorkerRecord
@@ -469,7 +479,7 @@ func scanWorker(row *sql.Rows) (WorkerRecord, error) {
 		&rec.ErrType, &rec.ErrMessage, &rec.TokensSoFar, &rec.TokensFresh,
 		&rec.TokensCacheRead, &rec.TokensCacheCreation, &rec.TokensOutput,
 		&parkSince, &parkWake, &rec.ParkReason, &rec.NudgeCount,
-		&rec.ExitCode, &completed)
+		&rec.ExitCode, &completed, &rec.WorktreeKey)
 	if err != nil {
 		return rec, err
 	}

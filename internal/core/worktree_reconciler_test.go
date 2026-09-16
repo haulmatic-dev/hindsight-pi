@@ -1,10 +1,12 @@
 package core
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestReconcileOrphanedWorktrees_IntegratesBothBranches(t *testing.T) {
@@ -26,6 +28,7 @@ func TestReconcileOrphanedWorktrees_IntegratesBothBranches(t *testing.T) {
 		if _, err := m.Commit(wt, "bead("+key+"): add file"); err != nil {
 			t.Fatalf("commit %s: %v", key, err)
 		}
+		backdateWorktree(t, m, projectPath, key) // past the reconciler age floor
 	}
 
 	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
@@ -43,6 +46,68 @@ func TestReconcileOrphanedWorktrees_IntegratesBothBranches(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(projectPath, key+".txt")); err != nil {
 			t.Fatalf("file %s.txt should be on working branch: %v", key, err)
 		}
+	}
+}
+
+func TestReconcileOrphanedWorktrees_SkipsRecentlyActive(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	projectPath := gitInitRepo(t)
+	m := NewWorktreeManager()
+
+	key := "live-key"
+	wt, err := m.EnsureWorktree(projectPath, key)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "work.txt"), []byte("fresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Commit(wt, "bead(live): fresh work"); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// Terminal bead, no active keys — but the worktree was written seconds
+	// ago. The age floor must protect it anyway (2026-09-16 webapp-zpf:
+	// the sweep deleted a live worker's sandbox when chain state lied).
+	integrated, _ := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
+	if integrated != 0 {
+		t.Fatalf("integrated = %d, want 0 (recently active worktree protected)", integrated)
+	}
+	if !branchExists(projectPath, m.branchName(key)) {
+		t.Fatal("recently active branch must survive the sweep")
+	}
+	if _, err := os.Stat(filepath.Join(wt, ".git")); err != nil {
+		t.Fatal("recently active worktree must survive the sweep")
+	}
+
+	// Once idle past the floor, the same worktree integrates.
+	backdateWorktree(t, m, projectPath, key)
+	integrated, _ = ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
+	if integrated != 1 {
+		t.Fatalf("integrated after idle = %d, want 1", integrated)
+	}
+}
+
+// backdateWorktree ages every file in the key's worktree (and the dir
+// itself) past the reconciler's age floor.
+func backdateWorktree(t *testing.T, m *WorktreeManager, projectPath, key string) {
+	t.Helper()
+	wt := m.worktreePath(projectPath, key)
+	old := time.Now().Add(-time.Hour)
+	err := filepath.WalkDir(wt, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		return os.Chtimes(path, old, old)
+	})
+	if err != nil {
+		t.Fatalf("backdate %s: %v", wt, err)
 	}
 }
 
@@ -105,6 +170,7 @@ func TestReconcileOrphanedWorktrees_CountsConflict(t *testing.T) {
 	if _, err := m.Commit(wt, "bead(conflict): add shared file"); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
+	backdateWorktree(t, m, projectPath, key) // past the reconciler age floor
 
 	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
 	if integrated != 0 {
