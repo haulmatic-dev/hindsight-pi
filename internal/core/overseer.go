@@ -69,6 +69,7 @@ type BeadsClient interface {
 	UpdateBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error
 	RemoveBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error
 	UpdateBeadDescription(projectPath, repoName string, beadID types.BeadID, description string) error
+	AddDependency(projectPath, repoName string, beadID, dependsOn types.BeadID) error
 }
 
 // Overseer is the main scheduler daemon

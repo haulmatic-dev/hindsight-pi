@@ -19,6 +19,7 @@ type mockBeadsClient struct {
 	getErr        error
 	closeErr      error
 	closeCalls    []mockCloseCall
+	depAdds       []string
 }
 
 // mockCloseCall tracks CloseBead invocations for testing
@@ -236,6 +237,21 @@ func (m *mockBeadsClient) UpdateBeadDescription(projectPath, repoName string, be
 	if bead, exists := m.beads[string(beadID)]; exists {
 		bead.Description = description
 		m.beads[string(beadID)] = bead
+	}
+	return nil
+}
+
+func (m *mockBeadsClient) AddDependency(projectPath, repoName string, beadID, dependsOn types.BeadID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.depAdds = append(m.depAdds, beadID.String()+"->"+dependsOn.String())
+	// Reflect the dep on the stored bead so park idempotency tests observe it.
+	projectName := filepath.Base(projectPath)
+	for k, b := range m.beads {
+		if b.ID == beadID && b.Project == projectName {
+			b.Dependencies = append(b.Dependencies, dependsOn)
+			m.beads[k] = b
+		}
 	}
 	return nil
 }

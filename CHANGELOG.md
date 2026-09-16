@@ -118,7 +118,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 - Worker prompt now injects deterministic discovery directives as protocol: every bead is told to run `hindsight_search` once at start, and beads without a `Files:` line (discovery-class beads) are required to run `graphify query` before exploring files, with a fallback to `rg`. Session forensics showed workers skipped graphify entirely and rarely used hindsight_search because both were discretionary skills.
 
-### Added
+- Pan fleet health digest — Pan's eyes: every tick the daemon collects a cheap per-project glance (open/in-progress/dep-blocked counts, live workers, dep-chained live-worker pairs, stranded worktrees, unintegrated wt-branches) and wakes Pan only when a project carries an anomaly flag, via `<project>-campaign-anomaly` pseudo-candidates with a compact fleet snapshot as evidence. Fixes the 2026-09-13→16 blindness where three days of campaign anomalies (gate execution, close loops, stranded worktrees) produced zero candidates because every bead-level provider class is failure-residue only. *Authored by a Hydra dogfood run.*
+- New Pan verbs: `repair:park-campaign` freezes a project's campaign behind a reusable approval-gate hold bead (idempotent, reversible, project-scoped rate limit) — the c36 containment, automated; `repair:log-improvement` appends Pan's hydra-improvement proposals to `$HYDRA_HOME/pan-improvements.log` for human review (proposals, never self-modification).
+
 - Pan can now autonomously close already-satisfied beads: a new `close_satisfied` verdict runs daemon-owned scoped gates on the main checkout and, if green, closes the bead as `already-satisfied (Pan)` with label `closed-satisfied`. This breaks the empty-diff reject loop where a worker correctly finds nothing to do but verified-close refuses an empty diff, burning tens of millions of tokens until a human intervenes (1xs7z, round 3).
 
 ### Added

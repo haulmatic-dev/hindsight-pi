@@ -72,9 +72,9 @@ func TestProjectScopedRepairRateLimit(t *testing.T) {
 	var events []string
 	s.OnRepairEvent = func(_, _, result, _ string) { events = append(events, result) }
 
-	s.handleRepair("webapp-a1", "prune-worktree-registration")
-	s.handleRepair("webapp-b2", "prune-worktree-registration") // same project → limited
-	s.handleRepair("webapp-a1", "reset-retries")               // per-bead action → allowed
+	s.handleRepair("webapp-a1", "prune-worktree-registration", "")
+	s.handleRepair("webapp-b2", "prune-worktree-registration", "") // same project → limited
+	s.handleRepair("webapp-a1", "reset-retries", "")               // per-bead action → allowed
 
 	if len(events) != 3 {
 		t.Fatalf("events = %v, want 3", events)
@@ -97,7 +97,7 @@ func TestProjectScopedRepairRateLimit(t *testing.T) {
 		}
 	}
 	s.repairMu.Unlock()
-	s.handleRepair("webapp-c3", "prune-worktree-registration")
+	s.handleRepair("webapp-c3", "prune-worktree-registration", "")
 	if events[3] != "ok" {
 		t.Errorf("post-window repair = %q, want ok", events[3])
 	}

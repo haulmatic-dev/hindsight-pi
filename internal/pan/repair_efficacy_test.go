@@ -70,7 +70,7 @@ func TestRepairEfficacyRefusesRepeatedAttempts(t *testing.T) {
 	})
 
 	for i := 0; i < maxConsecutiveRepairs+2; i++ {
-		s.handleRepair("webapp-push-pending", "re-push-integration")
+		s.handleRepair("webapp-push-pending", "re-push-integration", "")
 		// Bypass the 30-minute project rate limiter: efficacy counts
 		// ATTEMPTS, and the test makes them back-to-back.
 		s.repairMu.Lock()
@@ -96,7 +96,7 @@ func TestRepairEfficacyRefusesRepeatedAttempts(t *testing.T) {
 	s.repairMu.Lock()
 	s.repairLimits = make(map[string]time.Time)
 	s.repairMu.Unlock()
-	s.handleRepair("webapp-push-pending", "re-push-integration")
+	s.handleRepair("webapp-push-pending", "re-push-integration", "")
 	if executed != maxConsecutiveRepairs+1 {
 		t.Errorf("after reason change executions = %d, want %d", executed, maxConsecutiveRepairs+1)
 	}
