@@ -28,6 +28,7 @@ func (r *ChainRegistrar) RegisterFromProjects(projects []types.Project) {
 	}
 
 	allBeadMap := make(map[string]types.Bead)
+	beadProjectPath := make(map[string]string)
 	dependsOnMap := make(map[string][]string)
 
 	for _, project := range projects {
@@ -40,6 +41,7 @@ func (r *ChainRegistrar) RegisterFromProjects(projects []types.Project) {
 		log.Printf("[ChainCompletion] Read %d beads from %s", len(beads), project.Name)
 		for _, bead := range beads {
 			allBeadMap[string(bead.ID)] = bead
+			beadProjectPath[string(bead.ID)] = project.Path
 			for _, dep := range bead.Dependencies {
 				depStr := string(dep)
 				dependsOnMap[depStr] = append(dependsOnMap[depStr], string(bead.ID))
@@ -86,7 +88,10 @@ func (r *ChainRegistrar) RegisterFromProjects(projects []types.Project) {
 		dfs(string(root.ID))
 
 		if len(chainBeads) > 1 {
-			r.chainCompletionDetector.RegisterChain(chainBeads[0], chainBeads)
+			// Record the ROOT bead's project path so chain completion
+			// integrates into the project the chain actually lives in —
+			// never a name lookup that can match a same-named project.
+			r.chainCompletionDetector.RegisterChain(chainBeads[0], chainBeads, beadProjectPath[string(root.ID)])
 			chainCount++
 			log.Printf("[ChainCompletion] Registered chain with %d beads starting from %s", len(chainBeads), root.ID)
 		}

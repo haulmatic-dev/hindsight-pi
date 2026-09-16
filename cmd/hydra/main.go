@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -168,6 +169,13 @@ func main() {
 	// Load configuration
 	config, err := core.LoadConfig(*configPath)
 	if err != nil {
+		// Duplicate project names are fail-closed: name-based resolution
+		// silently picks the first match and chains integrate into the wrong
+		// project. Degraded-default startup would hide the config error.
+		var dupErr *core.DuplicateProjectNameError
+		if errors.As(err, &dupErr) {
+			log.Fatalf("Fatal: invalid configuration: %v", err)
+		}
 		log.Printf("Warning: Could not load config: %v", err)
 		log.Println("Using default configuration")
 		config = core.DefaultConfig()
