@@ -482,6 +482,16 @@ func (s *Scheduler) Tick() error {
 			poolRelease = rel
 		}
 
+		// Retry-queue beads bypass ShouldSpawnWorker's DAG-node path, so the
+		// container types must be filtered HERE too — approval-gate parking
+		// beads were spawned from the retry queue and "completed" by workers,
+		// satisfying every dep parked behind them and releasing whole
+		// campaigns (webapp-c36, 2026-09-16).
+		lt := strings.ToLower(strings.TrimSpace(bead.Type))
+		if lt == "approval-gate" || lt == "approval" || lt == "epic" {
+			continue
+		}
+
 		// Check rate limiting
 		if !o.spawnRateLimiter.CanSpawn() {
 			log.Printf("[RateLimit] Blocking spawn for bead %s: rate limit exceeded", bead.ID)

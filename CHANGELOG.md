@@ -108,7 +108,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 
-### Fixed
+- Approval-gate/epic/approval beads can no longer spawn from the RETRY queue: that loop bypassed `ShouldSpawnWorker`'s type filter, so parking-gate beads were executed by workers and "completed" — satisfying every dep parked behind them and releasing whole campaigns at once (webapp-c36 executed 2026-09-16; nipuna's campaign ran 5 chain beads in parallel, work discarded by the still-open integrate bug). The three container types are now skipped in the retry loop too. *Authored by a Hydra dogfood run.*
+
 - Charon kills now consume retry budget: killed processes classify as infra exits on the worker-death path (forced-kill = free retry), so budget/stuck kills respawned forever — 1xs7z burned 51.6M tokens across 4+ kill/respawn cycles on 2026-08-23. `recordKillRetry` counts each kill; the spawn gate (`RetryExhaustedError`) now stops the cycle at `default_retries`.
 
 
