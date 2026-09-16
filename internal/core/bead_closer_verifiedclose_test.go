@@ -614,3 +614,63 @@ func TestVerifyBeforeClose_PartialIntegrationLFAFallback(t *testing.T) {
 		t.Errorf("expected fallback integration log %q, got:\n%s", want, logs)
 	}
 }
+
+// withOriginSelfRemote points origin/<branch> at the repo itself so the
+// committed-evidence merge-base resolves in tests (campaign branches always
+// have an upstream in production).
+func withOriginSelfRemote(t *testing.T, repo string) {
+	t.Helper()
+	branch := strings.TrimSpace(gitTestOut(t, repo, "rev-parse", "--abbrev-ref", "HEAD"))
+	gitTestRun(t, repo, "remote", "add", "origin", repo)
+	gitTestRun(t, repo, "fetch", "origin", branch)
+	gitTestRun(t, repo, "branch", "--set-upstream-to=origin/"+branch, branch)
+}
+
+func gitTestRun(t *testing.T, repo string, args ...string) {
+	t.Helper()
+	cmd := append([]string{"git", "-C", repo}, args...)
+	if out, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v (%s)", args, err, out)
+	}
+}
+
+func gitTestOut(t *testing.T, repo string, args ...string) string {
+	t.Helper()
+	cmd := append([]string{"git", "-C", repo}, args...)
+	out, err := exec.Command(cmd[0], cmd[1:]...).Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return string(out)
+}
+
+// Regression (2026-09-16, nipuna campaign incident): a worker that ran in
+// the MAIN CHECKOUT (no worktree) edited files, exited, and verified-close
+// counted the UNCOMMITTED edits as diff evidence. The close was accepted and
+// the files were reverted afterwards — a false close with zero landed work.
+// In main-checkout mode only COMMITTED changes may satisfy the diff gate.
+func TestVerifyBeforeClose_MainCheckoutUncommittedRejected(t *testing.T) {
+	repo, closer, bead := setupScopeGateTest(t, "off")
+	withOriginSelfRemote(t, repo)
+	modifyFile(t, repo, "x/a.go", "package x\n// uncommitted edit\n")
+
+	err := closer.verifyBeforeClose(bead, repo, "")
+	if err == nil {
+		t.Fatal("uncommitted-only main-checkout change must NOT satisfy the diff gate (revertible evidence)")
+	}
+	if !strings.Contains(err.Error(), "empty-diff") {
+		t.Fatalf("want empty-diff rejection, got: %v", err)
+	}
+}
+
+// Committed work on the campaign branch still satisfies the gate in
+// main-checkout mode (positive control for the guard above).
+func TestVerifyBeforeClose_MainCheckoutCommittedAccepted(t *testing.T) {
+	repo, closer, bead := setupScopeGateTest(t, "off")
+	withOriginSelfRemote(t, repo)
+	writeAndCommit(t, repo, "x/a.go", "package x\n// committed campaign work\n")
+
+	if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
+		t.Fatalf("committed main-checkout change should pass, got: %v", err)
+	}
+}

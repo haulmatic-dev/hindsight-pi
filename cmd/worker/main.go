@@ -2209,7 +2209,7 @@ A turn ending without this block is treated as unfinished and you will be re-pro
 	// honestly delivered PLANS with "NOT VERIFIED" labels and zero changes —
 	// every close was then rejected as empty-diff. State the contract.
 	switch strings.ToLower(strings.TrimSpace(bead.Type)) {
-	case "fr", "fix", "implement", "green", "refactor", "task", "us-heavy":
+	case "fr", "fix", "implement", "green", "refactor", "task", "us-heavy", "test", "red":
 		promptParts = append(promptParts,
 			"DELIVERABLE CONTRACT: this task is complete only when the required file edits exist on disk and verification commands ran. A plan or analysis without edits will be rejected as an empty diff.")
 	}
