@@ -28,8 +28,6 @@ import (
 
 // panHoldMarker identifies Pan-created hold gates so park-campaign reuses
 // them idempotently instead of stacking a new gate per repair.
-const panHoldMarker = "HOLD: pan-park"
-
 // projectKey derives a stable, collision-free display key for a scan target:
 // /home/<user>/projects/<repo> → "<user>/<repo>" (multi-user same-repo), any
 // other path → its basename. The key is the basis of the campaign-anomaly
@@ -197,65 +195,44 @@ func countWTBranches(projectPath string) int {
 	return n
 }
 
-// parkCampaignRepair freezes a campaign behind a hold gate: every
-// non-terminal, non-container bead gets a dep on an approval-gate bead that
-// (post PR #247) no spawn path can execute. Reversible via the standard
-// un-escalation recipe; idempotent via the marker title.
+// parkCampaignRepair freezes a project's campaign by setting the durable
+// project_parks flag in the registry. The scheduler consults this flag before
+// spawning any worker for the project, so no new work starts while Pan's
+// containment is in effect. Reversible with repair:unpark-campaign.
 func (o *Overseer) parkCampaignRepair(beadID string) error {
 	key, ok := pan.ProjectKeyFromAnomalyID(beadID)
 	if !ok {
 		return fmt.Errorf("park-campaign targets a <project>-campaign-anomaly pseudo ID, got %q", beadID)
 	}
-	target, found := o.scanTargetByKey(key)
-	if !found {
+	if _, found := o.scanTargetByKey(key); !found {
 		return fmt.Errorf("no scan target for project key %q", key)
 	}
-	beads, err := o.beadsClient.ListBeads(target, "")
-	if err != nil {
-		return fmt.Errorf("list beads %s: %w", target, err)
+	if o.registryStore == nil {
+		return fmt.Errorf("park-campaign %s: registry store unavailable", key)
 	}
+	if err := o.registryStore.SetProjectPark(key, true, "campaign frozen by Pan; investigate before release"); err != nil {
+		return fmt.Errorf("park-campaign %s: %w", key, err)
+	}
+	log.Printf("[Pan] park-campaign %s: campaign parked (scheduler will skip spawns)", key)
+	return nil
+}
 
-	// Reuse an existing open pan hold gate when present.
-	var gateID types.BeadID
-	for _, b := range beads {
-		if b.Type == "approval-gate" && !b.Status.IsTerminal() && strings.Contains(b.Title, panHoldMarker) {
-			gateID = b.ID
-			break
-		}
+// unparkCampaignRepair releases a previously parked campaign.
+func (o *Overseer) unparkCampaignRepair(beadID string) error {
+	key, ok := pan.ProjectKeyFromAnomalyID(beadID)
+	if !ok {
+		return fmt.Errorf("unpark-campaign targets a <project>-campaign-anomaly pseudo ID, got %q", beadID)
 	}
-	if gateID == "" {
-		id, err := o.beadsClient.CreateBead(target, types.CreateBeadRequest{
-			Title:       panHoldMarker + " — campaign frozen by Pan; investigate before release",
-			Description: "Created by repair:park-campaign. Release = close this gate manually after the anomaly is understood (un-escalation recipe).",
-			Type:        "approval-gate",
-			Priority:    1,
-		})
-		if err != nil {
-			return fmt.Errorf("create hold gate: %w", err)
-		}
-		gateID = id
+	if _, found := o.scanTargetByKey(key); !found {
+		return fmt.Errorf("no scan target for project key %q", key)
 	}
-
-	parked, failed := 0, 0
-	for _, b := range beads {
-		if b.Status.IsTerminal() || b.ID == gateID {
-			continue
-		}
-		lt := strings.ToLower(strings.TrimSpace(b.Type))
-		if lt == "approval-gate" || lt == "approval" || lt == "epic" {
-			continue // containers never park behind containers
-		}
-		if err := o.beadsClient.AddDependency(target, "", b.ID, gateID); err != nil {
-			log.Printf("[Pan] park-campaign dep add %s -> %s failed: %v", b.ID, gateID, err)
-			failed++
-			continue
-		}
-		parked++
+	if o.registryStore == nil {
+		return fmt.Errorf("unpark-campaign %s: registry store unavailable", key)
 	}
-	log.Printf("[Pan] park-campaign %s: %d bead(s) parked behind %s (%d failed)", key, parked, gateID, failed)
-	if parked == 0 && failed > 0 {
-		return fmt.Errorf("all %d dep adds failed", failed)
+	if err := o.registryStore.SetProjectPark(key, false, ""); err != nil {
+		return fmt.Errorf("unpark-campaign %s: %w", key, err)
 	}
+	log.Printf("[Pan] unpark-campaign %s: campaign released", key)
 	return nil
 }
 

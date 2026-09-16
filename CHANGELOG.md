@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Changed
+- First-class campaign park mechanism replaces the HOLD-gate bead injection used by `repair:park-campaign`. A new durable `project_parks` registry table is the source of truth, the scheduler skips all spawns for a parked project in both spawn paths, and `repair:unpark-campaign` releases the project. This removes the gate-rooted chain identity problem that made the injected approval gate (not the epic) the chain key and confused the reconciler. *Authored by a Hydra dogfood run.*
+
 ### Fixed
 - Reconciler deleted a live worker's worktree (webapp-zpf "husk" incident, 2026-09-16): worktree protection depended on in-memory chain registration, so a routine chain-timeout unregister silently stripped it and the hourly sweep removed the sandbox 8 minutes later — the worker flailed in the empty directory for 25 minutes. Three layers now prevent the class: (1) workers report their `worktree_key` on the registry row and Charon's protection set unions every fresh-heartbeat row's key — protection is derivable from durable state, immune to chain timeouts and daemon restarts; (2) the reconciler skips any worktree with writes younger than 30 minutes regardless of what registry/chain/bead state claims; (3) workers run a heartbeat canary — a worktree run whose `.git` vanishes mid-run parks as `workspace-destroyed` and exits instead of burning turns in a husk.
 - Close-reopen loop on integration failure: `failIntegration` now counts consecutive integrate/push failures per bead and, at 3, escalates to the durable `integration-exhausted` hard-park label (already respected by the scheduler, Charon, and Pan) instead of a plain reopen that respawned the bead into the same failing integrate forever. Operators previously saw accepted-close→open cycles burning full worker runs (webapp-9ah: 4 cycles in 4 minutes); the counter resets on a successful integrate+push.

@@ -3,18 +3,27 @@ package core
 import (
 	"log"
 	"path/filepath"
+	"strings"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
+type chainCompletionRegistrar interface {
+	RegisterChain(rootBeadID types.BeadID, allBeadIDs []types.BeadID)
+}
+
+type beadFileReader interface {
+	ReadFile(filePath string) ([]types.Bead, error)
+}
+
 // ChainRegistrar registers bead chains from issues.jsonl files.
 type ChainRegistrar struct {
-	chainCompletionDetector *ChainCompletionDetector
-	beadFileReader          *BeadFileReader
+	chainCompletionDetector chainCompletionRegistrar
+	beadFileReader          beadFileReader
 }
 
 // NewChainRegistrar creates a new chain registrar.
-func NewChainRegistrar(detector *ChainCompletionDetector, reader *BeadFileReader) *ChainRegistrar {
+func NewChainRegistrar(detector chainCompletionRegistrar, reader beadFileReader) *ChainRegistrar {
 	return &ChainRegistrar{
 		chainCompletionDetector: detector,
 		beadFileReader:          reader,
@@ -52,10 +61,47 @@ func (r *ChainRegistrar) RegisterFromProjects(projects []types.Project) {
 		return
 	}
 
-	// Find roots (beads with no dependencies)
+	// Find roots (beads with no dependencies). Human gates (approval-gate,
+	// approval) are never chain roots: chains must root at the epic/PRD.
+	// When a gate is the dependency root, descend to the first non-gate
+	// descendant that itself has dependents and use those as chain roots.
+	// This prevents gate-rooted chains where the gate — not the epic — becomes
+	// the chain key and confuses the reconciler.
+	isGate := func(b types.Bead) bool {
+		t := strings.ToLower(strings.TrimSpace(b.Type))
+		return t == "approval-gate" || t == "approval"
+	}
+
 	roots := make([]types.Bead, 0)
+	queued := make(map[string]bool)
 	for _, bead := range allBeadMap {
-		if len(bead.Dependencies) == 0 {
+		if len(bead.Dependencies) != 0 {
+			continue
+		}
+		if isGate(bead) {
+			var descend func(beadID string)
+			descend = func(beadID string) {
+				for _, depID := range dependsOnMap[beadID] {
+					if queued[depID] {
+						continue
+					}
+					child := allBeadMap[depID]
+					if isGate(child) {
+						descend(depID)
+						continue
+					}
+					if len(dependsOnMap[depID]) > 0 {
+						queued[depID] = true
+						roots = append(roots, child)
+					}
+				}
+			}
+			descend(string(bead.ID))
+			continue
+		}
+		id := string(bead.ID)
+		if !queued[id] {
+			queued[id] = true
 			roots = append(roots, bead)
 		}
 	}

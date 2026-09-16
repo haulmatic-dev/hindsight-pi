@@ -14,10 +14,10 @@ import (
 
 func TestProjectKey(t *testing.T) {
 	cases := map[string]string{
-		"/home/nipuna.j/projects/webapp":    "nipuna.j/webapp",
-		"/home/ajantha/projects/webapp":     "ajantha/webapp",
-		"/opt/dev-tools/components/hydra":   "hydra",
-		"/test/test-project":                "test-project",
+		"/home/nipuna.j/projects/webapp":     "nipuna.j/webapp",
+		"/home/ajantha/projects/webapp":      "ajantha/webapp",
+		"/opt/dev-tools/components/hydra":    "hydra",
+		"/test/test-project":                 "test-project",
 		"/home/u/projects/grand/parent/repo": "u/grand/parent/repo",
 	}
 	for path, want := range cases {
@@ -101,50 +101,77 @@ func TestParkCampaignRepair(t *testing.T) {
 	tw := setupTestOverseer(t)
 	o := tw.overseer
 
-	open1 := types.Bead{ID: "test-project-aaa", Project: "test-project", Status: types.StatusOpen, Type: "implement"}
-	open2 := types.Bead{ID: "test-project-bbb", Project: "test-project", Status: types.StatusInProgress, Type: "test"}
-	epic := types.Bead{ID: "test-project-eee", Project: "test-project", Status: types.StatusOpen, Type: "epic"}
-	closed := types.Bead{ID: "test-project-zzz", Project: "test-project", Status: types.StatusClosed, Type: "implement"}
-	for _, b := range []types.Bead{open1, open2, epic, closed} {
-		tw.mockBeads.beads[b.ID.String()] = b
+	st, err := registry.Open(":memory:")
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
 	}
+	t.Cleanup(func() { st.Close() })
+	o.registryStore = st
 
 	target := pan.CampaignAnomalyID("test-project")
 	if err := o.parkCampaignRepair(target); err != nil {
 		t.Fatalf("parkCampaignRepair: %v", err)
 	}
 
-	// A hold gate was created and both non-container beads depend on it.
-	var gateID string
-	for _, b := range tw.mockBeads.beads {
-		if b.Type == "approval-gate" && strings.Contains(b.Title, panHoldMarker) {
-			gateID = b.ID.String()
-		}
+	info, ok, err := st.ProjectParkInfo("test-project")
+	if err != nil {
+		t.Fatalf("ProjectParkInfo: %v", err)
 	}
-	if gateID == "" {
-		t.Fatal("no pan hold gate created")
+	if !ok {
+		t.Fatal("expected project to be parked")
 	}
-	wantDeps := map[string]bool{
-		"test-project-aaa->" + gateID: true,
-		"test-project-bbb->" + gateID: true,
+	if !info.Parked {
+		t.Errorf("Parked = false, want true")
 	}
-	for _, got := range tw.mockBeads.depAdds {
-		if !wantDeps[got] {
-			t.Errorf("unexpected dep add %s (epic/closed beads must not park)", got)
-		}
-		delete(wantDeps, got)
-	}
-	if len(wantDeps) != 0 {
-		t.Errorf("missing dep adds: %v", wantDeps)
+	if info.Reason == "" {
+		t.Errorf("expected non-empty park reason")
 	}
 
-	// Idempotent: a second repair reuses the gate instead of stacking one.
-	beadCount := len(tw.mockBeads.beads)
+	// Idempotent: a second repair updates the timestamp but keeps it parked.
+	firstAt := info.ParkedAt
 	if err := o.parkCampaignRepair(target); err != nil {
 		t.Fatalf("second parkCampaignRepair: %v", err)
 	}
-	if len(tw.mockBeads.beads) != beadCount {
-		t.Errorf("second repair created another gate (%d -> %d beads)", beadCount, len(tw.mockBeads.beads))
+	info, ok, err = st.ProjectParkInfo("test-project")
+	if err != nil {
+		t.Fatalf("ProjectParkInfo after second park: %v", err)
+	}
+	if !ok || !info.Parked {
+		t.Fatal("expected project to still be parked after idempotent repair")
+	}
+	if !info.ParkedAt.After(firstAt) && !info.ParkedAt.Equal(firstAt) {
+		t.Errorf("parked_at should not regress: %v vs %v", info.ParkedAt, firstAt)
+	}
+}
+
+func TestUnparkCampaignRepair(t *testing.T) {
+	tw := setupTestOverseer(t)
+	o := tw.overseer
+
+	st, err := registry.Open(":memory:")
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	o.registryStore = st
+
+	target := pan.CampaignAnomalyID("test-project")
+	if err := o.parkCampaignRepair(target); err != nil {
+		t.Fatalf("parkCampaignRepair: %v", err)
+	}
+	if err := o.unparkCampaignRepair(target); err != nil {
+		t.Fatalf("unparkCampaignRepair: %v", err)
+	}
+
+	info, ok, err := st.ProjectParkInfo("test-project")
+	if err != nil {
+		t.Fatalf("ProjectParkInfo: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected park row to remain after unpark")
+	}
+	if info.Parked {
+		t.Errorf("Parked = true after unpark, want false")
 	}
 }
 
