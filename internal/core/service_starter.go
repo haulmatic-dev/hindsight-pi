@@ -374,7 +374,8 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				}
 				return fmt.Errorf("re-push-integration: no project named %s", name)
 			},
-			"park-campaign": o.parkCampaignRepair,
+			"park-campaign":   o.parkCampaignRepair,
+			"unpark-campaign": o.unparkCampaignRepair,
 		})
 		o.panShepherd.SetLogImprovement(o.logImprovementRepair)
 

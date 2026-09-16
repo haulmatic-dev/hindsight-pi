@@ -110,7 +110,22 @@ At chain completion, `ChainHasFailedBeads` reads those labels and decides:
 - **Any `closed-failed` member** → `QuarantineAndRemove`: the chain's commits
   are preserved on **`hydra/quarantine/<key>`**, the worktree and its
   `hydra/wt-<key>` branch are removed, and **nothing merges**. Emits
-  `chain_quarantined`.
+  `chain_quarantined`. A quarantine that finds nothing (no worktree or branch)
+  is logged as quarantine-empty instead of passing silently.
+
+Chain completion integrates against the **project path recorded at chain
+registration** (`ChainInfo.ProjectPath` — the root bead's own project), never
+a name lookup: two projects sharing a name made the lookup return the first
+match, the chain branch did not exist there, and the "nothing to integrate"
+nil read as success (webapp zpf, 2026-09-16: 17/17 beads closed, work
+unintegrated; recovered only by the reconciler's age-floor sweep). Config
+load rejects duplicate project names outright — the daemon fails startup,
+and hot reload rejects the new config before applying it. The completion
+callback captures the worktree branch tip before teardown and verifies the
+tip is contained in HEAD after integrate — a mismatch emits
+`chain_integration_unverified` and stamps the root bead
+`integration-unverified` — and every outcome (integrate success, skip with
+reason, integrate failure, quarantine-empty) is logged.
 
 Why: chain "completion" used to mean only "every bead reached a terminal
 state" — a chain whose beads closed *failed* integrated exactly like a
@@ -421,7 +436,11 @@ close-path resolvers (`resolveProjectPathByName`, service_starter's
 `projectPathForID`) were exact-match only — Pan's abandon/close/repair paths
 failed 100% with "project path not found" for every discovered project. Both
 resolvers now fall back to repo-name matches inside multi projects and
-path-basename matches; exact matches still win.
+path-basename matches; exact matches still win. Since 2026-09-16 duplicate
+project **names** are rejected at config load (`DuplicateProjectNameError`,
+daemon fails startup) — the basename/repo fallbacks only ever run within a
+uniquely-named project list, so they cannot cross-resolve into someone else's
+same-named project.
 
 **Charon is liveness-based now.** The stuck-worker sweep used to kill on
 wall-clock time alone and on 2026-08-01 killed every fleet worker at ~15m —

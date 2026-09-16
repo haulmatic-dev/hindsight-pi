@@ -807,6 +807,38 @@ func (cc *ConfigCache) set(path string, cfg *Config, modTime time.Time) {
 	cc.misses++
 }
 
+// DuplicateProjectNameError is returned when two configured projects share a
+// name. Name-based resolution (GetProjectPath, findProjectPathForBeadID)
+// picks the FIRST match, so duplicate names silently route chains to the
+// wrong project (webapp zpf incident, 2026-09-16: 17/17 beads closed while
+// the work sat unintegrated in another user's project).
+type DuplicateProjectNameError struct {
+	Name  string
+	PathA string
+	PathB string
+}
+
+func (e *DuplicateProjectNameError) Error() string {
+	return fmt.Sprintf("duplicate project name %q: %s and %s — project names must be unique; name-based resolution picks the first match", e.Name, e.PathA, e.PathB)
+}
+
+// validateUniqueProjectNames rejects a project list where two entries share
+// a name. Called from both load paths (daemon fails startup) and ValidateConfig
+// (hot reload rejects the new config before applying it).
+func validateUniqueProjectNames(projects []ProjectConfig) error {
+	seen := make(map[string]string, len(projects))
+	for _, p := range projects {
+		if p.Name == "" {
+			continue // caught by ValidateConfig's per-project checks
+		}
+		if prev, ok := seen[p.Name]; ok {
+			return &DuplicateProjectNameError{Name: p.Name, PathA: prev, PathB: p.Path}
+		}
+		seen[p.Name] = p.Path
+	}
+	return nil
+}
+
 // LoadConfig loads configuration from a YAML file with caching
 func LoadConfig(path string) (*Config, error) {
 	// Try cache first
@@ -885,6 +917,10 @@ func LoadConfig(path string) (*Config, error) {
 		}
 	}
 
+	if err := validateUniqueProjectNames(config.Projects); err != nil {
+		return nil, err
+	}
+
 	// Cache the loaded config
 	globalCache.set(path, config, info.ModTime())
 
@@ -948,6 +984,10 @@ func LoadConfigUncached(path string) (*Config, error) {
 				}
 			}
 		}
+	}
+
+	if err := validateUniqueProjectNames(config.Projects); err != nil {
+		return nil, err
 	}
 
 	return config, nil
@@ -1088,7 +1128,10 @@ func ValidateConfig(cfg *Config) ValidationErrors {
 		})
 	}
 
-	// Validate project paths
+	// Validate project paths and reject duplicate names (name-based
+	// resolution picks the first match — duplicates integrate into the
+	// wrong project silently).
+	seenNames := make(map[string]string, len(cfg.Projects))
 	for i, proj := range cfg.Projects {
 		if proj.Path == "" {
 			errors = append(errors, ValidationError{
@@ -1101,6 +1144,13 @@ func ValidateConfig(cfg *Config) ValidationErrors {
 				Field:   fmt.Sprintf("projects[%d].name", i),
 				Message: msgProjectNameRequired,
 			})
+		} else if prev, ok := seenNames[proj.Name]; ok {
+			errors = append(errors, ValidationError{
+				Field: fmt.Sprintf("projects[%d].name", i),
+				Message: (&DuplicateProjectNameError{Name: proj.Name, PathA: prev, PathB: proj.Path}).Error(),
+			})
+		} else {
+			seenNames[proj.Name] = proj.Path
 		}
 	}
 

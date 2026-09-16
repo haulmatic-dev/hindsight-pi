@@ -324,7 +324,6 @@ func (c *Client) UpdateBeadStatus(projectPath string, beadID types.BeadID, statu
 }
 
 // AddDependency records that beadID depends on dependsOn (br dep add).
-// Used by park-campaign to freeze a campaign behind a fresh hold gate.
 func (c *Client) AddDependency(projectPath, repoName string, beadID, dependsOn types.BeadID) error {
 	_, err := c.execInDir(repoCwd(projectPath, repoName), "br", "dep", "add", beadID.String(), dependsOn.String())
 	if err != nil {

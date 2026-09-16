@@ -122,6 +122,12 @@ CREATE TABLE IF NOT EXISTS commands (
   consumed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_commands_bead_pending ON commands (bead_id) WHERE consumed_at IS NULL;
+CREATE TABLE IF NOT EXISTS project_parks (
+  project   TEXT PRIMARY KEY,
+  parked    INTEGER NOT NULL DEFAULT 0,
+  reason    TEXT NOT NULL DEFAULT '',
+  parked_at TEXT
+);
 `
 
 const timeFmt = time.RFC3339Nano
@@ -171,6 +177,52 @@ func migrateRegistry(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// ProjectPark is one row of campaign-park truth: Pan's repair:park-campaign
+// freezes a project's campaign here and every spawn path consults it before
+// launching a worker. Replaces the HOLD-gate-bead mechanism (PR #250
+// follow-up: gate-rooted chains made the gate — not the epic — the chain
+// key, and reconciler confusion deleted a live worktree).
+type ProjectPark struct {
+	Project  string
+	Parked   bool
+	Reason   string
+	ParkedAt time.Time
+}
+
+// SetProjectPark parks or unparks a project's campaign. parked=false clears
+// the flag while keeping the row (audit trail of the release). The daemon is
+// the only writer by contract.
+func (s *Store) SetProjectPark(project string, parked bool, reason string) error {
+	_, err := s.db.Exec(`INSERT INTO project_parks (project, parked, reason, parked_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(project) DO UPDATE SET
+			parked = excluded.parked,
+			reason = excluded.reason,
+			parked_at = excluded.parked_at`,
+		project, parked, reason, marshalTime(time.Now().UTC()))
+	if err != nil {
+		return fmt.Errorf("set project park %s: %w", project, err)
+	}
+	return nil
+}
+
+// ProjectParkInfo returns the park record for a project key. ok=false when
+// the project has never been parked; an absent row means "not parked".
+func (s *Store) ProjectParkInfo(project string) (ProjectPark, bool, error) {
+	var p ProjectPark
+	var parkedAt interface{}
+	err := s.db.QueryRow(`SELECT project, parked, reason, parked_at FROM project_parks WHERE project = ?`, project).
+		Scan(&p.Project, &p.Parked, &p.Reason, &parkedAt)
+	if err == sql.ErrNoRows {
+		return ProjectPark{}, false, nil
+	}
+	if err != nil {
+		return ProjectPark{}, false, fmt.Errorf("project park %s: %w", project, err)
+	}
+	p.ParkedAt = scanTime(parkedAt)
+	return p, true, nil
 }
 
 // Close closes the underlying database.
