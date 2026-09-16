@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // BeadCloser closes beads via beadsClient based on worker completion status.
 type BeadCloser struct {
+	sessionMu         sync.Mutex
+	sessionBase       map[string]string    // bead ID -> branch HEAD commit recorded at spawn; close-time committed evidence starts here
 	sourceIndex       *BeadProvenanceIndex // nil-safe; bead->store provenance
 	beadsClient       BeadsClient
 	intelligenceHub   *IntelligenceHub
@@ -699,7 +702,17 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 	// committed changes since the branch diverged from origin count as
 	// evidence. Unavailable base (no upstream etc.) fails open.
 	if !switchedToWorktree && needDiff && changedErr == nil {
-		if committed, cerr := committedChangesSinceBranchBase(projectPath); cerr == nil {
+		base := c.sessionBaseFor(bead.ID.String())
+		if base != "" {
+			// Session-scoped: only commits made after the bead's spawn
+			// count. Pre-existing campaign commits must not satisfy the
+			// gate for a no-work session.
+			if committed, cerr := committedChangesSinceBase(projectPath, base); cerr == nil {
+				changed = committed
+			} else {
+				log.Printf("[VerifiedClose] session-evidence base unavailable for %s (fail open): %v", bead.ID, cerr)
+			}
+		} else if committed, cerr := committedChangesSinceBranchBase(projectPath); cerr == nil {
 			changed = committed
 		} else {
 			log.Printf("[VerifiedClose] committed-evidence base unavailable for %s (fail open): %v", bead.ID, cerr)
@@ -926,4 +939,24 @@ func splitFileList(s string) []string {
 // after the worker's own ProjectPath, before config name matching).
 func (c *BeadCloser) SetSourceIndex(idx *BeadProvenanceIndex) {
 	c.sourceIndex = idx
+}
+
+// SetSessionBase records the branch HEAD commit at spawn time. Close-time
+// committed evidence in main-checkout mode is scoped to commits AFTER this
+// point, so pre-existing campaign commits cannot satisfy the diff gate for
+// a no-work session (2026-09-16 nipuna epic incident). The literal "HEAD"
+// resolves at close time (test fixtures).
+func (c *BeadCloser) SetSessionBase(beadID, commit string) {
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+	if c.sessionBase == nil {
+		c.sessionBase = make(map[string]string)
+	}
+	c.sessionBase[beadID] = commit
+}
+
+func (c *BeadCloser) sessionBaseFor(beadID string) string {
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+	return c.sessionBase[beadID]
 }
