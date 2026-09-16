@@ -456,7 +456,8 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	if err := projectScanner.Discover(); err != nil {
 		return &ServiceError{Op: "discover projects", Err: err}
 	}
-	o.projects = projectScanner.Projects()
+	configProjects := projectScanner.Projects()
+	o.projects = configProjects
 	log.Printf("📁 Discovered %d projects from config", len(o.projects))
 	if o.config != nil && o.config.OutputPushEnabled() && o.config.AutoPREnabled() {
 		log.Println("[AutoPR] Enabled: protected-branch push rejections will open a PR")
@@ -475,6 +476,9 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				o.projects = append(o.projects, userProjects...)
 				log.Printf("👥 Discovered %d user projects from %d users", len(userProjects), len(multiUserDiscovery.Users()))
 			}
+			// Warn about config-listed projects whose repo basename collides
+			// with another registered project. PrefixGuard does not mutate these.
+			LogConfigPrefixCollisionGuidance(configProjects, o.projects)
 			// Store user contexts on overseer and worker spawner for per-user attribution
 			o.userContexts = multiUserDiscovery.Users()
 			o.workerSpawner.SetUserContexts(o.userContexts)

@@ -18,18 +18,22 @@ import (
 // Hydra workers inherit Pi configuration from the central Pi installation
 // (e.g. /opt/pi with symlinked ~/.pi) via environment variables.
 type MultiUserDiscovery struct {
-	users    map[string]*UserContext
-	projects []types.Project
-	blocked  []string // users whose config exists but is unreadable by the daemon
-	HomeDir  string   // Base directory to scan (default: /home)
-	Exclude  []string // project dir names or paths to skip during discovery
+	users         map[string]*UserContext
+	projects      []types.Project
+	blocked       []string // users whose config exists but is unreadable by the daemon
+	HomeDir       string   // Base directory to scan (default: /home)
+	Exclude       []string // project dir names or paths to skip during discovery
+	prefixGuard   *PrefixGuard
+	projectOwners map[string]string // project key "name|path" -> username
 }
 
 // NewMultiUserDiscovery creates a new multi-user discovery instance.
 func NewMultiUserDiscovery() *MultiUserDiscovery {
 	return &MultiUserDiscovery{
-		users:   make(map[string]*UserContext),
-		HomeDir: "/home",
+		users:         make(map[string]*UserContext),
+		projectOwners: make(map[string]string),
+		prefixGuard:   NewPrefixGuard(),
+		HomeDir:       "/home",
 	}
 }
 
@@ -110,6 +114,8 @@ func (d *MultiUserDiscovery) Discover() error {
 		}
 	}
 
+	d.guardPrefixes()
+
 	d.blocked = blocked
 	if len(blocked) > 0 {
 		log.Printf("[MultiUserDiscovery] ⚠️  %d user(s) SKIPPED (config present but unreadable by daemon): %s — fix with: hydra-onboard <user> (or wait for the onboard sweep)", len(blocked), strings.Join(blocked, ", "))
@@ -155,9 +161,10 @@ func (d *MultiUserDiscovery) convertProject(up UserProject, ctx *UserContext) *t
 	}
 
 	project := types.Project{
-		Name: up.Name,
-		Path: up.Path,
-		Type: types.RepoType(up.Type),
+		Name:        up.Name,
+		Path:        up.Path,
+		Type:        types.RepoType(up.Type),
+		IssuePrefix: up.IssuePrefix,
 	}
 
 	// Auto-discover repos if type is multi and no repos listed
@@ -183,6 +190,10 @@ func (d *MultiUserDiscovery) convertProject(up UserProject, ctx *UserContext) *t
 	} else if up.Type == "single" {
 		project.Type = types.RepoTypeSingle
 	}
+
+	// Record ownership so PrefixGuard can attribute repos to users during
+	// refresh cycles without baking usernames into the public Project type.
+	d.projectOwners[project.Name+"|"+project.Path] = ctx.Username
 
 	return &project
 }
@@ -229,4 +240,21 @@ func (d *MultiUserDiscovery) discoverRepos(projectPath string) []types.Repo {
 	}
 
 	return repos
+}
+
+// guardPrefixes runs PrefixGuard across all discovered projects. It is called
+// once per discovery cycle so newly discovered repos get namespaced on the
+// same tick that adds them.
+func (d *MultiUserDiscovery) guardPrefixes() {
+	for _, p := range d.projects {
+		owner, ok := d.projectOwners[d.projectKey(p)]
+		if !ok {
+			continue
+		}
+		d.prefixGuard.GuardProject(p, owner, p.IssuePrefix)
+	}
+}
+
+func (d *MultiUserDiscovery) projectKey(p types.Project) string {
+	return p.Name + "|" + p.Path
 }

@@ -1,0 +1,162 @@
+package core
+
+import (
+	"fmt"
+	"log"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"github.com/haulmatic-dev/hydra/pkg/types"
+)
+
+// brConfigRunner abstracts br config get/set so PrefixGuard stays testable
+// without requiring a live br binary in unit tests.
+type brConfigRunner interface {
+	configGet(repoDir, key string) (string, error)
+	configSet(repoDir, key, value string) error
+}
+
+type realBrConfigRunner struct{}
+
+func (r *realBrConfigRunner) configGet(repoDir, key string) (string, error) {
+	cmd := exec.Command("br", "config", "get", key)
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("br config get %s in %s: %w", key, repoDir, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (r *realBrConfigRunner) configSet(repoDir, key, value string) error {
+	cmd := exec.Command("br", "config", "set", key, value)
+	cmd.Dir = repoDir
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("br config set %s=%s in %s: %w", key, value, repoDir, err)
+	}
+	return nil
+}
+
+// PrefixGuard ensures discovered repos use a namespaced br issue_prefix so
+// bead IDs do not collide across users or projects that share a repo name.
+type PrefixGuard struct {
+	runner brConfigRunner
+}
+
+// NewPrefixGuard creates a PrefixGuard that shells out to br.
+func NewPrefixGuard() *PrefixGuard {
+	return &PrefixGuard{runner: &realBrConfigRunner{}}
+}
+
+// GuardProject applies the issue_prefix guard to every repo in a discovered
+// project. For single-repo projects the repo name is the project name; for
+// multi-repo projects each child repo gets its own prefix.
+func (g *PrefixGuard) GuardProject(project types.Project, username string, configured string) {
+	if project.Type == types.RepoTypeSingle || project.Type == "" {
+		g.guardRepo(project.Path, username, project.Name, configured)
+		return
+	}
+	for _, repo := range project.Repos {
+		repoDir := filepath.Join(project.Path, repo.Path)
+		g.guardRepo(repoDir, username, repo.Name, configured)
+	}
+}
+
+// guardRepo checks the current issue_prefix and rewrites it when it is unset
+// or still at br's default (the repo directory base name). A deliberately
+// customized prefix is left alone and logged loudly. Fail-open: br errors are
+// logged and ignored so a broken br config never blocks project discovery.
+func (g *PrefixGuard) guardRepo(repoDir, username, repoName, configured string) {
+	desired := issuePrefixForRepo(username, repoName, configured)
+	defaultPrefix := strings.ToLower(filepath.Base(repoDir))
+
+	current, err := g.runner.configGet(repoDir, "issue_prefix")
+	if err != nil {
+		log.Printf("[PrefixGuard] %s: br config get failed (fail-open): %v", repoDir, err)
+		return
+	}
+
+	if current == "" || current == defaultPrefix || current == "br" {
+		if err := g.runner.configSet(repoDir, "issue_prefix", desired); err != nil {
+			log.Printf("[PrefixGuard] %s: br config set failed (fail-open): %v", repoDir, err)
+			return
+		}
+		log.Printf("[PrefixGuard] Set issue_prefix=%s in %s", desired, repoDir)
+		return
+	}
+
+	if current != desired {
+		log.Printf("[PrefixGuard] %s: existing issue_prefix=%q (custom) preserved; desired=%q", repoDir, current, desired)
+	}
+}
+
+// LogConfigPrefixCollisionGuidance scans config-listed projects and warns when
+// a repo basename is shared with another registered project. Config-listed
+// projects are never mutated by PrefixGuard, so operators must add explicit
+// issue_prefix values to avoid bead ID collisions.
+func LogConfigPrefixCollisionGuidance(configProjects, allProjects []types.Project) {
+	seen := make(map[string]string) // repo basename -> project name
+	for _, p := range allProjects {
+		for _, prefix := range projectDefaultPrefixes(p) {
+			if existing, ok := seen[prefix]; ok && existing != p.Name {
+				// Collision between two registered projects already noted by the
+				// config-project pass below if one of them is config-listed.
+				continue
+			}
+			seen[prefix] = p.Name
+		}
+	}
+	for _, p := range configProjects {
+		for _, prefix := range projectDefaultPrefixes(p) {
+			if other, ok := seen[prefix]; ok && other != p.Name {
+				log.Printf("[PrefixGuard] Config-listed project %q shares repo basename %q with project %q. Add a distinct issue_prefix to the config project to avoid bead ID collisions. Hydra will not mutate config-listed projects.", p.Name, prefix, other)
+			}
+		}
+	}
+}
+
+func projectDefaultPrefixes(project types.Project) []string {
+	var out []string
+	if project.Type == types.RepoTypeSingle || project.Type == "" {
+		return append(out, strings.ToLower(filepath.Base(project.Path)))
+	}
+	for _, r := range project.Repos {
+		out = append(out, strings.ToLower(filepath.Base(filepath.Join(project.Path, r.Path))))
+	}
+	return out
+}
+// An explicitly configured prefix is normalized and used as-is; otherwise
+// the prefix is auto-namespaced as <username>-<reponame>.
+func issuePrefixForRepo(username, repoName, configured string) string {
+	if configured != "" {
+		return normalizeIssuePrefix(configured)
+	}
+	return normalizeIssuePrefix(username + "-" + repoName)
+}
+
+// normalizeIssuePrefix lowercases the prefix and collapses runs of
+// non-alphanumeric characters to a single hyphen, matching br's own
+// normalization for config values.
+func normalizeIssuePrefix(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	lastWasHyphen := false
+	for _, r := range s {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			lastWasHyphen = false
+		default:
+			if !lastWasHyphen {
+				b.WriteRune('-')
+				lastWasHyphen = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "beads"
+	}
+	return out
+}
