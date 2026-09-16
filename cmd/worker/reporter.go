@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -21,6 +22,7 @@ type stateReporter struct {
 	mu       sync.Mutex
 	rep      registry.WorkerReport
 	commands []registry.Command
+	runDir   string // worker's working dir (HYDRA_PROJECT_PATH); canary target
 
 	stop     chan struct{}
 	stopped  chan struct{}
@@ -37,18 +39,49 @@ var activeReporter *stateReporter
 func newStateReporter(client *registry.Client, beadID, project string) *stateReporter {
 	pid := os.Getpid()
 	pgid, _ := syscall.Getpgid(pid)
+	runDir := os.Getenv("HYDRA_PROJECT_PATH")
 	return &stateReporter{
 		client: client,
 		rep: registry.WorkerReport{
-			BeadID:  beadID,
-			PID:     pid,
-			PGID:    pgid,
-			Project: project,
-			State:   string(registry.StateWorking),
+			BeadID:      beadID,
+			PID:         pid,
+			PGID:        pgid,
+			Project:     project,
+			State:       string(registry.StateWorking),
+			WorktreeKey: worktreeKeyFromDir(runDir),
 		},
+		runDir:  runDir,
 		stop:    make(chan struct{}),
 		stopped: make(chan struct{}),
 	}
+}
+
+// worktreeKeyFromDir returns the chain worktree key when dir is a hydra
+// worktree path (<root>/.hydra-worktrees/<encoded-project>/<key>), else "".
+// The daemon stores it on the registry row so the reconciler/GC can protect
+// live sandboxes from durable state instead of in-memory chain registration.
+func worktreeKeyFromDir(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	dir = filepath.Clean(dir)
+	if filepath.Base(filepath.Dir(filepath.Dir(dir))) != ".hydra-worktrees" {
+		return ""
+	}
+	return filepath.Base(dir)
+}
+
+// workspaceDestroyed reports whether the worker's worktree lost its .git
+// mid-run. 2026-09-16: a chain-timeout unregistered the chain, the
+// reconciler's protection set silently dropped the key, and the sweep
+// deleted a live worker's sandbox — the worker flailed in the empty husk
+// for 25 minutes burning turns. Fail fast instead.
+func workspaceDestroyed(runDir string) bool {
+	if worktreeKeyFromDir(runDir) == "" {
+		return false // not a worktree run; nothing to guard
+	}
+	_, err := os.Stat(filepath.Join(runDir, ".git"))
+	return err != nil
 }
 
 // Enabled reports whether reporting is configured.
@@ -77,6 +110,18 @@ func (r *stateReporter) Start() {
 }
 
 func (r *stateReporter) beat() {
+	if workspaceDestroyed(r.runDir) {
+		r.mu.Lock()
+		r.rep.State = string(registry.StateParked)
+		r.rep.ParkReason = "workspace-destroyed"
+		rep := r.rep
+		r.mu.Unlock()
+		if err := r.client.Report(rep); err != nil {
+			log.Printf("[Registry] workspace-destroyed report failed: %v", err)
+		}
+		log.Printf("[Registry] FATAL: worktree %s lost its .git mid-run — parked as workspace-destroyed, exiting instead of flailing in the husk", r.runDir)
+		os.Exit(1)
+	}
 	r.mu.Lock()
 	rep := r.rep
 	r.mu.Unlock()

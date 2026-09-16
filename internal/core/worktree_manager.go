@@ -51,6 +51,42 @@ func sanitizeKey(key string) string {
 
 func (m *WorktreeManager) branchName(key string) string { return "hydra/wt-" + sanitizeKey(key) }
 
+// WorktreeRecentlyActive reports whether the worktree for key has any write
+// newer than floor (directory itself or any file, skipping dependency/build
+// trees). A missing directory returns false — there is nothing to protect.
+// Used as the reconciler's age floor: actively-written sandboxes are never
+// integrated or removed, independent of registry/chain/bead correctness.
+func (m *WorktreeManager) WorktreeRecentlyActive(projectPath, key string, floor time.Duration) bool {
+	wtPath := m.worktreePath(projectPath, key)
+	info, err := os.Stat(wtPath)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	cutoff := time.Now().Add(-floor)
+	if info.ModTime().After(cutoff) {
+		return true
+	}
+	recent := false
+	_ = filepath.WalkDir(wtPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || recent {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "dist", ".angular":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if fi, fierr := d.Info(); fierr == nil && fi.ModTime().After(cutoff) {
+			recent = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return recent
+}
+
 // changelogUnionEntry marks CHANGELOG.md for git's built-in union merge
 // driver: on conflict both sides' lines survive. Every worker appends its
 // changelog entry at the same anchor per the documentation doctrine, so any

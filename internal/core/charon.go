@@ -280,6 +280,24 @@ func (j *Charon) worktreeActiveKeys() map[string]bool {
 			}
 		}
 	}
+	// Durable liveness: the registry row outlives in-memory snapshots AND
+	// chain registrations. A chain timeout used to strip a live worker's
+	// worktree protection mid-run (2026-09-16 webapp-zpf husk incident:
+	// sweep deleted the sandbox 8 minutes after the chain unregistered).
+	// Union every fresh-heartbeat row's bead ID and reported worktree key.
+	if j.registryStore != nil {
+		if rows, err := j.registryStore.ListWorkers(registry.StateWorking, registry.StateParked, registry.StateHung); err == nil {
+			for _, row := range rows {
+				if j.heartbeatHungAfter > 0 && time.Since(row.LastHeartbeat) > j.heartbeatHungAfter {
+					continue // stale row: the ghost sweep reaps it; protection ends there
+				}
+				active[row.BeadID] = true
+				if row.WorktreeKey != "" {
+					active[row.WorktreeKey] = true
+				}
+			}
+		}
+	}
 	return active
 }
 

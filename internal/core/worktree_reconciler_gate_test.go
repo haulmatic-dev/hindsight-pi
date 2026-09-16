@@ -106,6 +106,7 @@ func TestReconcileOrphanedWorktrees_QuarantinesTerminalConflict(t *testing.T) {
 	if _, err := m.Commit(wt, "bead(conflicted): shared"); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
+	backdateWorktree(t, m, projectPath, key) // past the reconciler age floor
 
 	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
 	if integrated != 0 {
