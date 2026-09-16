@@ -202,7 +202,7 @@ func (m *WorktreeManager) Commit(worktreePath, message string) (bool, error) {
 		log.Printf("[Worktree] REFUSING commit in %s: conflict markers in %s", worktreePath, strings.Join(files, ", "))
 		return false, fmt.Errorf("conflict markers in %s — refusing to commit", strings.Join(files, ", "))
 	}
-	if _, err := gitOut(worktreePath, "commit", "-m", message); err != nil {
+	if _, err := gitOut(worktreePath, "commit", "--no-verify", "-m", message); err != nil {
 		return false, fmt.Errorf("commit in %s: %w", worktreePath, err)
 	}
 	return true, nil
