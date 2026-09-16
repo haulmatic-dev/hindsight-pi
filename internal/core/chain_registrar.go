@@ -9,7 +9,7 @@ import (
 )
 
 type chainCompletionRegistrar interface {
-	RegisterChain(rootBeadID types.BeadID, allBeadIDs []types.BeadID)
+	RegisterChain(rootBeadID types.BeadID, allBeadIDs []types.BeadID, projectPath string)
 }
 
 type beadFileReader interface {

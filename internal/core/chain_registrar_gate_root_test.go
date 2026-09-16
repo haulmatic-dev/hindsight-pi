@@ -15,7 +15,7 @@ type registeredChain struct {
 	ids  []types.BeadID
 }
 
-func (m *fakeChainCompletionDetector) RegisterChain(root types.BeadID, ids []types.BeadID) {
+func (m *fakeChainCompletionDetector) RegisterChain(root types.BeadID, ids []types.BeadID, projectPath string) {
 	m.chains = append(m.chains, registeredChain{root: root, ids: ids})
 }
 
