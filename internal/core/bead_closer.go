@@ -244,7 +244,7 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			// (type/title/description/PRD) instead of the bare "bead(id): title".
 			msg := BuildCommitMessage(*bead)
 			if committed, cErr := c.worktreeManager.Commit(wt, msg); cErr != nil {
-				log.Printf("[Worktree] commit failed for %s: %v", bead.ID, cErr)
+				return c.failIntegration(bead, projectPath, repoName, "commit", cErr)
 			} else if committed {
 				log.Printf("[Worktree] committed %s", bead.ID)
 				AppendActivity(projectPath, string(bead.ID), "committed")
@@ -620,7 +620,7 @@ func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, st
 
 	c.events.EmitRepo(projectPath, Event{Type: "integration-failed", Project: repoName,
 		Bead: beadID, Reason: stage + "_failed",
-		Detail: fmt.Sprintf("singleton integration failed at %s: %s", stage, detail),
+		Detail: fmt.Sprintf("close integration failed at %s: %s", stage, detail),
 		Fields: map[string]any{"stage": stage, "error": detail}})
 	AppendActivity(projectPath, beadID, "integration-failed: "+stage)
 	if c.beadsClient != nil {
