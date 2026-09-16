@@ -26,6 +26,12 @@ type ChainInfo struct {
 	StartTime      time.Time
 	EndTime        time.Time
 	Status         ChainStatus
+	// ProjectPath is the main-checkout path of the project this chain was
+	// registered from, recorded at registration time. Chain completion must
+	// integrate against THIS path, never a name-based lookup: duplicate
+	// project names make name lookup return the first match, which is how the
+	// webapp zpf chain integrated into the wrong project (2026-09-16).
+	ProjectPath string
 }
 
 type ChainStatus string
@@ -187,7 +193,7 @@ func (d *ChainCompletionDetector) ChainHasFailedBeads(beadIDs []types.BeadID) bo
 	return false
 }
 
-func (d *ChainCompletionDetector) RegisterChain(rootBeadID types.BeadID, allBeadIDs []types.BeadID) {
+func (d *ChainCompletionDetector) RegisterChain(rootBeadID types.BeadID, allBeadIDs []types.BeadID, projectPath string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -200,10 +206,11 @@ func (d *ChainCompletionDetector) RegisterChain(rootBeadID types.BeadID, allBead
 		TotalBeads:  len(allBeadIDs),
 		StartTime:   time.Now(),
 		Status:      ChainStatusInProgress,
+		ProjectPath: projectPath,
 	}
 
-	log.Printf("[ChainCompletion] Registered chain: root=%s, total_beads=%d, leaf_count=%d",
-		rootBeadID, len(allBeadIDs), len(leafIDs))
+	log.Printf("[ChainCompletion] Registered chain: root=%s, total_beads=%d, leaf_count=%d, project=%s",
+		rootBeadID, len(allBeadIDs), len(leafIDs), projectPath)
 }
 
 func (d *ChainCompletionDetector) findLeafBeads(root types.BeadID, allBeadIDs []types.BeadID) []types.BeadID {

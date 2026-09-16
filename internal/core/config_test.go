@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -787,5 +788,71 @@ func TestConfig_Clone_PhaseModelsDeepCopy(t *testing.T) {
 	cloned.Agents.Pi.PhaseModels["red"] = PhaseModel{Provider: "p2", Model: "m2"}
 	if cfg.Agents.Pi.PhaseModels["red"].Provider != "p1" {
 		t.Errorf("Original PhaseModels was mutated after clone modification: got %q", cfg.Agents.Pi.PhaseModels["red"].Provider)
+	}
+}
+
+// Regression (2026-09-16 webapp zpf incident): two projects sharing a name
+// must be rejected at load — name-based resolution picks the first match and
+// silently integrates chains into the wrong project.
+func TestLoadConfig_DuplicateProjectNamesRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hydra.yaml")
+	yaml := `
+projects:
+  - name: webapp
+    path: /home/ajantha/projects/webapp
+  - name: webapp
+    path: /home/nipuna/projects/webapp
+`
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadConfigUncached(path)
+	if err == nil {
+		t.Fatal("expected duplicate project name error, got nil")
+	}
+	var dupErr *DuplicateProjectNameError
+	if !errors.As(err, &dupErr) {
+		t.Fatalf("error is not DuplicateProjectNameError: %v", err)
+	}
+	if dupErr.Name != "webapp" || dupErr.PathA != "/home/ajantha/projects/webapp" || dupErr.PathB != "/home/nipuna/projects/webapp" {
+		t.Errorf("DuplicateProjectNameError = %+v, want name=webapp with both paths", dupErr)
+	}
+	if !strings.Contains(err.Error(), "project names must be unique") {
+		t.Errorf("error message %q missing uniqueness hint", err.Error())
+	}
+
+	// Unique names must still load.
+	yaml = `
+projects:
+  - name: webapp
+    path: /home/ajantha/projects/webapp
+  - name: api
+    path: /home/nipuna/projects/api
+`
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfigUncached(path); err != nil {
+		t.Fatalf("unique project names rejected: %v", err)
+	}
+}
+
+func TestValidateConfig_DuplicateProjectNames(t *testing.T) {
+	cfg := &Config{Projects: []ProjectConfig{
+		{Name: "webapp", Path: "/a/webapp"},
+		{Name: "api", Path: "/a/api"},
+		{Name: "webapp", Path: "/b/webapp"},
+	}}
+	errs := ValidateConfig(cfg)
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Message, "duplicate project name") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ValidateConfig errors %v missing duplicate project name entry", errs)
 	}
 }
