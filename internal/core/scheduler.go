@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -431,11 +432,29 @@ func (s *Scheduler) Tick() error {
 			continue
 		}
 
+		// Epics are containers, not executable work: they close via
+		// CloseReadyEpics when their children land. Spawning a worker on one
+		// burned 12.8M tokens producing nothing (2026-09-16 nipuna epic).
+		if strings.ToLower(strings.TrimSpace(bead.Type)) == "epic" {
+			log.Printf("⏸️  Skipping epic bead (container; auto-closes when children complete): %s", bead.ID)
+			continue
+		}
+
 		// Skip if project path is not found
 		projectPath := o.beadAnalyzer.FindProjectPath(&bead)
 		if projectPath == "" {
 			log.Printf("⚠️  Skipping bead %s: project '%s' not configured or found", bead.ID, bead.Project)
 			continue
+		}
+
+		// Record the branch HEAD as this bead's session base: verified-close
+		// in main-checkout mode scopes committed evidence to commits AFTER
+		// this point (pre-existing campaign commits must not satisfy the
+		// diff gate for a no-work session).
+		if o.beadCloser != nil {
+			if head, herr := exec.Command("git", "-C", projectPath, "rev-parse", "HEAD").Output(); herr == nil {
+				o.beadCloser.SetSessionBase(bead.ID.String(), strings.TrimSpace(string(head)))
+			}
 		}
 
 		// Check resource limits before spawning

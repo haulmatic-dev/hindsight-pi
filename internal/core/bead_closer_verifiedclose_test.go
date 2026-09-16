@@ -36,8 +36,8 @@ func TestBeadTargetFiles(t *testing.T) {
 
 func TestVerifyBeforeClose_OffScopeBlock(t *testing.T) {
 	repo, closer, bead := setupScopeGateTest(t, "block")
-	modifyFile(t, repo, "x/a.go", "package x\n// modified\n")
-	modifyFile(t, repo, "y/b.go", "package y\n// modified\n")
+	writeAndCommit(t, repo, "x/a.go", "package x\n// modified\n")
+	writeAndCommit(t, repo, "y/b.go", "package y\n// modified\n")
 
 	err := closer.verifyBeforeClose(bead, repo, "")
 	if err == nil {
@@ -53,8 +53,8 @@ func TestVerifyBeforeClose_OffScopeBlock(t *testing.T) {
 
 func TestVerifyBeforeClose_OffScopeWarn(t *testing.T) {
 	repo, closer, bead := setupScopeGateTest(t, "warn")
-	modifyFile(t, repo, "x/a.go", "package x\n// modified\n")
-	modifyFile(t, repo, "y/b.go", "package y\n// modified\n")
+	writeAndCommit(t, repo, "x/a.go", "package x\n// modified\n")
+	writeAndCommit(t, repo, "y/b.go", "package y\n// modified\n")
 
 	if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
 		t.Fatalf("warn mode should not reject close: %v", err)
@@ -63,8 +63,8 @@ func TestVerifyBeforeClose_OffScopeWarn(t *testing.T) {
 
 func TestVerifyBeforeClose_OnScopePasses(t *testing.T) {
 	repo, closer, bead := setupScopeGateTest(t, "block")
-	modifyFile(t, repo, "x/a.go", "package x\n// modified\n")
-	modifyFile(t, repo, "x/a_test.go", "package x\n// test\n")
+	writeAndCommit(t, repo, "x/a.go", "package x\n// modified\n")
+	writeAndCommit(t, repo, "x/a_test.go", "package x\n// test\n")
 
 	if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
 		t.Fatalf("on-scope changes should not reject close: %v", err)
@@ -75,7 +75,7 @@ func TestVerifyBeforeClose_EmptyTargetsBypasses(t *testing.T) {
 	repo, closer, bead := setupScopeGateTest(t, "block")
 	bead.Metadata = nil
 	bead.Description = "no targets declared"
-	modifyFile(t, repo, "y/b.go", "package y\n// modified\n")
+	writeAndCommit(t, repo, "y/b.go", "package y\n// modified\n")
 
 	if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
 		t.Fatalf("empty targets should bypass scope gate: %v", err)
@@ -177,7 +177,19 @@ func newScopeGateCloser(t *testing.T, repoPath, mode string) *BeadCloser {
 		{Name: "test-project", Path: repoPath, Type: types.RepoTypeSingle},
 	})
 
-	return NewBeadCloser(newMockBeadsClient(), nil, resolver, nil, cfg)
+	c := NewBeadCloser(newMockBeadsClient(), nil, resolver, nil, cfg)
+	// Session base = the repo's HEAD at fixture time: without this the
+	// session-scoped evidence guard would treat the fixture's own setup
+	// commits as worker evidence.
+	base, berr := exec.Command("git", "-C", repoPath, "rev-parse", "HEAD").Output()
+	if berr != nil {
+		// Broken-repo fixtures (ChangedFilesErrorFailsOpen): the "HEAD"
+		// sentinel resolves at close time and fails open there too.
+		c.SetSessionBase("scope-test-bead", "HEAD")
+	} else {
+		c.SetSessionBase("scope-test-bead", strings.TrimSpace(string(base)))
+	}
+	return c
 }
 
 func initGitRepo(t *testing.T) string {
@@ -305,7 +317,7 @@ func TestVerifyBeforeClose_TargetLessImplementationWarns(t *testing.T) {
 	bead.Metadata = nil
 	bead.Description = "no targets declared"
 	bead.Type = "fr"
-	modifyFile(t, repo, "internal/core/x.go", "package x\n// modified\n")
+	writeAndCommit(t, repo, "internal/core/x.go", "package x\n// modified\n")
 
 	logs := captureLogOutput(t, func() {
 		if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
@@ -326,7 +338,7 @@ func TestVerifyBeforeClose_TargetLessEpicNoWarning(t *testing.T) {
 	bead.Metadata = nil
 	bead.Description = "no targets declared"
 	bead.Type = "epic"
-	modifyFile(t, repo, "internal/core/x.go", "package x\n// modified\n")
+	writeAndCommit(t, repo, "internal/core/x.go", "package x\n// modified\n")
 
 	logs := captureLogOutput(t, func() {
 		if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
@@ -344,8 +356,8 @@ func TestVerifyBeforeClose_TargetLessAllowlistedOnlyNoWarning(t *testing.T) {
 	bead.Metadata = nil
 	bead.Description = "no targets declared"
 	bead.Type = "implement"
-	modifyFile(t, repo, "CHANGELOG.md", "# Changelog\n## Added\n")
-	modifyFile(t, repo, "docs/PRDs/x.md", "# PRD\n")
+	writeAndCommit(t, repo, "CHANGELOG.md", "# Changelog\n## Added\n")
+	writeAndCommit(t, repo, "docs/PRDs/x.md", "# PRD\n")
 
 	logs := captureLogOutput(t, func() {
 		if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
@@ -673,4 +685,77 @@ func TestVerifyBeforeClose_MainCheckoutCommittedAccepted(t *testing.T) {
 	if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
 		t.Fatalf("committed main-checkout change should pass, got: %v", err)
 	}
+}
+
+// Regression (2026-09-16, nipuna campaign): a worker ran in a chain worktree,
+// produced ZERO commits (empty worktree branch == base), and verified-close
+// ACCEPTED the close because the ancestry fast-path treats "branch is
+// ancestor of main" as "already integrated" — indistinguishable from "never
+// did anything". The epic burned 12.8M tokens and closed with no landed work.
+// Ancestry alone must never satisfy the diff gate; the target-presence check
+// on main since the merge-base is required too.
+func TestVerifyBeforeClose_EmptyWorktreeBranchRejected(t *testing.T) {
+	projectPath := initGitRepoWithCommit(t)
+
+	wtMgr := NewWorktreeManager()
+	key := "test-empty-wt"
+	if _, err := wtMgr.EnsureWorktree(projectPath, key); err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	// No edits anywhere: neither the worktree nor the main checkout changes.
+
+	bead := types.Bead{
+		ID:       "test-project-empty",
+		Title:    "GREEN: implement feature",
+		Project:  "test-project",
+		Type:     "implement",
+		Status:   types.StatusInProgress,
+		Metadata: map[string]string{"files": "feature.go"},
+	}
+
+	cfg := DefaultConfig()
+	cfg.Validation.RequireDiffOnClose = true
+	resolver := NewProjectResolver([]types.Project{
+		{Name: "test-project", Path: projectPath, Type: types.RepoTypeSingle},
+	})
+	closer := NewBeadCloser(newMockBeadsClient(), nil, resolver, nil, cfg)
+	closer.SetWorktreeManager(wtMgr,
+		func(_ types.Bead) string { return key },
+		func(_ types.BeadID) bool { return false },
+	)
+
+	err := closer.verifyBeforeClose(&bead, projectPath, "")
+	if err == nil {
+		t.Fatal("empty worktree branch (ancestor of main with no commits) must NOT satisfy the diff gate")
+	}
+	if !strings.Contains(err.Error(), "empty-diff") {
+		t.Fatalf("want empty-diff rejection, got: %v", err)
+	}
+}
+
+// Regression (2026-09-16, nipuna epic): in main-checkout mode with NO
+// declared target files, the committed-evidence gate passed on the
+// campaign's PRE-EXISTING commits (docs + store) — nothing the worker did.
+// Evidence must be scoped to the bead's own session: commits since the
+// branch HEAD recorded at spawn.
+func TestVerifyBeforeClose_MainCheckoutPreExistingCommitsRejected(t *testing.T) {
+	repo, closer, bead := setupScopeGateTest(t, "off")
+	withOriginSelfRemote(t, repo)
+	// Campaign-base commit that predates the bead's session.
+	writeAndCommit(t, repo, "docs/prd.md", "# prd\n")
+	closer.SetSessionBase(bead.ID.String(), sessionBaseCommit(t, repo)) // base AFTER the docs commit
+	// Worker did nothing.
+
+	err := closer.verifyBeforeClose(bead, repo, "")
+	if err == nil {
+		t.Fatal("pre-existing campaign commits must not satisfy the diff gate for a no-work session")
+	}
+	if !strings.Contains(err.Error(), "empty-diff") {
+		t.Fatalf("want empty-diff rejection, got: %v", err)
+	}
+}
+
+func sessionBaseCommit(t *testing.T, repo string) string {
+	t.Helper()
+	return strings.TrimSpace(gitTestOut(t, repo, "rev-parse", "HEAD"))
 }

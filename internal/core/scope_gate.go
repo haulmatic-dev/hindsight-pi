@@ -268,6 +268,30 @@ func committedChangesSinceBranchBase(projectPath string) ([]string, error) {
 	return files, nil
 }
 
+// committedChangesSinceBase lists files changed by commits after the given
+// base commit ("HEAD" resolves at call time). Empty result is a NON-NIL
+// slice — nil means unknown/fail-open downstream.
+func committedChangesSinceBase(projectPath, base string) ([]string, error) {
+	if base == "HEAD" {
+		out, err := exec.Command("git", "-C", projectPath, "rev-parse", "HEAD").Output()
+		if err != nil {
+			return nil, err
+		}
+		base = strings.TrimSpace(string(out))
+	}
+	out, err := exec.Command("git", "-C", projectPath, "diff", "--name-only", base+"..HEAD").Output()
+	if err != nil {
+		return nil, err
+	}
+	files := []string{}
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			files = append(files, l)
+		}
+	}
+	return files, nil
+}
+
 func currentBranch(projectPath string) string {
 	out, err := exec.Command("git", "-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD").Output()
 	if err != nil {
