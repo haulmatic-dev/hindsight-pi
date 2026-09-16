@@ -231,6 +231,43 @@ func changedFilesWithBase(repoPath, base string) ([]string, error) {
 
 // currentBranch resolves the checked-out branch of a checkout (the base the
 // chain worktree diverged from).
+// committedChangesSinceBranchBase lists files changed by commits on the
+// checkout's current branch since it diverged from its origin counterpart
+// (merge-base HEAD origin/<branch>). This is the durable diff evidence for
+// main-checkout-mode closes: uncommitted edits are revertible and must not
+// satisfy the diff gate (2026-09-16 nipuna incident: close accepted on
+// uncommitted edits, files reverted after acceptance, false close). Any
+// failure (no branch, no upstream, git error) returns an error so callers
+// can fail open.
+func committedChangesSinceBranchBase(projectPath string) ([]string, error) {
+	branch := currentBranch(projectPath)
+	if branch == "" {
+		return nil, fmt.Errorf("no current branch")
+	}
+	base, err := exec.Command("git", "-C", projectPath, "merge-base", "HEAD", "origin/"+branch).Output()
+	if err != nil {
+		return nil, err
+	}
+	baseStr := strings.TrimSpace(string(base))
+	if baseStr == "" {
+		return nil, fmt.Errorf("empty merge-base with origin/%s", branch)
+	}
+	out, err := exec.Command("git", "-C", projectPath, "diff", "--name-only", baseStr+"..HEAD").Output()
+	if err != nil {
+		return nil, err
+	}
+	// Empty result must be a NON-NIL slice: hasTargetChanges treats nil as
+	// "unknown, fail open", which would let a no-commit branch pass the
+	// diff gate — exactly the false-close class this helper exists to stop.
+	files := []string{}
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			files = append(files, l)
+		}
+	}
+	return files, nil
+}
+
 func currentBranch(projectPath string) string {
 	out, err := exec.Command("git", "-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD").Output()
 	if err != nil {

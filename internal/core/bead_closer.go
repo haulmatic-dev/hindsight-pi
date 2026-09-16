@@ -693,6 +693,19 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 		}
 	}
 
+	// Main-checkout mode (no chain worktree): uncommitted edits are
+	// revertible and have been observed to be reverted AFTER close
+	// acceptance (2026-09-16 nipuna incident: 14 false closes). Only
+	// committed changes since the branch diverged from origin count as
+	// evidence. Unavailable base (no upstream etc.) fails open.
+	if !switchedToWorktree && needDiff && changedErr == nil {
+		if committed, cerr := committedChangesSinceBranchBase(projectPath); cerr == nil {
+			changed = committed
+		} else {
+			log.Printf("[VerifiedClose] committed-evidence base unavailable for %s (fail open): %v", bead.ID, cerr)
+		}
+	}
+
 	// Incident 2jjz8: the agent wrote into the main checkout instead of its
 	// worktree. When we are inspecting a worktree, also collect uncommitted
 	// changes in the main checkout and union them into the diff/scope

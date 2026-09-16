@@ -83,3 +83,21 @@ func TestPromptPrefixDigest(t *testing.T) {
 		t.Errorf("8KiB head digest = %s, want %s", headLong, wantHead)
 	}
 }
+
+// Regression (2026-09-16, nipuna campaign incident): beads of type test/red
+// completed with EMPTY diffs because the deliverable contract only covered
+// implementation types. A RED bead whose whole purpose is writing failing
+// specs must carry the same no-plan-only contract.
+func TestDeliverableContractCoversTestAndRedTypes(t *testing.T) {
+	for _, typ := range []string{"test", "red"} {
+		p := buildPiPrompt(types.Bead{ID: "x-1", Type: typ, Title: "RED: specs", Description: "d"}, nil, promptExtras{})
+		if !strings.Contains(p, "DELIVERABLE CONTRACT") {
+			t.Errorf("type %q: prompt missing DELIVERABLE CONTRACT (empty-diff completions accepted)", typ)
+		}
+	}
+	// Non-edit types stay contract-free (discovery is analysis-shaped).
+	p := buildPiPrompt(types.Bead{ID: "x-1", Type: "discovery", Title: "Discovery", Description: "d"}, nil, promptExtras{})
+	if strings.Contains(p, "DELIVERABLE CONTRACT") {
+		t.Error("type discovery must NOT carry the deliverable contract")
+	}
+}
