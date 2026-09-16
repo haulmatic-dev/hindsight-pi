@@ -248,6 +248,11 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			} else if committed {
 				log.Printf("[Worktree] committed %s", bead.ID)
 				AppendActivity(projectPath, string(bead.ID), "committed")
+			} else {
+				// Loud no-op: nothing to commit here with an accepted close
+				// means the work never reached the worktree — the signature
+				// of the 2026-09-16 nipuna discard. Silence hid it for days.
+				log.Printf("[Worktree] %s: nothing to commit in worktree (close evidence falls back to main checkout)", bead.ID)
 			}
 
 			// Singletons (beads that belong to no registered multi-bead chain) have
@@ -258,7 +263,13 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			// emits integration-failed, and leaves the bead open with the
 			// worktree preserved (hydra-xnx 2026-09-06: cleanup ran after a fake
 			// success and the gate-verified commits dangled unreferenced).
-			if !c.isChainMember(bead.ID) {
+			member := c.isChainMember(bead.ID)
+			if member {
+				log.Printf("[Worktree] close %s: key=%s chainMember=true — integration deferred to chain completion (reconciler is the stranded-work net)", bead.ID, key)
+			} else {
+				log.Printf("[Worktree] close %s: key=%s chainMember=false — singleton, integrating now", bead.ID, key)
+			}
+			if !member {
 				if iErr := c.worktreeManager.Integrate(projectPath, key); iErr != nil {
 					return c.failIntegration(bead, projectPath, repoName, "integrate", iErr)
 				}
