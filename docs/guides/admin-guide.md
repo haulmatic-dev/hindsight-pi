@@ -244,6 +244,11 @@ Expected output:
 [MultiUserDiscovery] Total users: 2, total projects: 3
 ```
 
+Discovered repos are automatically namespaced: discovery writes `.beads/config.yaml`
+with `issue_prefix: <username>-<reponame>` in each repo directory so bead IDs from
+`br create` do not collide across users or projects that share a repo name. Set
+`issue_prefix` on a user project entry to override the generated prefix.
+
 ### Check worker attribution
 
 ```bash
