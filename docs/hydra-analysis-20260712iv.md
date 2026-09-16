@@ -132,7 +132,7 @@ Measurement (WO-E) comes **before** the Big 3 so every improvement is a number, 
 - **WO-J: Live dashboard** — serve ledger metrics from the existing `internal/api` server: bead states, cost/PRD, hang rate, one-shot trend. Effort 2–3 days. Deps WO-H.
 - **WO-K: Hindsight Claude-Code plugin** — official `vectorize-io/hindsight` plugin for operator sessions; `hindsightApiUrl` → VPS :8888 over SSH tunnel, same bank as workers, auto-features OFF. Effort 0.5 day. (CASS `cm` flow already in use.)
 - **WO-L: pi upstream issues** — file with repro data: (1) startup provider-registry fetch flakes under concurrent launches ("Unknown provider" for valid provider; `--offline` insufficient at extension layer), (2) stream hangs (no output ≥10m, signal-kill needed). We hold logs + repro commands. Effort 0.5 day; unblocks removing our workarounds later.
-- **WO-M: Multi-repo (#2b)** — bv-client repo-awareness, write-path `repoName` threading (`UpdateBeadStatus`/`CreateBead`), iterate beyond `Repos[0]`. Do when a real multi-repo project needs it. Effort 3–4 days.
+- **WO-M: Multi-repo (#2b)** — bv-client repo-awareness, write-path `repoName` threading (`UpdateBeadStatus`/`CreateBead`), iterate beyond `Repos[0]`. Do when a real multi-repo project needs it. Effort 3–4 days. **Status (2026-09-16): discovery read path done** — `findFromBV`/`findFromBVPlan` invoke bv per repo dir and resolve repo from the item's `repo` field (added to `bv.TriageRecommendation`/`BlockerToClear`/`PlanItem`) or the invocation target; current bv v0.16.4 emits no repo field, so per-repo invocation is the mechanism. Write-path threading remains open.
 
 ---
 
