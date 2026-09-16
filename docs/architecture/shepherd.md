@@ -120,7 +120,25 @@ match, the chain branch did not exist there, and the "nothing to integrate"
 nil read as success (webapp zpf, 2026-09-16: 17/17 beads closed, work
 unintegrated; recovered only by the reconciler's age-floor sweep). Config
 load rejects duplicate project names outright — the daemon fails startup,
-and hot reload rejects the new config before applying it. The completion
+and hot reload rejects the new config before applying it.
+
+**Recorded worktree key + branch (webapp-tc5, 2026-09-16).** A stale
+`hydra/wt-<key>` branch can leave the chain's real branch versioned as
+`hydra/wt-<key>-vN`, and any consumer that re-derives the branch from the
+key by exact match then misses and logs "nothing to integrate" — 1,642
+insertions stranded this way. The recorded-key contract: the spawner records
+the chain's actual worktree key + branch on `ChainInfo` at chain-worktree
+creation (`RecordChainWorktree`, sourced from
+`WorktreeManager.ResolveBranch` — the branch actually checked out, never
+re-derived); chain completion resolves the branch in priority order —
+recorded, then exact `hydra/wt-<key>`, then newest `-vN` by N — with every
+fallback logged loudly; a resolution that finds nothing emits typed
+`chain_integration_unverified` (`no_worktree_or_branch_after_resolution`)
+instead of skipping silently. The stale-branch reattach path in
+`EnsureWorktree` likewise logs that downstream lookups must use the recorded
+key. The orphan reconciler normalizes the `-vN` suffix off the branch-derived
+key before the active-key and terminal-bead checks (the exact-match miss
+there was the failed 1h+ backstop) and merges the real branch name. The completion
 callback captures the worktree branch tip before teardown and verifies the
 tip is contained in HEAD after integrate — a mismatch emits
 `chain_integration_unverified` and stamps the root bead
