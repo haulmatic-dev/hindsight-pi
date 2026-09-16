@@ -395,7 +395,12 @@ bead with no retry record (e.g. after a restart cleared in-memory retry state)
 was invisible to the shepherd. The `BlockedBeads` provider now also scans
 project stores for non-terminal beads carrying `worktree-unavailable`,
 `integration-exhausted`, or a >24h `escalated` label, and surfaces stranded
-pushes (below) as `<project>-push-pending` pseudo-beads. When ≥3 BLOCKED
+pushes (below) as `<project>-push-pending` pseudo-beads. The
+`integration-exhausted` label is set by `failIntegration` after 3 consecutive
+integrate/push failures on one bead (2026-09-16 close-reopen loop): below the
+cap a failed close reopens the bead as before, at the cap it hard-parks here
+instead of respawning into the same failing integrate forever; the counter
+resets on the first successful integrate+push. When ≥3 BLOCKED
 candidates share a normalized reason, `collapseWedges` replaces them with one
 PROJECT-WEDGE candidate so Pan issues a single project-scoped repair instead
 of N rate-limited per-bead ones.

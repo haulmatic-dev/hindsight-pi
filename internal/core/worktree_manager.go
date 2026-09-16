@@ -51,6 +51,51 @@ func sanitizeKey(key string) string {
 
 func (m *WorktreeManager) branchName(key string) string { return "hydra/wt-" + sanitizeKey(key) }
 
+// changelogUnionEntry marks CHANGELOG.md for git's built-in union merge
+// driver: on conflict both sides' lines survive. Every worker appends its
+// changelog entry at the same anchor per the documentation doctrine, so any
+// two wt-branches from a parallel batch conflict there on integrate — the
+// close then fails and the bead reopens in a loop (webapp isk/hrx/lbu/1oi/cpm,
+// 2026-09-16). Worst union outcome is a rare duplicated entry, which a
+// changelog tolerates; a close-reopen loop does not get tolerated.
+const changelogUnionEntry = "CHANGELOG.md merge=union"
+
+// ensureChangelogUnionDriver idempotently enables the union merge driver for
+// CHANGELOG.md in the repo-local (uncommitted) .git/info/attributes, which
+// applies to every worktree and clone-local merge of that repo. Fail-open: a
+// repo we cannot inspect still gets its worktree.
+func ensureChangelogUnionDriver(projectPath string) {
+	commonDir, err := gitOut(projectPath, "rev-parse", "--git-common-dir")
+	if err != nil {
+		log.Printf("[Worktree] changelog union driver: rev-parse failed for %s: %v", projectPath, err)
+		return
+	}
+	dir := strings.TrimSpace(commonDir)
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(projectPath, dir)
+	}
+	infoDir := filepath.Join(dir, "info")
+	if err := os.MkdirAll(infoDir, 0o755); err != nil {
+		log.Printf("[Worktree] changelog union driver: mkdir %s: %v", infoDir, err)
+		return
+	}
+	attrPath := filepath.Join(infoDir, "attributes")
+	if data, err := os.ReadFile(attrPath); err == nil && strings.Contains(string(data), changelogUnionEntry) {
+		return
+	}
+	f, err := os.OpenFile(attrPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Printf("[Worktree] changelog union driver: open %s: %v", attrPath, err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.WriteString(changelogUnionEntry + "\n"); err != nil {
+		log.Printf("[Worktree] changelog union driver: write %s: %v", attrPath, err)
+		return
+	}
+	log.Printf("[Worktree] CHANGELOG.md union merge driver enabled for %s", projectPath)
+}
+
 func (m *WorktreeManager) worktreePath(projectPath, key string) string {
 	return filepath.Join(worktreeRoot(projectPath), sanitizeKey(key))
 }
@@ -77,6 +122,7 @@ func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error
 	if projectPath == "" {
 		return "", fmt.Errorf("refusing to create worktree %q with empty project path (would worktree the daemon cwd — 1xs7z wrong-repo incident, 2026-08-23)", key)
 	}
+	ensureChangelogUnionDriver(projectPath)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -89,6 +135,23 @@ func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error
 	// refuse to delete a valid worktree that belongs to a different repository.
 	if _, err := os.Lstat(wtPath); err == nil {
 		if isOurWorktree(projectPath, wtPath) {
+			// Wrong branch checked out: a worktree sitting on the campaign
+			// branch lets the worker commit straight onto it, the wt-branch
+			// never exists, and every close then fails integration with
+			// "not something we can merge" in a close-reopen loop (webapp-9ah,
+			// 2026-09-16 parallel spawn storm). Repair only when nothing
+			// unintegrated would be stranded; otherwise fail closed.
+			if wtBranch, berr := gitOut(wtPath, "rev-parse", "--abbrev-ref", "HEAD"); berr == nil && strings.TrimSpace(wtBranch) != branch {
+				head, _ := gitOut(wtPath, "rev-parse", "HEAD")
+				if !isAncestorOf(projectPath, strings.TrimSpace(head), "HEAD") {
+					return "", fmt.Errorf("worktree %s on wrong branch %s (want %s) with unintegrated commits at %s — refusing to touch, manual inspection required", wtPath, strings.TrimSpace(wtBranch), branch, strings.TrimSpace(head))
+				}
+				if _, cerr := gitOut(wtPath, "checkout", "-B", branch, base); cerr != nil {
+					return "", fmt.Errorf("worktree %s branch repair (checkout -B %s %s): %w", wtPath, branch, base, cerr)
+				}
+				log.Printf("[Worktree] repaired %s: was on %s, now on %s at %s", wtPath, strings.TrimSpace(wtBranch), branch, base)
+				return wtPath, nil
+			}
 			// Only reset a clean worktree whose HEAD is behind/ahead of the current
 			// base. A dirty worktree contains in-flight worker output and must be
 			// returned as-is (the caller will commit/integrate it).

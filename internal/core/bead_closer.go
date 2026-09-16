@@ -13,6 +13,8 @@ import (
 type BeadCloser struct {
 	sessionMu         sync.Mutex
 	sessionBase       map[string]string    // bead ID -> branch HEAD commit recorded at spawn; close-time committed evidence starts here
+	integMu           sync.Mutex
+	integFails        map[string]int       // bead ID -> consecutive integrate/push failures (reset on success; in-memory like other caps)
 	sourceIndex       *BeadProvenanceIndex // nil-safe; bead->store provenance
 	beadsClient       BeadsClient
 	intelligenceHub   *IntelligenceHub
@@ -276,6 +278,7 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 				if pErr := c.publishAfterIntegrate(projectPath, bead); pErr != nil {
 					return c.failIntegration(bead, projectPath, repoName, "push", pErr)
 				}
+				c.resetIntegrationFailures(string(bead.ID))
 				c.worktreeManager.Remove(projectPath, key)
 				log.Printf("[Worktree] integrated singleton %s", bead.ID)
 				AppendActivity(projectPath, string(bead.ID), "integrated")
@@ -395,6 +398,13 @@ const closedFailedLabel = "closed-failed"
 // retry queue, DAG ready filter, Charon orphan recovery) must skip beads
 // carrying it until Pan repair or a human clears the label.
 const integrationExhaustedLabel = "integration-exhausted"
+
+// maxConsecutiveIntegrationFailures caps how many integrate/push failures a
+// bead may accumulate before failIntegration escalates it to the durable
+// integration-exhausted hard-park instead of a plain reopen. Uncapped, every
+// failed close respawned the bead into the same failing integrate — webapp-9ah
+// burned four full worker cycles in four minutes this way (2026-09-16).
+const maxConsecutiveIntegrationFailures = 3
 
 // escalatedLabel is the durable marker for beads a verified-close rejection
 // escalated to a human at max attempts. Unlike a status, a label is visible
@@ -610,6 +620,15 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 	return fmt.Errorf("push %s to %s/%s: %s", bead.ID, remote, branch, reason)
 }
 
+// resetIntegrationFailures clears a bead's consecutive-failure counter after
+// a successful integrate+push so one later isolated failure cannot trip the
+// cap on stale history.
+func (c *BeadCloser) resetIntegrationFailures(beadID string) {
+	c.integMu.Lock()
+	delete(c.integFails, beadID)
+	c.integMu.Unlock()
+}
+
 // failIntegration aborts a close whose integrate/push step failed
 // verification. The bead is left open (reopened when not terminal), a typed
 // integration-failed event carries the exact error, and the worktree is
@@ -634,11 +653,34 @@ func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, st
 		Detail: fmt.Sprintf("close integration failed at %s: %s", stage, detail),
 		Fields: map[string]any{"stage": stage, "error": detail}})
 	AppendActivity(projectPath, beadID, "integration-failed: "+stage)
+
+	c.integMu.Lock()
+	if c.integFails == nil {
+		c.integFails = map[string]int{}
+	}
+	c.integFails[beadID]++
+	failures := c.integFails[beadID]
+	c.integMu.Unlock()
+
 	if c.beadsClient != nil {
 		if err := c.beadsClient.UpdateBeadStatus(projectPath, bead.ID, types.StatusOpen); err != nil {
 			log.Printf("[Integrate] Failed to reopen %s: %v", beadID, err)
 		}
-		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"integration-failed"}); err != nil {
+		labels := []string{"integration-failed"}
+		if failures >= maxConsecutiveIntegrationFailures {
+			// Cap reached: a plain reopen would respawn the bead into the
+			// same failing integrate forever. The durable hard-park label is
+			// the one every respawn path (scheduler, Charon, Pan) already
+			// skips; only Pan repair or a human clears it.
+			labels = append(labels, integrationExhaustedLabel)
+			c.events.EmitRepo(projectPath, Event{Type: "integration-exhausted", Project: repoName,
+				Bead: beadID, Reason: "consecutive_failures_capped",
+				Detail: fmt.Sprintf("%d consecutive integration failures (last at %s: %s) — hard-parked", failures, stage, detail)})
+			AppendActivity(projectPath, beadID, "integration-exhausted: hard-parked")
+			log.Printf("[Integrate] %s hit %d consecutive integration failures — labeled %s (hard-park; clear only when the cause is fixed)",
+				beadID, failures, integrationExhaustedLabel)
+		}
+		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, labels); err != nil {
 			log.Printf("[Integrate] Failed to label %s: %v", beadID, err)
 		}
 	}
