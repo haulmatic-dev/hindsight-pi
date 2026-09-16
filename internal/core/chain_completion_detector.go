@@ -113,14 +113,15 @@ func (d *ChainCompletionDetector) checkChainCompletion() {
 	completedChains := make([]*ChainInfo, 0)
 
 	for _, chain := range d.chains {
-		if chain.Status != ChainStatusInProgress {
+		if chain.Status == ChainStatusCompleted {
 			continue
 		}
 
-		if time.Since(chain.StartTime) > d.config.Timeout {
-			chain.Status = ChainStatusTimedOut
-			log.Printf("[ChainCompletion] Chain %s timed out after %v", chain.RootBeadID, d.config.Timeout)
-			continue
+		if chain.Status == ChainStatusInProgress {
+			if time.Since(chain.StartTime) > d.config.Timeout {
+				chain.Status = ChainStatusTimedOut
+				log.Printf("[ChainCompletion] Chain %s timed out after %v", chain.RootBeadID, d.config.Timeout)
+			}
 		}
 
 		completedCount := d.countCompletedBeads(chain.AllBeadIDs)

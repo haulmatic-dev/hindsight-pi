@@ -244,10 +244,15 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			// (type/title/description/PRD) instead of the bare "bead(id): title".
 			msg := BuildCommitMessage(*bead)
 			if committed, cErr := c.worktreeManager.Commit(wt, msg); cErr != nil {
-				log.Printf("[Worktree] commit failed for %s: %v", bead.ID, cErr)
+				return c.failIntegration(bead, projectPath, repoName, "commit", cErr)
 			} else if committed {
 				log.Printf("[Worktree] committed %s", bead.ID)
 				AppendActivity(projectPath, string(bead.ID), "committed")
+			} else {
+				// Loud no-op: nothing to commit here with an accepted close
+				// means the work never reached the worktree — the signature
+				// of the 2026-09-16 nipuna discard. Silence hid it for days.
+				log.Printf("[Worktree] %s: nothing to commit in worktree (close evidence falls back to main checkout)", bead.ID)
 			}
 
 			// Singletons (beads that belong to no registered multi-bead chain) have
@@ -258,7 +263,13 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			// emits integration-failed, and leaves the bead open with the
 			// worktree preserved (hydra-xnx 2026-09-06: cleanup ran after a fake
 			// success and the gate-verified commits dangled unreferenced).
-			if !c.isChainMember(bead.ID) {
+			member := c.isChainMember(bead.ID)
+			if member {
+				log.Printf("[Worktree] close %s: key=%s chainMember=true — integration deferred to chain completion (reconciler is the stranded-work net)", bead.ID, key)
+			} else {
+				log.Printf("[Worktree] close %s: key=%s chainMember=false — singleton, integrating now", bead.ID, key)
+			}
+			if !member {
 				if iErr := c.worktreeManager.Integrate(projectPath, key); iErr != nil {
 					return c.failIntegration(bead, projectPath, repoName, "integrate", iErr)
 				}
@@ -620,7 +631,7 @@ func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, st
 
 	c.events.EmitRepo(projectPath, Event{Type: "integration-failed", Project: repoName,
 		Bead: beadID, Reason: stage + "_failed",
-		Detail: fmt.Sprintf("singleton integration failed at %s: %s", stage, detail),
+		Detail: fmt.Sprintf("close integration failed at %s: %s", stage, detail),
 		Fields: map[string]any{"stage": stage, "error": detail}})
 	AppendActivity(projectPath, beadID, "integration-failed: "+stage)
 	if c.beadsClient != nil {
