@@ -8,16 +8,15 @@ import (
 	"github.com/haulmatic-dev/hydra/internal/intelligence"
 )
 
-// chainBranchTip returns the commit at the head of the chain's worktree
-// branch in projectPath, or "" when neither the worktree nor the branch
-// exists there — the exact shape Integrate silently treats as "nothing to
-// integrate" success. Captured before teardown so integrate can be verified
-// as landed (or honestly skipped) after the worktree is gone.
-func chainBranchTip(m *WorktreeManager, projectPath, key string) string {
-	if m == nil {
+// chainBranchTipOf returns the commit at the head of the given branch in
+// projectPath, or "" when it does not exist there — the exact shape
+// Integrate silently treats as "nothing to integrate" success. Captured
+// before teardown so integrate can be verified as landed (or honestly
+// skipped) after the worktree is gone.
+func chainBranchTipOf(projectPath, branch string) string {
+	if branch == "" {
 		return ""
 	}
-	branch := m.branchName(key)
 	if !branchExists(projectPath, branch) {
 		return ""
 	}
@@ -26,6 +25,39 @@ func chainBranchTip(m *WorktreeManager, projectPath, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(tip)
+}
+
+func chainBranchTip(m *WorktreeManager, projectPath, key string) string {
+	if m == nil {
+		return ""
+	}
+	return chainBranchTipOf(projectPath, m.branchName(key))
+}
+
+// resolveChainBranch returns the branch chain completion must integrate,
+// in priority order, each fallback logged loudly:
+//  1. the branch RECORDED at chain-worktree creation (ChainInfo.WorktreeBranch) —
+//     the only name guaranteed correct when WorktreeManager versioned the
+//     branch (hydra/wt-<key>-vN, webapp-tc5 incident);
+//  2. exact hydra/wt-<key>;
+//  3. newest hydra/wt-<key>-vN by N.
+//
+// Returns "" only when none exist — a genuinely absent worktree, which the
+// caller must report as a typed skip (chain_integration_unverified), never
+// a silent success.
+func resolveChainBranch(m *WorktreeManager, projectPath, key, recorded string) string {
+	if recorded != "" {
+		return recorded
+	}
+	exact := m.branchName(key)
+	if branchExists(projectPath, exact) {
+		return exact
+	}
+	if newest := newestVersionedBranch(m, projectPath, key); newest != "" {
+		log.Printf("[Worktree] chain %s: no exact branch %s — fell back to versioned branch %s (recorded key missing; reconcile the registrar path)", key, exact, newest)
+		return newest
+	}
+	return ""
 }
 
 // ChainCompletionInitializer creates and configures the chain completion detector.
@@ -56,6 +88,9 @@ func (i *ChainCompletionInitializer) Initialize() {
 
 	o.chainCompletionDetector = NewChainCompletionDetector(config, o)
 	o.chainCompletionDetector.Start()
+	if o.workerSpawner != nil {
+		o.workerSpawner.SetChainCompletionDetector(o.chainCompletionDetector)
+	}
 
 	extractor := NewChainPatternExtractor(
 		o,
@@ -101,8 +136,13 @@ func (i *ChainCompletionInitializer) Initialize() {
 		if o.worktreeManager == nil {
 			log.Printf("[Overseer] chain %s: worktree manager unavailable, integrate skipped", key)
 		} else if projectPath != "" {
+			// Resolve the REAL branch (recorded key first, then exact, then
+			// newest -vN): silent branch versioning means the branch to merge
+			// is not necessarily hydra/wt-<key> (webapp-tc5 stranded 1,642
+			// insertions this way, 2026-09-16).
+			branch := resolveChainBranch(o.worktreeManager, projectPath, key, event.ChainInfo.WorktreeBranch)
 			if o.chainCompletionDetector != nil && o.chainCompletionDetector.ChainHasFailedBeads(event.ChainInfo.AllBeadIDs) {
-				if qBranch, qErr := o.worktreeManager.QuarantineAndRemove(projectPath, key); qErr != nil {
+				if qBranch, qErr := o.worktreeManager.QuarantineBranchAndRemove(projectPath, key, branch); qErr != nil {
 					log.Printf("[Worktree] quarantine failed for chain %s: %v", event.ChainInfo.RootBeadID, qErr)
 				} else if qBranch != "" {
 					log.Printf("[Worktree] quarantined failed chain %s on %s (not integrated)", event.ChainInfo.RootBeadID, qBranch)
@@ -121,10 +161,15 @@ func (i *ChainCompletionInitializer) Initialize() {
 				// so an empty tip is a skip with reason, and a captured tip lets
 				// us verify after teardown that the merge actually landed
 				// (closed != landed detector).
-				tip := chainBranchTip(o.worktreeManager, projectPath, key)
+				tip := chainBranchTipOf(projectPath, branch)
 				if tip == "" {
 					log.Printf("[Worktree] chain %s: SKIPPING integrate in %s — no worktree or hydra/wt branch (nothing to integrate)", key, projectPath)
-				} else if err := o.worktreeManager.IntegrateAndRemove(projectPath, key); err != nil {
+					if o.beadCloser != nil && o.beadCloser.events != nil {
+						o.beadCloser.events.EmitRepo(projectPath, Event{Type: "chain_integration_unverified",
+							Bead: key, Reason: "no_worktree_or_branch_after_resolution",
+							Fields: map[string]any{"resolved_branch": branch}})
+					}
+				} else if err := o.worktreeManager.IntegrateBranchAndRemove(projectPath, key, branch); err != nil {
 					log.Printf("[Worktree] integrate failed for chain %s: %v", event.ChainInfo.RootBeadID, err)
 				} else if isAncestorOf(projectPath, tip, "HEAD") {
 					log.Printf("[Worktree] integrated chain %s into %s", key, projectPath)

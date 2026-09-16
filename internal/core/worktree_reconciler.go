@@ -45,7 +45,17 @@ func ReconcileOrphanedWorktrees(m *WorktreeManager, projectPath string, activeKe
 			continue
 		}
 
+		// Versioned-key normalization (webapp-tc5 incident, 2026-09-16): a
+		// silently versioned branch is hydra/wt-<key>-vN, so the raw suffix
+		// here is "<key>-vN" — but the bead, the registry rows, the active-key
+		// set, and the worktree DIRECTORY all still key it as <key>. Matching
+		// isTerminal/activeKeys on the raw suffix misses every one of them and
+		// the versioned worktree was skipped forever while its chain sat
+		// completed. The merge itself still uses the real branch name.
 		key := strings.TrimPrefix(branch, "hydra/wt-")
+		if base, versioned := splitVersionedKey(key); versioned {
+			key = base
+		}
 		if activeKeys[key] {
 			continue
 		}
@@ -61,11 +71,11 @@ func ReconcileOrphanedWorktrees(m *WorktreeManager, projectPath string, activeKe
 			continue
 		}
 
-		if err := m.IntegrateAndRemove(projectPath, key); err != nil {
+		if err := m.IntegrateBranchAndRemove(projectPath, key, branch); err != nil {
 			// Terminal + conflict: preserve the work on a quarantine branch
 			// and consume the wt branch — the alternative is retrying the
 			// same failing merge every sweep forever.
-			if qb, qerr := m.QuarantineAndRemove(projectPath, key); qerr != nil {
+			if qb, qerr := m.QuarantineBranchAndRemove(projectPath, key, branch); qerr != nil {
 				log.Printf("[WorktreeReconcile] %s: integrate failed (%v); quarantine failed (%v)", key, err, qerr)
 			} else {
 				log.Printf("[WorktreeReconcile] %s: integrate conflicted — quarantined to %s (work preserved, retry loop ends)", key, qb)

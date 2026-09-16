@@ -35,6 +35,9 @@ type WorkerSpawner struct {
 	chainKeyFn           func(types.Bead) string // maps a bead to its chain's worktree key
 	registryStore        *registry.Store         // daemon-owned source of worker truth
 	parkedRespawnTimeout time.Duration           // parked rows older than this may be respawned
+	// Records each chain's REAL worktree branch (possibly -vN versioned) at
+	// chain-worktree creation, so completion integrates the branch that exists.
+	chainCompletionDetector *ChainCompletionDetector
 
 	spawnFailureMu sync.RWMutex
 	spawnFailures  map[string]*spawnFailureInfo // bead ID -> last spawn failure
@@ -57,6 +60,12 @@ type SpawnSuppressedError struct {
 
 func (e *SpawnSuppressedError) Error() string {
 	return fmt.Sprintf("spawn suppressed: bead %s is already terminal (%s)", e.BeadID, e.Status)
+}
+
+// SetChainCompletionDetector lets the spawner record each chain's REAL
+// worktree branch (possibly a -vN versioned name) at chain-worktree creation.
+func (s *WorkerSpawner) SetChainCompletionDetector(d *ChainCompletionDetector) {
+	s.chainCompletionDetector = d
 }
 
 // SetWorktreeManager enables per-chain worktree isolation for spawned workers.
@@ -414,6 +423,13 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 				log.Printf("[Worktree] bead %s: reused worktree %s", bead.ID, wt)
 			} else {
 				log.Printf("[Worktree] bead %s: created worktree %s", bead.ID, wt)
+			}
+			// Record the REAL branch name on the chain. WorktreeManager versions
+			// stale branches to hydra/wt-<key>-vN; chain completion must integrate
+			// the branch that actually exists, not the one re-derived from the key
+			// (webapp-tc5: 1,642 insertions stranded, 2026-09-16).
+			if s.chainCompletionDetector != nil {
+				s.chainCompletionDetector.RecordChainWorktree(key, s.worktreeManager.ResolveBranch(projectPath, key))
 			}
 			// Fail-early dependency gate (bead hydra-code-jwrh): never spawn a
 			// worker into an environment it cannot succeed in. A preflight

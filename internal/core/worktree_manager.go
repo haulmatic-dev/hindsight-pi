@@ -51,6 +51,75 @@ func sanitizeKey(key string) string {
 
 func (m *WorktreeManager) branchName(key string) string { return "hydra/wt-" + sanitizeKey(key) }
 
+// versionedKeySuffix is the branch-name suffix a versioned worktree branch
+// carries: hydra/wt-<key>-v2, -v3, ... (webapp-tc5 incident, 2026-09-16).
+const versionedKeySuffix = "-v"
+
+// splitVersionedKey strips a -vN version suffix from a worktree key, returning
+// the base key the bead and worktree directory actually use. "webapp-tc5-v2"
+// is branch-name residue of key "webapp-tc5" — the bead, the worktree dir,
+// and every registry row still key it as "webapp-tc5". Returns ("", false)
+// when no version suffix is present.
+func splitVersionedKey(key string) (string, bool) {
+	i := strings.LastIndex(key, versionedKeySuffix)
+	if i < 0 {
+		return "", false
+	}
+	suffix := key[i+len(versionedKeySuffix):]
+	if suffix == "" {
+		return "", false
+	}
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	if n, err := strconv.Atoi(suffix); err != nil || n < 2 {
+		return "", false
+	}
+	return key[:i], true
+}
+
+// newestVersionedBranch returns the highest-numbered existing
+// hydra/wt-<key>-vN branch, or "" when none exists. Used as the recorded-key
+// fallback at chain completion: the versioned branch that was current when
+// the chain finished is the newest one.
+func newestVersionedBranch(m *WorktreeManager, projectPath, key string) string {
+	prefix := m.branchName(key) + versionedKeySuffix
+	out, err := gitOut(projectPath, "for-each-ref", "--format=%(refname:short)", "refs/heads/"+prefix+"*")
+	if err != nil {
+		return ""
+	}
+	best, bestN := "", 0
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		if n, err := strconv.Atoi(strings.TrimPrefix(line, prefix)); err == nil && n > bestN {
+			best, bestN = line, n
+		}
+	}
+	return best
+}
+
+// ResolveBranch returns the branch actually checked out in the key's
+// worktree, or the key's canonical branch when no worktree exists. This is
+// the recorded-key contract: after EnsureWorktree, ResolveBranch names the
+// REAL branch (which may be a -vN versioned one), not the name a downstream
+// consumer would guess from the key alone.
+func (m *WorktreeManager) ResolveBranch(projectPath, key string) string {
+	wtPath := m.worktreePath(projectPath, key)
+	if isGitWorktree(wtPath) {
+		if out, err := gitOut(wtPath, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
+			if b := strings.TrimSpace(out); b != "HEAD" {
+				return b
+			}
+		}
+	}
+	return m.branchName(key)
+}
+
 // WorktreeRecentlyActive reports whether the worktree for key has any write
 // newer than floor (directory itself or any file, skipping dependency/build
 // trees). A missing directory returns false — there is nothing to protect.
@@ -251,7 +320,7 @@ func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error
 	// verified-close rejected empty-diff, beads wrongfully escalated).
 	reattachedTip, terr := gitOut(wtPath, "rev-parse", "HEAD")
 	if terr == nil && !isAncestorOf(projectPath, strings.TrimSpace(reattachedTip), "HEAD") {
-		log.Printf("[Worktree] keeping %s: unintegrated commits at %s (post-add reset skipped)", wtPath, strings.TrimSpace(reattachedTip))
+		log.Printf("[Worktree] keeping %s: unintegrated commits at %s (post-add reset skipped); branch %s stays the chain's identity — downstream lookups must use the recorded key", wtPath, strings.TrimSpace(reattachedTip), branch)
 		return wtPath, nil
 	}
 	if err := resetWorktree(wtPath, base); err != nil {
@@ -320,11 +389,17 @@ func (m *WorktreeManager) Commit(worktreePath, message string) (bool, error) {
 // a success — the exact swallow that logged "integrated singleton" while no
 // merge commit existed (hydra-xnx, 2026-09-06).
 func (m *WorktreeManager) Integrate(projectPath, key string) error {
+	return m.IntegrateBranch(projectPath, key, m.branchName(key))
+}
+
+// IntegrateBranch is Integrate with an explicit branch name: the branch to
+// merge is the RECORDED one (possibly a -vN versioned name), while the
+// worktree directory and teardown key stay the caller's key.
+func (m *WorktreeManager) IntegrateBranch(projectPath, key, branch string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	wtPath := m.worktreePath(projectPath, key)
-	branch := m.branchName(key)
 	if !isGitWorktree(wtPath) && !branchExists(projectPath, branch) {
 		return nil // nothing to integrate
 	}
@@ -372,20 +447,29 @@ merged:
 // singleton close path uses Integrate + Remove so a rejected push still
 // finds the worktree present.
 func (m *WorktreeManager) IntegrateAndRemove(projectPath, key string) error {
-	if err := m.Integrate(projectPath, key); err != nil {
+	return m.IntegrateBranchAndRemove(projectPath, key, m.branchName(key))
+}
+
+// IntegrateBranchAndRemove is IntegrateAndRemove with an explicit branch
+// name — the recorded-key path for versioned worktree branches.
+func (m *WorktreeManager) IntegrateBranchAndRemove(projectPath, key, branch string) error {
+	if err := m.IntegrateBranch(projectPath, key, branch); err != nil {
 		return err
 	}
-	m.removeWorktreeAndBranch(projectPath, key)
+	m.removeWorktreeAndBranchName(projectPath, key, branch)
 	return nil
 }
 
 // removeWorktreeAndBranch tears down a chain's worktree + branch. Called by
 // IntegrateAndRemove and Remove after their respective gates pass.
 func (m *WorktreeManager) removeWorktreeAndBranch(projectPath, key string) {
+	m.removeWorktreeAndBranchName(projectPath, key, m.branchName(key))
+}
+
+func (m *WorktreeManager) removeWorktreeAndBranchName(projectPath, key, branch string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	wtPath := m.worktreePath(projectPath, key)
-	branch := m.branchName(key)
 	if isGitWorktree(wtPath) {
 		_, _ = gitOut(projectPath, "worktree", "remove", wtPath, "--force")
 	}
@@ -418,11 +502,16 @@ func beadsOnlyConflict(projectPath string) bool {
 // work is kept on hydra/quarantine/<key> for inspection instead of deleted,
 // because the fix bead that retries the work may want the diff.
 func (m *WorktreeManager) QuarantineAndRemove(projectPath, key string) (string, error) {
+	return m.QuarantineBranchAndRemove(projectPath, key, m.branchName(key))
+}
+
+// QuarantineBranchAndRemove is QuarantineAndRemove with an explicit branch
+// name — the recorded-key path for versioned worktree branches.
+func (m *WorktreeManager) QuarantineBranchAndRemove(projectPath, key, branch string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	wtPath := m.worktreePath(projectPath, key)
-	branch := m.branchName(key)
 	if !isGitWorktree(wtPath) && !branchExists(projectPath, branch) {
 		return "", nil // nothing to quarantine
 	}
