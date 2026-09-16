@@ -87,6 +87,14 @@ type Config struct {
 	// these with registry-derived candidates. Nil means "none" and is fail-open.
 	BlockedBeads BlockedBeadsFunc
 
+	// DigestFunc returns the daemon-collected fleet health digest: Pan's eyes.
+	// Called every tick (cheap). Projects carrying anomaly flags become
+	// "<key>-campaign-anomaly" pseudo-candidates, so fleet-level trouble wakes
+	// Pan even when no bead-level candidate class fires — the 2026-09-13→16
+	// silence, where three days of campaign anomalies produced zero candidates
+	// because every provider class is failure-residue only. Nil disables.
+	DigestFunc func() HealthDigest
+
 	// Pan's own pi identity. Its provider MUST be configurable separately
 	// from the worker fleet's: Pan has to stay lucid during the congestion
 	// storms it manages. APIKeyName names the env var holding its key.
@@ -150,6 +158,8 @@ var repairWhitelist = map[string]bool{
 	"clear-hard-park":             true,
 	"prune-worktree-registration": true,
 	"re-push-integration":         true,
+	"park-campaign":               true,
+	"log-improvement":             true,
 }
 
 // pseudoBeadSuffix marks synthetic project-level candidates (e.g.
@@ -169,6 +179,8 @@ var reJudgeInterval = 15 * time.Minute
 var projectScopedRepairs = map[string]bool{
 	"prune-worktree-registration": true,
 	"re-push-integration":         true,
+	"park-campaign":               true,
+	"log-improvement":             true,
 }
 
 // isAllowedAction returns true for known worker command kinds and for
@@ -401,6 +413,9 @@ type Shepherd struct {
 	// RepairHandlers maps "<name>" → handler for "repair:<name>" verdicts.
 	// Optional; nil means all repair actions are rejected.
 	RepairHandlers map[string]func(beadID string) error
+	// LogImprovement persists repair:log-improvement verdicts as improvement
+	// proposals for human review (beadID, decision reason). Optional.
+	LogImprovement func(beadID, text string) error
 	// OnRepairEvent is called after a repair handler runs. If nil, Pan logs
 	// the event with log.Printf. Optional; used by tests to capture events.
 	OnRepairEvent func(beadID, action, result, detail string)
@@ -486,6 +501,12 @@ func (s *Shepherd) SetOnCloseSatisfied(fn func(beadID string) error) {
 // SetOnAbandonWithSummary injects the optional daemon-side abandon handler.
 func (s *Shepherd) SetOnAbandonWithSummary(fn func(beadID string) error) {
 	s.OnAbandonWithSummary = fn
+}
+
+// SetLogImprovement injects the improvement sink for repair:log-improvement
+// verdicts. Nil sink → the verdict is rejected with an audit event.
+func (s *Shepherd) SetLogImprovement(fn func(beadID, text string) error) {
+	s.LogImprovement = fn
 }
 
 // SetRepairHandlers injects the repair handler map. The map is copied so the
@@ -609,7 +630,7 @@ func (s *Shepherd) Tick(ctx context.Context) {
 		// Daemon-side repair verdict: execute whitelisted handler, do not
 		// enqueue a worker command.
 		if name, ok := parseRepairName(d.Action); ok {
-			s.handleRepair(d.BeadID, name)
+			s.handleRepair(d.BeadID, name, d.Message)
 			repaired++
 			continue
 		}
@@ -619,7 +640,7 @@ func (s *Shepherd) Tick(ctx context.Context) {
 		// to consume it (observed 2026-09-14: Pan abandoned
 		// webapp-push-pending every tick; each abandon failed and the
 		// judgment repeated forever). Repairs above already passed through.
-		if strings.HasSuffix(d.BeadID, pseudoBeadSuffix) {
+		if IsPseudoBeadID(d.BeadID) {
 			log.Printf("[Pan] ignoring %s for pseudo-bead %s (project-level signal; repair-only)", d.Action, d.BeadID)
 			continue
 		}
@@ -745,6 +766,86 @@ func (s *Shepherd) Tick(ctx context.Context) {
 
 // handleRepair executes a whitelisted repair handler for a blocked bead.
 // It is fail-open: errors are logged and emitted as audit events only.
+// reason carries the decision's justification; log-improvement persists it
+// as the improvement text, other handlers ignore it.
+func (s *Shepherd) handleRepair(beadID, name, reason string) {
+	// log-improvement is a pure observation sink: no live-worker refusal
+	// (the whole point is reporting on live situations) and no handler map —
+	// the shepherd writes the improvement line itself.
+	if name == "log-improvement" {
+		s.handleLogImprovement(beadID, reason)
+		return
+	}
+	// Safety gate: never repair a bead that still has a live worker row.
+	if s.hasLiveWorker(beadID) {
+		s.emitRepairEvent(beadID, name, "error", "refused: bead has a live worker row")
+		log.Printf("[Pan] repair %s for %s refused: live worker row exists", name, beadID)
+		return
+	}
+	// Rate limit: per-bead hourly; project-scoped repairs share a project key.
+	if ok, remaining := s.canRepair(beadID, name); !ok {
+		detail := fmt.Sprintf("rate limited: %v until next repair", remaining)
+		s.emitRepairEvent(beadID, name, "error", detail)
+		log.Printf("[Pan] repair %s for %s rate limited (%v remaining)", name, beadID, remaining)
+		return
+	}
+	// Efficacy gate: refuse after maxConsecutiveRepairs attempts on the same
+	// (action, scope, normalized reason). The wedge that spams repairs never
+	// gets fixed by the 4th identical attempt either — classify human-only.
+	if key := s.repairEfficacyKey(beadID, name); !s.noteRepairAttempt(key) {
+		detail := "ineffective: same repair attempted " + itoa(maxConsecutiveRepairs) + "+ times without the condition changing; human-only"
+		s.emitRepairEvent(beadID, name, "refused", detail)
+		log.Printf("[Pan] repair %s for %s refused (ineffective — condition unchanged across %d attempts)", name, beadID, maxConsecutiveRepairs)
+		return
+	}
+
+	handler, ok := s.RepairHandlers[name]
+	if !ok || handler == nil {
+		s.emitRepairEvent(beadID, name, "error", "unknown repair handler")
+		log.Printf("[Pan] repair %s for %s rejected: no handler configured", name, beadID)
+		return
+	}
+
+	if err := handler(beadID); err != nil {
+		s.recordRepair(beadID, name, err)
+		s.emitRepairEvent(beadID, name, "error", err.Error())
+		log.Printf("[Pan] repair %s for %s failed: %v", name, beadID, err)
+		return
+	}
+	s.recordRepair(beadID, name, nil)
+	s.emitRepairEvent(beadID, name, "ok", "")
+	log.Printf("[Pan] repair %s for %s succeeded", name, beadID)
+}
+
+// handleLogImprovement persists a Pan observation as an improvement
+// proposal. Proposals, never self-modification: a human reviews the log and
+// decides what becomes a bead. Rate-limited like any repair so a repeating
+// observation cannot spam the log.
+func (s *Shepherd) handleLogImprovement(beadID, text string) {
+	if ok, remaining := s.canRepair(beadID, "log-improvement"); !ok {
+		log.Printf("[Pan] log-improvement for %s rate limited (%v remaining)", beadID, remaining)
+		return
+	}
+	if s.LogImprovement == nil {
+		s.emitRepairEvent(beadID, "log-improvement", "error", "no improvement sink configured")
+		return
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		s.emitRepairEvent(beadID, "log-improvement", "error", "empty improvement text")
+		return
+	}
+	if err := s.LogImprovement(beadID, text); err != nil {
+		s.recordRepair(beadID, "log-improvement", err)
+		s.emitRepairEvent(beadID, "log-improvement", "error", err.Error())
+		log.Printf("[Pan] log-improvement for %s failed: %v", beadID, err)
+		return
+	}
+	s.recordRepair(beadID, "log-improvement", nil)
+	s.emitRepairEvent(beadID, "log-improvement", "ok", "")
+	log.Printf("[Pan] improvement logged for %s", beadID)
+}
+
 // repairEfficacyKey builds the (action, scope, normalized reason) identity
 // for efficacy counting. Scope is the project for project-scoped repairs
 // (a shared wedge counts collectively), the bead otherwise. Reason is the
@@ -785,48 +886,6 @@ func (s *Shepherd) noteRepairAttempt(key string) bool {
 	}
 	s.repairEfficacy[key]++
 	return true
-}
-
-func (s *Shepherd) handleRepair(beadID, name string) {
-	// Safety gate: never repair a bead that still has a live worker row.
-	if s.hasLiveWorker(beadID) {
-		s.emitRepairEvent(beadID, name, "error", "refused: bead has a live worker row")
-		log.Printf("[Pan] repair %s for %s refused: live worker row exists", name, beadID)
-		return
-	}
-	// Rate limit: per-bead hourly; project-scoped repairs share a project key.
-	if ok, remaining := s.canRepair(beadID, name); !ok {
-		detail := fmt.Sprintf("rate limited: %v until next repair", remaining)
-		s.emitRepairEvent(beadID, name, "error", detail)
-		log.Printf("[Pan] repair %s for %s rate limited (%v remaining)", name, beadID, remaining)
-		return
-	}
-	// Efficacy gate: refuse after maxConsecutiveRepairs attempts on the same
-	// (action, scope, normalized reason). The wedge that spams repairs never
-	// gets fixed by the 4th identical attempt either — classify human-only.
-	if key := s.repairEfficacyKey(beadID, name); !s.noteRepairAttempt(key) {
-		detail := "ineffective: same repair attempted " + itoa(maxConsecutiveRepairs) + "+ times without the condition changing; human-only"
-		s.emitRepairEvent(beadID, name, "refused", detail)
-		log.Printf("[Pan] repair %s for %s refused (ineffective — condition unchanged across %d attempts)", name, beadID, maxConsecutiveRepairs)
-		return
-	}
-
-	handler, ok := s.RepairHandlers[name]
-	if !ok || handler == nil {
-		s.emitRepairEvent(beadID, name, "error", "unknown repair handler")
-		log.Printf("[Pan] repair %s for %s rejected: no handler configured", name, beadID)
-		return
-	}
-
-	if err := handler(beadID); err != nil {
-		s.recordRepair(beadID, name, err)
-		s.emitRepairEvent(beadID, name, "error", err.Error())
-		log.Printf("[Pan] repair %s for %s failed: %v", name, beadID, err)
-		return
-	}
-	s.recordRepair(beadID, name, nil)
-	s.emitRepairEvent(beadID, name, "ok", "")
-	log.Printf("[Pan] repair %s for %s succeeded", name, beadID)
 }
 
 // Candidates returns the ambiguous tail: parked-overdue, hung,
@@ -901,7 +960,7 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 			if !strings.HasPrefix(reason, "BLOCKED: ") {
 				reason = "BLOCKED: " + reason
 			}
-			if strings.HasSuffix(b.BeadID, pseudoBeadSuffix) && !s.shouldPresentPseudo(b.BeadID, reason) {
+			if IsPseudoBeadID(b.BeadID) && !s.shouldPresentPseudo(b.BeadID, reason) {
 				continue
 			}
 			if !b.Since.IsZero() {
@@ -909,6 +968,27 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 			}
 			out = append(out, Candidate{
 				Record: registry.WorkerRecord{BeadID: b.BeadID},
+				Reason: reason,
+			})
+		}
+	}
+
+	// Fleet health digest: Pan's eyes. Projects carrying anomaly flags become
+	// campaign-anomaly pseudo-candidates even when no bead-level class fires —
+	// the fix for the 2026-09-13→16 silence, where gate execution, close
+	// loops, and stranded worktrees produced zero candidates for three days
+	// because every other provider class is failure-residue only.
+	if s.cfg.DigestFunc != nil {
+		digest := s.cfg.DigestFunc()
+		text := digest.Text()
+		for _, ph := range digest.Anomalous() {
+			id := CampaignAnomalyID(ph.Key)
+			reason := "CAMPAIGN-ANOMALY: " + strings.Join(ph.Anomalies, "; ") + " | fleet digest: " + text
+			if !s.shouldPresentPseudo(id, reason) {
+				continue
+			}
+			out = append(out, Candidate{
+				Record: registry.WorkerRecord{BeadID: id},
 				Reason: reason,
 			})
 		}
@@ -1019,7 +1099,7 @@ needs a judgment call. For EVERY worker decide exactly one action:
 - "compact-and-continue": session context is exhausted; compact then continue
 - "abandon-with-summary": give up gracefully (payload: what was done and what remains)
 - "close_satisfied": the bead's acceptance criteria are already met on the working branch and the worker found nothing to do; close it without a worker
-- "repair:<name>": execute a whitelisted daemon-side repair (payload: ignored). Only for BLOCKED beads with no live worker row. The only valid repair names are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park, prune-worktree-registration, re-push-integration. No other repair:<name> strings exist; if none fit, choose continue or abandon-with-summary.
+- "repair:<name>": execute a whitelisted daemon-side repair (payload: for log-improvement, the improvement text; ignored otherwise). Only for BLOCKED beads with no live worker row. The only valid repair names are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park, prune-worktree-registration, re-push-integration, park-campaign, log-improvement. No other repair:<name> strings exist; if none fit, choose continue or abandon-with-summary.
 
 Rescue recipes (hard-won; prefer the repair matching the cause):
 - Hard-park labels (worktree-unavailable, integration-exhausted) are durable by design — the scheduler never retries them. Use repair:clear-hard-park when the named cause is plausibly fixed or transient (worktree directory exists, store parses clean, push path repaired). Do not clear a park whose cause is still present.
@@ -1028,6 +1108,7 @@ Rescue recipes (hard-won; prefer the repair matching the cause):
 - repair:repair-bead-store restores a corrupted issues.jsonl from the newest clean backup; pick it when the reason mentions conflict markers or parse errors.
 - PUSH-PENDING candidates mean commits exist locally but not on origin. Prefer repair:re-push-integration once; if the reason is branch protection or permissions and a retry already failed, that is a human problem — say so in reasoning instead of looping repairs.
 - Candidates ending in -push-pending are project-level pseudo-beads, not beads: never abandon-with-summary or close_satisfied them — only repair:re-push-integration applies. If the reason is divergence or permissions, it is a human problem; say so in reasoning and move on.
+- Candidates ending in -campaign-anomaly are fleet-level findings from the health digest (their reason carries the anomaly and a compact fleet snapshot). Only two verbs apply: repair:park-campaign to freeze that project's campaign behind a hold gate (reversible; the default for chain-discipline violations), and repair:log-improvement to record a hydra improvement proposal for human review (payload = the proposal). Never abandon or close them. Prefer log-improvement when the right fix is a hydra code change rather than a containment.
 - Never repair for merges, PRs, deploys, or repo content edits — those are human-only; if the state needs one, explain it in reasoning.
 
 Rules:

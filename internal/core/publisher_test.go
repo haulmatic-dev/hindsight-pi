@@ -130,6 +130,10 @@ func (m *autoPRFakeBeadsClient) UpdateBeadDescription(projectPath, repoName stri
 	return nil
 }
 
+func (m *autoPRFakeBeadsClient) AddDependency(projectPath, repoName string, beadID, dependsOn types.BeadID) error {
+	return nil
+}
+
 type autoPRFakeExec struct {
 	pushes   []autoPRPushArgs
 	lsRemote []autoPRLsArgs

@@ -171,6 +171,8 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				}
 				return blocked
 			},
+			// Fleet health digest: Pan's eyes (see collectHealthDigest).
+			DigestFunc: o.collectHealthDigest,
 		}, o.registryStore, nil)
 
 		// Resolve project path for a bead ID using the configured projects.
@@ -372,7 +374,9 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				}
 				return fmt.Errorf("re-push-integration: no project named %s", name)
 			},
+			"park-campaign": o.parkCampaignRepair,
 		})
+		o.panShepherd.SetLogImprovement(o.logImprovementRepair)
 
 		// Project-scoped repairs (prune, re-push) rate-limit per project path;
 		// the pseudo-bead form "<project>-push-pending" resolves by name.
