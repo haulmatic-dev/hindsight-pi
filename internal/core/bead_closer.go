@@ -12,7 +12,7 @@ import (
 // BeadCloser closes beads via beadsClient based on worker completion status.
 type BeadCloser struct {
 	sessionMu         sync.Mutex
-	sessionBase       map[string]string    // bead ID -> branch HEAD commit recorded at spawn; close-time committed evidence starts here
+	sessionBase       map[string]string // bead ID -> branch HEAD commit recorded at spawn; close-time committed evidence starts here
 	integMu           sync.Mutex
 	integFails        map[string]int       // bead ID -> consecutive integrate/push failures (reset on success; in-memory like other caps)
 	sourceIndex       *BeadProvenanceIndex // nil-safe; bead->store provenance
@@ -597,7 +597,10 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 		AppendActivity(projectPath, string(bead.ID), "landed via PR")
 		return nil
 	}
-	pushed, reason := PushBranch(projectPath, remote, branch)
+	// Non-FF recovery (fetch + merge + one retry) handles the common
+	// divergence case where local is behind origin because a PR merged out
+	// of band — the hydra-7k1 2026-09-16 stranding.
+	pushed, reason := PushBranchWithNonFFRecovery(projectPath, remote, branch)
 	if pushed {
 		// Logged only after PushBranch's ls-remote verification confirmed the
 		// remote ref matches the local head — never on command exit alone.
@@ -823,6 +826,36 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 					} else if hasTargetChanges(mainChanged, targets) {
 						alreadyIntegrated = true
 						log.Printf("[VerifiedClose] %s targets already integrated on %s; treating as satisfied", bead.ID, baseBranch)
+					}
+				}
+			}
+
+			// Hydra-7k1 2026-09-16: the singleton integrate step merged the
+			// worktree branch into the main checkout and THEN the push was
+			// rejected (non-fast-forward), reopening the bead. From then on the
+			// worktree diff was empty (HEAD is contained in the main checkout via
+			// the merge) while the branch-name checks above could not run at all —
+			// the branch was already deleted, so chainBranch was empty and the
+			// whole block was skipped — so every re-close died empty-diff and the
+			// bead escalated after 3 rounds. The durable test is commit-level and
+			// runs whenever we are inspecting a worktree, branch name or not:
+			// worktree and main checkout share an object database, so worktree
+			// HEAD is resolvable in the main repo and
+			// `merge-base --is-ancestor <sha> HEAD` answers "is the work landed".
+			if !alreadyIntegrated {
+				if headOut, herr := gitOut(repoPath, "rev-parse", "HEAD"); herr == nil {
+					head := strings.TrimSpace(headOut)
+					if head != "" {
+						if isAncestor, aerr := commitIsAncestorOfMain(projectPath, head); aerr != nil {
+							log.Printf("[VerifiedClose] commit-ancestry check failed for %s (not blocking): %v", bead.ID, aerr)
+						} else if isAncestor {
+							alreadyIntegrated = true
+							log.Printf("[VerifiedClose] %s worktree HEAD %s is ancestor of main HEAD (locally integrated, push pending); treating as satisfied", bead.ID, head)
+							c.events.EmitRepo(projectPath, Event{Type: "close-accepted-already-integrated", Project: repoName,
+								Bead: string(bead.ID), Reason: "worktree_head_ancestor_of_main",
+								Detail: fmt.Sprintf("worktree HEAD %s contained in main HEAD; original push failure left origin behind — publisher will land it", head)})
+							AppendActivity(projectPath, string(bead.ID), "close-accepted: work already integrated locally (push pending)")
+						}
 					}
 				}
 			}

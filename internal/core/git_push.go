@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 )
@@ -63,7 +64,8 @@ func redactToken(text, token string) string {
 // remoteSHA) on mismatch or error. The comparison uses ls-remote so it does not
 // trust the local remote-tracking ref, which can be updated even when the
 // remote silently ignores the push.
-func verifyRemoteHead(repoPath, remote, branch string) (bool, string, string) {	localOut, err := gitOut(repoPath, "rev-parse", "--verify", "refs/heads/"+branch)
+func verifyRemoteHead(repoPath, remote, branch string) (bool, string, string) {
+	localOut, err := gitOut(repoPath, "rev-parse", "--verify", "refs/heads/"+branch)
 	if err != nil {
 		return false, "", ""
 	}
@@ -94,7 +96,45 @@ func IsProtectedBranchRejection(reason string) bool {
 		strings.Contains(lower, "gh006") ||
 		strings.Contains(lower, "pre-receive hook declined") ||
 		strings.Contains(lower, "remote rejected") ||
-		strings.Contains(lower, "changes must be made through a pull request")
+		strings.Contains(lower, "changes must be made through a pull request") ||
+		// Non-fast-forward: the remote diverged (another pusher, or a
+		// protected branch's own merge queue). Hydra-7k1 2026-09-16: local
+		// development was ahead with unpushed integrates AND behind origin
+		// (PR #253 merged out of band), the push died "(non-fast-forward)",
+		// this classifier missed it, no auto-PR opened, and the bead
+		// reopened into an empty-diff loop. The doc comment above already
+		// promised this coverage; the implementation did not deliver it.
+		strings.Contains(lower, "non-fast-forward") ||
+		strings.Contains(lower, "fetch first")
+}
+
+// PushBranchWithNonFFRecovery is PushBranch with one non-fast-forward
+// recovery round: when the remote branch has diverged from local (integrates
+// that landed out of band, another daemon pushing the same working branch),
+// fetch the remote tip and merge it (--no-edit) so local again contains the
+// remote tip, then retry the push once. A merge is used rather than a rebase
+// because the working branch carries --no-ff "hydra: integrate …" merge
+// commits that a rebase would flatten. A conflicting merge is aborted and the
+// original push-failure reason is returned verbatim so callers can still
+// route it (auto-PR, fail-closed reopen). Any non-non-FF failure, or a
+// missing remote ref, passes straight through unchanged.
+func PushBranchWithNonFFRecovery(repoPath, remote, branch string) (bool, string) {
+	pushed, reason := PushBranch(repoPath, remote, branch)
+	if pushed || !IsProtectedBranchRejection(reason) || !strings.Contains(strings.ToLower(reason), "non-fast-forward") {
+		return pushed, reason
+	}
+	if _, err := gitOut(repoPath, "fetch", remote, branch); err != nil {
+		log.Printf("[Push] non-FF recovery fetch %s/%s failed (not blocking): %v", remote, branch, err)
+		return pushed, reason
+	}
+	if _, err := gitOut(repoPath, "merge", "--no-edit", "FETCH_HEAD"); err != nil {
+		// Conflicting or otherwise unmergeable remote tip: restore the
+		// pre-merge state and report the original push failure.
+		_, _ = gitOut(repoPath, "merge", "--abort")
+		log.Printf("[Push] non-FF recovery merge of %s/%s failed (not blocking): %v", remote, branch, err)
+		return pushed, reason
+	}
+	return PushBranch(repoPath, remote, branch)
 }
 
 // PushBranchWithToken pushes branch from repoPath to the repo's origin,

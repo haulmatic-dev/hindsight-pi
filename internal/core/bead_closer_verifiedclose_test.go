@@ -632,7 +632,7 @@ func TestVerifyBeforeClose_PartialIntegrationLFAFallback(t *testing.T) {
 // have an upstream in production).
 func withOriginSelfRemote(t *testing.T, repo string) {
 	t.Helper()
-	branch := strings.TrimSpace(gitTestOut(t, repo, "rev-parse", "--abbrev-ref", "HEAD"))
+	branch := strings.TrimSpace(vcGitOut(t, repo, "rev-parse", "--abbrev-ref", "HEAD"))
 	gitTestRun(t, repo, "remote", "add", "origin", repo)
 	gitTestRun(t, repo, "fetch", "origin", branch)
 	gitTestRun(t, repo, "branch", "--set-upstream-to=origin/"+branch, branch)
@@ -646,7 +646,7 @@ func gitTestRun(t *testing.T, repo string, args ...string) {
 	}
 }
 
-func gitTestOut(t *testing.T, repo string, args ...string) string {
+func vcGitOut(t *testing.T, repo string, args ...string) string {
 	t.Helper()
 	cmd := append([]string{"git", "-C", repo}, args...)
 	out, err := exec.Command(cmd[0], cmd[1:]...).Output()
@@ -757,5 +757,92 @@ func TestVerifyBeforeClose_MainCheckoutPreExistingCommitsRejected(t *testing.T) 
 
 func sessionBaseCommit(t *testing.T, repo string) string {
 	t.Helper()
-	return strings.TrimSpace(gitTestOut(t, repo, "rev-parse", "HEAD"))
+	return strings.TrimSpace(vcGitOut(t, repo, "rev-parse", "HEAD"))
+}
+
+// TestVerifyBeforeClose_AlreadyIntegratedCommitAncestry reproduces the
+// hydra-7k1 2026-09-16 stranding: the singleton integrate merged the worktree
+// branch into the main checkout, the push was rejected (non-fast-forward),
+// the bead reopened, and the worktree branch was deleted — leaving an empty
+// worktree diff and no branch name for the ancestry check. Verified-close
+// must still accept: worktree HEAD is contained in main HEAD via the merge.
+func TestVerifyBeforeClose_AlreadyIntegratedCommitAncestry(t *testing.T) {
+	repo := initGitRepo(t)
+	writeAndCommit(t, repo, "internal/core/seed.go", "package core\n")
+
+	wm := NewWorktreeManager()
+	bead := &types.Bead{
+		ID:       "wt-bead-merged",
+		Title:    "Fix: versioned worktree-key resolution",
+		Project:  "test-project",
+		Metadata: map[string]string{"files": "internal/core/worktree_keys.go"},
+	}
+	key := string(bead.ID)
+
+	wt, err := wm.EnsureWorktree(repo, key)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	writeAndCommit(t, wt, "internal/core/worktree_keys.go", "package core\n// fix\n")
+
+	// Integrate like the singleton close path does: merge the worktree tip
+	// into the main checkout, then delete the branch ref while the worktree
+	// directory survives (exactly the post-failed-push state).
+	wtHead := strings.TrimSpace(vcGitOut(t, wt, "rev-parse", "HEAD"))
+	gitTestRun(t, repo, "merge", "--no-ff", "-m", "hydra: integrate test", wtHead)
+	branch := strings.TrimSpace(vcGitOut(t, wt, "branch", "--show-current"))
+	if branch == "" {
+		t.Fatal("worktree should be on a branch")
+	}
+	gitTestRun(t, repo, "update-ref", "-d", "refs/heads/"+branch)
+	// The branch ref is gone from the main repo. Detach the worktree HEAD at
+	// its commit so the fixture mirrors the production state (valid HEAD,
+	// clean status, no resolvable branch name — the hydra-7k1 worktree after
+	// its branch was cleaned up). A worktree whose HEAD symref dangles would
+	// report every file as staged-new, which is not the incident state.
+	gitTestRun(t, wt, "checkout", "--detach", wtHead)
+	if out, err := exec.Command("git", "-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch).CombinedOutput(); err == nil {
+		t.Fatalf("branch ref should be deleted in main repo, still resolves: %s", strings.TrimSpace(string(out)))
+	}
+
+	cfg := DefaultConfig()
+	cfg.Validation.Enabled = true
+	cfg.Validation.RequireDiffOnClose = true
+	cfg.Validation.EnforceTargetScope = "block"
+	resolver := NewProjectResolver([]types.Project{
+		{Name: "test-project", Path: repo, Type: types.RepoTypeSingle},
+	})
+	closer := NewBeadCloser(newMockBeadsClient(), nil, resolver, nil, cfg)
+	closer.SetWorktreeManager(wm,
+		func(b types.Bead) string { return string(b.ID) },
+		func(id types.BeadID) bool { return false },
+	)
+
+	if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
+		t.Fatalf("locally-integrated bead (branch deleted, push pending) must not be rejected empty-diff: %v", err)
+	}
+
+	// Negative control: a second bead whose work is NOT merged must still be
+	// rejected — the ancestry fallback must not accept unlanded work.
+	bead2 := &types.Bead{
+		ID:       "wt-bead-unmerged",
+		Title:    "Other fix",
+		Project:  "test-project",
+		Metadata: map[string]string{"files": "internal/core/other.go"},
+	}
+	wt2, err := wm.EnsureWorktree(repo, string(bead2.ID))
+	if err != nil {
+		t.Fatalf("EnsureWorktree 2: %v", err)
+	}
+	writeAndCommit(t, wt2, "internal/core/other.go", "package core\n// other\n")
+	// Make its diff vs the base empty without merging: reset the worktree
+	// to main HEAD (a worker that reverted its own work leaves this state —
+	// nothing landed, nothing to credit).
+	mainHead := strings.TrimSpace(vcGitOut(t, repo, "rev-parse", "HEAD"))
+	gitTestRun(t, wt2, "reset", "--hard", mainHead)
+	if err := closer.verifyBeforeClose(bead2, repo, ""); err == nil {
+		t.Fatal("unmerged bead with empty diff must still be rejected (ancestry fallback over-accepts)")
+	} else if !strings.Contains(err.Error(), "empty-diff") {
+		t.Fatalf("rejection reason should be empty-diff, got: %v", err)
+	}
 }
