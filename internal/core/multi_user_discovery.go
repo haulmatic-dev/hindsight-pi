@@ -213,7 +213,8 @@ func (d *MultiUserDiscovery) isExcluded(name string) bool {
 	return false
 }
 
-// discoverRepos checks subdirectories for .beads/beads.db markers.
+// discoverRepos checks subdirectories for .beads directory markers.
+// Real br projects write .beads/issues.jsonl; older setups may use .beads/beads.db.
 func (d *MultiUserDiscovery) discoverRepos(projectPath string) []types.Repo {
 	var repos []types.Repo
 
@@ -230,8 +231,8 @@ func (d *MultiUserDiscovery) discoverRepos(projectPath string) []types.Repo {
 			log.Printf("[MultiUserDiscovery] Excluding repo %s (matched auto_discover_exclude)", entry.Name())
 			continue
 		}
-		beadsPath := filepath.Join(projectPath, entry.Name(), ".beads", "beads.db")
-		if _, err := os.Stat(beadsPath); err == nil {
+		repoDir := filepath.Join(projectPath, entry.Name())
+		if hasBeadsMarker(repoDir) {
 			repos = append(repos, types.Repo{
 				Name: entry.Name(),
 				Path: entry.Name(),
@@ -240,6 +241,16 @@ func (d *MultiUserDiscovery) discoverRepos(projectPath string) []types.Repo {
 	}
 
 	return repos
+}
+
+// hasBeadsMarker reports whether dir contains a br project sentinel file.
+func hasBeadsMarker(dir string) bool {
+	for _, name := range []string{"issues.jsonl", "beads.db"} {
+		if _, err := os.Stat(filepath.Join(dir, ".beads", name)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // guardPrefixes runs PrefixGuard across all discovered projects. It is called
