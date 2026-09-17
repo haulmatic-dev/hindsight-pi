@@ -182,6 +182,21 @@ echo "ghp_xxxxxxxxxxxxxxxxxxxx" > ~/.hydra/.github-token
 chmod 600 ~/.hydra/.github-token
 ```
 
+A multi-repo project can be auto-discovered inside a parent directory:
+
+```yaml
+projects:
+  - name: webapp
+    path: ~/projects/webapp
+    type: multi
+    auto_discover: true
+```
+
+Hydra discovers each `br`-initialized repo under `~/projects/webapp` and
+PrefixGuard sets `issue_prefix` to `<username>-<reponame>` in each repo's
+`.beads/config.yaml` so bead IDs stay unique. Set `issue_prefix` on the entry
+to override the generated prefix.
+
 The user then:
 1. Writes a PRD in `~/projects/my-project/docs/PRDs/current.md`
 2. Runs task-breakdown to generate beads

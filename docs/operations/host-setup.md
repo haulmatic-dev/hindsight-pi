@@ -261,6 +261,34 @@ when wrong:
 | `output.push` | Off = finished work never reaches origin. When the working branch has permanent branch protection, pair it with `output.pr_merge: true` — direct pushes can never succeed, and the PR route (`dogfood/<id>` branch + `gh pr create` + `gh pr merge --merge --admin`, MERGED-state verified) is the only path that lands work. |
 | `pi.config_dir` | Wrong dir = 0 skills loaded, degraded generation (see §6). |
 | `projects.list[].path` | Workers run `br`/gates inside these repos; permissions per §2. |
+| `projects.multi_user_discovery` | Default `true`. Enables scanning `/home/*/.hydra/config.yaml` for per-user projects. Set to `false` only to run a purely config-listed fleet. |
+| `projects.auto_discover_exclude` | Directory names or paths excluded from auto-discovery. Applies to both the explicit `projects.auto_discover` path walk and multi-user `type: multi` + `auto_discover: true` discovery. Use to silence non-Hydra directories (e.g. `demo`) or, operator-side, to keep a project like `webapp` out of discovery until its fix is deployed and verified live. |
+
+### Multi-user project discovery
+
+User projects are declared in `/home/<user>/.hydra/config.yaml`. A multi-repo
+project is discovered automatically when the user entry uses `type: multi`
+with `auto_discover: true`:
+
+```yaml
+projects:
+  - name: webapp
+    path: ~/projects/webapp
+    type: multi
+    auto_discover: true
+```
+
+Hydra scans `<path>` for subdirectories containing `.beads/beads.db`. For each
+discovered repo, PrefixGuard writes `.beads/config.yaml` with
+`issue_prefix: <username>-<reponame>` (lowercased and sanitized to
+`[a-z0-9-]`) so `br create` bead IDs do not collide across users or across
+projects that share a repo name. An explicit `issue_prefix` on the user
+project entry overrides the generated value. Existing deliberate custom
+prefixes are preserved with a warning; explicit config-listed projects in
+`/etc/hydra/hydra.yaml` are not mutated.
+
+**Verify:** `journalctl -u hydra | grep -E "MultiUserDiscovery|PrefixGuard"` shows
+discovered users, repos, and any prefix overrides.
 
 **Verify:** the daemon logs `[PiSetup] ✅ Pi skills ready` and workers log
 `Added N skill flags` (N>0) on first spawn.
