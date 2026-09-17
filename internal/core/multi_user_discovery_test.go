@@ -1,10 +1,48 @@
 package core
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// fakeBrRunner records br config get/set calls and returns canned values.
+type fakeBrRunner struct {
+	values   map[string]string
+	sets     map[string]string
+	getErr   map[string]error
+	setErr   map[string]error
+	getCalls []string
+	setCalls []string
+}
+
+func newFakeBrRunner() *fakeBrRunner {
+	return &fakeBrRunner{
+		values: make(map[string]string),
+		sets:   make(map[string]string),
+		getErr: make(map[string]error),
+		setErr: make(map[string]error),
+	}
+}
+
+func (f *fakeBrRunner) configGet(repoDir, key string) (string, error) {
+	f.getCalls = append(f.getCalls, repoDir)
+	if err := f.getErr[repoDir]; err != nil {
+		return "", err
+	}
+	return f.values[repoDir], nil
+}
+
+func (f *fakeBrRunner) configSet(repoDir, key, value string) error {
+	f.setCalls = append(f.setCalls, repoDir)
+	if err := f.setErr[repoDir]; err != nil {
+		return err
+	}
+	f.sets[repoDir] = value
+	f.values[repoDir] = value
+	return nil
+}
 
 func TestMultiUserDiscovery_Discover(t *testing.T) {
 	// Create fake home dirs
@@ -107,8 +145,8 @@ func TestMultiUserDiscovery_AutoDiscoverRepos(t *testing.T) {
 	projectPath := filepath.Join(dir, "my-platform")
 	os.MkdirAll(filepath.Join(projectPath, "frontend", ".beads"), 0755)
 	os.MkdirAll(filepath.Join(projectPath, "backend", ".beads"), 0755)
-	os.WriteFile(filepath.Join(projectPath, "frontend", ".beads", "beads.db"), []byte("{}"), 0644)
-	os.WriteFile(filepath.Join(projectPath, "backend", ".beads", "beads.db"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(projectPath, "frontend", ".beads", "issues.jsonl"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(projectPath, "backend", ".beads", "issues.jsonl"), []byte("{}"), 0644)
 
 	ctx := &UserContext{
 		Username: "alice",
@@ -116,11 +154,18 @@ func TestMultiUserDiscovery_AutoDiscoverRepos(t *testing.T) {
 	}
 
 	d := NewMultiUserDiscovery()
+	runner := newFakeBrRunner()
+	runner.values[filepath.Join(projectPath, "frontend")] = "frontend"
+	runner.values[filepath.Join(projectPath, "backend")] = "backend"
+	d.prefixGuard.runner = runner
+
 	project := d.convertProject(UserProject{
 		Name: "my-platform",
 		Path: projectPath,
 		Type: "multi",
 	}, ctx)
+	d.projects = append(d.projects, *project)
+	d.guardPrefixes()
 
 	if project == nil {
 		t.Fatal("project conversion returned nil")
@@ -139,6 +184,16 @@ func TestMultiUserDiscovery_AutoDiscoverRepos(t *testing.T) {
 	if !repoNames["frontend"] || !repoNames["backend"] {
 		t.Errorf("repos = %v", project.Repos)
 	}
+
+	// PrefixGuard rewrites the default repo-dir prefix to <user>-<repo>.
+	wantFront := "alice-frontend"
+	if got := runner.sets[filepath.Join(projectPath, "frontend")]; got != wantFront {
+		t.Errorf("frontend set = %q, want %q", got, wantFront)
+	}
+	wantBack := "alice-backend"
+	if got := runner.sets[filepath.Join(projectPath, "backend")]; got != wantBack {
+		t.Errorf("backend set = %q, want %q", got, wantBack)
+	}
 }
 
 func TestMultiUserDiscovery_ExplicitRepos(t *testing.T) {
@@ -148,6 +203,10 @@ func TestMultiUserDiscovery_ExplicitRepos(t *testing.T) {
 
 	ctx := &UserContext{Username: "alice", HomeDir: dir}
 	d := NewMultiUserDiscovery()
+	runner := newFakeBrRunner()
+	runner.values[filepath.Join(projectPath, "frontend")] = "frontend"
+	runner.values[filepath.Join(projectPath, "backend")] = "backend"
+	d.prefixGuard.runner = runner
 
 	project := d.convertProject(UserProject{
 		Name:  "my-platform",
@@ -155,11 +214,190 @@ func TestMultiUserDiscovery_ExplicitRepos(t *testing.T) {
 		Type:  "multi",
 		Repos: []RepoConfig{{Name: "frontend", Path: "frontend"}, {Name: "backend", Path: "backend"}},
 	}, ctx)
+	d.projects = append(d.projects, *project)
+	d.guardPrefixes()
 
 	if len(project.Repos) != 2 {
 		t.Fatalf("expected 2 repos, got %d", len(project.Repos))
 	}
 	if project.Repos[0].Name != "frontend" {
 		t.Errorf("repo[0] = %q", project.Repos[0].Name)
+	}
+
+	wantFront := "alice-frontend"
+	if got := runner.sets[filepath.Join(projectPath, "frontend")]; got != wantFront {
+		t.Errorf("frontend set = %q, want %q", got, wantFront)
+	}
+}
+
+func TestPrefixGuard_SingleRepoDefault(t *testing.T) {
+	dir := t.TempDir()
+	projectPath := filepath.Join(dir, "task-service")
+	os.MkdirAll(filepath.Join(projectPath, ".beads"), 0755)
+	os.WriteFile(filepath.Join(projectPath, ".beads", "issues.jsonl"), []byte("{}"), 0644)
+
+	ctx := &UserContext{Username: "alice", HomeDir: dir}
+	d := NewMultiUserDiscovery()
+	runner := newFakeBrRunner()
+	runner.values[projectPath] = "task-service" // br default = dir base
+	d.prefixGuard.runner = runner
+
+	project := d.convertProject(UserProject{
+		Name: "task-service",
+		Path: projectPath,
+		Type: "single",
+	}, ctx)
+	d.projects = append(d.projects, *project)
+	d.guardPrefixes()
+
+	if project == nil {
+		t.Fatal("project conversion returned nil")
+	}
+	if got := runner.sets[projectPath]; got != "alice-task-service" {
+		t.Errorf("set issue_prefix = %q, want alice-task-service", got)
+	}
+}
+
+func TestPrefixGuard_SingleRepoUnset(t *testing.T) {
+	dir := t.TempDir()
+	projectPath := filepath.Join(dir, "task-service")
+	os.MkdirAll(projectPath, 0755)
+
+	ctx := &UserContext{Username: "alice", HomeDir: dir}
+	d := NewMultiUserDiscovery()
+	runner := newFakeBrRunner()
+	runner.values[projectPath] = ""
+	d.prefixGuard.runner = runner
+
+	project := d.convertProject(UserProject{
+		Name: "task-service",
+		Path: projectPath,
+		Type: "single",
+	}, ctx)
+	d.projects = append(d.projects, *project)
+	d.guardPrefixes()
+
+	if got := runner.sets[projectPath]; got != "alice-task-service" {
+		t.Errorf("set issue_prefix = %q, want alice-task-service", got)
+	}
+}
+
+func TestPrefixGuard_CustomPrefixPreserved(t *testing.T) {
+	dir := t.TempDir()
+	projectPath := filepath.Join(dir, "weird_repo")
+	os.MkdirAll(filepath.Join(projectPath, ".beads"), 0755)
+	os.WriteFile(filepath.Join(projectPath, ".beads", "issues.jsonl"), []byte("{}"), 0644)
+
+	ctx := &UserContext{Username: "alice", HomeDir: dir}
+	d := NewMultiUserDiscovery()
+	runner := newFakeBrRunner()
+	runner.values[projectPath] = "deliberate-custom-prefix"
+	d.prefixGuard.runner = runner
+
+	project := d.convertProject(UserProject{
+		Name:        "weird_repo",
+		Path:        projectPath,
+		Type:        "single",
+		IssuePrefix: "My Custom_Prefix!",
+	}, ctx)
+	d.projects = append(d.projects, *project)
+	d.guardPrefixes()
+
+	if project.IssuePrefix != "My Custom_Prefix!" {
+		t.Errorf("project.IssuePrefix = %q, want raw configured value", project.IssuePrefix)
+	}
+	if _, ok := runner.sets[projectPath]; ok {
+		t.Errorf("custom prefix was overwritten; sets = %v", runner.sets)
+	}
+}
+
+func TestPrefixGuard_BrGetFailureIsFailOpen(t *testing.T) {
+	dir := t.TempDir()
+	projectPath := filepath.Join(dir, "task-service")
+	os.MkdirAll(projectPath, 0755)
+
+	ctx := &UserContext{Username: "alice", HomeDir: dir}
+	d := NewMultiUserDiscovery()
+	runner := newFakeBrRunner()
+	runner.getErr[projectPath] = errors.New("br exploded")
+	d.prefixGuard.runner = runner
+
+	project := d.convertProject(UserProject{
+		Name: "task-service",
+		Path: projectPath,
+		Type: "single",
+	}, ctx)
+	d.projects = append(d.projects, *project)
+	d.guardPrefixes() // must not panic
+
+	if len(runner.setCalls) != 0 {
+		t.Errorf("expected no set calls after get failure, got %d", len(runner.setCalls))
+	}
+}
+
+func TestPrefixGuard_BrSetFailureIsFailOpen(t *testing.T) {
+	dir := t.TempDir()
+	projectPath := filepath.Join(dir, "task-service")
+	os.MkdirAll(projectPath, 0755)
+
+	ctx := &UserContext{Username: "alice", HomeDir: dir}
+	d := NewMultiUserDiscovery()
+	runner := newFakeBrRunner()
+	runner.values[projectPath] = "task-service"
+	runner.setErr[projectPath] = errors.New("br set denied")
+	d.prefixGuard.runner = runner
+
+	project := d.convertProject(UserProject{
+		Name: "task-service",
+		Path: projectPath,
+		Type: "single",
+	}, ctx)
+	d.projects = append(d.projects, *project)
+	d.guardPrefixes() // must not panic
+
+	if _, ok := runner.sets[projectPath]; ok {
+		t.Errorf("set failure should not update recorded value")
+	}
+}
+
+func TestPrefixGuard_GlobalBrDefaultIsRewritten(t *testing.T) {
+	dir := t.TempDir()
+	projectPath := filepath.Join(dir, "webapp")
+	os.MkdirAll(projectPath, 0755)
+
+	ctx := &UserContext{Username: "nipuna", HomeDir: dir}
+	d := NewMultiUserDiscovery()
+	runner := newFakeBrRunner()
+	runner.values[projectPath] = "br" // global fallback before br init
+	d.prefixGuard.runner = runner
+
+	project := d.convertProject(UserProject{
+		Name: "webapp",
+		Path: projectPath,
+		Type: "single",
+	}, ctx)
+	d.projects = append(d.projects, *project)
+	d.guardPrefixes()
+
+	if got := runner.sets[projectPath]; got != "nipuna-webapp" {
+		t.Errorf("set issue_prefix = %q, want nipuna-webapp", got)
+	}
+}
+
+func TestPrefixGuard_Normalization(t *testing.T) {
+	cases := []struct {
+		username, repoName, configured, want string
+	}{
+		{"alice", "webapp", "", "alice-webapp"},
+		{"Alice", "WebApp", "", "alice-webapp"},
+		{"alice", "webapp", "My_Custom.Prefix!", "my-custom-prefix"},
+		{"alice", "webapp", "__leading--trailing__", "leading-trailing"},
+		{"user", "repo", "!!!", "beads"},
+	}
+	for _, tc := range cases {
+		got := issuePrefixForRepo(tc.username, tc.repoName, tc.configured)
+		if got != tc.want {
+			t.Errorf("issuePrefixForRepo(%q,%q,%q) = %q, want %q", tc.username, tc.repoName, tc.configured, got, tc.want)
+		}
 	}
 }

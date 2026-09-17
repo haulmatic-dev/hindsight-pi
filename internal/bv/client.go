@@ -124,6 +124,13 @@ func (c *Client) exec(cmd string, args ...string) ([]byte, error) {
 
 // execInDir executes a CLI command in a specific directory
 func (c *Client) execInDir(dir string, cmd string, args ...string) ([]byte, error) {
+	// If the executor supports directory-aware execution, use it (test doubles
+	// implement ExecuteInDir; mirrors the beads client).
+	if execWithDir, ok := c.executor.(interface {
+		ExecuteInDir(dir string, name string, arg ...string) ([]byte, error)
+	}); ok {
+		return execWithDir.ExecuteInDir(dir, cmd, args...)
+	}
 	execCmd := exec.Command(cmd, args...)
 	execCmd.Dir = dir
 	output, err := execCmd.Output()

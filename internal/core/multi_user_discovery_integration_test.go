@@ -37,14 +37,14 @@ projects:
 
 	// Alice's single-repo project
 	os.MkdirAll(filepath.Join(aliceHome, "projects", "task-service", ".beads"), 0755)
-	os.WriteFile(filepath.Join(aliceHome, "projects", "task-service", ".beads", "beads.db"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(aliceHome, "projects", "task-service", ".beads", "issues.jsonl"), []byte("{}"), 0644)
 
 	// Alice's multi-repo project (auto-discover: frontend + backend)
 	alicePlatform := filepath.Join(aliceHome, "projects", "platform")
 	os.MkdirAll(filepath.Join(alicePlatform, "frontend", ".beads"), 0755)
 	os.MkdirAll(filepath.Join(alicePlatform, "backend", ".beads"), 0755)
-	os.WriteFile(filepath.Join(alicePlatform, "frontend", ".beads", "beads.db"), []byte("{}"), 0644)
-	os.WriteFile(filepath.Join(alicePlatform, "backend", ".beads", "beads.db"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(alicePlatform, "frontend", ".beads", "issues.jsonl"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(alicePlatform, "backend", ".beads", "issues.jsonl"), []byte("{}"), 0644)
 
 	// ── User: bob ──────────────────────────────────────────
 	bobHome := filepath.Join(baseDir, "bob")
@@ -67,7 +67,7 @@ projects:
 	os.WriteFile(filepath.Join(bobHydra, "config.yaml"), []byte(bobConfig), 0644)
 
 	os.MkdirAll(filepath.Join(bobHome, "projects", "api-gateway", ".beads"), 0755)
-	os.WriteFile(filepath.Join(bobHome, "projects", "api-gateway", ".beads", "beads.db"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(bobHome, "projects", "api-gateway", ".beads", "issues.jsonl"), []byte("{}"), 0644)
 
 	// ── Noise: system user ─────────────────────────────────
 	os.MkdirAll(filepath.Join(baseDir, "_deploy"), 0755)

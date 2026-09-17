@@ -82,6 +82,7 @@ type BlockerToClear struct {
 	UnblocksIDs   []string `json:"unblocks_ids"`
 	Actionable    bool     `json:"actionable"`
 	BlockedBy     []string `json:"blocked_by,omitempty"`
+	Repo          string   `json:"repo,omitempty"` // Source repo for multi-repo projects
 }
 
 // TriageRecommendation represents a single triage recommendation
@@ -95,6 +96,7 @@ type TriageRecommendation struct {
 	Labels        []string `json:"labels"`
 	EstimatedTime string   `json:"estimated_time,omitempty"`
 	BlockedBy     []string `json:"blocked_by,omitempty"` // Dependencies that block this bead
+	Repo          string   `json:"repo,omitempty"`       // Source repo for multi-repo projects
 }
 
 // AttentionItem represents items needing attention
@@ -107,9 +109,9 @@ type AttentionItem struct {
 
 // PlanWrapper wraps the raw bv --robot-plan JSON response.
 type PlanWrapper struct {
-	GeneratedAt    string   `json:"generated_at"`
-	DataHash       string   `json:"data_hash"`
-	Plan           PlanData `json:"plan"`
+	GeneratedAt string   `json:"generated_at"`
+	DataHash    string   `json:"data_hash"`
+	Plan        PlanData `json:"plan"`
 }
 
 // PlanData holds the actionable execution plan from bv.
@@ -122,7 +124,7 @@ type PlanData struct {
 
 // PlanTrack is a parallel work stream of beads that can execute independently.
 type PlanTrack struct {
-	TrackID string    `json:"track_id"`
+	TrackID string     `json:"track_id"`
 	Items   []PlanItem `json:"items"`
 }
 
@@ -133,13 +135,14 @@ type PlanItem struct {
 	Priority int      `json:"priority"`
 	Status   string   `json:"status"`
 	Unblocks []string `json:"unblocks"`
+	Repo     string   `json:"repo,omitempty"` // Source repo for multi-repo projects
 }
 
 // PlanSummary provides high-level plan metadata.
 type PlanSummary struct {
-	HighestImpact  string `json:"highest_impact"`
-	ImpactReason   string `json:"impact_reason"`
-	UnblocksCount  int    `json:"unblocks_count"`
+	HighestImpact string `json:"highest_impact"`
+	ImpactReason  string `json:"impact_reason"`
+	UnblocksCount int    `json:"unblocks_count"`
 }
 
 // --- Legacy types kept for backward compatibility ---

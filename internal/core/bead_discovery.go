@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"log"
+	"path/filepath"
 	"sort"
 	"sync"
 
@@ -163,6 +164,11 @@ func (d *BeadDiscovery) findFromBR(activeWorkers map[string]bool) ([]types.Bead,
 			filteredCounts["approvalGate"]++
 			continue
 		}
+		// bv's cache can be stale: never schedule a bead the store says is terminal.
+		if bead.Status.IsTerminal() {
+			continue
+		}
+
 		if bead.Type == "approval" && bead.Status == types.StatusInProgress {
 			filteredCounts["approvalInProgress"]++
 			continue
@@ -227,6 +233,40 @@ func (d *BeadDiscovery) stillCompleted(projectPath, repoName, beadIDStr string) 
 	return false
 }
 
+// resolveRepoName returns the repo a bv item belongs to. If bv emits a
+// per-item repo field, that value wins. For multi-repo projects we invoke
+// bv per repo, so the scan target determines the source repo. The legacy
+// Repos[0] fallback is only used for single-repo projects.
+func (d *BeadDiscovery) resolveRepoName(project types.Project, target string, itemRepo string, fallbackLogged map[string]bool) string {
+	if itemRepo != "" {
+		return itemRepo
+	}
+	if project.Type != types.RepoTypeMulti {
+		return ""
+	}
+	if len(project.Repos) == 1 {
+		return project.Repos[0].Name
+	}
+	// bv emitted no per-item repo field for a multi-repo project. We are
+	// invoking bv per repo, so the scan target tells us the source repo.
+	rel, err := filepath.Rel(project.Path, target)
+	if err == nil && rel != "." && !strings.Contains(rel, string(filepath.Separator)) {
+		d.logRepoFallbackOnce(project.Name, rel, fallbackLogged)
+		return rel
+	}
+	// Defensive fallback: should never happen for a valid multi-repo target.
+	d.logRepoFallbackOnce(project.Name, "", fallbackLogged)
+	return ""
+}
+
+func (d *BeadDiscovery) logRepoFallbackOnce(projectName string, repoName string, fallbackLogged map[string]bool) {
+	if fallbackLogged[projectName] {
+		return
+	}
+	fallbackLogged[projectName] = true
+	log.Printf("⚠️  [BV] items for project %s do not include a repo field; attributing beads from target repo %q", projectName, repoName)
+}
+
 // findFromBV retrieves beads using bv --robot-triage.
 func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead, error) {
 	if d.bvClient == nil {
@@ -240,142 +280,153 @@ func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead,
 			// Fail-closed: store presumed corrupt, excluded until restored.
 			continue
 		}
-		triage, err := d.bvClient.GetTriage(project.Path)
-		if err != nil {
-			// Per-project isolation: one project's triage failure must not
-			// abort the whole scheduler tick. Skip it and keep scheduling the
-			// rest.
-			log.Printf("⚠️  [BV] triage failed for project %s: %v — skipping this project this tick", project.Name, err)
+
+		targets := repoScanTargets(project)
+		if project.Type == types.RepoTypeMulti && len(targets) == 0 {
+			// Empty multi (no discovered repos with stores yet): bv has
+			// nothing to triage and exits non-zero every tick. Skip quietly.
 			continue
 		}
 
-		log.Printf("[BV] Triage for %s: %d recommendations, %d ready, %d blocked",
-			project.Name, len(triage.Recommendations), triage.ReadyCount, triage.BlockedCount)
+		fallbackLogged := map[string]bool{}
 
-		for _, rec := range triage.Recommendations {
-			beadID := types.BeadID(rec.BeadID)
-			beadIDStr := string(beadID)
-
-			if activeWorkers[beadIDStr] {
-				continue
-			}
-
-			var repoName string
-			if project.Type != types.RepoTypeSingle && len(project.Repos) > 0 {
-				repoName = project.Repos[0].Name
-			}
-
-			if d.stillCompleted(project.Path, repoName, beadIDStr) {
-				continue
-			}
-			if len(rec.BlockedBy) > 0 {
-				log.Printf("⏸️  [BV] Skipping blocked bead: %s (blocked by: %v)", beadID, rec.BlockedBy)
-				continue
-			}
-			if rec.Type == "approval-gate" {
-				log.Printf("⏸️  [BV] Skipping approval gate: %s", beadID)
-				continue
-			}
-
-			bead, err := d.beadsClient.GetBead(project.Path, repoName, beadID)
+		for _, target := range targets {
+			triage, err := d.bvClient.GetTriage(target)
 			if err != nil {
-				bead = &types.Bead{
-					ID:          beadID,
-					Title:       rec.Title,
-					Type:        rec.Type,
-					Priority:    rec.Priority,
-					Project:     project.Name,
-					Repo:        repoName,
-					Status:      types.StatusOpen,
-					Labels:      rec.Labels,
-					Description: rec.Reason,
-					Metadata: map[string]string{
-						"bv_confidence":     fmt.Sprintf("%f", rec.Confidence),
-						"bv_reason":         rec.Reason,
-						"bv_estimated_time": rec.EstimatedTime,
-					},
+				// Per-project isolation: one project's triage failure must not
+				// abort the whole scheduler tick. Skip it and keep scheduling the
+				// rest.
+				log.Printf("⚠️  [BV] triage failed for project %s (path %s): %v — skipping this repo this tick", project.Name, target, err)
+				continue
+			}
+
+			log.Printf("[BV] Triage for %s/%s: %d recommendations, %d ready, %d blocked",
+				project.Name, filepath.Base(target), len(triage.Recommendations), triage.ReadyCount, triage.BlockedCount)
+
+			for _, rec := range triage.Recommendations {
+				beadID := types.BeadID(rec.BeadID)
+				beadIDStr := string(beadID)
+
+				if activeWorkers[beadIDStr] {
+					continue
 				}
-			}
 
-			if bead.Type == "approval" && bead.Status == types.StatusInProgress {
-				log.Printf("⏸️  [BV] Skipping approval bead (waiting for user approval): %s", beadID)
-				continue
-			}
+				repoName := d.resolveRepoName(project, target, rec.Repo, fallbackLogged)
 
-			if bead.Metadata == nil {
-				bead.Metadata = make(map[string]string)
-			}
-			bead.Metadata["bv_confidence"] = fmt.Sprintf("%f", rec.Confidence)
-			bead.Metadata["bv_reason"] = rec.Reason
-
-			allReadyBeads = append(allReadyBeads, *bead)
-		}
-
-		for _, blocker := range triage.BlockersToClear {
-			if !blocker.Actionable {
-				continue
-			}
-
-			beadID := types.BeadID(blocker.BeadID)
-			beadIDStr := string(beadID)
-
-			if activeWorkers[beadIDStr] {
-				continue
-			}
-
-			var repoName string
-			if project.Type != types.RepoTypeSingle && len(project.Repos) > 0 {
-				repoName = project.Repos[0].Name
-			}
-
-			if d.stillCompleted(project.Path, repoName, beadIDStr) {
-				continue
-			}
-
-			alreadyAdded := false
-			for _, existing := range allReadyBeads {
-				if existing.ID == beadID {
-					alreadyAdded = true
-					break
+				if d.stillCompleted(project.Path, repoName, beadIDStr) {
+					continue
 				}
-			}
-			if alreadyAdded {
-				continue
-			}
-
-			if len(blocker.BlockedBy) > 0 {
-				log.Printf("⏸️  [BV] Skipping blocked bead from blockers_to_clear: %s (blocked by: %v)", beadID, blocker.BlockedBy)
-				continue
-			}
-
-			bead, err := d.beadsClient.GetBead(project.Path, repoName, beadID)
-			if err != nil {
-				bead = &types.Bead{
-					ID:       beadID,
-					Title:    blocker.Title,
-					Type:     "task",
-					Priority: 3,
-					Project:  project.Name,
-					Repo:     repoName,
-					Status:   types.StatusOpen,
-					Metadata: map[string]string{
-						"bv_source":     "blockers_to_clear",
-						"bv_unblocks":   fmt.Sprintf("%d", blocker.UnblocksCount),
-						"bv_confidence": "0.8",
-						"bv_reason":     fmt.Sprintf("Unblocks %d items", blocker.UnblocksCount),
-					},
+				if len(rec.BlockedBy) > 0 {
+					log.Printf("⏸️  [BV] Skipping blocked bead: %s (blocked by: %v)", beadID, rec.BlockedBy)
+					continue
 				}
+				if rec.Type == "approval-gate" {
+					log.Printf("⏸️  [BV] Skipping approval gate: %s", beadID)
+					continue
+				}
+
+				bead, err := d.beadsClient.GetBead(project.Path, repoName, beadID)
+				if err != nil {
+					bead = &types.Bead{
+						ID:          beadID,
+						Title:       rec.Title,
+						Type:        rec.Type,
+						Priority:    rec.Priority,
+						Project:     project.Name,
+						Repo:        repoName,
+						Status:      types.StatusOpen,
+						Labels:      rec.Labels,
+						Description: rec.Reason,
+						Metadata: map[string]string{
+							"bv_confidence":     fmt.Sprintf("%f", rec.Confidence),
+							"bv_reason":         rec.Reason,
+							"bv_estimated_time": rec.EstimatedTime,
+						},
+					}
+				}
+
+				// bv's cache can be stale: never schedule a bead the store says is terminal.
+				if bead.Status.IsTerminal() {
+					continue
+				}
+
+				if bead.Type == "approval" && bead.Status == types.StatusInProgress {
+					log.Printf("⏸️  [BV] Skipping approval bead (waiting for user approval): %s", beadID)
+					continue
+				}
+
+				if bead.Metadata == nil {
+					bead.Metadata = make(map[string]string)
+				}
+				bead.Metadata["bv_confidence"] = fmt.Sprintf("%f", rec.Confidence)
+				bead.Metadata["bv_reason"] = rec.Reason
+
+				allReadyBeads = append(allReadyBeads, *bead)
 			}
 
-			if bead.Metadata == nil {
-				bead.Metadata = make(map[string]string)
-			}
-			bead.Metadata["bv_source"] = "blockers_to_clear"
-			bead.Metadata["bv_unblocks"] = fmt.Sprintf("%d", blocker.UnblocksCount)
-			bead.Metadata["bv_confidence"] = "0.8"
-			bead.Metadata["bv_reason"] = fmt.Sprintf("Unblocks %d items: %v", blocker.UnblocksCount, blocker.UnblocksIDs)
+			for _, blocker := range triage.BlockersToClear {
+				if !blocker.Actionable {
+					continue
+				}
 
-			allReadyBeads = append(allReadyBeads, *bead)
+				beadID := types.BeadID(blocker.BeadID)
+				beadIDStr := string(beadID)
+
+				if activeWorkers[beadIDStr] {
+					continue
+				}
+
+				repoName := d.resolveRepoName(project, target, blocker.Repo, fallbackLogged)
+
+				if d.stillCompleted(project.Path, repoName, beadIDStr) {
+					continue
+				}
+
+				alreadyAdded := false
+				for _, existing := range allReadyBeads {
+					if existing.ID == beadID {
+						alreadyAdded = true
+						break
+					}
+				}
+				if alreadyAdded {
+					continue
+				}
+
+				if len(blocker.BlockedBy) > 0 {
+					log.Printf("⏸️  [BV] Skipping blocked bead from blockers_to_clear: %s (blocked by: %v)", beadID, blocker.BlockedBy)
+					continue
+				}
+
+				bead, err := d.beadsClient.GetBead(project.Path, repoName, beadID)
+				if err != nil {
+					bead = &types.Bead{
+						ID:       beadID,
+						Title:    blocker.Title,
+						Type:     "task",
+						Priority: 3,
+						Project:  project.Name,
+						Repo:     repoName,
+						Status:   types.StatusOpen,
+						Metadata: map[string]string{
+							"bv_source":     "blockers_to_clear",
+							"bv_unblocks":   fmt.Sprintf("%d", blocker.UnblocksCount),
+							"bv_confidence": "0.8",
+							"bv_reason":     fmt.Sprintf("Unblocks %d items", blocker.UnblocksCount),
+						},
+					}
+				}
+
+				if bead.Metadata == nil {
+					bead.Metadata = make(map[string]string)
+				}
+				bead.Metadata["bv_source"] = "blockers_to_clear"
+				bead.Metadata["bv_unblocks"] = fmt.Sprintf("%d", blocker.UnblocksCount)
+				bead.Metadata["bv_confidence"] = "0.8"
+				bead.Metadata["bv_reason"] = fmt.Sprintf("Unblocks %d items: %v", blocker.UnblocksCount, blocker.UnblocksIDs)
+
+				allReadyBeads = append(allReadyBeads, *bead)
+			}
 		}
 	}
 
@@ -407,68 +458,77 @@ func (d *BeadDiscovery) findFromBVPlan(activeWorkers map[string]bool) ([]types.B
 			// Fail-closed: store presumed corrupt, excluded until restored.
 			continue
 		}
-		if project.Type == types.RepoTypeMulti && len(project.Repos) == 0 {
+
+		targets := repoScanTargets(project)
+		if project.Type == types.RepoTypeMulti && len(targets) == 0 {
 			// Empty multi (no discovered repos with stores yet): bv has
 			// nothing to plan and exits non-zero every tick. Skip quietly.
 			continue
 		}
-		plan, err := d.bvClient.GetPlan(project.Path)
-		if err != nil {
-			// Per-project isolation: skip a project whose plan failed rather
-			// than aborting planning for every project this tick.
-			log.Printf("⚠️  [BV-Plan] plan failed for project %s: %v — skipping this project this tick", project.Name, err)
-			continue
-		}
 
-		log.Printf("[BV-Plan] Plan for %s: %d tracks, %d total actionable beads",
-			project.Name, len(plan.Tracks), plan.TotalActionable)
+		fallbackLogged := map[string]bool{}
 
-		for _, track := range plan.Tracks {
-			log.Printf("[BV-Plan] Track %s: %d beads", track.TrackID, len(track.Items))
+		for _, target := range targets {
+			plan, err := d.bvClient.GetPlan(target)
+			if err != nil {
+				// Per-project isolation: skip a project whose plan failed rather
+				// than aborting planning for every project this tick.
+				log.Printf("⚠️  [BV-Plan] plan failed for project %s (path %s): %v — skipping this repo this tick", project.Name, target, err)
+				continue
+			}
 
-			for _, item := range track.Items {
-				beadID := types.BeadID(item.ID)
-				beadIDStr := string(beadID)
+			log.Printf("[BV-Plan] Plan for %s/%s: %d tracks, %d total actionable beads",
+				project.Name, filepath.Base(target), len(plan.Tracks), plan.TotalActionable)
 
-				var repoName string
-				if project.Type != types.RepoTypeSingle && len(project.Repos) > 0 {
-					repoName = project.Repos[0].Name
-				}
+			for _, track := range plan.Tracks {
+				log.Printf("[BV-Plan] Track %s: %d beads", track.TrackID, len(track.Items))
 
-				if activeWorkers[beadIDStr] {
-					continue
-				}
-				if d.stillCompleted(project.Path, repoName, beadIDStr) {
-					continue
-				}
+				for _, item := range track.Items {
+					beadID := types.BeadID(item.ID)
+					beadIDStr := string(beadID)
 
-				bead, err := d.beadsClient.GetBead(project.Path, repoName, beadID)
-				if err != nil {
-					log.Printf("⚠️  [BV-Plan] Could not get bead details for %s: %v", beadID, err)
-					bead = &types.Bead{
-						ID:       beadID,
-						Title:    item.Title,
-						Type:     "task",
-						Priority: item.Priority,
-						Project:  project.Name,
-						Repo:     repoName,
-						Status:   types.StatusOpen,
-						Metadata: map[string]string{
-							"bv_plan_track": track.TrackID,
-							"bv_unblocks":   strings.Join(item.Unblocks, ","),
-						},
+					repoName := d.resolveRepoName(project, target, item.Repo, fallbackLogged)
+
+					if activeWorkers[beadIDStr] {
+						continue
 					}
-				}
+					if d.stillCompleted(project.Path, repoName, beadIDStr) {
+						continue
+					}
 
-				if bead.Metadata == nil {
-					bead.Metadata = make(map[string]string)
-				}
-				bead.Metadata["bv_plan_track"] = track.TrackID
-				if len(item.Unblocks) > 0 {
-					bead.Metadata["bv_unblocks"] = strings.Join(item.Unblocks, ",")
-				}
+					bead, err := d.beadsClient.GetBead(project.Path, repoName, beadID)
+					if err != nil {
+						log.Printf("⚠️  [BV-Plan] Could not get bead details for %s: %v", beadID, err)
+						bead = &types.Bead{
+							ID:       beadID,
+							Title:    item.Title,
+							Type:     "task",
+							Priority: item.Priority,
+							Project:  project.Name,
+							Repo:     repoName,
+							Status:   types.StatusOpen,
+							Metadata: map[string]string{
+								"bv_plan_track": track.TrackID,
+								"bv_unblocks":   strings.Join(item.Unblocks, ","),
+							},
+						}
+					}
 
-				allReadyBeads = append(allReadyBeads, *bead)
+					// bv's cache can be stale: never schedule a bead the store says is terminal.
+					if bead.Status.IsTerminal() {
+						continue
+					}
+
+					if bead.Metadata == nil {
+						bead.Metadata = make(map[string]string)
+					}
+					bead.Metadata["bv_plan_track"] = track.TrackID
+					if len(item.Unblocks) > 0 {
+						bead.Metadata["bv_unblocks"] = strings.Join(item.Unblocks, ",")
+					}
+
+					allReadyBeads = append(allReadyBeads, *bead)
+				}
 			}
 		}
 	}

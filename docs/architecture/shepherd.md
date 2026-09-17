@@ -59,7 +59,8 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `satisfied_closed` | Pan closes a bead whose acceptance criteria are already met on the working branch | `tokens` (`0`) |
 | `retry_exhausted` | a bead exhausts `default_retries` and has no live worker or registry row | `attempts` |
 | `spawn-suppressed-closed` | a queued retry spawn is aborted because the bead became terminal while in the retry queue | `status` |
-| `integration-failed` | singleton integrate/push failed verification (merge not contained in HEAD, or push rejected / remote ref did not advance) — bead reopened with `integration-failed` label, worktree preserved | `stage` (`integrate`/`push`), `error` (exact remote stderr) |
+| `integration-failed` | singleton integrate/push failed verification (merge not contained in HEAD, or push rejected / remote ref did not advance) — bead reopened with `integration-failed` label, worktree preserved. Non-fast-forward rejections get one fetch + merge + retry (`PushBranchWithNonFFRecovery`) before this fires | `stage` (`integrate`/`push`), `error` (exact remote stderr) |
+| `close-accepted-already-integrated` | verified-close accepted a bead whose worktree HEAD is a strict ancestor of the main checkout HEAD — the singleton integrate landed locally but the push was rejected (hydra-7k1 2026-09-16: non-FF push failure → reopened bead → empty-diff loop). Emitted once per accepted close; the publisher ticker remains responsible for landing the working branch on origin | `reason` (`worktree_head_ancestor_of_main`) |
 | `worktree-preserved-unintegrated` | janitorial GC refused to remove a stale worktree: its branch carries commits not yet in the working branch, it has uncommitted tracked changes, or files under it were modified after creation and within the staleness window (merge-resolution edits, untracked output — hydra-q3p mid-merge reap, 2026-09-12) — reconciler integrates on its next sweep | `worktree`, `branch`, `cause` (`unintegrated_work`/`recent_activity`) |
 | `bead_store_suspect` | a project's open-bead count collapsed to 0 or >80% in one discovery tick (or `br list` failed after a healthy baseline) — store presumed corrupt, project excluded from scheduling | `project_path`, `previous`, `current`, `list_error` |
 | `bead_store_restored` | `.beads/issues.jsonl` rebuilt from the newest `.br_history` snapshot and the re-listed open count verified recovered — scheduling unblocked | `project_path`, `snapshot`, `open`, `baseline` |
@@ -120,7 +121,25 @@ match, the chain branch did not exist there, and the "nothing to integrate"
 nil read as success (webapp zpf, 2026-09-16: 17/17 beads closed, work
 unintegrated; recovered only by the reconciler's age-floor sweep). Config
 load rejects duplicate project names outright — the daemon fails startup,
-and hot reload rejects the new config before applying it. The completion
+and hot reload rejects the new config before applying it.
+
+**Recorded worktree key + branch (webapp-tc5, 2026-09-16).** A stale
+`hydra/wt-<key>` branch can leave the chain's real branch versioned as
+`hydra/wt-<key>-vN`, and any consumer that re-derives the branch from the
+key by exact match then misses and logs "nothing to integrate" — 1,642
+insertions stranded this way. The recorded-key contract: the spawner records
+the chain's actual worktree key + branch on `ChainInfo` at chain-worktree
+creation (`RecordChainWorktree`, sourced from
+`WorktreeManager.ResolveBranch` — the branch actually checked out, never
+re-derived); chain completion resolves the branch in priority order —
+recorded, then exact `hydra/wt-<key>`, then newest `-vN` by N — with every
+fallback logged loudly; a resolution that finds nothing emits typed
+`chain_integration_unverified` (`no_worktree_or_branch_after_resolution`)
+instead of skipping silently. The stale-branch reattach path in
+`EnsureWorktree` likewise logs that downstream lookups must use the recorded
+key. The orphan reconciler normalizes the `-vN` suffix off the branch-derived
+key before the active-key and terminal-bead checks (the exact-match miss
+there was the failed 1h+ backstop) and merges the real branch name. The completion
 callback captures the worktree branch tip before teardown and verifies the
 tip is contained in HEAD after integrate — a mismatch emits
 `chain_integration_unverified` and stamps the root bead

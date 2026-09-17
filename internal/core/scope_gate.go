@@ -362,3 +362,32 @@ func branchIsAncestorOfMain(projectPath, branch string) (bool, error) {
 	}
 	return true, nil
 }
+
+// commitIsAncestorOfMain is branchIsAncestorOfMain for a raw commit SHA: is
+// sha a STRICT ancestor of the main checkout HEAD? Unlike the branch variant
+// there is no tip==HEAD special case to preserve — equality is explicitly
+// NOT credited: a worktree sitting at the main tip carries no bead work
+// (worker produced nothing / reverted its own edits), and the empty-diff
+// reject must still fire for it, exactly as branchIsAncestorOfMain decided
+// for the tip==HEAD branch case. Worktrees share the main repo's object
+// database, so any worktree commit is resolvable here.
+func commitIsAncestorOfMain(projectPath, sha string) (bool, error) {
+	if projectPath == "" || sha == "" {
+		return false, fmt.Errorf("commitIsAncestorOfMain: projectPath and sha are required")
+	}
+	headOut, err := exec.Command("git", "-C", projectPath, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return false, fmt.Errorf("rev-parse HEAD in %s: %w", projectPath, err)
+	}
+	if strings.TrimSpace(string(headOut)) == strings.TrimSpace(sha) {
+		return false, nil
+	}
+	cmd := exec.Command("git", "-C", projectPath, "merge-base", "--is-ancestor", sha, "HEAD")
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("merge-base --is-ancestor %s HEAD in %s: %w", sha, projectPath, err)
+	}
+	return true, nil
+}

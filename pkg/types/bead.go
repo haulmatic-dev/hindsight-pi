@@ -190,11 +190,12 @@ const (
 
 // Project represents a software project that contains beads.
 type Project struct {
-	Name     string   `json:"name"`
-	Path     string   `json:"path"`
-	Type     RepoType `json:"type"`            // single or multi
-	Repos    []Repo   `json:"repos,omitempty"` // For multi-repo projects
-	Priority int      `json:"priority"`
+	Name        string   `json:"name"`
+	Path        string   `json:"path"`
+	Type        RepoType `json:"type"`                   // single or multi
+	Repos       []Repo   `json:"repos,omitempty"`        // For multi-repo projects
+	Priority    int      `json:"priority"`
+	IssuePrefix string   `json:"issue_prefix,omitempty"` // br issue prefix (<user>-<repo>)
 }
 
 // Repo represents a single repository within a multi-repo project.

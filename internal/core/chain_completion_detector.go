@@ -32,6 +32,15 @@ type ChainInfo struct {
 	// project names make name lookup return the first match, which is how the
 	// webapp zpf chain integrated into the wrong project (2026-09-16).
 	ProjectPath string
+	// WorktreeKey and WorktreeBranch are the chain's REAL worktree identity,
+	// recorded at chain-worktree creation (first EnsureWorktree). WorktreeManager
+	// versions a stale branch name to hydra/wt-<key>-vN; consumers that
+	// re-derive the branch from the key by exact match then miss and log
+	// "nothing to integrate" while the work strands (webapp-tc5, 1,642
+	// insertions, 2026-09-16). Empty for pre-upgrade chains — completion then
+	// falls back: exact match, then newest -vN prefix match, each logged.
+	WorktreeKey    string
+	WorktreeBranch string
 }
 
 type ChainStatus string
@@ -199,18 +208,45 @@ func (d *ChainCompletionDetector) RegisterChain(rootBeadID types.BeadID, allBead
 
 	leafIDs := d.findLeafBeads(rootBeadID, allBeadIDs)
 
+	// Preserve a previously recorded worktree identity across re-registration
+	// (the registrar re-runs at every startup): the chain's real branch name
+	// is known only to the entity that created the versioned branch.
+	worktreeKey, worktreeBranch := "", ""
+	if existing, ok := d.chains[rootBeadID.String()]; ok {
+		worktreeKey, worktreeBranch = existing.WorktreeKey, existing.WorktreeBranch
+	}
+
 	d.chains[rootBeadID.String()] = &ChainInfo{
-		RootBeadID:  rootBeadID,
-		LeafBeadIDs: leafIDs,
-		AllBeadIDs:  allBeadIDs,
-		TotalBeads:  len(allBeadIDs),
-		StartTime:   time.Now(),
-		Status:      ChainStatusInProgress,
-		ProjectPath: projectPath,
+		RootBeadID:     rootBeadID,
+		LeafBeadIDs:    leafIDs,
+		AllBeadIDs:     allBeadIDs,
+		TotalBeads:     len(allBeadIDs),
+		StartTime:      time.Now(),
+		Status:         ChainStatusInProgress,
+		ProjectPath:    projectPath,
+		WorktreeKey:    worktreeKey,
+		WorktreeBranch: worktreeBranch,
 	}
 
 	log.Printf("[ChainCompletion] Registered chain: root=%s, total_beads=%d, leaf_count=%d, project=%s",
 		rootBeadID, len(allBeadIDs), len(leafIDs), projectPath)
+}
+
+// RecordChainWorktree records the chain's actual worktree key + branch at
+// chain-worktree creation, exactly as RegisterChain records ProjectPath.
+// Key is the chain root bead ID string; branch is the REAL branch name the
+// worktree was created on (possibly a -vN versioned one — ask
+// WorktreeManager.ResolveBranch, never re-derive from the key). No-op when
+// the chain is not registered yet; the completion-time resolver falls back
+// to exact/-vN matching in that case.
+func (d *ChainCompletionDetector) RecordChainWorktree(key, branch string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if chain, ok := d.chains[key]; ok && branch != "" {
+		chain.WorktreeKey = key
+		chain.WorktreeBranch = branch
+		log.Printf("[ChainCompletion] recorded worktree for chain %s: branch=%s", key, branch)
+	}
 }
 
 func (d *ChainCompletionDetector) findLeafBeads(root types.BeadID, allBeadIDs []types.BeadID) []types.BeadID {

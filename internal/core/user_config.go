@@ -46,6 +46,7 @@ type UserProject struct {
 	RepoURL      string       `yaml:"repo_url,omitempty"`      // Remote URL
 	PRDPath      string       `yaml:"prd_path,omitempty"`      // e.g. docs/PRDs/current.md
 	Branch       string       `yaml:"branch,omitempty"`        // Default: main
+	IssuePrefix  string       `yaml:"issue_prefix,omitempty"`  // Optional bead ID prefix; defaults to <username>-<repo>
 	AutoDiscover bool         `yaml:"auto_discover,omitempty"` // Discover repos if type=multi
 }
 
