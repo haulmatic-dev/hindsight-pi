@@ -11,7 +11,7 @@ func TestMultiUserDiscovery_ExcludeProject(t *testing.T) {
 
 	projectPath := filepath.Join(dir, "projects", "demo")
 	os.MkdirAll(filepath.Join(projectPath, ".beads"), 0755)
-	os.WriteFile(filepath.Join(projectPath, ".beads", "beads.db"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(projectPath, ".beads", "issues.jsonl"), []byte("{}"), 0644)
 
 	ctx := &UserContext{Username: "alice", HomeDir: dir}
 	d := NewMultiUserDiscovery()
@@ -35,9 +35,9 @@ func TestMultiUserDiscovery_ExcludeRepoInMultiProject(t *testing.T) {
 	os.MkdirAll(filepath.Join(projectPath, "frontend", ".beads"), 0755)
 	os.MkdirAll(filepath.Join(projectPath, "backend", ".beads"), 0755)
 	os.MkdirAll(filepath.Join(projectPath, "demo", ".beads"), 0755)
-	os.WriteFile(filepath.Join(projectPath, "frontend", ".beads", "beads.db"), []byte("{}"), 0644)
-	os.WriteFile(filepath.Join(projectPath, "backend", ".beads", "beads.db"), []byte("{}"), 0644)
-	os.WriteFile(filepath.Join(projectPath, "demo", ".beads", "beads.db"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(projectPath, "frontend", ".beads", "issues.jsonl"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(projectPath, "backend", ".beads", "issues.jsonl"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(projectPath, "demo", ".beads", "issues.jsonl"), []byte("{}"), 0644)
 
 	ctx := &UserContext{Username: "alice", HomeDir: dir}
 	d := NewMultiUserDiscovery()
@@ -67,7 +67,7 @@ func TestMultiUserDiscovery_ExcludeByPath(t *testing.T) {
 
 	projectPath := filepath.Join(dir, "projects", "demo")
 	os.MkdirAll(filepath.Join(projectPath, ".beads"), 0755)
-	os.WriteFile(filepath.Join(projectPath, ".beads", "beads.db"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(projectPath, ".beads", "issues.jsonl"), []byte("{}"), 0644)
 
 	ctx := &UserContext{Username: "alice", HomeDir: dir}
 	d := NewMultiUserDiscovery()

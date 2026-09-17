@@ -145,8 +145,8 @@ func TestMultiUserDiscovery_AutoDiscoverRepos(t *testing.T) {
 	projectPath := filepath.Join(dir, "my-platform")
 	os.MkdirAll(filepath.Join(projectPath, "frontend", ".beads"), 0755)
 	os.MkdirAll(filepath.Join(projectPath, "backend", ".beads"), 0755)
-	os.WriteFile(filepath.Join(projectPath, "frontend", ".beads", "beads.db"), []byte("{}"), 0644)
-	os.WriteFile(filepath.Join(projectPath, "backend", ".beads", "beads.db"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(projectPath, "frontend", ".beads", "issues.jsonl"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(projectPath, "backend", ".beads", "issues.jsonl"), []byte("{}"), 0644)
 
 	ctx := &UserContext{
 		Username: "alice",
@@ -234,7 +234,7 @@ func TestPrefixGuard_SingleRepoDefault(t *testing.T) {
 	dir := t.TempDir()
 	projectPath := filepath.Join(dir, "task-service")
 	os.MkdirAll(filepath.Join(projectPath, ".beads"), 0755)
-	os.WriteFile(filepath.Join(projectPath, ".beads", "beads.db"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(projectPath, ".beads", "issues.jsonl"), []byte("{}"), 0644)
 
 	ctx := &UserContext{Username: "alice", HomeDir: dir}
 	d := NewMultiUserDiscovery()
@@ -286,7 +286,7 @@ func TestPrefixGuard_CustomPrefixPreserved(t *testing.T) {
 	dir := t.TempDir()
 	projectPath := filepath.Join(dir, "weird_repo")
 	os.MkdirAll(filepath.Join(projectPath, ".beads"), 0755)
-	os.WriteFile(filepath.Join(projectPath, ".beads", "beads.db"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(projectPath, ".beads", "issues.jsonl"), []byte("{}"), 0644)
 
 	ctx := &UserContext{Username: "alice", HomeDir: dir}
 	d := NewMultiUserDiscovery()
