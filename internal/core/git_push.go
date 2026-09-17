@@ -104,6 +104,12 @@ func IsProtectedBranchRejection(reason string) bool {
 		// this classifier missed it, no auto-PR opened, and the bead
 		// reopened into an empty-diff loop. The doc comment above already
 		// promised this coverage; the implementation did not deliver it.
+		// Rule violations: GitHub rulesets phrase a declined push as
+		// "push declined due to repository rule violations" (seen on
+		// haulmatic-dev/hydra development 2026-09-17 after divergence was
+		// resolved — the protection is permanent, so this is the steady-state
+		// rejection and must route to the auto-PR fallback).
+		strings.Contains(lower, "rule violations") ||
 		strings.Contains(lower, "non-fast-forward") ||
 		strings.Contains(lower, "fetch first")
 }
