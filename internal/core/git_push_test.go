@@ -279,3 +279,115 @@ func TestPushBranchWithToken_NoRemote(t *testing.T) {
 		t.Errorf("no origin: got (%v,%q), want (false,\"no remote\")", ok, reason)
 	}
 }
+
+func TestIsProtectedBranchRejection_NonFastForward(t *testing.T) {
+	t.Parallel()
+	// Hydra-7k1 2026-09-16: the push died with a bare non-fast-forward
+	// rejection (local development ahead with unpushed integrates AND behind
+	// origin after PR #253 merged out of band). This classifier missed it,
+	// no auto-PR opened, and the bead reopened into an empty-diff loop.
+	reason := "To https://github.com/haulmatic-dev/hydra.git\n ! [rejected]        development -> development (non-fast-forward)\nerror: failed to push some refs to 'https://github.com/haulmatic-dev/hydra.git'\nhint: Updates were rejected because the tip of your current branch is behind"
+	if !IsProtectedBranchRejection(reason) {
+		t.Error("IsProtectedBranchRejection must match a non-fast-forward rejection (verbatim hydra-7k1 remote output)")
+	}
+}
+
+func TestPushBranchWithNonFFRecovery(t *testing.T) {
+	t.Parallel()
+
+	setupDivergedPair := func(t *testing.T) (repo, remote, other string) {
+		t.Helper()
+		repo, remote = setupReachableRemote(t)
+		commitFile(t, repo, "README.md", "hello")
+		if pushed, reason := PushBranch(repo, "origin", "main"); !pushed {
+			t.Fatalf("seed push failed: %s", reason)
+		}
+		// Second clone advances origin's main out from under the first repo
+		// (the out-of-band PR merge in the hydra-7k1 scenario).
+		other = filepath.Join(t.TempDir(), "other")
+		if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("git", "clone", "-q", remote, other)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("clone: %v\n%s", err, out)
+		}
+		git(t, other, "config", "user.email", "test@example.com")
+		git(t, other, "config", "user.name", "Test User")
+		return repo, remote, other
+	}
+
+	t.Run("non-fast-forward recovers via fetch merge and retry", func(t *testing.T) {
+		t.Parallel()
+		repo, remote, other := setupDivergedPair(t)
+		commitFile(t, other, "upstream.go", "package main\n// merged out of band\n")
+		if pushed, reason := PushBranch(other, "origin", "main"); !pushed {
+			t.Fatalf("other push failed: %s", reason)
+		}
+
+		commitFile(t, repo, "local.go", "package main\n// hydra integrate\n")
+		pushed, reason := PushBranch(repo, "origin", "main")
+		if pushed {
+			t.Fatal("plain PushBranch should fail non-fast-forward when origin diverged")
+		}
+		if !strings.Contains(reason, "non-fast-forward") {
+			t.Fatalf("failure reason should carry the verbatim non-fast-forward rejection, got: %q", reason)
+		}
+
+		pushed, reason = PushBranchWithNonFFRecovery(repo, "origin", "main")
+		if !pushed {
+			t.Fatalf("PushBranchWithNonFFRecovery should recover and push, got reason: %q", reason)
+		}
+		if !remoteHas(t, remote, "main", headCommit(t, repo)) {
+			t.Errorf("remote main does not contain recovered head %s", headCommit(t, repo))
+		}
+		// The recovery must be a merge (preserving --no-ff integrate
+		// history), i.e. HEAD has two parents after recovery.
+		if out := git(t, repo, "rev-parse", "--verify", "HEAD^2"); strings.TrimSpace(out) == "" {
+			t.Error("recovery should have created a merge commit (HEAD^2 missing)")
+		}
+		// The out-of-band commit is contained in local main now.
+		upstream := headCommit(t, other)
+		if out, err := exec.Command("git", "-C", repo, "merge-base", "--is-ancestor", upstream, "HEAD").CombinedOutput(); err != nil {
+			t.Errorf("recovered main does not contain out-of-band commit %s: %v", upstream, out)
+		}
+	})
+
+	t.Run("conflicting remote tip aborts merge and reports original failure", func(t *testing.T) {
+		t.Parallel()
+		repo, remote, other := setupDivergedPair(t)
+		commitFile(t, other, "conflict.go", "package main\n// upstream version\n")
+		if pushed, reason := PushBranch(other, "origin", "main"); !pushed {
+			t.Fatalf("other push failed: %s", reason)
+		}
+
+		commitFile(t, repo, "conflict.go", "package main\n// divergent local version\n")
+		before := headCommit(t, repo)
+		pushed, reason := PushBranchWithNonFFRecovery(repo, "origin", "main")
+		if pushed {
+			t.Fatal("recovery must not push when the merge conflicts")
+		}
+		if !strings.Contains(reason, "non-fast-forward") && !strings.Contains(reason, "fetch first") {
+			t.Fatalf("reason should be the original push failure, got: %q", reason)
+		}
+		if after := headCommit(t, repo); after != before {
+			t.Errorf("failed recovery must leave HEAD untouched: before %s after %s", before, after)
+		}
+		if out := strings.TrimSpace(git(t, repo, "status", "--porcelain")); out != "" {
+			t.Errorf("failed recovery must leave a clean worktree, got: %q", out)
+		}
+		if remoteHas(t, remote, "main", headCommit(t, repo)) {
+			t.Error("remote main must not contain the unpushed local commit after failed recovery")
+		}
+	})
+
+	t.Run("non-divergence failures pass through without recovery", func(t *testing.T) {
+		t.Parallel()
+		repo := setupLocalRepo(t) // no remote configured at all
+		commitFile(t, repo, "README.md", "hello")
+		pushed, reason := PushBranchWithNonFFRecovery(repo, "", "main")
+		if pushed || reason != "not configured" {
+			t.Errorf("pass-through mismatch: pushed=%v reason=%q", pushed, reason)
+		}
+	})
+}
