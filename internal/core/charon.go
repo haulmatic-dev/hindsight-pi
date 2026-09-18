@@ -49,6 +49,7 @@ type Charon struct {
 	steeredMu           sync.Mutex
 	steeredAt           map[string]time.Time // bead → last budget steer (rate limit)
 	retryManager        *RetryManager        // Charon kills consume retry budget (else infra-classified free respawns loop)
+	chainCompletionDetector *ChainCompletionDetector // active-chain guard for stranded-work detection
 	maxWorkers          int                  // pool size ceiling for phantom-slot deadlock detection
 	events              *EventSink           // structured event stream; nil-safe
 	deadlockScans       int                  // consecutive scans seeing active>=max and zero live PIDs
@@ -254,6 +255,13 @@ func (j *Charon) SetChainKeyForBeadID(fn func(types.BeadID) string) {
 	j.chainKeyForBeadID = fn
 }
 
+// SetChainCompletionDetector injects the active-chain registry so the
+// stranded-work detector does not mistake an in-progress chain's worktree
+// for abandoned work.
+func (j *Charon) SetChainCompletionDetector(d *ChainCompletionDetector) {
+	j.chainCompletionDetector = d
+}
+
 // worktreeActiveKeys builds the set of worktree keys the reconciler and
 // stale-worktree GC must never touch: every active worker's bead ID, its
 // chain key, and any tracked worker spawned within worktreeSpawnGrace.
@@ -322,6 +330,13 @@ func (j *Charon) performCleanup() {
 				}
 			}
 			CleanupStaleWorktrees(24*time.Hour, active, j.events)
+			if j.beadsClient != nil && j.getProjects != nil {
+				for _, project := range j.getProjects() {
+					for _, target := range repoScanTargets(project) {
+						DetectStrandedWork(NewWorktreeManager(), target, active, j.chainCompletionDetector, j.beadsClient, j.events)
+					}
+				}
+			}
 		}()
 	}
 

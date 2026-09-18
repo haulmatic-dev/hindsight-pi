@@ -120,6 +120,9 @@ type Overseer struct {
 	// Resource monitoring for adaptive scaling
 	resourceMonitor *ResourceMonitor // Monitors CPU/Memory usage
 
+	// Shared structured event sink for daemon-wide decision events.
+	eventSink *EventSink
+
 	// Orphan process janitor for cleaning up orphaned worker processes
 	orphanJanitor *Charon // Cleans up orphaned worker processes
 
@@ -362,6 +365,8 @@ func NewOverseer(config *Config) *Overseer {
 	// never integrate/remove a live chain worktree (member bead ID ≠ chain
 	// root key — gybo4, 2026-09-10).
 	o.orphanJanitor.SetChainKeyForBeadID(o.chainKeyForBeadID)
+	// Guard stranded-work detection against in-progress chains.
+	o.orphanJanitor.SetChainCompletionDetector(o.chainCompletionDetector)
 	// When Charon detects a stale PID-0 entry, it invokes this callback to
 	// actually delete the entry from the in-memory map (since Charon does not
 	// own the map).
@@ -490,9 +495,11 @@ func NewOverseer(config *Config) *Overseer {
 	}
 	// Structured decision stream (Shepherd C1/C2): central day-files plus
 	// per-repo .hydra/events.jsonl mirrors.
-	o.beadCloser.SetEventSink(NewEventSink(DefaultEventsDir()))
-	o.providerPool.SetEventSink(NewEventSink(DefaultEventsDir()))
-	o.orphanJanitor.SetEventSink(NewEventSink(DefaultEventsDir()))
+	events := NewEventSink(DefaultEventsDir())
+	o.eventSink = events
+	o.beadCloser.SetEventSink(events)
+	o.providerPool.SetEventSink(events)
+	o.orphanJanitor.SetEventSink(events)
 	retainer := NewVerdictRetainer(o.hindsightClient)
 	o.beadCloser.SetVerdictRetainer(retainer)
 

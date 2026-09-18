@@ -161,6 +161,7 @@ var repairWhitelist = map[string]bool{
 	"park-campaign":               true,
 	"unpark-campaign":             true,
 	"log-improvement":             true,
+	"integrate-stranded":          true,
 }
 
 // pseudoBeadSuffix marks synthetic project-level candidates (e.g.
@@ -1100,7 +1101,7 @@ needs a judgment call. For EVERY worker decide exactly one action:
 - "compact-and-continue": session context is exhausted; compact then continue
 - "abandon-with-summary": give up gracefully (payload: what was done and what remains)
 - "close_satisfied": the bead's acceptance criteria are already met on the working branch and the worker found nothing to do; close it without a worker
-- "repair:<name>": execute a whitelisted daemon-side repair (payload: for log-improvement, the improvement text; ignored otherwise). Only for BLOCKED beads with no live worker row. The only valid repair names are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park, prune-worktree-registration, re-push-integration, park-campaign, log-improvement. No other repair:<name> strings exist; if none fit, choose continue or abandon-with-summary.
+- "repair:<name>": execute a whitelisted daemon-side repair (payload: for log-improvement, the improvement text; ignored otherwise). Only for BLOCKED beads with no live worker row. The only valid repair names are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park, prune-worktree-registration, re-push-integration, park-campaign, log-improvement, integrate-stranded. No other repair:<name> strings exist; if none fit, choose continue or abandon-with-summary.
 
 Rescue recipes (hard-won; prefer the repair matching the cause):
 - Hard-park labels (worktree-unavailable, integration-exhausted) are durable by design — the scheduler never retries them. Use repair:clear-hard-park when the named cause is plausibly fixed or transient (worktree directory exists, store parses clean, push path repaired). Do not clear a park whose cause is still present.
@@ -1110,6 +1111,7 @@ Rescue recipes (hard-won; prefer the repair matching the cause):
 - PUSH-PENDING candidates mean commits exist locally but not on origin. Prefer repair:re-push-integration once; if the reason is branch protection or permissions and a retry already failed, that is a human problem — say so in reasoning instead of looping repairs.
 - Candidates ending in -push-pending are project-level pseudo-beads, not beads: never abandon-with-summary or close_satisfied them — only repair:re-push-integration applies. If the reason is divergence or permissions, it is a human problem; say so in reasoning and move on.
 - Candidates ending in -campaign-anomaly are fleet-level findings from the health digest (their reason carries the anomaly and a compact fleet snapshot). Three verbs apply: repair:park-campaign to freeze that project's campaign (the scheduler skips all spawns for the project; reversible; the default for chain-discipline violations), repair:unpark-campaign to release the campaign once the anomaly is understood, and repair:log-improvement to record a hydra improvement proposal for human review (payload = the proposal). Never abandon or close them. Prefer log-improvement when the right fix is a hydra code change rather than a containment.
+- Stranded worktrees (a hydra/wt-<key> branch is ahead of the working branch, the owning bead is terminal or unknown, and there is no live worker or active in-progress chain) are repaired with repair:integrate-stranded. A clean merge integrates the branch and removes the worktree; a merge conflict quarantines it to hydra/quarantine/<key> and labels the bead stranded-conflict; a post-merge verification failure labels integration-unverified.
 - Never repair for merges, PRs, deploys, or repo content edits — those are human-only; if the state needs one, explain it in reasoning.
 
 Rules:
