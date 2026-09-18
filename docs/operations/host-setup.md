@@ -278,8 +278,9 @@ projects:
     auto_discover: true
 ```
 
-Hydra scans `<path>` for subdirectories containing `.beads/beads.db`. For each
-discovered repo, PrefixGuard writes `.beads/config.yaml` with
+Hydra scans `<path>` for subdirectories containing a `.beads` store
+(`.beads/issues.jsonl`, with legacy `.beads/beads.db` accepted as a fallback
+marker). For each discovered repo, PrefixGuard writes `.beads/config.yaml` with
 `issue_prefix: <username>-<reponame>` (lowercased and sanitized to
 `[a-z0-9-]`) so `br create` bead IDs do not collide across users or across
 projects that share a repo name. An explicit `issue_prefix` on the user
