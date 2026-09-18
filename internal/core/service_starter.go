@@ -374,6 +374,18 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				}
 				return fmt.Errorf("re-push-integration: no project named %s", name)
 			},
+			"integrate-stranded": func(beadID string) error {
+				id := types.BeadID(beadID)
+				projectPath := projectPathForID(id)
+				if projectPath == "" {
+					return fmt.Errorf("integrate-stranded: project path unresolved for %s", beadID)
+				}
+				if o.worktreeManager == nil {
+					return fmt.Errorf("integrate-stranded: no worktree manager for %s", beadID)
+				}
+				key := o.chainKeyForBead(types.Bead{ID: id})
+				return IntegrateStrandedRepair(projectPath, key, o.worktreeManager, o.beadsClient, o.eventSink)
+			},
 			"park-campaign":   o.parkCampaignRepair,
 			"unpark-campaign": o.unparkCampaignRepair,
 		})

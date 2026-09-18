@@ -354,7 +354,7 @@ func TestTickDeduplicatesPendingCommands(t *testing.T) {
 
 func TestBuildPromptListsRepairWhitelist(t *testing.T) {
 	prompt := BuildPrompt(nil)
-	for _, name := range []string{"repair-worktree", "reap-placeholder", "reset-retries"} {
+	for _, name := range []string{"repair-worktree", "reap-placeholder", "reset-retries", "integrate-stranded"} {
 		if !strings.Contains(prompt, name) {
 			t.Errorf("prompt missing whitelisted repair name %q", name)
 		}
