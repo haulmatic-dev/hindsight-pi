@@ -551,7 +551,28 @@ func (d *BeadDiscovery) findFromBVPlan(activeWorkers map[string]bool) ([]types.B
 // filterByDAG intersects candidate beads with the DAG's ready nodes.
 // This prevents duplicate scheduling when external sources (br, bv) return beads
 // whose dependencies are not yet satisfied in our view of the world.
+//
+// This is also the single chokepoint every discovery path (br ready, bv
+// robot-plan, bv triage) returns through, so the escalated-label gate lives
+// here: dag_navigator.GetReadyBeadsFromDAG already skips escalated beads,
+// but the filtered candidate slice itself must not resurrect them. Filtering
+// before the dag==nil early return keeps the gate effective even when no DAG
+// is loaded (kgo: hydra-wdp spawned with escalated label present).
 func (d *BeadDiscovery) filterByDAG(candidates []types.Bead) []types.Bead {
+	kept := candidates[:0]
+	escalatedFiltered := 0
+	for _, bead := range candidates {
+		if hasBeadLabel(bead.Labels, escalatedLabel) {
+			escalatedFiltered++
+			continue
+		}
+		kept = append(kept, bead)
+	}
+	if escalatedFiltered > 0 {
+		log.Printf("[Discovery] Filtered %d escalated-labeled beads (escalated to human; not schedulable)", escalatedFiltered)
+	}
+	candidates = kept
+
 	if d.dag == nil || d.dagMu == nil {
 		return candidates
 	}
