@@ -38,6 +38,8 @@ type WorkerSpawner struct {
 	// Records each chain's REAL worktree branch (possibly -vN versioned) at
 	// chain-worktree creation, so completion integrates the branch that exists.
 	chainCompletionDetector *ChainCompletionDetector
+	// sessionResumePilot gates session-file resume on orphan respawn.
+	sessionResumePilot *SessionResumePilot
 
 	spawnFailureMu sync.RWMutex
 	spawnFailures  map[string]*spawnFailureInfo // bead ID -> last spawn failure
@@ -82,6 +84,11 @@ func (s *WorkerSpawner) SetRegistryStore(st *registry.Store) {
 	if s.parkedRespawnTimeout == 0 {
 		s.parkedRespawnTimeout = defaultParkedRespawnTimeout
 	}
+}
+
+// SetSessionResumePilot wires the session-file resume pilot.
+func (s *WorkerSpawner) SetSessionResumePilot(p *SessionResumePilot) {
+	s.sessionResumePilot = p
 }
 
 // NewWorkerSpawner creates a new worker spawner.
@@ -533,6 +540,56 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 	// would keep the bead in Pan's blocked candidacy while a live worker runs.
 	s.ClearSpawnFailure(beadIDStr)
 
+	// Session-file resume pilot (Self-heal recovery A): only resume after an
+	// infra-class death, with attempt-boundary injection, HEAD check, and
+	// age/size caps. Post-reap safety is implicit: SpawnInternal is only
+	// reached after the duplicate-spawn guards confirm no live worker.
+	if s.sessionResumePilot != nil && s.workerTracker != nil && s.retryManager != nil && cmd.Process != nil {
+		head := currentGitHead(runDir)
+		if head != "" {
+			if err := s.workerTracker.SetWorkerSpawnHead(cmd.Process.Pid, head); err != nil {
+				log.Printf("[WorkerSpawner] failed to record spawn HEAD for %s: %v", beadIDStr, err)
+			}
+		}
+
+		sessionID := PiSessionID(beadIDStr)
+		sessionDir := PiSessionDir(beadIDStr, os.Getenv("HYDRA_HOME"))
+		age, size, exists, serr := SessionFileStats(sessionDir)
+		if serr != nil && exists {
+			log.Printf("[WorkerSpawner] session stats error for %s: %v", beadIDStr, serr)
+		}
+
+		lastInfra := s.retryManager.IsInfra(beadIDStr)
+		storedHead := ""
+		if prev, ok := s.workerTracker.GetPreviousWorkerRecordByBead(beadIDStr, cmd.Process.Pid); ok {
+			storedHead = prev.SpawnHead
+		}
+
+		resume := false
+		resumeReason := ""
+		if !exists {
+			resumeReason = "no prior session"
+		} else {
+			resume, resumeReason = s.sessionResumePilot.ShouldResume(beadIDStr, retryCount, lastInfra, sessionDir, age, size, head, storedHead)
+		}
+
+		if resume {
+			cmd.Env = append(cmd.Env,
+				"HYDRA_RESUME_SESSION=1",
+				fmt.Sprintf("HYDRA_RESUME_SESSION_ID=%s", sessionID),
+				fmt.Sprintf("HYDRA_RESUME_SESSION_DIR=%s", sessionDir),
+			)
+			if s.beadsClient != nil && projectPath != "" {
+				if err := s.beadsClient.UpdateBeadLabels(projectPath, "", bead.ID, []string{sessionResumedLabel}); err != nil {
+					log.Printf("[WorkerSpawner] failed to label resumed bead %s: %v", beadIDStr, err)
+				}
+			}
+			log.Printf("[WorkerSpawner] resuming Pi session for %s (attempt %d, dir=%s)", beadIDStr, retryCount+1, sessionDir)
+		} else {
+			log.Printf("[WorkerSpawner] not resuming session for %s: %s", beadIDStr, resumeReason)
+		}
+	}
+
 	go s.workerLifecycle.Monitor(worker, cmd)
 
 	return worker, nil
@@ -668,4 +725,16 @@ func isNotableWorkerLine(s string) bool {
 		}
 	}
 	return false
+}
+
+// currentGitHead returns the HEAD commit of dir, or empty string on error.
+func currentGitHead(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

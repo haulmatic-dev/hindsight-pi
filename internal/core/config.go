@@ -33,6 +33,7 @@ type Config struct {
 	Shepherd           ShepherdConfig        `yaml:"shepherd"`
 	Worktree           WorktreeConfig        `yaml:"worktree"`
 	Status             StatusConfig          `yaml:"status"`
+	SelfHealing        SelfHealingConfig     `yaml:"self_healing"`
 }
 
 // ShepherdConfig configures Pan, the shepherd that decides the ambiguous
@@ -337,6 +338,7 @@ type rawConfig struct {
 	Shepherd        ShepherdConfig        `yaml:"shepherd"`
 	Worktree        WorktreeConfig        `yaml:"worktree"`
 	Status          StatusConfig          `yaml:"status"`
+	SelfHealing     SelfHealingConfig     `yaml:"self_healing"`
 }
 
 // projectsListConfig handles the case where projects is an object with 'list' field
@@ -632,6 +634,9 @@ func DefaultConfig() *Config {
 			EnforceTargetScope:       "warn",
 			RequireDiffOnClose:       true,
 		},
+		SelfHealing: SelfHealingConfig{
+			SessionResume: DefaultSessionResumeConfig(),
+		},
 		ComplianceCycle: ComplianceCycleConfig{
 			Enabled:      false,
 			MaxCycles:    2,
@@ -888,6 +893,8 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	config.Output = raw.Output
 	config.Worktree = raw.Worktree
+	config.SelfHealing = raw.SelfHealing
+	config.SelfHealing.SessionResume.applyDefaults()
 	// Handle projects field - can be:
 	// 1. An array of ProjectConfig (direct list)
 	// 2. An object with 'auto_discover' and 'list' fields
@@ -960,6 +967,8 @@ func LoadConfigUncached(path string) (*Config, error) {
 	}
 	config.Output = raw.Output
 	config.Worktree = raw.Worktree
+	config.SelfHealing = raw.SelfHealing
+	config.SelfHealing.SessionResume.applyDefaults()
 	config.Validation = raw.Validation
 	config.ComplianceCycle = raw.ComplianceCycle
 	config.Shepherd = raw.Shepherd

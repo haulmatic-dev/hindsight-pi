@@ -268,3 +268,23 @@ output:
   # This is an operator-side toggle; apply it in /etc/hydra/hydra.yaml.
   auto_pr: false
 
+
+
+# Self-healing: session-file resume pilot (opt-in).
+# Resume a dead worker's Pi session on orphan respawn only when the death was
+# infra-class, the session is within age/size caps, and the worktree HEAD
+# matches the stored spawn HEAD. Dark-metrics mode (dry_run: true) measures
+# resumed vs fresh outcomes without disabling; set dry_run: false to enable
+# auto-disable when resumed beads produce more fix beads or verified-close
+# rejections.
+self_healing:
+  session_resume:
+    enabled: false
+    dry_run: true
+    infra_only: true
+    head_check: true
+    max_session_age: 1h
+    max_session_size: 52428800   # 50 MiB
+    fix_rate_threshold: 0.5
+    reject_rate_threshold: 0.5
+    min_samples: 3

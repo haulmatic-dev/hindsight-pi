@@ -20,6 +20,10 @@ type WorkerRecord struct {
 	CompletedAt time.Time `json:"completed_at,omitempty"`
 	Status      string    `json:"status"`
 	ExitCode    int       `json:"exit_code,omitempty"`
+	// SpawnHead is the git HEAD of the worktree at the moment this worker was
+	// spawned. It is used by the session-resume pilot to detect when the
+	// worktree has diverged from the state the resumed session claims.
+	SpawnHead string `json:"spawn_head,omitempty"`
 }
 
 // WorkerTracker persists worker process information to JSON file
@@ -332,9 +336,46 @@ func (wt *WorkerTracker) GetWorkerByPGID(pgid int) (*WorkerRecord, bool) {
 				Status:      r.Status,
 				ExitCode:    r.ExitCode,
 				CompletedAt: r.CompletedAt,
+				SpawnHead:   r.SpawnHead,
 			}, true
 		}
 	}
 
 	return nil, false
+}
+
+// SetWorkerSpawnHead records the worktree HEAD for a tracked worker.
+func (wt *WorkerTracker) SetWorkerSpawnHead(pid int, head string) error {
+	wt.mu.Lock()
+	defer wt.mu.Unlock()
+
+	r, ok := wt.workers[pid]
+	if !ok {
+		return fmt.Errorf("worker %d not found", pid)
+	}
+	r.SpawnHead = head
+	return wt.save()
+}
+
+// GetPreviousWorkerRecordByBead returns the most recent record for a bead
+// excluding the given PID. This is used to find the orphan attempt that
+// preceded the current respawn.
+func (wt *WorkerTracker) GetPreviousWorkerRecordByBead(beadID string, excludePID int) (*WorkerRecord, bool) {
+	wt.mu.RLock()
+	defer wt.mu.RUnlock()
+
+	var best *WorkerRecord
+	for _, r := range wt.workers {
+		if r.BeadID != beadID || r.PID == excludePID {
+			continue
+		}
+		if best == nil || r.StartedAt.After(best.StartedAt) {
+			best = r
+		}
+	}
+	if best == nil {
+		return nil, false
+	}
+	copy := *best
+	return &copy, true
 }

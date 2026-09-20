@@ -1901,10 +1901,18 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 		"--offline",
 	}
 	if sessionID != "" && sessionDir != "" {
-		// --session-id (not --session): pi exits 1 with "No session found
-		// matching" when --session names a session that does not exist yet —
-		// i.e. every fresh bead. --session-id creates it if missing.
-		args = append(args, "--session-id", sessionID, "--session-dir", sessionDir)
+		if os.Getenv("HYDRA_RESUME_SESSION") == "1" && sessionHasFiles(sessionDir) {
+			// Resume the orphan's existing session (Self-heal recovery A).
+			// --session requires the session to exist; sessionHasFiles guards
+			// against an empty directory that would make pi exit 1.
+			args = append(args, "--session", sessionID, "--session-dir", sessionDir)
+			log.Printf("[Worker] Resuming existing Pi session for %s (dir=%s)", bead.ID, sessionDir)
+		} else {
+			// --session-id (not --session): pi exits 1 with "No session found
+			// matching" when --session names a session that does not exist yet —
+			// i.e. every fresh bead. --session-id creates it if missing.
+			args = append(args, "--session-id", sessionID, "--session-dir", sessionDir)
+		}
 	}
 
 	// RPC mode is what makes Pi initialise its extensions (rtk command
@@ -2042,6 +2050,14 @@ func sanitizeSessionID(s string) string {
 	return b.String()
 }
 
+// sessionHasFiles reports whether a session directory contains at least one
+// file. Pi's --session resume requires an existing session; an empty directory
+// would cause pi to exit 1.
+func sessionHasFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	return err == nil && len(entries) > 0
+}
+
 // buildPiPrompt builds the prompt message for Pi agent
 // phaseGuidance returns phase-specific working doctrine for a bead, keyed on
 // the TDD-phase title prefix task-breakdown emits (RED:/GREEN:/REFACTOR:) and
@@ -2098,6 +2114,11 @@ func stableByContentHash(items []string) []string {
 	})
 	return out
 }
+
+// resumeAttemptBoundaryText is injected into the prompt when the daemon
+// resumes a previous Pi session. It makes the model distrust prior claims
+// and re-verify worktree state before building on them.
+const resumeAttemptBoundaryText = `ATTEMPT BOUNDARY: you are a NEW attempt for this bead. A previous attempt's Pi session has been resumed for continuity, but its claims about files, tests, git state, and verification are NOT automatically true. Verify the current worktree state (git status, HEAD, changed files, test results) before trusting prior claims. Do not repeat the failed approach; diagnose the root cause first, then proceed.`
 
 func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, extras promptExtras) string {
 	var promptParts []string
@@ -2172,6 +2193,12 @@ A turn ending without this block is treated as unfinished and you will be re-pro
 	// not narration — the reader acts on this verbatim.
 	promptParts = append(promptParts,
 		"CHAIN HANDOFF: if your bead is a TDD-chain phase (test/red, green, refactor) and you changed files, also write docs/hydra/handoff/<phase>.md before finishing — <phase> is your bead type lowercased (e.g. red.md, green.md). Fixed template: # <PHASE> handoff / ## What changed (files + one line each) / ## Verification (commands run + pass/fail) / ## Open edges for the next phase. Later phases read these files; record verified facts only, no narration.")
+
+	// Attempt-boundary injection for resumed sessions (Self-heal recovery A):
+	// the transcript is present, but the model must treat its claims as leads.
+	if os.Getenv("HYDRA_RESUME_SESSION") == "1" {
+		promptParts = append(promptParts, resumeAttemptBoundaryText)
+	}
 
 	// ---- Per-bead variable tail --------------------------------------------------
 

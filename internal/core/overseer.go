@@ -438,6 +438,11 @@ func NewOverseer(config *Config) *Overseer {
 		nil, // userContexts set after discovery
 	)
 
+	// Session-file resume pilot (Self-heal recovery A): quality-gated resume
+	// of Pi sessions after infra-class orphan deaths.
+	sessionResumePilot := NewSessionResumePilot(config.SelfHealing.SessionResume)
+	o.workerSpawner.SetSessionResumePilot(sessionResumePilot)
+
 	// Initialize scheduler
 	o.scheduler = NewScheduler(o)
 	o.scopeValidator = NewScopeValidator(config)
@@ -507,6 +512,7 @@ func NewOverseer(config *Config) *Overseer {
 	// clear retry and spawn-failure residue for the bead.
 	o.beadCloser.SetRetryManager(o.retryManager)
 	o.beadCloser.SetWorkerSpawner(o.workerSpawner)
+	o.beadCloser.SetSessionResumePilot(sessionResumePilot)
 
 	// Per-chain worktree isolation (opt-in via overseer.worktree_isolation).
 	// Wires the manager into spawn (run worker in the chain's worktree) and
