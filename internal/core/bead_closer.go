@@ -29,6 +29,7 @@ type BeadCloser struct {
 	gateRunner        *GateRunner             // nil until SetGateRunner; daemon_owned projects fail closed without it
 	retryManager      *RetryManager           // clears retry residue on verified close
 	workerSpawner     *WorkerSpawner          // clears spawn-failure residue on verified close
+	sessionResumePilot *SessionResumePilot    // session-file resume quality metrics
 }
 
 // SetWorktreeManager enables commit-on-close and singleton integrate-on-close
@@ -68,6 +69,10 @@ func (c *BeadCloser) SetRetryManager(rm *RetryManager) { c.retryManager = rm }
 // SetWorkerSpawner wires the worker spawner so verified closes can purge
 // spawn-failure residue.
 func (c *BeadCloser) SetWorkerSpawner(s *WorkerSpawner) { c.workerSpawner = s }
+
+// SetSessionResumePilot wires the session-file resume pilot for outcome
+// metrics and auto-disable.
+func (c *BeadCloser) SetSessionResumePilot(p *SessionResumePilot) { c.sessionResumePilot = p }
 
 // retainFailedClose retains a failed close as a Hindsight memory when a
 // failure cause was extracted. Fail-open: nil retainer or nil memory (no bead,
@@ -311,6 +316,9 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 	if reason == "completed" {
 		c.purgeCloseState(worker.BeadID)
 	}
+	if reason == "completed" && c.sessionResumePilot != nil && bead != nil {
+		c.sessionResumePilot.RecordSuccess(hasBeadLabel(bead.Labels, sessionResumedLabel))
+	}
 	return nil
 }
 
@@ -514,6 +522,9 @@ func (c *BeadCloser) createFixBeadForFailedCloseWithExitCode(bead *types.Bead, p
 		c.events.EmitRepo(projectPath, Event{Type: "fix_created", Project: repoName,
 			Bead: string(newID), Reason: "failed_close",
 			Fields: map[string]any{"original": priorityBeadID, "exit_code": exitCode}})
+	}
+	if c.sessionResumePilot != nil && bead != nil {
+		c.sessionResumePilot.RecordFix(hasBeadLabel(bead.Labels, sessionResumedLabel))
 	}
 	return nil
 }
@@ -959,6 +970,9 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"verified-close-reject-" + reason}); err != nil {
 			log.Printf("[VerifiedClose] Failed to label %s: %v", beadID, err)
 		}
+	}
+	if c.sessionResumePilot != nil {
+		c.sessionResumePilot.RecordReject(hasBeadLabel(bead.Labels, sessionResumedLabel))
 	}
 	return fmt.Errorf("verified-close: bead %s rejected (%s)", beadID, reason)
 }

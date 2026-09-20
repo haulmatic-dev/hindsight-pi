@@ -198,6 +198,18 @@ func (rm *RetryManager) GetRetryCount(beadID string) int {
 	return 0
 }
 
+// IsInfra reports whether the most recent recorded failure for a bead was
+// classified as infrastructure. This gates session-file resume so wedged or
+// code-fault deaths do not re-import their pathology.
+func (rm *RetryManager) IsInfra(beadID string) bool {
+	rm.retriesMu.RLock()
+	defer rm.retriesMu.RUnlock()
+	if info, exists := rm.retries[beadID]; exists {
+		return info.isInfra
+	}
+	return false
+}
+
 // GetInfraRetryCount returns how many times a bead failed for provider or host
 // reasons. These do not consume the retry budget, so callers deciding whether a
 // bead is making progress must look at this as well as GetRetryCount.
