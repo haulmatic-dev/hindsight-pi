@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- Live acceptance test hygiene for worktree registrations (hydra-g4e follow-up, 2026-09-21): the ad-hoc live acceptance run against the real buddhi fixture repo left a `hydra/wt-*` worktree registration behind, so the next real spawn failed with `branch already used by worktree` (git exit 128) until manual prune. `internal/core/spawn_path_resolution_test.go` now ships `removeWorktreeRegistration` (force-remove worktree + prune + delete the actual checked-out `hydra/wt-*` branch, best-effort) with unit coverage, plus an opt-in `TestSpawnInternal_LiveAcceptanceWorktreeCleanup` (`HYDRA_LIVE_SPAWN_VERIFY=1`, optional `HYDRA_LIVE_SPAWN_REPO`) that registers the cleanup via `t.Cleanup` against the real fixture repo. Audit of every `EnsureWorktree` test found all others already use `t.TempDir()` repos.
 - Project park now suppresses retry-queue and fallback-path spawns, not just DAG-path spawns: the retry-queue loop in `Scheduler.Tick` and the scheduler-less `Overseer.spawnWorkersForNodes` fallback called `spawnWorker` without consulting `campaignParked`, so a parked campaign kept retry-spawning (srv-telematics spawned for hours with park rows present in the registry, 2026-09-21). Also adds the first unit coverage for `campaignParked` (parked / unparked / nil-registry fail-open). Operators can again trust that parking a project actually stops new workers.
 
 ### Added
