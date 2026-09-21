@@ -58,7 +58,7 @@ func (g *PrefixGuard) GuardProject(project types.Project, username string, confi
 		return
 	}
 	for _, repo := range project.Repos {
-		repoDir := filepath.Join(project.Path, repo.Path)
+		repoDir := resolveRepoPath(project, repo)
 		g.guardRepo(repoDir, username, repo.Name, configured)
 	}
 }
@@ -122,7 +122,7 @@ func projectDefaultPrefixes(project types.Project) []string {
 		return append(out, strings.ToLower(filepath.Base(project.Path)))
 	}
 	for _, r := range project.Repos {
-		out = append(out, strings.ToLower(filepath.Base(filepath.Join(project.Path, r.Path))))
+		out = append(out, strings.ToLower(filepath.Base(resolveRepoPath(project, r))))
 	}
 	return out
 }

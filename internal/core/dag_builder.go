@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"path/filepath"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -98,10 +97,7 @@ func (b *DAGBuilder) Build(dag *DAG, beadsClient BeadsClient, projects []types.P
 					fetchErrors = append(fetchErrors, fetchErr)
 					continue
 				}
-				sourcePath := repo.Path
-				if sourcePath == "" {
-					sourcePath = filepath.Join(project.Path, repo.Name)
-				}
+				sourcePath := resolveRepoPath(project, repo)
 				b.note(sourcePath, beads)
 
 				for _, bead := range beads {

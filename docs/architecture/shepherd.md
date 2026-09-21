@@ -465,6 +465,18 @@ daemon fails startup) — the basename/repo fallbacks only ever run within a
 uniquely-named project list, so they cannot cross-resolve into someone else's
 same-named project.
 
+**Per-repo spawn path resolution and wrong-repo guards (2026-09-21).** For
+`type: multi` projects, `Repo.Path` is a segment relative to the project root
+(the bare repo directory name for auto-discovered repos). The DAG builder and
+all per-repo path consumers now derive the absolute repo path with
+`resolveRepoPath` before recording bead provenance or handing the path to git.
+`SpawnInternal` refuses empty or relative project paths and emits a typed
+`spawn_refused` event. `EnsureWorktree` verifies `git rev-parse --show-toplevel`
+matches the resolved project path before `git worktree add`; a mismatch emits
+`worktree_refused` and fails closed, preventing git from walking up into a
+parent repository (the `/opt/dev-tools` monorepo walk-up that broke the
+srv-telematics campaign).
+
 **Charon is liveness-based now.** The stuck-worker sweep used to kill on
 wall-clock time alone and on 2026-08-01 killed every fleet worker at ~15m —
 including parked workers and one worker while it was emitting its closing
