@@ -130,6 +130,10 @@ func (m *autoPRFakeBeadsClient) UpdateBeadDescription(projectPath, repoName stri
 	return nil
 }
 
+func (m *autoPRFakeBeadsClient) UpdateBeadAgentContext(projectPath, repoName string, beadID types.BeadID, ctxJSON string) error {
+	return nil
+}
+
 func (m *autoPRFakeBeadsClient) AddDependency(projectPath, repoName string, beadID, dependsOn types.BeadID) error {
 	return nil
 }

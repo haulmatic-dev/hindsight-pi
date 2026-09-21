@@ -501,3 +501,26 @@ func (c *Client) UpdateBeadDescription(projectPath, repoName string, beadID type
 	_, err := c.execInDir(projectPath, "br", "update", string(beadID), "--description", description)
 	return err
 }
+
+// UpdateBeadAgentContext writes a bead's governing-instructions JSON via
+// `br update --agent-context @file` (beads_rust#297, br 0.2.10). The context
+// pack is serialized to a temp file because inline JSON breaks on shell
+// quoting; the @path form is br's supported channel. Callers must treat a
+// returned error as fail-open: an unguided spawn beats a blocked one.
+func (c *Client) UpdateBeadAgentContext(projectPath, repoName string, beadID types.BeadID, ctxJSON string) error {
+	f, err := os.CreateTemp("", "hydra-agent-context-*.json")
+	if err != nil {
+		return fmt.Errorf("agent-context temp file: %w", err)
+	}
+	path := f.Name()
+	defer os.Remove(path)
+	if _, err := f.WriteString(ctxJSON); err != nil {
+		f.Close()
+		return fmt.Errorf("agent-context temp file write: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("agent-context temp file close: %w", err)
+	}
+	_, err = c.execInDir(projectPath, "br", "update", string(beadID), "--agent-context", "@"+path)
+	return err
+}

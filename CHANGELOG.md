@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Chain context packs (bead 1 of the orientation-burn reduction program): the daemon builds a mechanical context pack just-in-time at chain first-member spawn — gate commands from the project's `gates` block, dominant spec-pattern scan, 2-level target-dir listing, and best-effort graphify requirement→file anchors — and writes it to every chain member's `agent_context` via `br update --agent-context` (br 0.2.10+). The pack refreshes SHA-keyed at each member spawn (mechanical sections regenerated on SHA move, agentic anchors re-validated with broken ones dropped as `pack_miss` events) and renders into the worker prompt TAIL only, so the frozen cache-stable head is untouched. Fail-open throughout: a pack failure logs and the spawn proceeds unguided. Typed events `pack_created` / `pack_refreshed` / `pack_miss` on the fail-open event stream. The verified-close scope gate enforces against pack file anchors when a bead declares no Target Files, so guided beads get real enforcement instead of advisory; file reservations are consulted against the same anchors with an advisory `pack_reservation_offscope` event (the reservation stream is informational — the close-time scope gate is the blocking enforcement). *Authored by a Hydra dogfood run.*
+
 ### Changed
 - First-class campaign park mechanism replaces the HOLD-gate bead injection used by `repair:park-campaign`. A new durable `project_parks` registry table is the source of truth, the scheduler skips all spawns for a parked project in both spawn paths, and `repair:unpark-campaign` releases the project. This removes the gate-rooted chain identity problem that made the injected approval gate (not the epic) the chain key and confused the reconciler. *Authored by a Hydra dogfood run.*
 

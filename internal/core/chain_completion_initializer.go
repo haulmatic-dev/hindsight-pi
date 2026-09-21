@@ -90,6 +90,7 @@ func (i *ChainCompletionInitializer) Initialize() {
 	o.chainCompletionDetector.Start()
 	if o.workerSpawner != nil {
 		o.workerSpawner.SetChainCompletionDetector(o.chainCompletionDetector)
+		o.workerSpawner.SetEventSink(o.eventSink)
 	}
 
 	extractor := NewChainPatternExtractor(
