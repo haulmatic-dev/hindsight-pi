@@ -457,6 +457,38 @@ agents:
 - Phase keys are matched case-insensitively.
 - Circuit-breaker failover (`fallback_provider`/`fallback_model`) still overrides the phase-routed provider when its circuit is open.
 
+##### `turn_budget_reminder_cadence`
+
+**Type**: `integer`  
+**Default**: `1`  
+**Description**: How often (in turns) the worker appends a non-binding "You have used N of ~B turns" reminder to the live prompt tail. A value of `0` or omission means "every turn". This is a visibility knob, not a hard cap.
+
+```yaml
+agents:
+  pi:
+    turn_budget_reminder_cadence: 1
+```
+
+##### `turn_budgets`
+
+**Type**: `map[string]integer`  
+**Default**: `red: 150`, `green: 300`, `refactor: 300`, others: `200`  
+**Description**: Soft per-phase turn budget B shown to the model as a pacing hint. Defaults are set above the observed fleet p75 (red ~117, green/refactor ~270) so the hint never binds early. Missing phases fall back to the defaults. The budget is visible but not enforced by the worker.
+
+```yaml
+agents:
+  pi:
+    turn_budgets:
+      red: 150
+      green: 300
+      refactor: 300
+```
+
+**Notes**:
+- Phase keys are matched case-insensitively.
+- The daemon computes the effective budget for the bead's phase and forwards it to the worker as `HYDRA_PI_TURN_BUDGET`.
+- Pair with `turn_budget_reminder_cadence` to control how often the model sees the remaining-turns reminder.
+
 ## Configuration Examples
 
 ### Development Environment

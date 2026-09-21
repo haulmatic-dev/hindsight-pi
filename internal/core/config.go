@@ -126,6 +126,18 @@ type PiConfig struct {
 	// refactor, …), for cases where a phase needs something the others do not.
 	// A phase with no entry uses Extensions.
 	PhaseExtensions map[string][]string `yaml:"phase_extensions"`
+
+	// TurnBudgetReminderCadence controls how often (in turns) the worker
+	// injects a non-binding "you have used N of ~B turns" reminder into the
+	// live prompt tail. Zero means "every turn" because the default is to
+	// keep the budget visible.
+	TurnBudgetReminderCadence int `yaml:"turn_budget_reminder_cadence"`
+
+	// TurnBudgets maps TDD phase keys (red, green, refactor, …) to a soft
+	// per-phase turn budget B. The budget is visible to the model as a
+	// pacing hint, not a hard cap. Missing phases get fleet defaults set
+	// above the observed p75 (red 150, green/refactor 300, others 200).
+	TurnBudgets map[string]int `yaml:"turn_budgets"`
 }
 
 // defaultPiMode is the protocol workers use unless the config says otherwise.
@@ -212,6 +224,35 @@ func (p PiConfig) RPCEnabled() bool {
 // are approved; when false (the default), they are denied.
 func (p PiConfig) AutoConfirm() bool {
 	return p.RPCAutoConfirm
+}
+
+// ReminderCadence returns the turn-budget reminder cadence in turns.
+// Values <= 0 are treated as 1 (remind every turn) so the budget stays
+// visible by default.
+func (p PiConfig) ReminderCadence() int {
+	if p.TurnBudgetReminderCadence > 0 {
+		return p.TurnBudgetReminderCadence
+	}
+	return 1
+}
+
+// TurnBudgetForPhase returns the soft turn budget for a phase. Unset
+// phases use defaults above the fleet p75 so the hint never binds early.
+func (p PiConfig) TurnBudgetForPhase(phase string) int {
+	key := strings.ToLower(strings.TrimSpace(phase))
+	if key != "" {
+		if v, ok := p.TurnBudgets[key]; ok && v > 0 {
+			return v
+		}
+	}
+	switch key {
+	case "red":
+		return 150
+	case "green", "refactor":
+		return 300
+	default:
+		return 200
+	}
 }
 
 // ModelForPhase returns the provider and model for a phase, falling back to
@@ -1168,7 +1209,7 @@ func ValidateConfig(cfg *Config) ValidationErrors {
 			})
 		} else if prev, ok := seenNames[proj.Name]; ok {
 			errors = append(errors, ValidationError{
-				Field: fmt.Sprintf("projects[%d].name", i),
+				Field:   fmt.Sprintf("projects[%d].name", i),
 				Message: (&DuplicateProjectNameError{Name: proj.Name, PathA: prev, PathB: proj.Path}).Error(),
 			})
 		} else {

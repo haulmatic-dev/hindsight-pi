@@ -114,8 +114,11 @@ func decideTurnEnd(v *Verdict, nudges, cap int) (nudge bool, reason string) {
 }
 
 // buildNudgePrompt renders the re-prompt sent into the live session.
-func buildNudgePrompt(reason string) string {
-	return fmt.Sprintf(`Your turn ended but the task is not closed: %s.
+// turnCount is the prompt number in this bead session (1 = initial prompt,
+// 2+ = nudges). If turnCount lands on the configured cadence, a non-binding
+// turn-budget reminder is appended to the tail.
+func buildNudgePrompt(reason string, turnCount int, piConfig PiConfig) string {
+	base := fmt.Sprintf(`Your turn ended but the task is not closed: %s.
 
 Continue working. When the task is genuinely complete — required file edits
 exist on disk and verification commands ran — end your final message with:
@@ -125,4 +128,11 @@ HYDRA_VERDICT: {"done": true, "ac_met": [...], "ac_unmet": [], "files_changed": 
 If you cannot complete it, end with:
 
 HYDRA_VERDICT: {"done": false, "summary": "what was done and what remains"}`, reason)
+
+	cadence := piConfig.reminderCadence()
+	if turnCount > 0 && cadence > 0 && turnCount%cadence == 0 {
+		budget := piConfig.turnBudget()
+		return base + fmt.Sprintf("\n\nReminder: you have used %d of ~%d turns. This is a pacing hint, not a hard cap; keep working if you are making progress.", turnCount, budget)
+	}
+	return base
 }
