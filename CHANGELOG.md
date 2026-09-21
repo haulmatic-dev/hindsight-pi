@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Turn-economy measurement harness (`scripts/turn_economy.py`): productized analyzer over `{HYDRA_HOME}/sessions/<bead-id>/*.jsonl` producing per-bead/per-chain/per-campaign turn, token, zero-action, repeat-read, RTK-recovery, thinking-split, and per-phase (p25/p50/p75/max) aggregates, with gate first-try pass and empty-patch guardrails that exit 2 on regression. Replaces ad-hoc session forensics for every context-pack / prompt-tail / turn-budget / RTK decision. Unit tests in `scripts/tests/` (`python3 -m unittest discover -s scripts/tests`); operator guide at `docs/operations/turn-economy-measurement.md`. *Authored by a Hydra dogfood run.*
+
 ### Changed
 - First-class campaign park mechanism replaces the HOLD-gate bead injection used by `repair:park-campaign`. A new durable `project_parks` registry table is the source of truth, the scheduler skips all spawns for a parked project in both spawn paths, and `repair:unpark-campaign` releases the project. This removes the gate-rooted chain identity problem that made the injected approval gate (not the epic) the chain key and confused the reconciler. *Authored by a Hydra dogfood run.*
 
