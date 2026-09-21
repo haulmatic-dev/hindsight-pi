@@ -464,6 +464,15 @@ func (s *Scheduler) Tick() error {
 			continue
 		}
 
+		// Campaign park: retry-queue beads bypass the DAG-node path (which
+		// checks at SpawnWorkersForNodes), so the park must be consulted HERE
+		// too — srv-telematics retry-spawned for hours with park rows present
+		// in the registry (2026-09-21).
+		if o.campaignParked(bead) {
+			log.Printf("⏸️  Skipping retry of bead %s: campaign parked (Pan)", bead.ID)
+			continue
+		}
+
 		// Record the branch HEAD as this bead's session base: verified-close
 		// in main-checkout mode scopes committed evidence to commits AFTER
 		// this point (pre-existing campaign commits must not satisfy the

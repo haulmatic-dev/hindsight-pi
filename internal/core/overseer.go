@@ -1194,6 +1194,10 @@ func (o *Overseer) spawnWorkersForNodes(nodes []*Node, maxSlots int) int {
 		if spawned >= effectiveLimit {
 			break
 		}
+		if o.campaignParked(node.Bead) {
+			log.Printf("⏸️  Skipping bead %s: campaign parked (Pan)", node.Bead.ID)
+			continue
+		}
 		if !o.shouldSpawnWorker(node) {
 			continue
 		}
