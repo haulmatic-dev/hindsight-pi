@@ -252,3 +252,88 @@ func TestResolveExtensionPaths_DirectoryEntryResolvesIndex(t *testing.T) {
 		t.Errorf("directory entry must resolve to index.ts, got %v want [%s]", got, absOrSelf(idx))
 	}
 }
+
+// solPiInstalled creates the real npm layout for sol-pi and returns agentDir.
+func solPiInstalled(t *testing.T) string {
+	t.Helper()
+	agent := t.TempDir()
+	writePkg(t, agent, "sol-pi",
+		`{"pi":{"extensions":["./src/sol-pi/index.ts"]}}`, "src/sol-pi/index.ts")
+	return agent
+}
+
+func TestSolPiResolved(t *testing.T) {
+	agent := solPiInstalled(t)
+	if !solPiResolved(agent, []string{"rtk", "sol-pi"}) {
+		t.Error("sol-pi allowlisted and installed must resolve")
+	}
+	if solPiResolved(agent, []string{"rtk"}) {
+		t.Error("sol-pi not allowlisted must not resolve")
+	}
+	if solPiResolved(t.TempDir(), []string{"sol-pi"}) {
+		t.Error("sol-pi allowlisted but not installed must not resolve")
+	}
+}
+
+func TestProvisionSolPi_WritesConfigAndExclude(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwd, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !provisionSolPi(cwd) {
+		t.Fatal("provisionSolPi must succeed in a writable worktree")
+	}
+	cfg, err := os.ReadFile(filepath.Join(cwd, ".pi", "sol-pi.json"))
+	if err != nil {
+		t.Fatalf("sol-pi.json not written: %v", err)
+	}
+	for _, want := range []string{`"actionFusion": true`, `"observationPack": true`,
+		`"evidencePreservingReducer": false`, `"onlineContextCompact": false`} {
+		if !strings.Contains(string(cfg), want) {
+			t.Errorf("sol-pi.json missing %s:\n%s", want, cfg)
+		}
+	}
+	ex, err := os.ReadFile(filepath.Join(cwd, ".git", "info", "exclude"))
+	if err != nil || !strings.Contains(string(ex), "\n.pi/") {
+		t.Errorf(".git/info/exclude must exclude .pi/, got %q err=%v", ex, err)
+	}
+
+	// Idempotent: a second run must not duplicate the exclude entry.
+	if !provisionSolPi(cwd) {
+		t.Fatal("second provisionSolPi must succeed")
+	}
+	ex2, _ := os.ReadFile(filepath.Join(cwd, ".git", "info", "exclude"))
+	if strings.Count(string(ex2), "\n.pi/") != 1 {
+		t.Errorf("exclude entry duplicated:\n%s", ex2)
+	}
+}
+
+// A project that ships its own sol-pi.json wins over the pilot default.
+func TestProvisionSolPi_KeepsExistingConfig(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwd, ".pi"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	custom := `{"version":1,"actionFusion":false}`
+	if err := os.WriteFile(filepath.Join(cwd, ".pi", "sol-pi.json"), []byte(custom), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if !provisionSolPi(cwd) {
+		t.Fatal("provisionSolPi must succeed when config already exists")
+	}
+	got, _ := os.ReadFile(filepath.Join(cwd, ".pi", "sol-pi.json"))
+	if string(got) != custom {
+		t.Errorf("existing sol-pi.json overwritten:\n%s", got)
+	}
+}
+
+// Non-git cwd (no .git): config still written, exclude step skipped.
+func TestProvisionSolPi_NoGitDir(t *testing.T) {
+	cwd := t.TempDir()
+	if !provisionSolPi(cwd) {
+		t.Fatal("provisionSolPi must succeed without .git")
+	}
+	if _, err := os.Stat(filepath.Join(cwd, ".pi", "sol-pi.json")); err != nil {
+		t.Fatalf("sol-pi.json not written: %v", err)
+	}
+}

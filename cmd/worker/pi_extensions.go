@@ -11,6 +11,92 @@ import (
 	"strings"
 )
 
+// solPiConfigJSON is the vendor's conservative pilot profile: only Action
+// Fusion and ObservationPack — the two mechanisms that make no extra model
+// calls and never stop an active run. Evidence-Preserving Reducer (extra
+// remote model call) and Online Context Compact (starts a new turn after
+// compacting, breaking the frozen-prefix prompt-cache program) stay off.
+// See docs/operations/sol-pi-pilot.md.
+const solPiConfigJSON = `{
+  "version": 1,
+  "actionFusion": true,
+  "observationPack": true,
+  "evidencePreservingReducer": false,
+  "evidencePreservingReducerRemote": false,
+  "onlineContextCompact": false,
+  "cacheWriteReadRatio": 12.5
+}
+`
+
+// hasExtension reports whether names contains name (case-insensitive).
+func hasExtension(names []string, name string) bool {
+	for _, n := range names {
+		if strings.EqualFold(strings.TrimSpace(n), name) {
+			return true
+		}
+	}
+	return false
+}
+
+// solPiResolved reports whether "sol-pi" is allowlisted AND its package
+// actually resolves to an entry point. Provisioning config (and granting
+// per-run project trust) for an extension that is not installed would be a
+// behaviour change for zero benefit.
+func solPiResolved(agentDir string, names []string) bool {
+	if !hasExtension(names, "sol-pi") {
+		return false
+	}
+	return len(resolveExtensionPaths(agentDir, []string{"sol-pi"})) == 1
+}
+
+// provisionSolPi writes the conservative pilot config to
+// <cwd>/.pi/sol-pi.json and excludes .pi/ from the worktree's git index via
+// .git/info/exclude (worktree-local, never committed — same trick as the
+// daemon's .git/info/attributes merge=union setup). An existing sol-pi.json
+// is left untouched: a project that ships its own config wins over the
+// pilot default.
+//
+// SoL-Pi only reads the project-level config when the project is trusted.
+// Non-interactive modes (rpc included) never prompt, so the caller passes
+// --approve for this run when this returns true.
+func provisionSolPi(cwd string) bool {
+	dir := filepath.Join(cwd, ".pi")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		log.Printf("[Worker:rpc] sol-pi: cannot create %s: %v", dir, err)
+		return false
+	}
+	cfg := filepath.Join(dir, "sol-pi.json")
+	if _, err := os.Stat(cfg); err == nil {
+		log.Printf("[Worker:rpc] sol-pi: %s already exists, keeping project config", cfg)
+	} else if err := os.WriteFile(cfg, []byte(solPiConfigJSON), 0o640); err != nil {
+		log.Printf("[Worker:rpc] sol-pi: cannot write %s: %v", cfg, err)
+		return false
+	}
+	// Keep the config (and anything else .pi/) out of worker commits in target
+	// repos that do not gitignore it. Info/exclude is per-worktree metadata.
+	if gitDir := filepath.Join(cwd, ".git"); isDir(gitDir) {
+		ex := filepath.Join(gitDir, "info", "exclude")
+		if err := os.MkdirAll(filepath.Dir(ex), 0o750); err == nil {
+			if data, err := os.ReadFile(ex); err != nil || !strings.Contains(string(data), "\n.pi/") {
+				f, err := os.OpenFile(ex, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+				if err == nil {
+					_, err = f.WriteString("\n# hydra sol-pi pilot config — never commit\n.pi/\n")
+					f.Close()
+				}
+				if err != nil {
+					log.Printf("[Worker:rpc] sol-pi: cannot update %s: %v", ex, err)
+				}
+			}
+		}
+	}
+	return true
+}
+
+func isDir(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.IsDir()
+}
+
 // extensionAliases maps the short names used in hydra.yaml to the npm package
 // that provides them. Config should not have to carry scoped npm names.
 var extensionAliases = map[string]string{
@@ -21,6 +107,7 @@ var extensionAliases = map[string]string{
 	"subagents":    "pi-subagents",
 	"web-access":   "pi-web-access",
 	"hindsight":    "@walodayeet/hindsight-pi",
+	// sol-pi needs no alias: config may carry the package name directly.
 }
 
 // parseExtensionList splits the comma-separated HYDRA_PI_EXTENSIONS value.
