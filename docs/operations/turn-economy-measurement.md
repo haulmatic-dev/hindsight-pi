@@ -44,7 +44,8 @@ python3 scripts/turn_economy.py \
   read more than once.
 - **cmd-rerun rate** — share of bash invocations (whitespace-normalized)
   run more than once per chain. Together with repeat-read rate this is the
-  RTK keep/fix/remove signal.
+  RTK keep/fix/remove signal. Decision record and fleet evidence:
+  `docs/operations/rtk-evaluation.md`.
 - **RTK recovery events** — `rtk_compacted` counts tool results carrying the
   `[RTK compacted output` marker; `rtk_reopens` counts a later successful
   re-read of the same path after compaction (the "full-output re-open"
