@@ -97,7 +97,9 @@ context_pack:
    terms come from all chain-member titles (`RequirementTermsForBead`);
    titles whose terms stay below the confidence threshold are handed to the
    scout pass (see “Agentic scout fallback”).
-   Non-chain (singleton) beads get no pack and spawn unguided.
+   Non-chain (singleton) beads are treated as a chain of one
+   (`AllBeadIDs=[self]`), so standalone fix-beads get the same pack and
+   SHA-keyed refresh instead of spawning unguided.
 2. **Storage** — serialized and written to **every** chain member via
    `BeadsClient.UpdateBeadAgentContext` (`br update <id> --agent-context
    @file`; the `@file` form avoids shell-quoting breakage). Per-member write
