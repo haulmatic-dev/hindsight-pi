@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- Sibling `file:` dependencies are provisioned into the repo's worktree root at `EnsureWorktree` time: npm install resolves `file:../lib-nestjs` (e.g. srv-telematics' `@haulmatic/common`) as a node_modules symlink relative to the worktree, which dangled because the sibling only exists in the main checkout's parent — preflight then failed with "dependency check failed after install: 1 broken symlink(s)" and the bead looped on spawn failure (telematics incident 2026-09-21). `provisionSiblingDeps` scans package.json `dependencies`/`devDependencies` for `file:` specs, resolves each against the project path, and creates an idempotent symlink at the shared worktree root pointing at the sibling's on-disk path (wrong/dangling links are repaired; missing siblings are logged and skipped, fail-open). *Authored by a Hydra dogfood run.*
 - Project park now suppresses retry-queue and fallback-path spawns, not just DAG-path spawns: the retry-queue loop in `Scheduler.Tick` and the scheduler-less `Overseer.spawnWorkersForNodes` fallback called `spawnWorker` without consulting `campaignParked`, so a parked campaign kept retry-spawning (srv-telematics spawned for hours with park rows present in the registry, 2026-09-21). Also adds the first unit coverage for `campaignParked` (parked / unparked / nil-registry fail-open). Operators can again trust that parking a project actually stops new workers.
 
 ### Added

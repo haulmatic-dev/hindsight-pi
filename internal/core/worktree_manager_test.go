@@ -511,3 +511,96 @@ func TestEnsureWorktree_RefusesToplevelMismatch(t *testing.T) {
 	}
 }
 
+// TestEnsureWorktree_ProvisionsSiblingFileDeps: srv-telematics incident
+// 2026-09-21 — npm install resolves `file:../lib-nestjs` as a node_modules
+// symlink relative to the worktree (../../../lib-nestjs), which dangles
+// because the sibling lives in the main checkout's parent, not the worktree
+// root. EnsureWorktree must provision the sibling as a symlink at the repo's
+// worktree root so the relative resolution lands.
+func TestEnsureWorktree_ProvisionsSiblingFileDeps(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	t.Setenv("HYDRA_HOME", t.TempDir())
+
+	parent := t.TempDir()
+	sibling := filepath.Join(parent, "lib-nestjs")
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sibling, "index.ts"), []byte("export {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	proj := filepath.Join(parent, "srv-demo")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = proj
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "test@hydra.local")
+	runGit("config", "user.name", "hydra-test")
+	pkg := `{"name":"srv-demo","dependencies":{"@haulmatic/common":"file:../lib-nestjs"}}`
+	if err := os.WriteFile(filepath.Join(proj, "package.json"), []byte(pkg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "-A")
+	runGit("commit", "-m", "seed")
+
+	m := NewWorktreeManager()
+	wt, err := m.EnsureWorktree(proj, "demo-chain")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	link := filepath.Join(worktreeRoot(proj), "lib-nestjs")
+	fi, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("sibling symlink not provisioned at worktree root: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected symlink at %s", link)
+	}
+	cur, err := os.Readlink(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pathsEqual(cur, sibling) {
+		t.Fatalf("symlink target %q does not point at sibling %s", cur, sibling)
+	}
+	// The symlink must RESOLVE — this is what npm's ../../../lib-nestjs needs.
+	if _, err := os.Stat(filepath.Join(link, "index.ts")); err != nil {
+		t.Fatalf("sibling symlink does not resolve: %v", err)
+	}
+
+	// Idempotent: re-ensuring keeps the same correct symlink.
+	if _, err := m.EnsureWorktree(proj, "demo-chain-2"); err != nil {
+		t.Fatalf("second EnsureWorktree: %v", err)
+	}
+	cur2, err := os.Readlink(link)
+	if err != nil || cur2 != cur {
+		t.Fatalf("idempotency violated: %q vs %q (err %v)", cur2, cur, err)
+	}
+
+	// Dangling/wrong symlink is repaired: point it elsewhere, re-ensure.
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(parent, "nowhere"), link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.EnsureWorktree(proj, "demo-chain-3"); err != nil {
+		t.Fatalf("third EnsureWorktree: %v", err)
+	}
+	if cur3, err := os.Readlink(link); err != nil || !pathsEqual(cur3, sibling) {
+		t.Fatalf("stale symlink not repaired: %q (err %v)", cur3, err)
+	}
+	_ = wt
+}

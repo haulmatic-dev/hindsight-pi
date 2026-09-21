@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -121,6 +122,29 @@ func brokenDepSymlinks(nm string) []string {
 		check(p)
 	}
 	return broken
+}
+
+// siblingFileDeps extracts the `file:` dependency paths declared in a
+// package.json manifest (dependencies and devDependencies). Used by
+// provisionSiblingDeps to decide which sibling repos need symlinks at the
+// repo's worktree root. Malformed manifests yield nothing (fail-open).
+func siblingFileDeps(pkgJSON []byte) []string {
+	var manifest struct {
+		Dependencies    map[string]string `json:"dependencies"`
+		DevDependencies map[string]string `json:"devDependencies"`
+	}
+	if err := json.Unmarshal(pkgJSON, &manifest); err != nil {
+		return nil
+	}
+	var deps []string
+	for _, set := range []map[string]string{manifest.Dependencies, manifest.DevDependencies} {
+		for _, v := range set {
+			if p, ok := strings.CutPrefix(v, "file:"); ok && p != "" {
+				deps = append(deps, p)
+			}
+		}
+	}
+	return deps
 }
 
 func writePreflightSentinel(wtPath, lockHash string) error {
