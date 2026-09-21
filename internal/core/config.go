@@ -34,6 +34,16 @@ type Config struct {
 	Worktree           WorktreeConfig        `yaml:"worktree"`
 	Status             StatusConfig          `yaml:"status"`
 	SelfHealing        SelfHealingConfig     `yaml:"self_healing"`
+	// ContextPack configures the chain orientation pack (mechanical build +
+	// agentic scout fallback). See docs/architecture/context-pack.md.
+	ContextPack ContextPackConfig `yaml:"context_pack"`
+}
+
+// ContextPackConfig configures the chain context pack.
+type ContextPackConfig struct {
+	// Scout is the agentic fallback for requirements the mechanical pack
+	// cannot map (confidence below threshold). Disabled by default.
+	Scout ScoutConfig `yaml:"scout"`
 }
 
 // ShepherdConfig configures Pan, the shepherd that decides the ambiguous
@@ -339,6 +349,7 @@ type rawConfig struct {
 	Worktree        WorktreeConfig        `yaml:"worktree"`
 	Status          StatusConfig          `yaml:"status"`
 	SelfHealing     SelfHealingConfig     `yaml:"self_healing"`
+	ContextPack     ContextPackConfig     `yaml:"context_pack"`
 }
 
 // projectsListConfig handles the case where projects is an object with 'list' field
@@ -894,6 +905,7 @@ func LoadConfig(path string) (*Config, error) {
 	config.Output = raw.Output
 	config.Worktree = raw.Worktree
 	config.SelfHealing = raw.SelfHealing
+	config.ContextPack = raw.ContextPack
 	config.SelfHealing.SessionResume.applyDefaults()
 	// Handle projects field - can be:
 	// 1. An array of ProjectConfig (direct list)
@@ -968,6 +980,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 	config.Output = raw.Output
 	config.Worktree = raw.Worktree
 	config.SelfHealing = raw.SelfHealing
+	config.ContextPack = raw.ContextPack
 	config.SelfHealing.SessionResume.applyDefaults()
 	config.Validation = raw.Validation
 	config.ComplianceCycle = raw.ComplianceCycle
