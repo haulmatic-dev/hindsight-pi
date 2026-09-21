@@ -288,6 +288,35 @@ project entry overrides the generated value. Existing deliberate custom
 prefixes are preserved with a warning; explicit config-listed projects in
 `/etc/hydra/hydra.yaml` are not mutated.
 
+#### Beads-group permission convention (auto-onboarded)
+
+Every repo Hydra discovers must share its `.beads` store between the repo owner
+and the daemon. Without this, every `br`/`git` op the worker runs fails with
+`exit status 8` / EACCES (telematics-incident repro, 2026-09-21: a fresh
+user-owned scratch repo failed every spawn until the convention was applied by
+hand). The convention:
+
+| Path | Owner:group | Mode |
+|---|---|---|
+| `<repo>/.beads` | `<user>:beads` | `2770` (setgid, `g+rwX`, `o-rwx`) |
+| `<repo>/.beads/issues.jsonl` | `<user>:beads` | `0660` — `br init` writes `0600`, which must be repaired |
+| `<repo>/.git/worktrees` | `hydra:beads` | `0770`-class, `g+rwX`, `o-rwx` |
+
+The setgid bit is the load-bearing piece: without it, new files inherit the
+writer's primary group (every human's primary group is their own username),
+not `beads`, and group access silently rots. `chmod 0600` on issues.jsonl also
+zeroes the ACL mask, which is why ACL-only onboarding was invisible for a
+month — group ownership survives chmod, ACLs do not.
+
+Discovery applies this convention itself, idempotently, on every tick
+(`onboardBeadsPerms` in `internal/core/beads_perms_onboard.go`, invoked from
+`convertProject`): repos already conforming are not touched at all, fresh or
+regressed repos are repaired in place. The daemon only has power over repos it
+can chgrp/chmod; repos owned by another user that the daemon cannot fix are
+logged (`[MultiUserDiscovery] ... fail-open`) and repaired by the root-run
+onboard sweep instead (`hydra-onboard-sweep` → `hydra-onboard` →
+`hydra-normalize-beads`, see §2).
+
 **Verify:** `journalctl -u hydra | grep -E "MultiUserDiscovery|PrefixGuard"` shows
 discovered users, repos, and any prefix overrides.
 

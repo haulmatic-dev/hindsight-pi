@@ -195,7 +195,37 @@ func (d *MultiUserDiscovery) convertProject(up UserProject, ctx *UserContext) *t
 	// refresh cycles without baking usernames into the public Project type.
 	d.projectOwners[project.Name+"|"+project.Path] = ctx.Username
 
+	d.onboardBeadsPerms(project)
+
 	return &project
+}
+
+// onboardBeadsPerms applies the beads-group permission convention to every
+// repo in a discovered project that has a .beads store. Idempotent: repos
+// already conforming are skipped without a single chmod/chown, so re-runs on
+// every discovery tick are free. Fail-open: repos the daemon cannot fix
+// (another user's files) are logged and left for the root-run onboard sweep.
+func (d *MultiUserDiscovery) onboardBeadsPerms(project types.Project) {
+	for _, repoDir := range projectRepoDirs(project) {
+		if !hasBeadsMarker(repoDir) {
+			continue
+		}
+		if err := onboardBeadsPerms(repoDir); err != nil {
+			log.Printf("[MultiUserDiscovery] %s/%s: beads perms onboarding incomplete (fail-open): %v", project.Name, filepath.Base(repoDir), err)
+		}
+	}
+}
+
+// projectRepoDirs returns the absolute directory of every repo in a project.
+func projectRepoDirs(project types.Project) []string {
+	if project.Type == types.RepoTypeSingle || project.Type == "" || len(project.Repos) == 0 {
+		return []string{project.Path}
+	}
+	dirs := make([]string, 0, len(project.Repos))
+	for _, repo := range project.Repos {
+		dirs = append(dirs, resolveRepoPath(project, repo))
+	}
+	return dirs
 }
 
 // isExcluded reports whether a project name or path matches the exclusion list.
