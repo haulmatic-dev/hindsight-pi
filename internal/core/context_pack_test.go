@@ -264,15 +264,19 @@ func TestEnsureContextPack_SHARefresh(t *testing.T) {
 	}
 }
 
-func TestEnsureContextPack_NoChainIsNoop(t *testing.T) {
+func TestEnsureContextPack_StandaloneBeadGetsChainOfOnePack(t *testing.T) {
+	dir := packFixtureRepo(t)
 	mock := newMockBeadsClient()
 	mock.beads["solo-1"] = types.Bead{ID: "solo-1", Title: "CreateShortlink"}
-	s, _ := packTestSpawner(t, mock, []types.BeadID{"root-1"}, t.TempDir())
+	s, _ := packTestSpawner(t, mock, []types.BeadID{"root-1"}, dir) // solo-1 not in the registered chain
 
-	solo := mock.beads["solo-1"]
-	s.ensureContextPack(solo, t.TempDir()) // solo-1 not in the registered chain
-	if solo.AgentContext != "" {
-		t.Errorf("non-chain bead got a pack: %q", solo.AgentContext)
+	s.ensureContextPack(mock.beads["solo-1"], dir)
+	pack, err := ParseContextPack(mock.beads["solo-1"].AgentContext)
+	if err != nil || pack == nil {
+		t.Fatalf("standalone bead got no parseable pack: %q (err %v)", mock.beads["solo-1"].AgentContext, err)
+	}
+	if pack.BaseSHA == "" {
+		t.Error("standalone pack has empty base_sha")
 	}
 }
 

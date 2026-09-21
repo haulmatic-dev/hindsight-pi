@@ -841,8 +841,15 @@ func (s *WorkerSpawner) ensureContextPack(bead types.Bead, projectPath string) {
 		return
 	}
 	chain, ok := s.chainCompletionDetector.FindChainByBead(bead.ID)
-	if !ok || len(chain.AllBeadIDs) == 0 {
-		return // packs attach to chains; single beads spawn unguided
+	if !ok {
+		// Chain-of-one fallback: standalone beads (fix-beads spawned outside a
+		// chain) are exactly the unguided cohort the pack was built for
+		// (measured: 68-turn p50 unguided vs 20 guided). Treat the bead as a
+		// chain of itself so it gets the same mechanical pack + SHA refresh.
+		chain = &ChainInfo{RootBeadID: bead.ID, AllBeadIDs: []types.BeadID{bead.ID}, ProjectPath: projectPath}
+	}
+	if len(chain.AllBeadIDs) == 0 {
+		return
 	}
 	if len(chain.AllBeadIDs) > maxPackChainMembers {
 		log.Printf("[ContextPack] chain has %d members (> %d); skipping pack for %s", len(chain.AllBeadIDs), maxPackChainMembers, bead.ID)
