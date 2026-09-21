@@ -17,15 +17,16 @@ type BeadContext struct {
 
 // BeadCore contains the common fields present in all bead JSON responses
 type BeadCore struct {
-	ID          string    `json:"id"`
-	Title       string    `json:"title"`
-	Description *string   `json:"description"`
-	Status      string    `json:"status"`
-	Priority    int       `json:"priority"`
-	IssueType   string    `json:"issue_type"`
-	Labels      []string  `json:"labels"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	Title        string    `json:"title"`
+	Description  *string   `json:"description"`
+	Status       string    `json:"status"`
+	Priority     int       `json:"priority"`
+	IssueType    string    `json:"issue_type"`
+	Labels       []string  `json:"labels"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	AgentContext *string   `json:"agent_context"` // governing-instructions JSON (br 0.2.10+); nil = unset
 }
 
 // ReadyBead represents a bead from 'br ready --json' output
@@ -160,6 +161,7 @@ func createBaseBead(core BeadCore, ctx BeadContext) types.Bead {
 		Priority:    core.Priority,
 		CreatedAt:   core.CreatedAt,
 		UpdatedAt:   core.UpdatedAt,
+		AgentContext: derefString(core.AgentContext),
 		Metadata:    map[string]string{"bead_id": core.ID},
 	}
 }

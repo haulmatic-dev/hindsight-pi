@@ -69,6 +69,7 @@ type BeadsClient interface {
 	UpdateBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error
 	RemoveBeadLabels(projectPath, repoName string, beadID types.BeadID, labels []string) error
 	UpdateBeadDescription(projectPath, repoName string, beadID types.BeadID, description string) error
+	UpdateBeadAgentContext(projectPath, repoName string, beadID types.BeadID, ctxJSON string) error
 	AddDependency(projectPath, repoName string, beadID, dependsOn types.BeadID) error
 }
 
@@ -1471,6 +1472,53 @@ func (o *Overseer) handleLogMessage(msg *mcp.Message) {
 // handleFileReservedMessage processes file reservation messages.
 func (o *Overseer) handleFileReservedMessage(msg *mcp.Message) {
 	o.mcpManager.handleFileReserved(msg)
+	o.consultPackOnReservation(msg)
+}
+
+// consultPackOnReservation checks a worker-initiated file reservation
+// against the bead's context-pack anchors. Hydra's reservation stream is
+// informational (handleFileReserved only records it — worker-to-worker
+// conflict enforcement lives in the MCP reservation client), so an
+// off-anchor reservation emits an advisory pack_reservation_offscope event
+// rather than blocking; the real enforcement remains the close-time scope
+// gate, which consults the same anchors. Fail-open: any lookup failure
+// returns silently.
+func (o *Overseer) consultPackOnReservation(msg *mcp.Message) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[ContextPack] consultPackOnReservation panicked (fail-open): %v", r)
+		}
+	}()
+	beadID, _ := msg.Payload["bead_id"].(string)
+	filePath, _ := msg.Payload["file_path"].(string)
+	if beadID == "" || filePath == "" || o.beadsClient == nil {
+		return
+	}
+	projectPath := o.beadSource.Lookup(beadID)
+	if projectPath == "" {
+		return
+	}
+	bead, err := o.beadsClient.GetBead(projectPath, "", types.BeadID(beadID))
+	if err != nil || bead == nil {
+		return
+	}
+	pack, err := ParseContextPack(bead.AgentContext)
+	if err != nil || pack == nil || len(pack.Files) == 0 {
+		return
+	}
+	anchorTargets := make([]string, 0, len(pack.Files))
+	for _, a := range pack.Files {
+		anchorTargets = append(anchorTargets, a.Path)
+	}
+	if violations := scopeViolations([]string{filePath}, anchorTargets); len(violations) == 0 {
+		return
+	}
+	log.Printf("[ContextPack] bead %s reserved off-anchor file %s (anchors: %v)", beadID, filePath, anchorTargets)
+	if o.eventSink != nil {
+		o.eventSink.EmitRepo(projectPath, Event{Type: "pack_reservation_offscope", Project: bead.Project,
+			Bead: beadID, Reason: "off_anchor_reservation",
+			Detail: "reserved file outside context-pack anchors: " + filePath})
+	}
 }
 
 // handleFileReleasedMessage processes file release messages.

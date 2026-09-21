@@ -176,6 +176,11 @@ type Bead struct {
 	UpdatedAt    time.Time         `json:"updated_at"`
 	CompletedAt  *time.Time        `json:"completed_at,omitempty"`
 	Metadata     map[string]string `json:"metadata"`
+	// AgentContext is the bead's governing-instructions JSON written by the
+	// daemon's context-pack builder (br field `agent_context`, beads_rust#297).
+	// Opaque to most of the pipeline; parsed into a ContextPack at chain
+	// member spawn / refresh and injected into the worker prompt tail.
+	AgentContext string `json:"agent_context,omitempty"`
 }
 
 // RepoType indicates whether a project is single or multi-repo.
