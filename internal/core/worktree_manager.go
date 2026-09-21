@@ -23,11 +23,17 @@ import (
 // Worktrees live OUTSIDE the target project (a sibling `.hydra-worktrees/`
 // dir) so they never appear in the target project's own git status.
 type WorktreeManager struct {
-	mu sync.Mutex // serialize git worktree ops (shared repo, single process)
+	mu        sync.Mutex // serialize git worktree ops (shared repo, single process)
+	eventSink *EventSink // optional: emits worktree-level typed events
 }
 
 // NewWorktreeManager creates a worktree manager.
 func NewWorktreeManager() *WorktreeManager { return &WorktreeManager{} }
+
+// SetEventSink wires an event sink for worktree-level typed events. Nil-safe.
+func (m *WorktreeManager) SetEventSink(sink *EventSink) {
+	m.eventSink = sink
+}
 
 // worktreeRoot returns the directory that holds a project's worktrees. It
 // lives OUTSIDE the target project (so worktrees never pollute the project's
@@ -201,6 +207,30 @@ func ensureChangelogUnionDriver(projectPath string) {
 	log.Printf("[Worktree] CHANGELOG.md union merge driver enabled for %s", projectPath)
 }
 
+// repoToplevel returns the absolute root of the git working tree that owns
+// path, or an error if path is not inside a git repository.
+func repoToplevel(path string) (string, error) {
+	out, err := gitOut(path, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(strings.TrimSpace(out))
+}
+
+// pathsEqual reports whether two filesystem paths denote the same directory
+// after cleaning and resolving to an absolute path.
+func pathsEqual(a, b string) bool {
+	a, err := filepath.Abs(filepath.Clean(a))
+	if err != nil {
+		return false
+	}
+	b, err = filepath.Abs(filepath.Clean(b))
+	if err != nil {
+		return false
+	}
+	return a == b
+}
+
 func (m *WorktreeManager) worktreePath(projectPath, key string) string {
 	return filepath.Join(worktreeRoot(projectPath), sanitizeKey(key))
 }
@@ -227,6 +257,30 @@ func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error
 	if projectPath == "" {
 		return "", fmt.Errorf("refusing to create worktree %q with empty project path (would worktree the daemon cwd — 1xs7z wrong-repo incident, 2026-08-23)", key)
 	}
+
+	// Wrong-repo guard (telematics incident, 2026-09-21): git commands in a
+	// directory that is not a repo root walk up to the nearest parent repo
+	// (/opt/dev-tools monorepo). Verify the resolved toplevel matches the
+	// project path before any worktree operation touches the repo.
+	if top, err := repoToplevel(projectPath); err != nil {
+		return "", fmt.Errorf("worktree guard for %s: project path %q is not a git repository: %w", key, projectPath, err)
+	} else if !pathsEqual(top, projectPath) {
+		detail := fmt.Sprintf("worktree guard for %s: git toplevel %q does not match project path %q", key, top, projectPath)
+		if m.eventSink != nil {
+			m.eventSink.Emit(Event{
+				Type:   "worktree_refused",
+				Reason: "toplevel_mismatch",
+				Detail: detail,
+				Fields: map[string]any{
+					"project_path": projectPath,
+					"toplevel":     top,
+					"key":          key,
+				},
+			})
+		}
+		return "", fmt.Errorf("%s", detail)
+	}
+
 	ensureChangelogUnionDriver(projectPath)
 	m.mu.Lock()
 	defer m.mu.Unlock()

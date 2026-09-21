@@ -490,3 +490,24 @@ func head(t *testing.T, dir string) string {
 	t.Helper()
 	return strings.TrimSpace(gitDir(t, dir, "rev-parse", "HEAD"))
 }
+
+func TestEnsureWorktree_RefusesToplevelMismatch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := gitInitRepo(t)
+	subdir := filepath.Join(repo, "subdir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewWorktreeManager()
+	_, err := m.EnsureWorktree(subdir, "chain-subdir")
+	if err == nil {
+		t.Fatal("expected failure when project path is a subdir, not the repo root")
+	}
+	if !strings.Contains(err.Error(), "toplevel") {
+		t.Fatalf("error should mention toplevel mismatch: %v", err)
+	}
+}
+
