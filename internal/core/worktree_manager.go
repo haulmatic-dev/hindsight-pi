@@ -253,7 +253,18 @@ func (m *WorktreeManager) WorkingBranch(projectPath string) (string, error) {
 
 // EnsureWorktree creates the chain's worktree off the working branch if it
 // does not exist and returns its path. Idempotent — reuses an existing one.
+// After the worktree exists, sibling `file:` deps are provisioned into the
+// repo's worktree root (see provisionSiblingDeps).
 func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error) {
+	wtPath, err := m.ensureWorktreeLocked(projectPath, key)
+	if err != nil {
+		return "", err
+	}
+	m.provisionSiblingDeps(projectPath)
+	return wtPath, nil
+}
+
+func (m *WorktreeManager) ensureWorktreeLocked(projectPath, key string) (string, error) {
 	if projectPath == "" {
 		return "", fmt.Errorf("refusing to create worktree %q with empty project path (would worktree the daemon cwd — 1xs7z wrong-repo incident, 2026-08-23)", key)
 	}
@@ -381,6 +392,67 @@ func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error
 		return "", fmt.Errorf("worktree reset after add %s: %w", wtPath, err)
 	}
 	return wtPath, nil
+}
+
+// provisionSiblingDeps materializes sibling `file:` dependencies declared in
+// the project's package.json as symlinks at the repo's worktree root (the
+// directory shared by all bead worktrees of the project). srv-telematics
+// incident 2026-09-21: npm install turns `file:../lib-nestjs` into
+// node_modules/@haulmatic/common -> ../../../lib-nestjs, which resolves
+// against the worktree, where the sibling does not exist — preflight then
+// fails with "dependency check failed after install: 1 broken symlink(s)"
+// and the bead loops on spawn failure. The symlink therefore belongs at the
+// worktree root, one level above each bead worktree. Idempotent: a correct
+// existing symlink is kept; a wrong or dangling one is replaced. Fail-open:
+// a sibling that does not exist on disk is logged and skipped, never fatal.
+func (m *WorktreeManager) provisionSiblingDeps(projectPath string) {
+	data, err := os.ReadFile(filepath.Join(projectPath, "package.json"))
+	if err != nil {
+		return // not a node project (or unreadable manifest) — nothing to do
+	}
+	root := worktreeRoot(projectPath)
+	for _, dep := range siblingFileDeps(data) {
+		target := dep
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(projectPath, target)
+		}
+		target = filepath.Clean(target)
+		// In-repo file: deps (file:./packages/x) ship inside the checkout and
+		// resolve within the worktree already — only out-of-repo siblings need
+		// provisioning at the worktree root.
+		if rel, rerr := filepath.Rel(projectPath, target); rerr != nil || rel == "." ||
+			(rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
+			continue
+		}
+		info, err := os.Stat(target)
+		if err != nil || !info.IsDir() {
+			log.Printf("[Worktree] sibling file: dep %s: target %s not found — skipping", dep, target)
+			continue
+		}
+		link := filepath.Join(root, filepath.Base(target))
+		if fi, err := os.Lstat(link); err == nil {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				if cur, err := os.Readlink(link); err == nil && pathsEqual(cur, target) {
+					continue // already provisioned, correct target
+				}
+			}
+			if err := os.RemoveAll(link); err != nil {
+				log.Printf("[Worktree] sibling file: dep %s: replace stale %s: %v", dep, link, err)
+				continue
+			}
+		} else if !os.IsNotExist(err) {
+			continue
+		}
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			log.Printf("[Worktree] sibling file: dep %s: mkdir %s: %v", dep, root, err)
+			continue
+		}
+		if err := os.Symlink(target, link); err != nil {
+			log.Printf("[Worktree] sibling file: dep %s: symlink %s -> %s: %v", dep, link, target, err)
+			continue
+		}
+		log.Printf("[Worktree] provisioned sibling file: dep %s: %s -> %s", dep, link, target)
+	}
 }
 
 // stagedConflictMarkerFiles lists staged files whose added lines contain git
