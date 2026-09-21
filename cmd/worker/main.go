@@ -1930,6 +1930,20 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 			log.Printf("[Worker:rpc] loading %d allowlisted extension(s): %s",
 				(len(extArgs)-1)/2, strings.Join(piConfig.Extensions, ", "))
 		}
+		// SoL-Pi reads its config from <cwd>/.pi/sol-pi.json only when the
+		// project is trusted; rpc mode never prompts, so trust is granted
+		// per-run and only when sol-pi is allowlisted and installed. Without
+		// the config the extension loads with everything disabled — a silent
+		// no-op, which is why a failed provision skips --approve rather than
+		// running an unconfigured pilot.
+		if solPiResolved(resolvePiAgentDir(piConfig.ConfigDir), piConfig.Extensions) {
+			if provisionSolPi(path) {
+				args = append(args, "--approve")
+				log.Printf("[Worker:rpc] sol-pi pilot: wrote .pi/sol-pi.json, granting per-run project trust (--approve)")
+			} else {
+				log.Printf("[Worker:rpc] sol-pi pilot: config provisioning failed; extension will load with defaults (all mechanisms disabled)")
+			}
+		}
 	}
 
 	// Add provider
