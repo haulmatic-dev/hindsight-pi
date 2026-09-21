@@ -1209,7 +1209,7 @@ func ValidateConfig(cfg *Config) ValidationErrors {
 			})
 		} else if prev, ok := seenNames[proj.Name]; ok {
 			errors = append(errors, ValidationError{
-				Field: fmt.Sprintf("projects[%d].name", i),
+				Field:   fmt.Sprintf("projects[%d].name", i),
 				Message: (&DuplicateProjectNameError{Name: proj.Name, PathA: prev, PathB: proj.Path}).Error(),
 			})
 		} else {
