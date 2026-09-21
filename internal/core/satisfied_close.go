@@ -309,10 +309,14 @@ func resolveProjectPathByName(cfg *Config, projectName, repoName string) string 
 		if p.Type == "multi" {
 			for _, r := range p.Repos {
 				if r.Name == projectName || (repoName != "" && r.Name == repoName) {
-					if r.Path != "" {
-						return r.Path
+					segment := r.Path
+					if segment == "" {
+						segment = r.Name
 					}
-					return filepath.Join(p.Path, r.Name)
+					if filepath.IsAbs(segment) {
+						return segment
+					}
+					return filepath.Join(p.Path, segment)
 				}
 			}
 		}

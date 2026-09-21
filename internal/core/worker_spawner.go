@@ -85,6 +85,9 @@ func (s *WorkerSpawner) SetChainCompletionDetector(d *ChainCompletionDetector) {
 func (s *WorkerSpawner) SetWorktreeManager(m *WorktreeManager, chainKeyFn func(types.Bead) string) {
 	s.worktreeManager = m
 	s.chainKeyFn = chainKeyFn
+	if m != nil {
+		m.SetEventSink(s.eventSink)
+	}
 }
 
 // SetRegistryStore wires the daemon's registry store so the duplicate-spawn
@@ -106,6 +109,9 @@ func (s *WorkerSpawner) SetSessionResumePilot(p *SessionResumePilot) {
 // events (pack_created/pack_refreshed/pack_miss).
 func (s *WorkerSpawner) SetEventSink(sink *EventSink) {
 	s.eventSink = sink
+	if s.worktreeManager != nil {
+		s.worktreeManager.SetEventSink(sink)
+	}
 }
 
 // SetScoutRunner wires the agentic scout fallback for low-confidence pack
@@ -402,6 +408,30 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 		log.Printf("[Overseer] project path unresolved for %s (project %q) — spawn will fail closed", bead.ID, bead.Project)
 	}
 
+	// Fail-closed spawn guard (telematics incident, 2026-09-21): an empty or
+	// relative project path would run git/worktree operations in the daemon's
+	// cwd or walk up into a parent repo (the /opt/dev-tools monorepo). Refuse
+	// and emit a typed event so the failure is visible downstream.
+	if projectPath == "" || !filepath.IsAbs(projectPath) {
+		reason := "empty_project_path"
+		if projectPath != "" {
+			reason = "relative_project_path"
+		}
+		if s.eventSink != nil {
+			s.eventSink.Emit(Event{
+				Type:    "spawn_refused",
+				Project: bead.Project,
+				Bead:    beadIDStr,
+				Reason:  reason,
+				Detail:  fmt.Sprintf("refusing spawn for %s: project path %q is not absolute", beadIDStr, projectPath),
+				Fields: map[string]any{
+					"project_path": projectPath,
+				},
+			})
+		}
+		return nil, fmt.Errorf("refusing spawn for %s: project path %q is empty or relative", beadIDStr, projectPath)
+	}
+
 	// Context pack: built just-in-time at chain first-member spawn, SHA-keyed
 	// refresh at each later member spawn. Fail-open by construction — a pack
 	// failure must never block the spawn it was meant to guide.
@@ -629,6 +659,9 @@ func (s *WorkerSpawner) SetUserContexts(ctxs map[string]*UserContext) {
 }
 
 // findUserForProject returns the username associated with a project path.
+// It matches both the configured project path and each configured repo path
+// (relative or absolute) so per-repo paths for multi projects resolve to the
+// owning user.
 func (s *WorkerSpawner) findUserForProject(projectPath string) string {
 	if s.userContexts == nil {
 		return ""
@@ -637,6 +670,23 @@ func (s *WorkerSpawner) findUserForProject(projectPath string) string {
 		for _, p := range ctx.Config.Projects {
 			if p.Path == projectPath {
 				return username
+			}
+			if p.Type == "multi" {
+				for _, r := range p.Repos {
+					segment := r.Path
+					if segment == "" {
+						segment = r.Name
+					}
+					if filepath.IsAbs(segment) {
+						if segment == projectPath {
+							return username
+						}
+						continue
+					}
+					if filepath.Join(p.Path, segment) == projectPath {
+						return username
+					}
+				}
 			}
 		}
 	}

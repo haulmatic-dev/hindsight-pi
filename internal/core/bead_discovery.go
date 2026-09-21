@@ -344,6 +344,24 @@ func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead,
 						},
 					}
 				}
+				if bead == nil {
+					bead = &types.Bead{
+						ID:          beadID,
+						Title:       rec.Title,
+						Type:        rec.Type,
+						Priority:    rec.Priority,
+						Project:     project.Name,
+						Repo:        repoName,
+						Status:      types.StatusOpen,
+						Labels:      rec.Labels,
+						Description: rec.Reason,
+						Metadata: map[string]string{
+							"bv_confidence":     fmt.Sprintf("%f", rec.Confidence),
+							"bv_reason":         rec.Reason,
+							"bv_estimated_time": rec.EstimatedTime,
+						},
+					}
+				}
 
 				// bv's cache can be stale: never schedule a bead the store says is terminal.
 				if bead.Status.IsTerminal() {
@@ -400,6 +418,23 @@ func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead,
 
 				bead, err := d.beadsClient.GetBead(project.Path, repoName, beadID)
 				if err != nil {
+					bead = &types.Bead{
+						ID:       beadID,
+						Title:    blocker.Title,
+						Type:     "task",
+						Priority: 3,
+						Project:  project.Name,
+						Repo:     repoName,
+						Status:   types.StatusOpen,
+						Metadata: map[string]string{
+							"bv_source":     "blockers_to_clear",
+							"bv_unblocks":   fmt.Sprintf("%d", blocker.UnblocksCount),
+							"bv_confidence": "0.8",
+							"bv_reason":     fmt.Sprintf("Unblocks %d items", blocker.UnblocksCount),
+						},
+					}
+				}
+				if bead == nil {
 					bead = &types.Bead{
 						ID:       beadID,
 						Title:    blocker.Title,
@@ -499,6 +534,21 @@ func (d *BeadDiscovery) findFromBVPlan(activeWorkers map[string]bool) ([]types.B
 					bead, err := d.beadsClient.GetBead(project.Path, repoName, beadID)
 					if err != nil {
 						log.Printf("⚠️  [BV-Plan] Could not get bead details for %s: %v", beadID, err)
+						bead = &types.Bead{
+							ID:       beadID,
+							Title:    item.Title,
+							Type:     "task",
+							Priority: item.Priority,
+							Project:  project.Name,
+							Repo:     repoName,
+							Status:   types.StatusOpen,
+							Metadata: map[string]string{
+								"bv_plan_track": track.TrackID,
+								"bv_unblocks":   strings.Join(item.Unblocks, ","),
+							},
+						}
+					}
+					if bead == nil {
 						bead = &types.Bead{
 							ID:       beadID,
 							Title:    item.Title,

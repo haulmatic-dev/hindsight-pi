@@ -1,6 +1,7 @@
 package core
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -82,5 +83,47 @@ func projectsWithSameRepoName(ajanthaPath, nipunaPath string) []types.Project {
 	return []types.Project{
 		{Name: "webapp", Path: ajanthaPath, Type: types.RepoTypeSingle},
 		{Name: "webapp", Path: nipunaPath, Type: types.RepoTypeSingle},
+	}
+}
+
+// Regression: discovered multi-repo projects stored a bare relative repo name
+// in provenance, so spawn resolved a relative path and git walked up to the
+// daemon's monorepo (srv-telematics incident, 2026-09-21). The DAG builder
+// must record the absolute per-repo path for every listed bead.
+func TestDAGBuilderRecordsAbsoluteRepoPath(t *testing.T) {
+	parent := "/home/buddhi/projects-hydra-repro"
+	repoName := "tiny-greeter"
+	expectedRepoPath := filepath.Join(parent, repoName)
+
+	project := types.Project{
+		Name: "projects-hydra-repro",
+		Path: parent,
+		Type: types.RepoTypeMulti,
+		Repos: []types.Repo{
+			{Name: repoName, Path: repoName}, // discovery stores the bare name
+		},
+	}
+
+	beadID := types.BeadID("projects-hydra-repro/" + repoName + "-u1i")
+	bead := types.Bead{
+		ID:       beadID,
+		Project:  project.Name,
+		Repo:     repoName,
+		Status:   types.StatusOpen,
+	}
+
+	client := newMockBeadsClient()
+	client.beads[string(beadID)] = bead
+
+	provenance := &BeadProvenanceIndex{}
+	builder := NewDAGBuilder(NewErrorLogger(nil))
+	builder.Provenance = provenance
+
+	if err := builder.Build(NewDAG(), client, []types.Project{project}, nil); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	if got := provenance.Lookup(string(beadID)); got != expectedRepoPath {
+		t.Errorf("provenance path = %q, want absolute repo path %q", got, expectedRepoPath)
 	}
 }

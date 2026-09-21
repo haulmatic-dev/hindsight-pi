@@ -201,10 +201,7 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				if p.Type == "multi" {
 					for _, r := range p.Repos {
 						if r.Name == projectName || (repoName != "" && r.Name == repoName) {
-							if r.Path != "" {
-								return r.Path
-							}
-							return filepath.Join(p.Path, r.Name)
+							return resolveRepoPath(p, r)
 						}
 					}
 				}
