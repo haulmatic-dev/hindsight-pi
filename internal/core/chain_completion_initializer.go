@@ -91,6 +91,15 @@ func (i *ChainCompletionInitializer) Initialize() {
 	if o.workerSpawner != nil {
 		o.workerSpawner.SetChainCompletionDetector(o.chainCompletionDetector)
 		o.workerSpawner.SetEventSink(o.eventSink)
+		if o.config != nil && o.config.ContextPack.Scout.Enabled {
+			sc := resolveScoutConfig(o.config)
+			o.workerSpawner.SetScoutRunner(&PiScoutRunner{
+				Provider:   sc.provider,
+				Model:      sc.model,
+				APIKeyName: sc.apiKeyName,
+				TurnBudget: sc.turnBudget,
+			})
+		}
 	}
 
 	extractor := NewChainPatternExtractor(

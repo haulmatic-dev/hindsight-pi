@@ -29,13 +29,36 @@ const ContextPackVersion = 1
 // distinguish its own packs from a human's hand-written agent_context.
 const contextPackProvenance = "hydra-context-pack"
 
+// Pack anchor provenance values. Mechanical anchors come from graphify +
+// convention scans; agentic anchors come from the bounded scout pass
+// (context_pack_scout.go). The worker prompt renders them differently and
+// the re-scout policy targets agentic ones only.
+const (
+	PackProvenanceMechanical = "mechanical"
+	PackProvenanceAgentic    = "agentic"
+)
+
+// PackScoutConfidenceThreshold separates mapped from unmapped requirements.
+// Mechanical anchors score 1.0 (exact symbol) or 0.6 (substring); anything
+// below the threshold counts as unmappable and makes the requirement
+// scout-eligible.
+const PackScoutConfidenceThreshold = 0.7
+
 // PackFileAnchor maps a requirement term to the file that implements it.
-// Populated best-effort from the graphify symbol index; confidence <1 means
-// the match was substring/fuzzy, not an exact symbol hit.
+// Populated best-effort from the graphify symbol index (provenance
+// "mechanical") or the scout pass (provenance "agentic"); confidence <1
+// means the match was substring/fuzzy, not an exact symbol hit.
 type PackFileAnchor struct {
 	Requirement string  `json:"requirement"`
 	Path        string  `json:"path"`
 	Confidence  float64 `json:"confidence"`
+	// Symbol and Snippet are scout-only fields: the symbol the scout pinned
+	// and a short verbatim anchor snippet for orientation.
+	Symbol  string `json:"symbol,omitempty"`
+	Snippet string `json:"anchor_snippet,omitempty"`
+	// Provenance is "mechanical" (graphify/convention, default) or
+	// "agentic" (scout pass). Empty reads as mechanical.
+	Provenance string `json:"provenance,omitempty"`
 }
 
 // ContextPack is the agent_context payload written to every chain member.
@@ -276,7 +299,7 @@ func graphFileAnchors(projectPath string, terms []string) []PackFileAnchor {
 				continue
 			}
 			seen[term+"\x00"+path] = true
-			anchors = append(anchors, PackFileAnchor{Requirement: term, Path: path, Confidence: conf})
+			anchors = append(anchors, PackFileAnchor{Requirement: term, Path: path, Confidence: conf, Provenance: PackProvenanceMechanical})
 			break // best (first) match per term
 		}
 		if len(anchors) >= 20 {
