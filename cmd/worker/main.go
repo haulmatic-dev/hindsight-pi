@@ -84,6 +84,15 @@ type PiConfig struct {
 	// this bead's phase by the daemon. Only meaningful in rpc mode: text mode
 	// has no extension host, so the flags would be inert.
 	Extensions []string
+
+	// TurnBudget is the soft per-bead turn budget passed from the daemon.
+	// It is visible to the model as a pacing hint, not a hard cap.
+	TurnBudget int
+
+	// TurnBudgetCadence is how often (in turns) the worker appends a
+	// non-binding "you have used N of ~B turns" reminder to the prompt tail.
+	// Values <= 0 mean "every turn".
+	TurnBudgetCadence int
 }
 
 // RPCEnabled reports whether this worker should drive Pi over the rpc JSONL
@@ -93,6 +102,24 @@ type PiConfig struct {
 // agree on what counts as "rpc".
 func (c PiConfig) RPCEnabled() bool {
 	return strings.ToLower(strings.TrimSpace(c.Mode)) == "rpc"
+}
+
+// reminderCadence returns the effective reminder cadence. Zero or negative
+// values mean "every turn" so the budget is always visible.
+func (c PiConfig) reminderCadence() int {
+	if c.TurnBudgetCadence > 0 {
+		return c.TurnBudgetCadence
+	}
+	return 1
+}
+
+// turnBudget returns the effective soft turn budget, with a safe default
+// when the daemon did not pass one.
+func (c PiConfig) turnBudget() int {
+	if c.TurnBudget > 0 {
+		return c.TurnBudget
+	}
+	return 200
 }
 
 // HindsightClientConfig contains configuration for the Hindsight client
@@ -745,6 +772,20 @@ func parsePiConfig() PiConfig {
 
 	// Parse config directory
 	cfg.ConfigDir = os.Getenv("HYDRA_PI_CONFIG_DIR")
+
+	// Visible turn budget: the daemon computes the per-phase budget and
+	// cadence; the worker just applies them. Defaults are fail-open so an
+	// absent or malformed env var never blocks a bead.
+	if v := os.Getenv("HYDRA_PI_TURN_BUDGET"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.TurnBudget = n
+		}
+	}
+	if v := os.Getenv("HYDRA_PI_TURN_BUDGET_CADENCE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.TurnBudgetCadence = n
+		}
+	}
 
 	return cfg
 }
@@ -1489,7 +1530,7 @@ func executeWithPi(
 	extras.ChainContext = loadChainContext(cmd.Dir)
 
 	// Build the prompt message
-	prompt := buildPiPrompt(bead, hindsightContext, extras)
+	prompt := buildPiPrompt(bead, hindsightContext, extras, piConfig)
 	fullSha, headSha := promptPrefixDigest(prompt)
 	// Prefix-stability metric (2026-09-14): identical digests across beads of
 	// a project mean the provider-side prefix cache pays. The `account` field
@@ -1533,6 +1574,7 @@ func executeWithPi(
 	// torn down. Capped; past the cap the turn closes and Pan sees the
 	// nudge-capped worker in the registry.
 	nudgeCount := 0
+	turnCount := 1
 
 	// Park state (rpc mode only): Tier A provider-capacity failures park the
 	// live session instead of killing it (PRD Part 2).
@@ -1574,11 +1616,12 @@ func executeWithPi(
 				}
 				if nudge, reason := decideTurnEnd(v, nudgeCount, verdictNudgeCap); nudge {
 					nudgeCount++
+					turnCount++
 					if activeReporter != nil {
 						activeReporter.SetNudges(nudgeCount)
 					}
-					log.Printf("[Worker:rpc] turn ended without closure (%s) — nudging session %d/%d", reason, nudgeCount, verdictNudgeCap)
-					if nudgeLine, err := rpcPromptLine(buildNudgePrompt(reason)); err == nil {
+					log.Printf("[Worker:rpc] turn ended without closure (%s) — nudging session %d/%d (turn %d)", reason, nudgeCount, verdictNudgeCap, turnCount)
+					if nudgeLine, err := rpcPromptLine(buildNudgePrompt(reason, turnCount, piConfig)); err == nil {
 						if _, err := stdinPipe.Write(append(nudgeLine, '\n')); err != nil {
 							log.Printf("[Worker:rpc] nudge write failed, finishing turn: %v", err)
 							turn.finish(cmdPid(cmd), stdinPipe)
@@ -2135,7 +2178,14 @@ func stableByContentHash(items []string) []string {
 // and re-verify worktree state before building on them.
 const resumeAttemptBoundaryText = `ATTEMPT BOUNDARY: you are a NEW attempt for this bead. A previous attempt's Pi session has been resumed for continuity, but its claims about files, tests, git state, and verification are NOT automatically true. Verify the current worktree state (git status, HEAD, changed files, test results) before trusting prior claims. Do not repeat the failed approach; diagnose the root cause first, then proceed.`
 
-func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, extras promptExtras) string {
+func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, extras promptExtras, piConfigs ...PiConfig) string {
+	var piConfig PiConfig
+	if len(piConfigs) > 0 {
+		piConfig = piConfigs[0]
+	}
+	budget := piConfig.turnBudget()
+	reminderCadence := piConfig.reminderCadence()
+
 	var promptParts []string
 
 	// ---- Invariant doctrine head -------------------------------------------------
@@ -2180,8 +2230,13 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 	// but implies infinite runway; 200-turn grinds (20M tokens) resulted. An
 	// explicit budget makes the model pace itself and converts wandering
 	// into an early honest unmet verdict instead of a grind to the wall.
+	reminderPhrase := "every turn"
+	if reminderCadence > 1 {
+		reminderPhrase = fmt.Sprintf("every %d turns", reminderCadence)
+	}
+
 	promptParts = append(promptParts,
-		"TURN BUDGET: plan for ~40 turns total. Track your own count. If you pass 40 without the narrow test green: stop exploring, commit whatever progress exists, and emit HYDRA_VERDICT with done:false and your findings — an honest unmet verdict is a good outcome; grinding without convergence is not. When running tests, pipe output through tail (`... 2>&1 | tail -30`) — full test output floods the context every turn.")
+		fmt.Sprintf("TURN BUDGET: plan for ~%d turns total. Track your own count. If you pass %d without the narrow test green: stop exploring, commit whatever progress exists, and emit HYDRA_VERDICT with done:false and your findings — an honest unmet verdict is a good outcome; grinding without convergence is not. When running tests, pipe output through tail (`... 2>&1 | tail -30`) — full test output floods the context every turn. You will receive a non-binding \"You have used N of ~%d turns\" reminder %s.", budget, budget, budget, reminderPhrase))
 
 	// Daemon-owned gates (FR-002): when the project delegates verification to
 	// the daemon, the prompt redirects the agent away from suite babysitting.
@@ -2324,6 +2379,14 @@ A turn ending without this block is treated as unfinished and you will be re-pro
 	}
 
 	return strings.Join(promptParts, "\n\n")
+}
+
+// cadencePhrase renders the reminder cadence as readable prose.
+func cadencePhrase(cadence int) string {
+	if cadence <= 1 {
+		return "every turn"
+	}
+	return fmt.Sprintf("every %d turns", cadence)
 }
 
 // renderContextPack formats the daemon-written ContextPack for the prompt

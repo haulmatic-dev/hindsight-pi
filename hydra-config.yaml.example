@@ -232,6 +232,17 @@ agents:
     #   green:
     #     model: kimi-for-coding
 
+    # Visible turn budget: per-phase soft budgets and reminder cadence.
+    # The budget is a non-binding pacing hint shown in the worker prompt
+    # tail; defaults are set above fleet p75 (red 150, green/refactor 300,
+    # others 200) so the hint never binds early. Reminders are injected
+    # into the live session every N turns; 0 or omitted means every turn.
+    # turn_budget_reminder_cadence: 1
+    # turn_budgets:
+    #   red: 150
+    #   green: 300
+    #   refactor: 300
+
 # Pan, the shepherd: a pi-agent that watches the worker registry and decides
 # the ambiguous tail (parked-overdue, hung, verdict-missing past nudge cap).
 # Fail-open by contract: disabled or failing, deterministic rules (backoff,

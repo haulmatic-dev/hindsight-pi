@@ -328,5 +328,10 @@ func (b *WorkerEnvBuilder) buildPiEnv(bead types.Bead) []string {
 		// survives the env hand-off; the worker resolves names to entry paths
 		// because only it knows the resolved package root.
 		fmt.Sprintf("HYDRA_PI_EXTENSIONS=%s", strings.Join(p.ExtensionsForPhase(phase), ",")),
+		// Visible turn budget: per-phase soft budget and reminder cadence.
+		// The budget is computed for this bead's phase and injected into the
+		// prompt tail as a non-binding pacing hint.
+		fmt.Sprintf("HYDRA_PI_TURN_BUDGET=%d", p.TurnBudgetForPhase(phase)),
+		fmt.Sprintf("HYDRA_PI_TURN_BUDGET_CADENCE=%d", p.ReminderCadence()),
 	}
 }

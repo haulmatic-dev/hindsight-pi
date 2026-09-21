@@ -83,7 +83,7 @@ func TestDecideTurnEnd(t *testing.T) {
 }
 
 func TestNudgePromptContent(t *testing.T) {
-	p := buildNudgePrompt("verdict missing — emit HYDRA_VERDICT or continue working")
+	p := buildNudgePrompt("verdict missing — emit HYDRA_VERDICT or continue working", 1, PiConfig{})
 	if !strings.Contains(p, "HYDRA_VERDICT") {
 		t.Errorf("nudge prompt must demand the verdict: %q", p)
 	}
