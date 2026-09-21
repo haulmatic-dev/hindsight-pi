@@ -166,6 +166,10 @@ func (m *e2eMockBeadsClient) UpdateBeadDescription(projectPath, repoName string,
 	return nil
 }
 
+func (m *e2eMockBeadsClient) UpdateBeadAgentContext(projectPath, repoName string, beadID types.BeadID, ctxJSON string) error {
+	return nil
+}
+
 func (m *e2eMockBeadsClient) AddDependency(projectPath, repoName string, beadID, dependsOn types.BeadID) error {
 	return nil
 }

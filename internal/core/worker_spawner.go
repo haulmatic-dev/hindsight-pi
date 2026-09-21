@@ -2,6 +2,7 @@ package core
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -40,6 +41,10 @@ type WorkerSpawner struct {
 	chainCompletionDetector *ChainCompletionDetector
 	// sessionResumePilot gates session-file resume on orphan respawn.
 	sessionResumePilot *SessionResumePilot
+
+	// eventSink carries pack_created/pack_refreshed/pack_miss. Nil-safe:
+	// pack events are observability, never a spawn gate.
+	eventSink *EventSink
 
 	spawnFailureMu sync.RWMutex
 	spawnFailures  map[string]*spawnFailureInfo // bead ID -> last spawn failure
@@ -89,6 +94,12 @@ func (s *WorkerSpawner) SetRegistryStore(st *registry.Store) {
 // SetSessionResumePilot wires the session-file resume pilot.
 func (s *WorkerSpawner) SetSessionResumePilot(p *SessionResumePilot) {
 	s.sessionResumePilot = p
+}
+
+// SetEventSink wires the structured event sink used for pack lifecycle
+// events (pack_created/pack_refreshed/pack_miss).
+func (s *WorkerSpawner) SetEventSink(sink *EventSink) {
+	s.eventSink = sink
 }
 
 // NewWorkerSpawner creates a new worker spawner.
@@ -378,6 +389,11 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 	if projectPath == "" {
 		log.Printf("[Overseer] project path unresolved for %s (project %q) — spawn will fail closed", bead.ID, bead.Project)
 	}
+
+	// Context pack: built just-in-time at chain first-member spawn, SHA-keyed
+	// refresh at each later member spawn. Fail-open by construction — a pack
+	// failure must never block the spawn it was meant to guide.
+	s.ensureContextPack(bead, projectPath)
 
 	if projectPath != "" && s.beadsClient != nil {
 		// Defense in depth: refuse to mark a terminal bead as in_progress.
@@ -737,4 +753,111 @@ func currentGitHead(dir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// maxPackChainMembers bounds the per-spawn chain scan: fetching every
+// member's bead to find an existing pack costs one `br show` each, fine for
+// chains, not for epic-scale lists.
+const maxPackChainMembers = 50
+
+// ensureContextPack builds or refreshes the chain's context pack just-in-time
+// at member spawn. First member spawn with no pack anywhere in the chain →
+// build and write to every member (pack_created). Later spawns compare the
+// pack's base_sha against the working-branch head: moved → regenerate the
+// mechanical sections, re-validate (not regenerate) the agentic file anchors,
+// drop broken ones with pack_miss events (pack_refreshed). Unchanged → reuse.
+//
+// Fail-open throughout: any error logs and the spawn proceeds unguided. The
+// pack is an optimization; it must never gate execution.
+func (s *WorkerSpawner) ensureContextPack(bead types.Bead, projectPath string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[ContextPack] ensureContextPack panicked for %s (fail-open): %v", bead.ID, r)
+		}
+	}()
+	if s.chainCompletionDetector == nil || s.beadsClient == nil || projectPath == "" {
+		return
+	}
+	chain, ok := s.chainCompletionDetector.FindChainByBead(bead.ID)
+	if !ok || len(chain.AllBeadIDs) == 0 {
+		return // packs attach to chains; single beads spawn unguided
+	}
+	if len(chain.AllBeadIDs) > maxPackChainMembers {
+		log.Printf("[ContextPack] chain has %d members (> %d); skipping pack for %s", len(chain.AllBeadIDs), maxPackChainMembers, bead.ID)
+		return
+	}
+
+	// One pass over chain members: collect titles for requirement terms and
+	// find any member already carrying a parseable pack.
+	var existing *ContextPack
+	var terms []string
+	for _, id := range chain.AllBeadIDs {
+		b, err := s.beadsClient.GetBead(projectPath, bead.Repo, id)
+		if err != nil || b == nil {
+			continue
+		}
+		terms = append(terms, RequirementTermsForBead(b.Title)...)
+		if existing == nil {
+			if p, err := ParseContextPack(b.AgentContext); err == nil && p != nil {
+				existing = p
+			}
+		}
+	}
+	if len(terms) > 16 {
+		terms = terms[:16]
+	}
+
+	gates := gatesForProject(s.config, bead.Project)
+	head := currentGitHead(projectPath)
+
+	switch {
+	case existing == nil:
+		pack := BuildContextPack(projectPath, gates, terms)
+		log.Printf("[ContextPack] built pack for chain of %s (base_sha=%s, gates=%d, anchors=%d)",
+			bead.ID, pack.BaseSHA, len(pack.GateCommands), len(pack.Files))
+		s.writePackToChain(chain, projectPath, bead, pack, "pack_created")
+	case head != "" && existing.BaseSHA != head:
+		// SHA moved: mechanical sections are stale (gate commands, spec
+		// pattern, dir listing all derive from the tree). Regenerate them;
+		// the agentic anchor mapping is re-validated, not regenerated.
+		refreshed := BuildContextPack(projectPath, gates, nil)
+		refreshed.Files = existing.Files
+		dropped := ValidatePackAnchors(refreshed, projectPath)
+		logPackMiss(s.eventSink, bead.Project, string(bead.ID), dropped)
+		log.Printf("[ContextPack] refreshed pack for chain of %s (base_sha %s → %s, dropped %d anchors)",
+			bead.ID, existing.BaseSHA, refreshed.BaseSHA, len(dropped))
+		s.writePackToChain(chain, projectPath, bead, refreshed, "pack_refreshed")
+	default:
+		log.Printf("[ContextPack] pack for chain of %s still fresh (base_sha=%s)", bead.ID, existing.BaseSHA)
+	}
+}
+
+// writePackToChain serializes the pack and writes it to every chain member's
+// agent_context. Per-member failures log and continue (fail-open: a partially
+// guided chain beats an unspawned one). Emits the typed event per successful
+// write on the fail-open event stream.
+func (s *WorkerSpawner) writePackToChain(chain *ChainInfo, projectPath string, bead types.Bead, pack *ContextPack, eventType string) {
+	raw, err := json.Marshal(pack)
+	if err != nil {
+		log.Printf("[ContextPack] marshal failed for chain of %s (fail-open): %v", bead.ID, err)
+		return
+	}
+	for _, id := range chain.AllBeadIDs {
+		if err := s.beadsClient.UpdateBeadAgentContext(projectPath, bead.Repo, id, string(raw)); err != nil {
+			log.Printf("[ContextPack] %s write failed for %s (fail-open): %v", eventType, id, err)
+			continue
+		}
+		if s.eventSink != nil {
+			s.eventSink.Emit(Event{Type: eventType, Project: bead.Project, Bead: string(id),
+				Reason: "sha_" + pack.BaseSHA[:min(12, len(pack.BaseSHA))],
+				Detail: "context pack written to chain member (base_sha " + pack.BaseSHA + ")"})
+		}
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

@@ -105,6 +105,10 @@ func (m *repoAwareMockBeadsClient) RemoveBeadLabels(projectPath, repoName string
 func (m *repoAwareMockBeadsClient) UpdateBeadDescription(projectPath, repoName string, beadID types.BeadID, description string) error {
 	return nil
 }
+
+func (m *repoAwareMockBeadsClient) UpdateBeadAgentContext(projectPath, repoName string, beadID types.BeadID, ctxJSON string) error {
+	return nil
+}
 func (m *repoAwareMockBeadsClient) AddDependency(projectPath, repoName string, beadID, dependsOn types.BeadID) error {
 	return nil
 }

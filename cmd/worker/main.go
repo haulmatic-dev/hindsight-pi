@@ -24,6 +24,7 @@ import (
 	"github.com/haulmatic-dev/hydra/agents"
 	piagents "github.com/haulmatic-dev/hydra/internal/agents"
 	"github.com/haulmatic-dev/hydra/internal/beads"
+	"github.com/haulmatic-dev/hydra/internal/core"
 	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/internal/mcp"
 	"github.com/haulmatic-dev/hydra/internal/pi"
@@ -2247,6 +2248,16 @@ A turn ending without this block is treated as unfinished and you will be re-pro
 		promptParts = append(promptParts, fmt.Sprintf("Files to modify: %v", targetFiles))
 	}
 
+	// Context pack: daemon-generated orientation data (gate commands, spec
+	// convention, repo dirs, requirement→file anchors) written to this bead's
+	// agent_context at chain first-member spawn and SHA-refreshed since. TAIL
+	// ONLY — the frozen invariant head above must stay byte-identical for the
+	// cache-hit program. Treated as verified fact: the worker must not spend
+	// turns re-deriving what the pack already records.
+	if pack, perr := core.ParseContextPack(bead.AgentContext); perr == nil && pack != nil {
+		promptParts = append(promptParts, renderContextPack(pack))
+	}
+
 	// Add Hindsight context if available. Memories arrive server-ranked, but
 	// the server rank is not stable across identical recall calls, and an
 	// unstable tail defeats prompt caching on respawn. Sort by content hash
@@ -2299,6 +2310,37 @@ A turn ending without this block is treated as unfinished and you will be re-pro
 	}
 
 	return strings.Join(promptParts, "\n\n")
+}
+
+// renderContextPack formats the daemon-written ContextPack for the prompt
+// tail. Facts first, then the three behaviour lines the pack program relies
+// on: no approval-seeking (the bead is the approval), parallel tool calls
+// (VERIFIED on Pi 0.85.1: this harness batches independent tool calls per
+// assistant message), and the identical-error-twice failure protocol.
+func renderContextPack(pack *core.ContextPack) string {
+	var sb strings.Builder
+	sb.WriteString("CONTEXT PACK (daemon-generated orientation for this chain — verified fact, do not re-derive what it records):\n")
+	if len(pack.GateCommands) > 0 {
+		sb.WriteString("Gate commands (the daemon runs these after you finish; use for scoped checks): " +
+			strings.Join(pack.GateCommands, " | ") + "\n")
+	}
+	if pack.SpecPattern != "" {
+		sb.WriteString("Spec convention: " + pack.SpecPattern + "\n")
+	}
+	if len(pack.TargetDirs) > 0 {
+		sb.WriteString("Repo dirs (2 levels): " + strings.Join(pack.TargetDirs, ", ") + "\n")
+	}
+	if len(pack.Files) > 0 {
+		sb.WriteString("Requirement → file anchors (graphify-derived; confidence <1 means fuzzy, verify before relying):\n")
+		for _, a := range pack.Files {
+			fmt.Fprintf(&sb, "- %s → %s\n", a.Requirement, a.Path)
+		}
+	}
+	sb.WriteString("Pack behaviour contract:\n" +
+		"- NO APPROVAL-SEEKING: this bead is the approval. Never ask for confirmation — act.\n" +
+		"- PARALLEL TOOL CALLS: batch independent reads/searches into one assistant message.\n" +
+		"- FAILURE PROTOCOL: the same test failing twice with an identical error → stop editing, report the error verbatim, and exit.")
+	return sb.String()
 }
 
 // queryHindsightForContext queries Hindsight for relevant context before agent execution

@@ -904,6 +904,28 @@ func (c *BeadCloser) checkTargetScope(bead *types.Bead, projectPath, repoName st
 		return nil
 	}
 
+	// Context-pack consult: a guided bead carries its chain's file anchors in
+	// agent_context even when its description declares no Target Files. The
+	// pack is written to every chain member at first-member spawn, so the
+	// bead itself is the chain lookup — no extra resolution needed here.
+	// Enforcing against the anchors turns guided beads from advisory-scoped
+	// into really-scoped.
+	if pack, err := ParseContextPack(bead.AgentContext); err == nil && pack != nil && len(pack.Files) > 0 {
+		anchorTargets := make([]string, 0, len(pack.Files))
+		for _, a := range pack.Files {
+			anchorTargets = append(anchorTargets, a.Path)
+		}
+		violations := scopeViolations(changed, anchorTargets)
+		if len(violations) == 0 {
+			return nil
+		}
+		if mode == "block" {
+			return c.rejectClose(bead, projectPath, repoName, "off-scope changes (context-pack anchors): "+strings.Join(violations, ", "))
+		}
+		log.Printf("[ScopeGate] bead %s changed off-scope files vs context-pack anchors: %v", bead.ID, violations)
+		return nil
+	}
+
 	if !beadTypeShouldDeclareTargets(bead.Type) {
 		return nil
 	}

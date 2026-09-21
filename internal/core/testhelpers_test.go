@@ -241,6 +241,19 @@ func (m *mockBeadsClient) UpdateBeadDescription(projectPath, repoName string, be
 	return nil
 }
 
+// UpdateBeadAgentContext records the pack on the mock bead so pack
+// round-trips are observable in tests.
+func (m *mockBeadsClient) UpdateBeadAgentContext(projectPath, repoName string, beadID types.BeadID, ctxJSON string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if bead, exists := m.beads[string(beadID)]; exists {
+		bead.AgentContext = ctxJSON
+		m.beads[string(beadID)] = bead
+	}
+	return nil
+}
+
 func (m *mockBeadsClient) AddDependency(projectPath, repoName string, beadID, dependsOn types.BeadID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
