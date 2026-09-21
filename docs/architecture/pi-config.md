@@ -64,6 +64,13 @@ Short names map to packages in `cmd/worker/pi_extensions.go` (`rtk` →
 `pi-rtk-optimizer`, `caveman` → `@tomooshi/caveman-milk-pi`, …). An unresolvable
 name is logged and skipped — a typo costs that extension, not the bead.
 
+`sol-pi` (SoL-Pi pilot) needs no alias — the config may carry the package
+name directly. When `sol-pi` is allowlisted and installed, the worker also
+writes the conservative pilot config to `<worktree>/.pi/sol-pi.json` and
+passes `--approve` for that run (SoL-Pi reads project config only under
+project trust; rpc mode never prompts). Details and the A/B protocol:
+`docs/operations/sol-pi-pilot.md`.
+
 ## `manage_config` — why hydra must not write here
 
 `pi.manage_config` defaults to **false**, meaning the daemon treats the directory
