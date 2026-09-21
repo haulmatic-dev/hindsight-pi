@@ -2,6 +2,7 @@ package core
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,6 +46,11 @@ type WorkerSpawner struct {
 	// eventSink carries pack_created/pack_refreshed/pack_miss. Nil-safe:
 	// pack events are observability, never a spawn gate.
 	eventSink *EventSink
+
+	// scoutRunner is the agentic fallback for requirements the mechanical
+	// pack cannot map. Nil (or scout disabled in config) = mechanical-only
+	// packs, zero scout spend.
+	scoutRunner ScoutRunner
 
 	spawnFailureMu sync.RWMutex
 	spawnFailures  map[string]*spawnFailureInfo // bead ID -> last spawn failure
@@ -100,6 +106,12 @@ func (s *WorkerSpawner) SetSessionResumePilot(p *SessionResumePilot) {
 // events (pack_created/pack_refreshed/pack_miss).
 func (s *WorkerSpawner) SetEventSink(sink *EventSink) {
 	s.eventSink = sink
+}
+
+// SetScoutRunner wires the agentic scout fallback for low-confidence pack
+// mappings. Nil leaves packs mechanical-only (the default).
+func (s *WorkerSpawner) SetScoutRunner(r ScoutRunner) {
+	s.scoutRunner = r
 }
 
 // NewWorkerSpawner creates a new worker spawner.
@@ -791,12 +803,14 @@ func (s *WorkerSpawner) ensureContextPack(bead types.Bead, projectPath string) {
 	// find any member already carrying a parseable pack.
 	var existing *ContextPack
 	var terms []string
+	var titles []string
 	for _, id := range chain.AllBeadIDs {
 		b, err := s.beadsClient.GetBead(projectPath, bead.Repo, id)
 		if err != nil || b == nil {
 			continue
 		}
 		terms = append(terms, RequirementTermsForBead(b.Title)...)
+		titles = append(titles, b.Title)
 		if existing == nil {
 			if p, err := ParseContextPack(b.AgentContext); err == nil && p != nil {
 				existing = p
@@ -813,23 +827,60 @@ func (s *WorkerSpawner) ensureContextPack(bead types.Bead, projectPath string) {
 	switch {
 	case existing == nil:
 		pack := BuildContextPack(projectPath, gates, terms)
+		// Agentic fallback: requirements the mechanical index could not map
+		// at confidence get ONE bounded scout pass (chain-level, not per bead).
+		unmapped := UnmappedRequirements(titles, pack.Files, PackScoutConfidenceThreshold)
+		pack.Files = s.scoutUnmapped(bead, projectPath, unmapped, pack.Files)
 		log.Printf("[ContextPack] built pack for chain of %s (base_sha=%s, gates=%d, anchors=%d)",
 			bead.ID, pack.BaseSHA, len(pack.GateCommands), len(pack.Files))
 		s.writePackToChain(chain, projectPath, bead, pack, "pack_created")
 	case head != "" && existing.BaseSHA != head:
 		// SHA moved: mechanical sections are stale (gate commands, spec
 		// pattern, dir listing all derive from the tree). Regenerate them;
-		// the agentic anchor mapping is re-validated, not regenerated.
+		// the agentic anchor mapping is re-validated, not regenerated —
+		// except anchors that BROKE, which get a targeted per-requirement
+		// re-scout, never a whole-chain redo.
 		refreshed := BuildContextPack(projectPath, gates, nil)
 		refreshed.Files = existing.Files
 		dropped := ValidatePackAnchors(refreshed, projectPath)
 		logPackMiss(s.eventSink, bead.Project, string(bead.ID), dropped)
+		reScout := DroppedAgenticRequirements(dropped)
+		if len(reScout) > 0 {
+			refreshed.Files = s.scoutUnmapped(bead, projectPath, reScout, refreshed.Files)
+		}
 		log.Printf("[ContextPack] refreshed pack for chain of %s (base_sha %s → %s, dropped %d anchors)",
 			bead.ID, existing.BaseSHA, refreshed.BaseSHA, len(dropped))
 		s.writePackToChain(chain, projectPath, bead, refreshed, "pack_refreshed")
 	default:
 		log.Printf("[ContextPack] pack for chain of %s still fresh (base_sha=%s)", bead.ID, existing.BaseSHA)
 	}
+}
+
+// scoutUnmapped runs ONE bounded scout pass for the given requirements and
+// merges the mappings into files (provenance agentic). Fail-open: a scout
+// error logs a pack_scout event and returns files untouched, so the spawn
+// proceeds with the mechanical-only pack. Serialized daemon-wide so two
+// spawns of the same chain cannot double-spend on the same pass.
+func (s *WorkerSpawner) scoutUnmapped(bead types.Bead, projectPath string, requirements []string, files []PackFileAnchor) []PackFileAnchor {
+	if len(requirements) == 0 {
+		return files
+	}
+	scoutCfg := resolveScoutConfig(s.config)
+	if !scoutCfg.enabled || s.scoutRunner == nil {
+		return files
+	}
+	scoutGate.Lock()
+	defer scoutGate.Unlock()
+	start := time.Now()
+	mappings, err := s.scoutRunner.RunScout(context.Background(), projectPath, requirements, scoutCfg.maxTurns)
+	emitPackScout(s.eventSink, bead.Project, string(bead.ID), len(requirements), len(mappings), time.Since(start), err)
+	if err != nil {
+		log.Printf("[ContextPack] scout failed for chain of %s (fail-open): %v", bead.ID, err)
+		return files
+	}
+	pack := &ContextPack{Files: files}
+	MergeScoutMappings(pack, mappings, requirements)
+	return pack.Files
 }
 
 // writePackToChain serializes the pack and writes it to every chain member's

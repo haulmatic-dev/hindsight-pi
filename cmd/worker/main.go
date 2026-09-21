@@ -2331,9 +2331,20 @@ func renderContextPack(pack *core.ContextPack) string {
 		sb.WriteString("Repo dirs (2 levels): " + strings.Join(pack.TargetDirs, ", ") + "\n")
 	}
 	if len(pack.Files) > 0 {
-		sb.WriteString("Requirement → file anchors (graphify-derived; confidence <1 means fuzzy, verify before relying):\n")
+		sb.WriteString("Requirement → file anchors (confidence <1 means fuzzy, verify before relying; AGENTIC entries came from a daemon scout pass and include the pinned symbol + a verbatim anchor line):\n")
 		for _, a := range pack.Files {
-			fmt.Fprintf(&sb, "- %s → %s\n", a.Requirement, a.Path)
+			if a.Provenance == "agentic" {
+				line := fmt.Sprintf("- %s → %s (AGENTIC, conf %.2f", a.Requirement, a.Path, a.Confidence)
+				if a.Symbol != "" {
+					line += ", symbol " + a.Symbol
+				}
+				if a.Snippet != "" {
+					line += ", anchor: " + strconv.Quote(a.Snippet)
+				}
+				sb.WriteString(line + ")\n")
+			} else {
+				fmt.Fprintf(&sb, "- %s → %s\n", a.Requirement, a.Path)
+			}
 		}
 	}
 	sb.WriteString("Pack behaviour contract:\n" +

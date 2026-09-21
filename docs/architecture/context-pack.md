@@ -19,7 +19,9 @@ verified). Schema (`ContextPackVersion = 1`):
   "gate_commands": ["go test ./...", "golangci-lint run"],
   "spec_pattern": "*_test.go (colocated next to source)",
   "target_dirs": ["cmd", "internal", "internal/core"],
-  "files": [{"requirement": "CreateShortlink", "path": "shortlinks.go", "confidence": 1.0}],
+  "files": [{"requirement": "CreateShortlink", "path": "shortlinks.go", "confidence": 1.0, "provenance": "mechanical"},
+              {"requirement": "Flux capacitor calibration", "path": "flux/cap.go", "confidence": 0.85,
+               "symbol": "Calibrate", "anchor_snippet": "func Calibrate() {", "provenance": "agentic"}],
   "provenance": "hydra-context-pack"
 }
 ```
@@ -33,18 +35,68 @@ verified). Schema (`ContextPackVersion = 1`):
   colocation hint when the majority sit next to a same-stem source file.
 - `target_dirs` — repo directories two levels deep (hidden/vendored dirs
   skipped), so the worker's first `ls` is free.
-- `files` — requirement→file anchors from the graphify symbol index
-  (`graphify-out/graph.json`). Best-effort and fail-open: an absent or
-  malformed graph yields an omitted section, never an error. `confidence < 1`
-  means a substring/fuzzy match, not an exact symbol hit.
+- `files` — requirement→file anchors from two sources, told apart by the
+  per-anchor `provenance` field:
+  - `"mechanical"` (default) — the graphify symbol index
+    (`graphify-out/graph.json`). Best-effort and fail-open: an absent or
+    malformed graph yields an omitted section, never an error.
+    `confidence < 1` means a substring/fuzzy match, not an exact symbol hit.
+  - `"agentic"` — the scout pass (below). Carries the pinned `symbol` and a
+    verbatim `anchor_snippet` line in addition to path/confidence.
 - `provenance` — `"hydra-context-pack"` marks packs this daemon wrote; a
   human's hand-written `agent_context` never parses as a pack.
+
+## Agentic scout fallback
+
+The mechanical index maps what it can (exact symbol hit = 1.0, substring =
+0.6). Requirements whose best anchor is below `PackScoutConfidenceThreshold`
+(0.7) — or which have no anchor at all — are *unmapped*: greenfield areas,
+novel concepts, repos without a graph. For those, the daemon runs ONE
+bounded Pi scout pass per chain build (`context_pack.scout.enabled: true` —
+**off by default**; enabling opts into scout spend):
+
+- **Bounded** — `max_turns` (default 20) enforced two ways: the prompt tells
+  the model the budget, and a wall-clock timeout of `max_turns × turn_budget`
+  (default 60s/turn) kills the whole process group. The runner is
+  `PiScoutRunner`: one headless `pi --offline` invocation with the fleet's
+  provider/model identity, so the pass rides the normal llm-router lane
+  accounting (cost attribution via the `pack_scout` event).
+- **Read-only** — the prompt is an orientation brief: map each requirement to
+  1–3 files with a calibrated confidence and a verbatim anchor snippet. No
+  edits, no test runs. Output is parsed from the final JSON array
+  (`parseScoutOutput`), tolerant of surrounding prose.
+- **Merged, not replaced** — `MergeScoutMappings` appends scout mappings
+  (provenance forced to `"agentic"`, deduped by requirement+path); the
+  mechanical anchors stay.
+- **Re-scout policy** — targeted, never whole-chain. At SHA refresh only
+  agentic anchors that *broke* (`ValidatePackAnchors` dropped them) trigger a
+  re-scout, and only for their own requirements
+  (`DroppedAgenticRequirements`). Mechanical drops and never-scouted
+  requirements never spawn a pass. A daemon-wide mutex (`scoutGate`)
+  serializes passes so overlapping spawns cannot double-spend.
+- **Fail-open** — scout error/timeout logs a `pack_scout` event with reason
+  `scout_failed` and the spawn proceeds with the mechanical-only pack.
+
+Config (`hydra.yaml`):
+
+```yaml
+context_pack:
+  scout:
+    enabled: true        # default false
+    max_turns: 20        # turn cap
+    turn_budget: 60s     # per-turn wall time; timeout = max_turns × turn_budget
+    provider: ""         # default: pi.standard-agent.llm provider (fleet identity)
+    model: ""            # default: pi.standard-agent.llm model
+    api_key_name: ""     # default: KIMI_API_KEY
+```
 
 ## Lifecycle
 
 1. **Build** — at chain first-member spawn (`WorkerSpawner.ensureContextPack`,
    called from `SpawnInternal` after project-path resolution). Requirement
-   terms come from all chain-member titles (`RequirementTermsForBead`).
+   terms come from all chain-member titles (`RequirementTermsForBead`);
+   titles whose terms stay below the confidence threshold are handed to the
+   scout pass (see “Agentic scout fallback”).
    Non-chain (singleton) beads get no pack and spawn unguided.
 2. **Storage** — serialized and written to **every** chain member via
    `BeadsClient.UpdateBeadAgentContext` (`br update <id> --agent-context
@@ -54,9 +106,10 @@ verified). Schema (`ContextPackVersion = 1`):
 3. **Refresh** — at each later member spawn the pack's `base_sha` is compared
    against the working-branch HEAD (`currentGitHead`). Equal → reuse.
    Moved → the mechanical sections are rebuilt from the current tree and the
-   agentic `files` anchors are **re-validated, not regenerated**:
+   `files` anchors are **re-validated, not regenerated**:
    `ValidatePackAnchors` drops anchors whose file no longer exists, emitting
-   one `pack_miss` event per drop.
+   one `pack_miss` event per drop. Dropped *agentic* anchors then trigger a
+   targeted per-requirement re-scout (never a whole-chain redo).
 4. **Injection** — `buildPiPrompt` (cmd/worker) parses the bead's
    `agent_context` and appends the rendered pack to the **per-bead variable
    tail only**. The invariant doctrine head is byte-identical with or without
@@ -84,11 +137,14 @@ verified). Schema (`ContextPackVersion = 1`):
 Typed events on the fail-open event stream (never gate the pipeline):
 `pack_created`, `pack_refreshed` (per member write, reason carries the short
 SHA), `pack_miss` (one per dropped anchor, reason `anchor_gone`),
+`pack_scout` (one per scout pass — reason `scout_ok`/`scout_failed`, detail
+carries requirement/mapping counts and duration for cost attribution),
 `pack_reservation_offscope` (advisory, reason `off_anchor_reservation`).
 
 ## Failure model
 
 Fail-open everywhere. Build errors omit sections; graph absence omits the
-files section; write errors skip that member; a panic in
+files section; write errors skip that member; a scout error/timeout keeps
+the mechanical-only pack; a panic in
 `ensureContextPack` is recovered and logged. The pack is an optimization and
 must never block a spawn — today's unguided prompt is the floor.
