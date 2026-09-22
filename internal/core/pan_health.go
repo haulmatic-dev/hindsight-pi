@@ -32,6 +32,10 @@ import (
 // /home/<user>/projects/<repo> → "<user>/<repo>" (multi-user same-repo), any
 // other path → its basename. The key is the basis of the campaign-anomaly
 // pseudo ID and park-campaign's project resolution.
+// unpublishedWedgeAge is how long locally-merged work may sit unpublished
+// before the health digest flags a publisher wedge (Pan-detectable).
+const unpublishedWedgeAge = 15 * time.Minute
+
 func projectKey(path string) string {
 	parts := strings.Split(filepath.Clean(path), string(filepath.Separator))
 	for i := 0; i+2 < len(parts); i++ {
@@ -132,6 +136,19 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 			if ph.StrandedWorktrees > 0 && ph.LiveWorkers == 0 {
 				ph.Anomalies = append(ph.Anomalies, fmt.Sprintf(
 					"%d stranded worktrees with no live workers — completed beads' work unswept", ph.StrandedWorktrees))
+			}
+			// Publisher wedge: locally-merged work that has not reached origin
+			// for longer than unpublishedWedgeAge. Pan-detectable: the digest
+			// anomaly wakes Pan even when no single bead looks blocked.
+			for _, pp := range o.PushPending() {
+				if pp.ProjectPath != target {
+					continue
+				}
+				if age := time.Since(pp.Since); age > unpublishedWedgeAge {
+					ph.Anomalies = append(ph.Anomalies, fmt.Sprintf(
+						"publisher wedge: %s holds locally-merged work unpublished for %s (%s)",
+						pp.ProjectPath, age.Round(time.Minute), pp.Reason))
+				}
 			}
 			digest.Projects = append(digest.Projects, ph)
 		}
