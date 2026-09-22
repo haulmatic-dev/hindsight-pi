@@ -503,6 +503,7 @@ func NewOverseer(config *Config) *Overseer {
 	// per-repo .hydra/events.jsonl mirrors.
 	events := NewEventSink(DefaultEventsDir())
 	o.eventSink = events
+	SetPublishEventSink(events)
 	o.beadCloser.SetEventSink(events)
 	o.providerPool.SetEventSink(events)
 	o.orphanJanitor.SetEventSink(events)

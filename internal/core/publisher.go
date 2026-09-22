@@ -56,36 +56,58 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 
 	branch, err := m.WorkingBranch(projectPath)
 	if err != nil || branch == "" {
+		log.Printf("[Publish] skip %s: no working branch (err=%v)", projectPath, err)
 		return false, "no branch"
 	}
 	// 2. Only push when there is something new to publish.
 	if !branchAheadOfRemote(projectPath, branch) {
+		log.Printf("[Publish] %s: branch %s matches origin, nothing to publish", projectPath, branch)
 		return false, "up to date"
 	}
+	publishEvents.EmitRepo(projectPath, Event{Type: "publish_push_attempted", Project: filepath.Base(projectPath),
+		Detail: "publisher attempting to land " + branch + " on origin",
+		Fields: map[string]any{"branch": branch, "pr_merge": prMerge, "project_path": projectPath}})
+	log.Printf("[Publish] push attempted for %s (%s) pr_merge=%v", projectPath, branch, prMerge)
 	if prMerge {
 		feature := "dogfood/publish-" + prSafeName(filepath.Base(projectPath))
+		publishEvents.EmitRepo(projectPath, Event{Type: "publish_pr_invoked", Project: filepath.Base(projectPath),
+			Detail: "PublishViaPR invoked for " + branch + " via " + feature,
+			Fields: map[string]any{"branch": branch, "feature_branch": feature, "project_path": projectPath}})
+		log.Printf("[Publish] PublishViaPR invoked for %s/%s via %s", projectPath, branch, feature)
 		url, err := PublishViaPR(projectPath, branch, feature, "Hydra publish: "+branch, token)
 		if err != nil {
+			publishEvents.EmitRepo(projectPath, Event{Type: "publish_push_rejected", Project: filepath.Base(projectPath), Reason: "pr_merge_failed",
+				Detail: "PR merge failed for " + branch + ": " + err.Error(),
+				Fields: map[string]any{"branch": branch, "feature_branch": feature, "project_path": projectPath}})
 			log.Printf("[Publish] PR merge failed for %s/%s: %v", projectPath, branch, err)
 			AppendActivity(projectPath, "publish", "PR merge failed: "+err.Error())
 			return false, "pr merge failed: " + err.Error()
 		}
+		publishEvents.EmitRepo(projectPath, Event{Type: "publish_pr_opened", Project: filepath.Base(projectPath),
+			Detail: "landed via PR " + url,
+			Fields: map[string]any{"branch": branch, "pr_url": url, "project_path": projectPath}})
 		log.Printf("[Publish] landed via PR %s for %s (%s)", url, projectPath, branch)
 		AppendActivity(projectPath, "publish", "landed via PR "+url)
 		return true, ""
 	}
 	pushed, reason := PushBranchWithToken(projectPath, branch, token)
 	if pushed {
+		publishEvents.EmitRepo(projectPath, Event{Type: "publish_push_succeeded", Project: filepath.Base(projectPath),
+			Detail: "pushed " + branch + " to origin",
+			Fields: map[string]any{"branch": branch, "project_path": projectPath}})
 		log.Printf("[Publish] pushed %s (%s) to origin", projectPath, branch)
 		AppendActivity(projectPath, "publish", "pushed "+branch)
 	} else {
+		publishEvents.EmitRepo(projectPath, Event{Type: "publish_push_rejected", Project: filepath.Base(projectPath), Reason: "direct_push_failed",
+			Detail: "push rejected/skipped for " + branch + ": " + reason,
+			Fields: map[string]any{"branch": branch, "reason": reason, "project_path": projectPath}})
+		log.Printf("[Publish] push rejected for %s/%s: %s", projectPath, branch, reason)
 		if strings.HasPrefix(reason, "remote at") {
 			log.Printf("[Publish] push verification FAILED for %s/%s: %s", projectPath, branch, reason)
 		}
 		if IsProtectedBranchRejection(reason) {
 			log.Printf("[Publish] push rejected by branch protection for %s/%s: %s", projectPath, branch, reason)
 		}
-		log.Printf("[Publish] push skipped for %s: %s", projectPath, reason)
 		AppendActivity(projectPath, "publish", "push skipped: "+reason)
 	}
 	return pushed, reason
@@ -97,6 +119,15 @@ var (
 	autoPRLsRemote = defaultAutoPRLsRemote
 	autoPRGhCreate = defaultAutoPRGhCreate
 )
+
+// publishEvents carries publisher telemetry into the typed event stream.
+// Nil-safe (a nil *EventSink is a no-op on every method), wired once by the
+// overseer at startup. The publisher stays fail-open: an event-write failure
+// can never break a push.
+var publishEvents *EventSink
+
+// SetPublishEventSink wires the publisher's typed-event sink.
+func SetPublishEventSink(s *EventSink) { publishEvents = s }
 
 // PR-merge exec-layer hooks. Overridden in tests to avoid real git/gh calls.
 var (
