@@ -299,3 +299,15 @@ self_healing:
     fix_rate_threshold: 0.5
     reject_rate_threshold: 0.5
     min_samples: 3
+
+# Integration-retest stage (Tier A of the integration-conflict plan): when
+# enabled, the overseer tick periodically rechecks beads labelled
+# integration-failed/integration-exhausted whose hydra-owned branch still
+# exists. A provably clean branch (merge-tree against origin/<base> + gates in
+# a scratch worktree) lands via the existing dogfood PR path and the bead
+# closes; conflicts and red gates stay parked. Conflicts are never resolved
+# here (Tier B, separate bead). Fail-open: errors skip the bead for the tick.
+integration_retest:
+  enabled: false
+  max_attempts: 5            # counted outcomes (conflict/gates-failed) per bead, then give up
+  retry_interval: 1h         # minimum gap between retest attempts on one bead
