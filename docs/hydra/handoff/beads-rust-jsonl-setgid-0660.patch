@@ -1,0 +1,40 @@
+--- a/services/beads-rust/beads_rust/src/sync/mod.rs
++++ b/services/beads-rust/beads_rust/src/sync/mod.rs
+@@ -290,10 +290,36 @@
+     )))
+ }
+ 
++/// Mode for a freshly written JSONL store file.
++///
++/// `br` deliberately keeps bead text non-world-readable, so the base mode is
++/// owner-only 0o600. But when the containing `.beads` directory is setgid —
++/// the multi-user convention where the store is shared through a group — an
++/// owner-only rewrite re-locks every other group member out of the store on
++/// every write (hydra daemon outage 2026-09-22: `br update` EACCES storms
++/// after any user-side br/git activity). In a setgid directory the group is
++/// the sharing mechanism, so the file must be group-readable+writable.
++fn jsonl_store_mode(path: &Path) -> u32 {
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let setgid_parent = path
++            .parent()
++            .and_then(|parent| fs::metadata(parent).ok())
++            .map(|metadata| metadata.permissions().mode() & 0o2000 != 0)
++            .unwrap_or(false);
++        if setgid_parent {
++            return 0o660;
++        }
++    }
++    let _ = path;
++    0o600
++}
++
+ #[cfg(unix)]
+ fn set_restrictive_jsonl_permissions(path: &Path) {
+     use std::os::unix::fs::PermissionsExt;
+-    let perms = std::fs::Permissions::from_mode(0o600);
++    let perms = std::fs::Permissions::from_mode(jsonl_store_mode(path));
+     if let Err(error) = fs::set_permissions(path, perms) {
+         tracing::warn!(
+             path = %path.display(),

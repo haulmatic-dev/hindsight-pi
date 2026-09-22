@@ -113,6 +113,18 @@ build_binaries() {
     # Set permissions
     chown "$HYDRA_USER:$HYDRA_USER" "$HYDRA_HOME/bin/"*
     chmod +x "$HYDRA_HOME/bin/"*
+
+    # Install the br shim as the daemon's `br`. The real br recreates
+    # .beads/issues.jsonl mode 0600 on every rewrite, which re-locks the daemon
+    # (or the human) out of shared stores after any write by the other party;
+    # the shim repairs group perms inside the same invocation (2026-09-22
+    # telematics + buddhi outage). $HYDRA_HOME/bin must precede the raw
+    # beads-rust release dir on the unit's PATH for this to be the br the
+    # daemon actually execs — see scripts/hydra.service.
+    if [[ -f "packaging/br" ]]; then
+        install -m 0755 -o "$HYDRA_USER" -g "$HYDRA_USER" packaging/br "$HYDRA_HOME/bin/br"
+        print_status "Installed br shim to $HYDRA_HOME/bin/br"
+    fi
 }
 
 # Create configuration
@@ -223,7 +235,7 @@ WorkingDirectory=$HYDRA_HOME
 
 Environment="HYDRA_CONFIG=$HYDRA_CONFIG"
 Environment="HYDRA_HOME=$HYDRA_HOME"
-Environment="PATH=/usr/local/bin:/usr/bin:/bin:$HYDRA_HOME/bin"
+Environment="PATH=$HYDRA_HOME/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="HYDRA_ENVIRONMENT=$ENVIRONMENT"
 
 ExecStart=$HYDRA_HOME/bin/hydra -config $HYDRA_CONFIG

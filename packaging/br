@@ -33,6 +33,14 @@
 #   - normalisation is best-effort and NEVER changes the exit status or prints
 #     to stdout; failures go to stderr only when BR_SHIM_DEBUG=1
 #
+# Read-only subcommands (list/show/ready/... — the daemon's every-tick polls)
+# also normalise, but only when a cheap stat probe shows the store is broken
+# (issues.jsonl not group-rw, world bits on, or .beads setgid missing). A
+# conforming store costs two stats and nothing else; a broken one is repaired
+# within the same tick instead of waiting for a mutating call. 2026-09-22
+# (telematics + buddhi): a store re-locked to 0600 by a non-shim br stayed
+# locked for over an hour because every daemon call until then was read-only.
+#
 # Env:
 #   BR_REAL        absolute path to the real br (default: first PATH br that is
 #                  not this script)
@@ -108,7 +116,7 @@ done
 "$REAL_BR" "$@"
 status=$?
 
-if [ "${BR_SHIM_OFF:-0}" = "1" ] || is_readonly_subcommand "$subcommand"; then
+if [ "${BR_SHIM_OFF:-0}" = "1" ]; then
 	exit $status
 fi
 
@@ -130,10 +138,37 @@ find_beads_dir() {
 	return 1
 }
 
+# store_needs_normalise: 0 = broken (repair warranted), 1 = conforming/unknown.
+# Cheap on purpose: three stats, no walk. Anything ambiguous answers 1 on the
+# read-only path (skip) and 0 on the mutating path (normalise unconditionally),
+# so a probe failure can only defer repair, never skip it permanently.
+store_needs_normalise() {
+	local dir="$1" jsonl="$1/issues.jsonl" m dm
+	[ -e "$jsonl" ] || return 1
+	dm="$(stat -c '%a' "$dir" 2>/dev/null)" || return 0
+	m="$(stat -c '%a' "$jsonl" 2>/dev/null)" || return 0
+	# group must have rw, world must have nothing
+	[ $((8#$m & 060)) -eq 060 ] || return 0
+	[ $((8#$m & 007)) -eq 0 ] || return 0
+	# .beads must be setgid so future rewrites inherit the beads group
+	[ $((8#$dm & 2000)) -ne 0 ] || return 0
+	return 1
+}
+
 beads_dir="$(find_beads_dir || true)"
 if [ -z "$beads_dir" ]; then
 	debug "no .beads at or above $PWD — nothing to normalise"
 	exit $status
+fi
+
+# Read-only fast path: probe, repair only if broken. Without this the daemon's
+# constant `ready`/`list` polls would either churn chmods every tick or — the
+# pre-2026-09-22 behavior — never repair at all.
+if is_readonly_subcommand "$subcommand"; then
+	if ! store_needs_normalise "$beads_dir"; then
+		exit $status
+	fi
+	debug "read-only '$subcommand' on non-conforming store — repairing"
 fi
 
 # Everything below is best-effort. A failure here must not turn a successful br
