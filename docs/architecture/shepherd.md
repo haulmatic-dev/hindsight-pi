@@ -60,6 +60,7 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `retry_exhausted` | a bead exhausts `default_retries` and has no live worker or registry row | `attempts` |
 | `spawn-suppressed-closed` | a queued retry spawn is aborted because the bead became terminal while in the retry queue | `status` |
 | `integration-failed` | singleton integrate/push failed verification (merge not contained in HEAD, or push rejected / remote ref did not advance) — bead reopened with `integration-failed` label, worktree preserved. Non-fast-forward rejections get one fetch + merge + retry (`PushBranchWithNonFFRecovery`) before this fires | `stage` (`integrate`/`push`), `error` (exact remote stderr) |
+| `integration_retest` | integration-retest stage (Tier A, opt-in via `integration_retest.enabled`) rechecked an `integration-failed`/`integration-exhausted` bead: `merge-tree --write-tree origin/<base> hydra/wt-\*` proved the conflict state, gates ran in a scratch worktree off `origin/<base>` (never the user's main checkout), and the bead either landed via the dogfood PR path (`result: landed`, bead closed, labels stripped), stayed parked (`result: conflict` / `gates-failed`), or hit the attempt cap | `result` (`landed`/`conflict`/`gates-failed`), `pr` (landed only) |
 | `close-accepted-already-integrated` | verified-close accepted a bead whose worktree HEAD is a strict ancestor of the main checkout HEAD — the singleton integrate landed locally but the push was rejected (hydra-7k1 2026-09-16: non-FF push failure → reopened bead → empty-diff loop). Emitted once per accepted close; the publisher ticker remains responsible for landing the working branch on origin | `reason` (`worktree_head_ancestor_of_main`) |
 | `worktree-preserved-unintegrated` | janitorial GC refused to remove a stale worktree: its branch carries commits not yet in the working branch, it has uncommitted tracked changes, or files under it were modified after creation and within the staleness window (merge-resolution edits, untracked output — hydra-q3p mid-merge reap, 2026-09-12) — reconciler integrates on its next sweep | `worktree`, `branch`, `cause` (`unintegrated_work`/`recent_activity`) |
 | `bead_store_suspect` | a project's open-bead count collapsed to 0 or >80% in one discovery tick (or `br list` failed after a healthy baseline) — store presumed corrupt, project excluded from scheduling | `project_path`, `previous`, `current`, `list_error` |
@@ -442,6 +443,31 @@ resets on the first successful integrate+push. When ≥3 BLOCKED
 candidates share a normalized reason, `collapseWedges` replaces them with one
 PROJECT-WEDGE candidate so Pan issues a single project-scoped repair instead
 of N rate-limited per-bead ones.
+
+**Integration-exhausted contract change (2026-09-22, Tier A).** Hard-park no
+longer means "parked until a human looks": with `integration_retest.enabled`
+the overseer tick runs a mechanical retest stage over beads labelled
+`integration-failed`/`integration-exhausted` whose `hydra/wt-<id>[-vN]` or
+`hydra/quarantine/<id>` branch still exists (quarantine branches included
+because the telematics campaign left 35 commits of real work in 20 of them
+while beads read closed). Per bead, at most one retest per
+`integration_retest.retry_interval` (default 1h) and at most
+`integration_retest.max_attempts` (default 5) counted outcomes, then it gives
+up and stays parked. A retest is: fetch `origin/<base>`,
+`git merge-tree --write-tree` (conflict → stay parked, emit
+`integration_retest{result:conflict}`, never resolved here — that is Tier B),
+then a scratch worktree at `origin/<base>` — never the user's main checkout,
+whose dirty state poisoned 288 integrations in the 2026-09-22 telematics
+campaign — merge `--no-edit`, run the project's daemon gates (or detectable
+defaults `go build ./...` / `npm run build`; fail-open when undetectable).
+Gates green → land via the existing dogfood PR path (`dogfood/<id>-retest` +
+`gh pr create` + `gh pr merge --admin`, verified MERGED — branch protection
+respected, never direct-push, never force-push), close the bead, strip both
+labels, emit `integration_retest{result:landed,pr}`. Gates red → stay parked,
+emit `integration_retest{result:gates-failed}`. Beads also carrying
+`worktree-unavailable` or `infra-exhausted` (parked by Pan for another cause)
+are skipped. Everything fails open: gh/network/registry errors skip the bead
+for the tick. Human resume is still required for anything not provably clean.
 
 **Push-pending visibility (2026-09-13).** `publishProjects` previously
 discarded `PublishRepo`'s `(pushed, reason)` result, so a push rejected by
