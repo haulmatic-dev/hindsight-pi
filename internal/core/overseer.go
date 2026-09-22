@@ -115,6 +115,10 @@ type Overseer struct {
 	bvClient              *bv.Client                      // BV client for graph analytics
 	settledStateSvc       *SettledStateService            // Settled-state detection service
 
+	// Integration-retest stage: periodic mechanical recheck of
+	// integration-parked beads; nil unless HYDRA_HOME is set.
+	integrationRetest *IntegrationRetestStage
+
 	// MCP manager for Model Context Protocol operations
 	mcpManager *MCPManager
 
@@ -507,6 +511,17 @@ func NewOverseer(config *Config) *Overseer {
 	o.beadCloser.SetEventSink(events)
 	o.providerPool.SetEventSink(events)
 	o.orphanJanitor.SetEventSink(events)
+	// Integration-retest stage (Tier A): periodic mechanical recheck of
+	// integration-failed/exhausted beads. Constructed whenever HYDRA_HOME is
+	// available; the stage is inert unless integration_retest.enabled is set.
+	// Fail-open by construction: Run isolates per-project/panics.
+	if home := os.Getenv("HYDRA_HOME"); home != "" {
+		o.integrationRetest = NewIntegrationRetestStage(config.IntegrationRetest, config, o.beadsClient, events, NewGateRunner(home), home)
+		if o.integrationRetest.Enabled() {
+			log.Printf("[IntegrationRetest] stage armed (max_attempts=%d retry_interval=%s)",
+				o.integrationRetest.cfg.MaxAttempts, o.integrationRetest.cfg.RetryInterval)
+		}
+	}
 	retainer := NewVerdictRetainer(o.hindsightClient)
 	o.beadCloser.SetVerdictRetainer(retainer)
 
@@ -731,7 +746,25 @@ func (o *Overseer) tick() error {
 	// the end of a run every repo's branch is on the remote for the developer
 	// to pull/build locally. Fail-open: never affects the scheduling result.
 	o.publishProjects()
+	// After publishing, sweep integration-parked beads for provably-clean
+	// retests (fail-open: never affects the scheduling result).
+	if o.integrationRetest != nil {
+		o.integrationRetest.Run(o.projects, o.activeWorkerKeys())
+	}
 	return err
+}
+
+// activeWorkerKeys returns the set of bead IDs with a live worker row in
+// this daemon, so maintenance sweeps (publish reconcile, integration
+// retest) never touch in-flight beads.
+func (o *Overseer) activeWorkerKeys() map[string]bool {
+	o.workerMutex.RLock()
+	defer o.workerMutex.RUnlock()
+	active := make(map[string]bool, len(o.activeWorkers))
+	for beadID := range o.activeWorkers {
+		active[beadID] = true
+	}
+	return active
 }
 
 // publishProjects reconciles + pushes each project's working branch when

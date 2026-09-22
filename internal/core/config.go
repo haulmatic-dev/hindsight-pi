@@ -21,19 +21,20 @@ type Config struct {
 	// MultiUserDiscovery enables the multi-user project scan
 	// (projects.multi_user_discovery, default true). Not decoded directly —
 	// it lives inside the projects object and is resolved during parsing.
-	MultiUserDiscovery bool                  `yaml:"-"`
-	MCP                MCPConfig             `yaml:"mcp"`
-	API                APIConfig             `yaml:"api"`
-	Intelligence       IntelligenceConfig    `yaml:"intelligence"`
-	Agents             AgentsConfig          `yaml:"agents"`
-	Pi                 PiRootConfig          `yaml:"pi"`
-	Output             OutputConfig          `yaml:"output"`
-	Validation         ValidationConfig      `yaml:"validation"`
-	ComplianceCycle    ComplianceCycleConfig `yaml:"compliance_cycle"`
-	Shepherd           ShepherdConfig        `yaml:"shepherd"`
-	Worktree           WorktreeConfig        `yaml:"worktree"`
-	Status             StatusConfig          `yaml:"status"`
-	SelfHealing        SelfHealingConfig     `yaml:"self_healing"`
+	MultiUserDiscovery bool                    `yaml:"-"`
+	MCP                MCPConfig               `yaml:"mcp"`
+	API                APIConfig               `yaml:"api"`
+	Intelligence       IntelligenceConfig      `yaml:"intelligence"`
+	Agents             AgentsConfig            `yaml:"agents"`
+	Pi                 PiRootConfig            `yaml:"pi"`
+	Output             OutputConfig            `yaml:"output"`
+	Validation         ValidationConfig        `yaml:"validation"`
+	ComplianceCycle    ComplianceCycleConfig   `yaml:"compliance_cycle"`
+	Shepherd           ShepherdConfig          `yaml:"shepherd"`
+	Worktree           WorktreeConfig          `yaml:"worktree"`
+	Status             StatusConfig            `yaml:"status"`
+	IntegrationRetest  IntegrationRetestConfig `yaml:"integration_retest"`
+	SelfHealing        SelfHealingConfig       `yaml:"self_healing"`
 	// ContextPack configures the chain orientation pack (mechanical build +
 	// agentic scout fallback). See docs/architecture/context-pack.md.
 	ContextPack ContextPackConfig `yaml:"context_pack"`
@@ -327,6 +328,54 @@ type WorktreeConfig struct {
 	QuarantineAutoDrain bool `yaml:"quarantine_auto_drain"`
 }
 
+// IntegrationRetestConfig controls the integration-retest stage (Tier A of
+// the integration-conflict plan): beads labelled integration-failed or
+// integration-exhausted get a periodic mechanical recheck — merge-tree
+// against the current base, gates in a scratch worktree, and landing via
+// the existing dogfood PR path when provably clean. Tier B (agentic
+// conflict resolution) is a separate bead and does not exist here.
+type IntegrationRetestConfig struct {
+	// Enabled turns the stage on. Default false: the selector matches only
+	// beads the closer itself labelled, but a fresh enable should be a
+	// deliberate operator decision, not an upgrade side effect.
+	Enabled bool `yaml:"enabled"`
+	// MaxAttempts caps retest attempts per bead (across conflict and
+	// gates-failed outcomes). Reached → the bead stays parked and is never
+	// retested again this daemon lifetime. Default 5.
+	MaxAttempts int `yaml:"max_attempts"`
+	// RetryInterval is the minimum gap between retest attempts on one bead,
+	// as a Go duration string. Default "1h".
+	RetryInterval string `yaml:"retry_interval"`
+}
+
+const (
+	defaultIntegrationRetestMaxAttempts   = 5
+	defaultIntegrationRetestRetryInterval = time.Hour
+)
+
+// applyDefaults fills zero values with the documented defaults.
+func (c *IntegrationRetestConfig) applyDefaults() {
+	if c.MaxAttempts <= 0 {
+		c.MaxAttempts = defaultIntegrationRetestMaxAttempts
+	}
+	if c.RetryInterval == "" {
+		c.RetryInterval = defaultIntegrationRetestRetryInterval.String()
+	}
+}
+
+// RetryIntervalDuration parses RetryInterval, falling back to the default
+// on empty or unparsable values (fail-open: a bad knob must not panic the
+// reconciler tick).
+func (c *IntegrationRetestConfig) RetryIntervalDuration() time.Duration {
+	if c == nil || c.RetryInterval == "" {
+		return defaultIntegrationRetestRetryInterval
+	}
+	if d, err := time.ParseDuration(c.RetryInterval); err == nil && d > 0 {
+		return d
+	}
+	return defaultIntegrationRetestRetryInterval
+}
+
 // StatusConfig configures the hydra status subcommand.
 type StatusConfig struct {
 	// LogPath is the daemon log to scan for recent verdicts.
@@ -376,21 +425,22 @@ func (c *Config) PRMergeEnabled() bool {
 
 // rawConfig is used for YAML parsing to handle the nested projects structure
 type rawConfig struct {
-	Overseer        OverseerConfig        `yaml:"overseer"`
-	Projects        yaml.Node             `yaml:"projects"` // Can be array or object
-	MCP             MCPConfig             `yaml:"mcp"`
-	API             APIConfig             `yaml:"api"`
-	Intelligence    IntelligenceConfig    `yaml:"intelligence"`
-	Agents          AgentsConfig          `yaml:"agents"`
-	Pi              PiRootConfig          `yaml:"pi"`
-	Output          OutputConfig          `yaml:"output"`
-	Validation      ValidationConfig      `yaml:"validation"`
-	ComplianceCycle ComplianceCycleConfig `yaml:"compliance_cycle"`
-	Shepherd        ShepherdConfig        `yaml:"shepherd"`
-	Worktree        WorktreeConfig        `yaml:"worktree"`
-	Status          StatusConfig          `yaml:"status"`
-	SelfHealing     SelfHealingConfig     `yaml:"self_healing"`
-	ContextPack     ContextPackConfig     `yaml:"context_pack"`
+	Overseer          OverseerConfig          `yaml:"overseer"`
+	Projects          yaml.Node               `yaml:"projects"` // Can be array or object
+	MCP               MCPConfig               `yaml:"mcp"`
+	API               APIConfig               `yaml:"api"`
+	Intelligence      IntelligenceConfig      `yaml:"intelligence"`
+	Agents            AgentsConfig            `yaml:"agents"`
+	Pi                PiRootConfig            `yaml:"pi"`
+	Output            OutputConfig            `yaml:"output"`
+	Validation        ValidationConfig        `yaml:"validation"`
+	ComplianceCycle   ComplianceCycleConfig   `yaml:"compliance_cycle"`
+	Shepherd          ShepherdConfig          `yaml:"shepherd"`
+	Worktree          WorktreeConfig          `yaml:"worktree"`
+	Status            StatusConfig            `yaml:"status"`
+	IntegrationRetest IntegrationRetestConfig `yaml:"integration_retest"`
+	SelfHealing       SelfHealingConfig       `yaml:"self_healing"`
+	ContextPack       ContextPackConfig       `yaml:"context_pack"`
 }
 
 // projectsListConfig handles the case where projects is an object with 'list' field
@@ -945,6 +995,8 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	config.Output = raw.Output
 	config.Worktree = raw.Worktree
+	config.IntegrationRetest = raw.IntegrationRetest
+	config.IntegrationRetest.applyDefaults()
 	config.SelfHealing = raw.SelfHealing
 	config.ContextPack = raw.ContextPack
 	config.SelfHealing.SessionResume.applyDefaults()
@@ -1020,6 +1072,8 @@ func LoadConfigUncached(path string) (*Config, error) {
 	}
 	config.Output = raw.Output
 	config.Worktree = raw.Worktree
+	config.IntegrationRetest = raw.IntegrationRetest
+	config.IntegrationRetest.applyDefaults()
 	config.SelfHealing = raw.SelfHealing
 	config.ContextPack = raw.ContextPack
 	config.SelfHealing.SessionResume.applyDefaults()
