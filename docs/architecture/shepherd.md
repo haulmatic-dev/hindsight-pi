@@ -106,8 +106,12 @@ unattended-upgrades restarts the daemon around 06:11 daily).
 
 At chain completion, `ChainHasFailedBeads` reads those labels and decides:
 
-- **Clean chain** → `IntegrateAndRemove`: squash-merge the chain worktree into
-  the working branch, as before.
+- **Clean chain** → `IntegrateAndRemove`: merge the chain worktree into
+  the working branch, as before. The merge itself runs in a daemon-owned
+  scratch worktree (never the human's main checkout), which is then
+  fast-forwarded onto the merge commit — or advanced by bare ref update when
+  uncommitted human WIP overlaps the merge, so a dirty main checkout can
+  never block or poison integration.
 - **Any `closed-failed` member** → `QuarantineAndRemove`: the chain's commits
   are preserved on **`hydra/quarantine/<key>`**, the worktree and its
   `hydra/wt-<key>` branch are removed, and **nothing merges**. Emits
