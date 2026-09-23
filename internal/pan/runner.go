@@ -13,7 +13,12 @@ import (
 // gap adjudicator), prompt on stdin, Pan's own provider identity, API key
 // injected from the named env var.
 func RunPi(ctx context.Context, cfg Config, prompt string) (string, error) {
+	// --no-extensions: Pan's prompt is fully self-contained (JSON in, JSON
+	// out). The full interactive extension load measured 48,315 vs 12,059
+	// tokens/call on the worker path (2026-09) — a per-judgment tax Pan
+	// never needed to pay.
 	var args []string
+	args = append(args, "--no-extensions")
 	if cfg.Provider != "" {
 		args = append(args, "--provider", cfg.Provider)
 	}
