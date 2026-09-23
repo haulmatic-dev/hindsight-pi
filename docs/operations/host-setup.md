@@ -211,8 +211,12 @@ Install `scripts/hydra.service` per `docs/operations/SERVICE_SETUP.md`
 - `Environment="HYDRA_HOME=/opt/dev-tools/var/hydra"` — workers and tests
   resolve all runtime state from this. **Never let tests or workers inherit a
   real `$HYDRA_HOME`** (see `TestMain` in `internal/core`).
-- `Environment="PATH=..."` must include the `br`/`bv` directories and
-  `/opt/dev-tools/var/hydra/bin` last.
+- `Environment="PATH=..."` must include the `br`/`bv` directories, with
+  `/opt/dev-tools/var/hydra/bin` **first** — it carries the `br` shim
+  (`packaging/br`, installed by `scripts/deploy.sh`) that repairs
+  `.beads/issues.jsonl` group perms after every br call. If the raw
+  beads-rust release dir comes first, the daemon bypasses the shim and every
+  store it rewrites flaps back to owner-only 0600 (2026-09-22 outage).
 - `EnvironmentFile=/etc/hydra/api-keys.env` — provider keys, systemd format
   (`KEY=value`, no `export`):
   ```
@@ -300,6 +304,13 @@ hand). The convention:
 |---|---|---|
 | `<repo>/.beads` | `<user>:beads` | `2770` (setgid, `g+rwX`, `o-rwx`) |
 | `<repo>/.beads/issues.jsonl` | `<user>:beads` | `0660` — `br init` writes `0600`, which must be repaired |
+
+The repair is normally invisible: the daemon execs `br` through the shim in
+`packaging/br` (installed to `$HYDRA_HOME/bin/br`, first on the unit's PATH),
+which restores the group bits inside the same invocation — including after
+read-only `list`/`ready` polls when a stat probe shows the store regressed, so
+a non-shim `br` write is healed on the daemon's next tick rather than at the
+next mutating call.
 | `<repo>/.git/worktrees` | `hydra:beads` | `0770`-class, `g+rwX`, `o-rwx` |
 
 The setgid bit is the load-bearing piece: without it, new files inherit the
