@@ -175,6 +175,26 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 			DigestFunc: o.collectHealthDigest,
 		}, o.registryStore, nil)
 
+		// Judge-degradation telemetry: Pan's pi judge failing silently for weeks
+		// (6494/6494 invocations, Aug–Sep 2026) proved the fallback hides outages.
+		// Surface degraded/recovered transitions as daemon events + ERROR logs.
+		o.panShepherd.OnJudgeFailure = func(consecutive int, err error) {
+			o.eventSink.Emit(Event{
+				Type:   "pan_judge_degraded",
+				Reason: "pi_invocation_failed",
+				Detail: fmt.Sprintf("Pan judge degraded: %d consecutive pi invocation failures; deterministic rules in force; last error: %v", consecutive, err),
+				Fields: map[string]any{"consecutive_failures": consecutive},
+			})
+		}
+		o.panShepherd.OnJudgeRecovered = func(failures int) {
+			o.eventSink.Emit(Event{
+				Type:   "pan_judge_recovered",
+				Reason: "pi_invocation_succeeded",
+				Detail: fmt.Sprintf("Pan judge recovered after %d consecutive pi invocation failure(s)", failures),
+				Fields: map[string]any{"outage_failures": failures},
+			})
+		}
+
 		// Resolve project path for a bead ID using the configured projects.
 		// Falls back to repo-name and path-basename matches: multi-user discovery
 		// registers projects as "<user>/<repo>" while bead IDs carry only the repo
