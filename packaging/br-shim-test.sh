@@ -80,7 +80,11 @@ check "world bits stay off" "0" "$(( m % 10 ))"
 
 chmod 600 .beads/issues.jsonl
 "$SHIM" list >/dev/null 2>&1
-check "read-only subcommand does not touch modes" "600" "$(mode_of .beads/issues.jsonl)"
+check "read-only subcommand repairs a broken store" "660" "$(mode_of .beads/issues.jsonl)"
+
+# ...but a conforming store costs the read-only path nothing (no chmod churn).
+"$SHIM" list >/dev/null 2>&1
+check "read-only on conforming store leaves modes alone" "660" "$(mode_of .beads/issues.jsonl)"
 
 # A `br` that leaves a 0600 file behind on failure must still be repaired: the
 # daemon has to be able to read the state of a failed run.

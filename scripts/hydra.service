@@ -13,7 +13,7 @@ WorkingDirectory=/opt/dev-tools/var/hydra
 # Environment
 Environment="HYDRA_CONFIG=/etc/hydra/hydra.yaml"
 Environment="HYDRA_HOME=/opt/dev-tools/var/hydra"
-Environment="PATH=/opt/dev-tools/components/infra/services/beads-rust/beads_rust/target/release:/opt/dev-tools/components/infra/services/beads-viewer/beads_viewer:/usr/local/bin:/usr/bin:/bin:/opt/dev-tools/var/hydra/bin"
+Environment="PATH=/opt/dev-tools/var/hydra/bin:/opt/dev-tools/components/infra/services/beads-rust/beads_rust/target/release:/opt/dev-tools/components/infra/services/beads-viewer/beads_viewer:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=/etc/hydra/api-keys.env
 Environment="HYDRA_ENVIRONMENT=production"
 

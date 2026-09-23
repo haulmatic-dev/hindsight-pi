@@ -11,10 +11,14 @@ import (
 // Dirty main checkout must never block integration (2026-08-19: 9 legacy-era
 // uncommitted files in srv-smart-engine made every `git merge` die with
 // "Your local changes would be overwritten", so gate-verified work piled up
-// in quarantine while beads closed as completed). IntegrateAndRemove
-// auto-commits a dirty main checkout as a janitorial wip commit first.
+// in quarantine while beads closed as completed). The merge runs in a
+// daemon-owned scratch worktree; the checkout's branch then advances by
+// fast-forward, or by bare ref update when uncommitted WIP overlaps the
+// files the merge touched. Hydra never janitorial-commits the human's WIP —
+// telematics campaign: the wip commit's gates failed 288 times and every
+// integrate poisoned into quarantine.
 
-func TestIntegrateAndRemove_DirtyMainAutoCommits(t *testing.T) {
+func TestIntegrateAndRemove_DirtyMainOverlappingWIP(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -47,31 +51,90 @@ func TestIntegrateAndRemove_DirtyMainAutoCommits(t *testing.T) {
 	}
 
 	// dirty the MAIN checkout with an uncommitted edit to the SAME file but
-	// a DIFFERENT hunk — the srv-smart-engine failure mode: git merge dies
-	// with "Your local changes would be overwritten"; auto-commit turns it
-	// into a clean two-hunk merge.
-	if err := os.WriteFile(filepath.Join(proj, "seed.txt"), []byte("loose worker edit\n"+seedLines), 0o644); err != nil {
+	// a DIFFERENT hunk — the srv-smart-engine failure mode.
+	humanWIP := "loose worker edit\n" + seedLines
+	if err := os.WriteFile(filepath.Join(proj, "seed.txt"), []byte(humanWIP), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	if err := m.IntegrateAndRemove(proj, "proj-dirty1"); err != nil {
-		t.Fatalf("dirty main must be auto-committed, not block integration: %v", err)
+		t.Fatalf("dirty main must not block integration: %v", err)
 	}
 
-	// main is clean and contains both the janitorial commit and the work
-	out, _ := exec.Command("git", "-C", proj, "status", "--porcelain").Output()
-	if strings.TrimSpace(string(out)) != "" {
-		t.Errorf("main checkout must be clean after integration, got %q", out)
-	}
-	if _, err := os.Stat(filepath.Join(proj, "feature.go")); err != nil {
-		t.Errorf("worktree change must land in main: %v", err)
-	}
+	// No janitorial commit — the human's WIP is never committed by hydra.
 	log, _ := exec.Command("git", "-C", proj, "log", "--oneline").Output()
-	if !strings.Contains(string(log), "wip: hydra auto-commit") {
-		t.Errorf("janitorial wip commit must be visible, log:\n%s", log)
+	if strings.Contains(string(log), "wip: hydra auto-commit") {
+		t.Errorf("janitorial wip commit must not exist, log:\n%s", log)
 	}
 	if !strings.Contains(string(log), "hydra: integrate") {
 		t.Errorf("integrate commit must be visible, log:\n%s", log)
+	}
+	// Human WIP preserved byte-identical on disk (ref-update fallback path).
+	content, _ := os.ReadFile(filepath.Join(proj, "seed.txt"))
+	if string(content) != humanWIP {
+		t.Errorf("human WIP must be preserved on disk, got %q", content)
+	}
+	// The integrate commit is HEAD and carries the merged worktree change.
+	show, _ := exec.Command("git", "-C", proj, "show", "--stat", "--format=", "HEAD").Output()
+	if !strings.Contains(string(show), "seed.txt") {
+		t.Errorf("integrate commit must carry the merged change, got:\n%s", show)
+	}
+	// Scratch worktree must be gone.
+	wls, _ := exec.Command("git", "-C", proj, "worktree", "list").Output()
+	if strings.Contains(string(wls), "integrate-scratch") {
+		t.Errorf("scratch worktree must be removed, worktree list:\n%s", wls)
+	}
+}
+
+// Dirty WIP in files the merge does NOT touch: fast-forward path — the
+// checkout's worktree is updated (merge content lands on disk) and the
+// unrelated WIP stays uncommitted and untouched.
+func TestIntegrateAndRemove_DirtyMainUnrelatedWIPFastForwards(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	proj := gitInitRepo(t)
+	m := NewWorktreeManager()
+
+	wt, err := m.EnsureWorktree(proj, "proj-dirty2")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "feature.go"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Commit(wt, "bead(b2): add feature"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Human WIP in a file the merge does not touch.
+	humanWIP := "human work in progress\n"
+	if err := os.WriteFile(filepath.Join(proj, "notes.txt"), []byte(humanWIP), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.IntegrateAndRemove(proj, "proj-dirty2"); err != nil {
+		t.Fatalf("dirty main must not block integration: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(proj, "feature.go"))
+	if err != nil || string(content) != "package x\n" {
+		t.Errorf("merge content must land on disk via fast-forward, content=%q err=%v", content, err)
+	}
+	content, _ = os.ReadFile(filepath.Join(proj, "notes.txt"))
+	if string(content) != humanWIP {
+		t.Errorf("unrelated human WIP must be untouched, got %q", content)
+	}
+	log, _ := exec.Command("git", "-C", proj, "log", "--oneline").Output()
+	if strings.Contains(string(log), "wip: hydra auto-commit") {
+		t.Errorf("janitorial wip commit must not exist, log:\n%s", log)
+	}
+	if !strings.Contains(string(log), "hydra: integrate") {
+		t.Errorf("integrate commit must be visible, log:\n%s", log)
+	}
+	status, _ := exec.Command("git", "-C", proj, "status", "--porcelain").Output()
+	if !strings.Contains(string(status), "notes.txt") {
+		t.Errorf("human WIP must remain uncommitted, status:\n%s", status)
 	}
 }
 

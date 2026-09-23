@@ -521,6 +521,15 @@ func (m *WorktreeManager) Integrate(projectPath, key string) error {
 // IntegrateBranch is Integrate with an explicit branch name: the branch to
 // merge is the RECORDED one (possibly a -vN versioned name), while the
 // worktree directory and teardown key stay the caller's key.
+//
+// The merge NEVER runs in the human's main checkout. It runs in a
+// daemon-owned scratch worktree (detached at the checkout's tip), and the
+// checkout's branch is then fast-forwarded — by worktree update when
+// possible, by bare ref update when uncommitted human WIP overlaps the
+// merge (WIP files stay byte-identical on disk). The old in-checkout merge
+// required the checkout to be clean; a lint-failing WIP made the janitorial
+// auto-commit fail (288 integrates poisoned into quarantine during the
+// telematics campaign).
 func (m *WorktreeManager) IntegrateBranch(projectPath, key, branch string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -530,39 +539,78 @@ func (m *WorktreeManager) IntegrateBranch(projectPath, key, branch string) error
 		return nil // nothing to integrate
 	}
 
-	// Dirty main checkout blocks merges outright ("Your local changes would
-	// be overwritten") — janitorial auto-commit first (2026-08-19 incident).
-	autoCommitDirtyMain(projectPath)
+	headBranch, hbErr := m.WorkingBranch(projectPath)
+	baseTip, btErr := gitOut(projectPath, "rev-parse", "HEAD")
 
-	if _, err := gitOut(projectPath, "merge", "--no-ff", "-m", "hydra: integrate "+branch, branch); err != nil {
+	scratchPath := m.worktreePath(projectPath, "integrate-scratch-"+key)
+	if isGitWorktree(scratchPath) {
+		_, _ = gitOut(projectPath, "worktree", "remove", scratchPath, "--force")
+	}
+	start := "HEAD"
+	if btErr == nil {
+		start = strings.TrimSpace(baseTip)
+	}
+	if _, err := gitOut(projectPath, "worktree", "add", "--detach", scratchPath, start); err != nil {
+		return fmt.Errorf("integrate %s: scratch worktree: %w", branch, err)
+	}
+	defer func() {
+		_, _ = gitOut(projectPath, "worktree", "remove", scratchPath, "--force")
+		_, _ = gitOut(projectPath, "worktree", "prune")
+	}()
+
+	if _, err := gitOut(scratchPath, "merge", "--no-ff", "-m", "hydra: integrate "+branch, branch); err != nil {
 		// .beads/ is a br-owned mirror: br state on main is the source of
 		// truth and worktree-side writes are redundant, so a conflict
 		// confined to .beads/ resolves --ours. It quarantined 65wa0's
 		// gate-proven fix on a mirror row (2026-08-21). Real-code
 		// conflicts still abort + quarantine.
-		if beadsOnlyConflict(projectPath) {
-			if _, oerr := gitOut(projectPath, "checkout", "--ours", "--", ".beads"); oerr == nil {
-				_, _ = gitOut(projectPath, "add", ".beads")
-				if _, cerr := gitOut(projectPath, "commit", "--no-edit"); cerr == nil {
+		if beadsOnlyConflict(scratchPath) {
+			if _, oerr := gitOut(scratchPath, "checkout", "--ours", "--", ".beads"); oerr == nil {
+				_, _ = gitOut(scratchPath, "add", ".beads")
+				if _, cerr := gitOut(scratchPath, "commit", "--no-edit"); cerr == nil {
 					log.Printf("[Worktree] auto-resolved .beads-only merge conflict (--ours) integrating %s", branch)
 					goto merged
 				}
 			}
 		}
-		_, _ = gitOut(projectPath, "merge", "--abort")
+		_, _ = gitOut(scratchPath, "merge", "--abort")
 		return fmt.Errorf("integrate %s failed (worktree left at %s for inspection): %w", branch, wtPath, err)
 	}
 
 merged:
 
 	// Verify the effect, not the command: the branch tip must be contained in
-	// HEAD now. Failure keeps worktree + branch and reports an error so the
-	// caller never logs "integrated" over a no-op merge.
-	if !isAncestorOf(projectPath, branch, "HEAD") {
-		tip, _ := gitOut(projectPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
-		head, _ := gitOut(projectPath, "rev-parse", "HEAD")
+	// the scratch HEAD now. Failure keeps worktree + branch and reports an
+	// error so the caller never logs "integrated" over a no-op merge.
+	if !isAncestorOf(scratchPath, branch, "HEAD") {
+		tip, _ := gitOut(scratchPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+		head, _ := gitOut(scratchPath, "rev-parse", "HEAD")
 		return fmt.Errorf("integrate %s: merge verification failed: branch tip %s not contained in HEAD %s (worktree left at %s)",
 			branch, strings.TrimSpace(tip), strings.TrimSpace(head), wtPath)
+	}
+
+	newTipOut, _ := gitOut(scratchPath, "rev-parse", "HEAD")
+	newTip := strings.TrimSpace(newTipOut)
+
+	// Land the merge commit on the checkout's branch. Preferred: a real
+	// fast-forward so the checkout's worktree and index track HEAD (the
+	// pre-fix behavior for clean checkouts). When uncommitted human WIP
+	// overlaps the files the merge touched, git rightly refuses to clobber
+	// it — fall back to a bare ref update: HEAD advances, human files stay
+	// byte-identical on disk and read as ordinary modifications against the
+	// new HEAD.
+	if _, err := gitOut(projectPath, "merge", "--ff-only", newTip); err != nil {
+		if hbErr != nil || headBranch == "" || headBranch == "HEAD" {
+			return fmt.Errorf("integrate %s: merge landed in scratch only; checkout branch %q not advanceable: %w", branch, headBranch, err)
+		}
+		if _, uerr := gitOut(projectPath, "update-ref", "refs/heads/"+headBranch, newTip); uerr != nil {
+			return fmt.Errorf("integrate %s: fast-forward and ref-update both failed: %v / %w", branch, err, uerr)
+		}
+		short := newTip
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		log.Printf("[Worktree] integrate %s: overlapping uncommitted WIP — advanced %s to %s by ref update (WIP preserved on disk)", branch, headBranch, short)
 	}
 	return nil
 }
@@ -919,13 +967,13 @@ func worktreeClean(wtPath string) bool {
 	return err == nil && strings.TrimSpace(out) == ""
 }
 
-// autoCommitDirtyMain turns a dirty main checkout into a janitorial commit
-// before merging. Uncommitted changes the merge touches fail the whole merge
-// ("Your local changes would be overwritten") — observed 2026-08-19 when 9
-// legacy-era files in srv-smart-engine blocked every integration and
-// gate-verified work piled up in quarantine while beads closed as completed.
-// Committing first converts that hard failure into an ordinary two-parent
-// merge. Same-hunk content conflicts can still conflict — those quarantine.
+// autoCommitDirtyMain turns a dirty main checkout into a janitorial commit.
+// RETAINED FOR DIRECT TESTS ONLY — no longer on the integrate path: since
+// the scratch-worktree integration (telematics campaign, 288 quarantine
+// poisons from gate-failing wip commits) IntegrateBranch never requires the
+// checkout to be clean. Kept because the guard behavior (exclude .beads,
+// refuse conflict markers) is still unit-tested and may be reused by manual
+// repair flows.
 func autoCommitDirtyMain(projectPath string) {
 	out, err := gitOut(projectPath, "status", "--porcelain")
 	if err != nil || strings.TrimSpace(out) == "" {
