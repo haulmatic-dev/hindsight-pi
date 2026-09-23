@@ -397,6 +397,15 @@ type Candidate struct {
 type Runner func(ctx context.Context, cfg Config, prompt string) (string, error)
 
 // Shepherd is Pan's runtime.
+const (
+	// judgeDegradedThreshold is the consecutive pi-invocation failure count
+	// at which the judge is declared degraded (loud log + OnJudgeFailure).
+	judgeDegradedThreshold = 5
+	// judgeDegradedRepeat re-fires the degraded signal every N further
+	// consecutive failures so a multi-day outage keeps surfacing.
+	judgeDegradedRepeat = 25
+)
+
 type Shepherd struct {
 	cfg   Config
 	store Store
@@ -426,6 +435,17 @@ type Shepherd struct {
 	// project instead of per bead. Optional; nil means per-bead keying.
 	ProjectScope func(beadID string) string
 
+	// OnJudgeFailure fires when consecutive pi-invocation failures cross
+	// judgeDegradedThreshold (and every judgeDegradedRepeat-th after): the
+	// judge is DOWN and every judgment is silently running on deterministic
+	// rules. 2026-09-23: 6494/6494 invocations failed across Aug-Sep with no
+	// signal — the fail-open fallback hid a dead MiniMax plan for weeks.
+	// Optional; nil means the loud log line still prints.
+	OnJudgeFailure func(consecutive int, err error)
+	// OnJudgeRecovered fires once when the judge succeeds again after a
+	// degraded outage, reporting how many failures the outage contained.
+	OnJudgeRecovered func(failures int)
+
 	verdictsMu sync.Mutex
 	verdicts   map[string]time.Time // bead → last life-continuing verdict
 
@@ -453,6 +473,9 @@ type Shepherd struct {
 
 	efficacyMu     sync.Mutex
 	repairEfficacy map[string]int // repair key → consecutive attempts
+
+	judgeFailures int  // consecutive pi-invocation failures (reset on success)
+	judgeDegraded bool // loud degraded signal already fired for this outage
 }
 
 // recordVerdict notes a non-terminal decision (continue/steer/compact) so
@@ -592,8 +615,31 @@ func (s *Shepherd) Tick(ctx context.Context) {
 
 	out, err := s.run(ctx, s.cfg, BuildPrompt(cands))
 	if err != nil {
+		s.judgeFailures++
 		log.Printf("[Pan] pi invocation failed (deterministic rules in force): %v", err)
+		if !s.judgeDegraded && s.judgeFailures >= judgeDegradedThreshold {
+			s.judgeDegraded = true
+			log.Printf("[Pan] ERROR judge DEGRADED: %d consecutive pi invocation failures — every judgment is falling back to deterministic rules; last error: %v", s.judgeFailures, err)
+			if s.OnJudgeFailure != nil {
+				s.OnJudgeFailure(s.judgeFailures, err)
+			}
+		} else if s.judgeDegraded && (s.judgeFailures-judgeDegradedThreshold)%judgeDegradedRepeat == 0 {
+			log.Printf("[Pan] ERROR judge STILL DEGRADED: %d consecutive pi invocation failures; last error: %v", s.judgeFailures, err)
+			if s.OnJudgeFailure != nil {
+				s.OnJudgeFailure(s.judgeFailures, err)
+			}
+		}
 		return
+	}
+	if s.judgeFailures > 0 {
+		if s.judgeDegraded {
+			log.Printf("[Pan] judge RECOVERED after %d consecutive pi invocation failure(s)", s.judgeFailures)
+			if s.OnJudgeRecovered != nil {
+				s.OnJudgeRecovered(s.judgeFailures)
+			}
+		}
+		s.judgeFailures = 0
+		s.judgeDegraded = false
 	}
 
 	decisions, err := ParseDecisions(out)

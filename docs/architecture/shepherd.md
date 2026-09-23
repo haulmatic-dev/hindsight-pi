@@ -66,6 +66,8 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `bead_store_suspect` | a project's open-bead count collapsed to 0 or >80% in one discovery tick (or `br list` failed after a healthy baseline) — store presumed corrupt, project excluded from scheduling | `project_path`, `previous`, `current`, `list_error` |
 | `bead_store_restored` | `.beads/issues.jsonl` rebuilt from the newest `.br_history` snapshot and the re-listed open count verified recovered — scheduling unblocked | `project_path`, `snapshot`, `open`, `baseline` |
 | `bead_store_restore_failed` | snapshot restore could not verify recovery (no snapshot, copy error, re-list failure, or count still collapsed) — project stays blocked | `project_path`, `snapshot`, `error` |
+| `pan_judge_degraded` | Pan's pi judge invocation failed `judgeDegradedThreshold` (5) times in a row (re-fires every 25 further failures) — every judgment is silently running on deterministic rules. Added 2026-09-23 after 6494/6494 invocations failed across Aug–Sep with zero signal | `consecutive_failures` |
+| `pan_judge_recovered` | a judge invocation succeeded after a degraded outage | `outage_failures` |
 
 Read programmatically with `ReadEvents(path)` (torn-line tolerant; a missing
 file is an empty stream, not an error).
