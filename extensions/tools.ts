@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { ensureBank, getBankInsights, getHandles, type HindsightHandles } from "./client.js";
+import { ensureBank, getBankInfo, getBankInsights, getHandles, type HindsightHandles } from "./client.js";
 import { getRecallMode, type ReasoningLevel, type SearchBudget } from "./config.js";
 import { sessionRetained } from "./meta.js";
 
@@ -197,7 +197,7 @@ export const registerTools = (pi: ExtensionAPI): void => {
     async execute(_toolCallId: string) {
       const handles = await ensureHandles();
       const insights = await getBankInsights(handles.config.baseUrl, handles.config.apiKey, handles.bankId);
-      const profile = insights.profile ?? await handles.client.getBankProfile(handles.bankId);
+      const profile = insights.profile ?? await getBankInfo(handles.config.baseUrl, handles.config.apiKey, handles.bankId);
       const disposition = profile?.disposition
         ? `skepticism=${profile.disposition.skepticism ?? "?"}, literalism=${profile.disposition.literalism ?? "?"}, empathy=${profile.disposition.empathy ?? "?"}`
         : "none";
@@ -205,7 +205,7 @@ export const registerTools = (pi: ExtensionAPI): void => {
       const text = [
         `Bank ID: ${handles.bankId}`,
         `Name: ${profile?.name ?? handles.bankId}`,
-        `Background: ${profile?.background ?? ""}`,
+        `Background: ${profile?.background ?? profile?.mission ?? ""}`,
         `Disposition: ${disposition}`,
         `Directives: ${insights.directivesCount ?? "unknown"}`,
         `Mental models: ${insights.mentalModelsCount ?? "unknown"}`,

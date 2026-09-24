@@ -34,16 +34,20 @@ const isNotFoundError = (error: unknown): boolean => {
   return /404|not found/i.test(message);
 };
 
-export const ensureBank = async (client: any, bankId: string, config: { autoCreateBank: boolean; workspace: string }): Promise<void> => {
-  try {
-    await client.getBankProfile(bankId);
-  } catch (error) {
-    if (!isNotFoundError(error) || !config.autoCreateBank) throw error;
-    await client.createBank(bankId, {
-      name: bankId,
-      background: `Persistent coding memory for pi workspace ${config.workspace}`,
-    });
-  }
+export const getBankInfo = async (baseUrl: string, apiKey: string | undefined, bankId: string): Promise<any | null> => {
+  const data = await apiGet(baseUrl, apiKey, `/v1/default/banks`);
+  const banks = Array.isArray(data?.banks) ? data.banks : [];
+  return banks.find((b: any) => b?.bank_id === bankId || b?.name === bankId) ?? null;
+};
+
+export const ensureBank = async (client: any, bankId: string, config: { autoCreateBank: boolean; workspace: string; baseUrl: string; apiKey?: string }): Promise<void> => {
+  const info = await getBankInfo(config.baseUrl, config.apiKey, bankId);
+  if (info) return;
+  if (!config.autoCreateBank) throw new Error(`Hindsight bank '${bankId}' not found`);
+  await client.createBank(bankId, {
+    name: bankId,
+    mission: `Persistent coding memory for pi workspace ${config.workspace}`,
+  });
 };
 
 const buildClient = (baseUrl: string, apiKey?: string): any => new HindsightClient({
@@ -86,7 +90,7 @@ export const getBankInsights = async (baseUrl: string, apiKey: string | undefine
     apiGet(baseUrl, apiKey, `/v1/default/banks/${encodeURIComponent(bankId)}/entities`),
   ]);
 
-  const profile = await apiGet(baseUrl, apiKey, `/v1/default/banks/${encodeURIComponent(bankId)}`)
+  const profile = await getBankInfo(baseUrl, apiKey, bankId)
     .catch(async () => null);
 
   return {
@@ -121,7 +125,7 @@ export const bootstrap = async (config: HindsightConfig, cwd: string): Promise<H
       linkedHosts: [],
       linkedHostConfigs: [],
     });
-    await ensureBank(linkedClient, linkedBankId, { autoCreateBank: config.autoCreateBank, workspace: linkedConfig.workspace });
+    await ensureBank(linkedClient, linkedBankId, { autoCreateBank: config.autoCreateBank, workspace: linkedConfig.workspace, baseUrl: linkedConfig.baseUrl, apiKey: linkedConfig.apiKey });
     linked.push({ name: linkedConfig.name, client: linkedClient, bankId: linkedBankId, config: linkedConfig });
   }
 
