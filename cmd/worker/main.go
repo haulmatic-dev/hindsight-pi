@@ -221,6 +221,7 @@ type ExecutionResult struct {
 	Error     string
 	Duration  time.Duration
 	Attempts  int
+	TurnCount int
 	AgentType string
 	// Verdict is the parsed HYDRA_VERDICT closure block, when the agent
 	// emitted one. Retention prefers it over raw output: it is the
@@ -439,6 +440,23 @@ func main() {
 	duration := time.Since(startTime)
 	if result != nil {
 		result.Duration = duration
+	}
+
+	// Write the execution report AFTER Duration and Attempts are final.
+	// Writing earlier (inside executeWithPi) left duration=0 and attempts=0
+	// in every /tmp/hydra-executions record.
+	if result != nil {
+		if tempFile, err := writeExecutionOutputToFile(bead.ID.String(), result); err != nil {
+			log.Printf("[WARN] Failed to write execution output to file: %v", err)
+		} else {
+			log.Printf("📝 Execution output written to: %s", tempFile)
+			// Keep file for 1 hour then clean up
+			time.AfterFunc(1*time.Hour, func() {
+				if err := os.Remove(tempFile); err == nil {
+					log.Printf("🗑️  Cleaned up temp file: %s", tempFile)
+				}
+			})
+		}
 	}
 
 	// Classify the failure so hydra can distinguish infrastructure
@@ -1748,6 +1766,7 @@ monitorLoop:
 				s.Input, s.Output, s.CacheReadInput, s.CacheCreation, s.FreshInput, s.Total)
 			reportTurnTokens(s)
 			result.TokensTotal = int64(s.Total)
+		result.TurnCount = turnCount
 			result.TokensFresh = int64(s.FreshInput + s.Output)
 			result.TokensCacheRead = int64(s.CacheReadInput)
 			result.TokensCacheCreation = int64(s.CacheCreation)
@@ -1798,23 +1817,9 @@ monitorLoop:
 		}
 	}
 
-	// Write output to temp file for durability and post-processing
-	tempFile, err := writeExecutionOutputToFile(bead.ID.String(), result)
-	if err != nil {
-		log.Printf("[WARN] Failed to write execution output to file: %v", err)
-	} else {
-		log.Printf("📝 Execution output written to: %s", tempFile)
-
-		// Schedule file cleanup after retention (optional - can keep for debugging)
-		defer func() {
-			// Keep file for 1 hour then clean up
-			time.AfterFunc(1*time.Hour, func() {
-				if err := os.Remove(tempFile); err == nil {
-					log.Printf("🗑️  Cleaned up temp file: %s", tempFile)
-				}
-			})
-		}()
-	}
+	// Report writing moved to runWorker: writing here (before the caller
+	// sets Duration and Attempts) produced reports with duration=0 and
+	// attempts=0 for every execution.
 
 	return result, cmdErr
 }
@@ -1841,6 +1846,7 @@ func writeExecutionOutputToFile(beadID string, result *ExecutionResult) (string,
 		"exit_code":             result.ExitCode,
 		"duration":              result.Duration.Seconds(),
 		"attempts":              result.Attempts,
+		"turns":                 result.TurnCount,
 		"agent_type":            result.AgentType,
 		"output":                result.Output,
 		"error":                 result.Error,
@@ -1902,6 +1908,15 @@ func readExecutionOutputFromFile(filepath string) (*ExecutionResult, error) {
 	}
 	if attempts, ok := record["attempts"].(float64); ok {
 		result.Attempts = int(attempts)
+	}
+	if turns, ok := record["turns"].(float64); ok {
+		result.TurnCount = int(turns)
+	}
+	if dur, ok := record["duration"].(float64); ok {
+		result.Duration = time.Duration(dur * float64(time.Second))
+	}
+	if total, ok := record["tokens_total"].(float64); ok {
+		result.TokensTotal = int64(total)
 	}
 
 	return result, nil
