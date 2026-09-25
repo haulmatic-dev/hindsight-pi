@@ -73,32 +73,37 @@ What was actually done and verified:
    `user_version` — verified by a no-op `br update`.
 4. **`/home/ajantha/projects/webapp` MIGRATED:** 37 issues preserved,
    init/import clean.
-5. **Backups for rollback:** `/tmp/telematics-beads.db.bak`,
-   `/tmp/webapp-beads.db.bak`, `/tmp/webapp-issues.jsonl.bak`, plus the
-   displaced v11 families at `/tmp/tel-old-schema.db*`,
-   `/tmp/webapp-old-schema.db*`.
+5. **`/opt/dev-tools/components/hydra/.beads` MIGRATED** (second attempt,
+   after the daemon had recreated a v11 DB through its old-binary PATH):
+   164 issues / 24 open preserved verbatim; new br reads it; 0 EACCES /
+   schema-mismatch in daemon logs afterwards.
+6. **Backups for rollback:** `/tmp/telematics-beads.db.bak`,
+   `/tmp/webapp-beads.db.bak`, `/tmp/webapp-issues.jsonl.bak`,
+   `/tmp/hydra-main-beads.db.bak2`, plus the displaced v11 families at
+   `/tmp/tel-old-schema.db*`, `/tmp/webapp-old-schema.db*`,
+   `/tmp/hydra-main-old2.db*`.
 
 What remains (root-side, one shell):
 
-- **Daemon PATH fix:** the daemon's PATH is
-  `/opt/dev-tools/bin:…infra/target/release…` — the shim's `find_real_br`
-  resolves to the old 0.2.10 binary at
-  `/opt/dev-tools/components/infra/services/beads-rust/beads_rust/target/release/br`
-  (root-owned; hydra user cannot replace it). One-line systemd drop-in:
-  `Environment=PATH=/opt/dev-tools/config/pi/bin:/opt/dev-tools/bin:…` (or
-  root replaces the infra release binary after the rsync below), then
-  `systemctl restart hydra`.
-- **`/opt/dev-tools/components/hydra/.beads`** was intentionally left at
-  schema 11: the daemon recreated a v11 DB there after the first migration
-  attempt (old binary via its PATH) and old 0.2.10 operates it correctly.
-  After the PATH fix, apply the same `mv db family; br init` recipe to it
-  (snapshot `/tmp/hydra-main-beads.db.bak` already taken).
-- **`/opt/dev-tools/components/infra/.beads`**: root:root 755/644, not
-  writable by the hydra user at all; migrate during the same root-side
-  shell (it is effectively read-only for the daemon already).
-- **Fleet binary install:** replace the infra vendored tree + rebuild (steps
-  1–3 below) so `/opt/dev-tools/components/…/target/release/br` itself
-  becomes v0.7.0 — that also fixes the daemon without a PATH change.
+- **Fleet binary install:** rsync the vendored v0.7.0 tree into
+  `/opt/dev-tools/components/infra/services/beads-rust/beads_rust` (root-owned;
+  hydra user cannot replace it), apply the port patch, rebuild — then
+  `/usr/local/bin/br` and the daemon's PATH hit both become v0.7.0 and the
+  daemon needs no PATH change.
+- **`/opt/dev-tools/components/infra/.beads`** is root:root 755/644 — not
+  writable or lock-probeable by the hydra user for EITHER binary version;
+  migrate it during the same root-side shell after the rsync (recipe above).
+- If the infra binary replacement is deferred, a one-line unit drop-in
+  (`Environment=PATH=/opt/dev-tools/config/pi/bin:…`) also switches the
+  daemon to the deployed v0.7.0; then `systemctl restart hydra`.
+- Watch post-swap for `Permission denied (os error 13)` on `issues.jsonl`
+  (should be zero) and `NOT_INITIALIZED` storms (should be zero).
+
+Rollout status after the hydra-user pass (2026-09-25 15:05Z): binary
+deployed; telematics, webapp AND hydra-main stores migrated to schema 19
+with issue counts preserved verbatim; zero EACCES / NOT_INITIALIZED /
+schema-mismatch in daemon logs post-migration. The only store left for the
+root-side shell is the root-locked infra store.
 
 ## Staged rollout (root-side runbook)
 
@@ -133,8 +138,8 @@ br is the most load-bearing binary in the fleet. Execute in order:
    (The release binary used for the verified canary was built at
    `/tmp/br-apply-tgt/release/br`; rebuild from the applied tree instead if
    /tmp was cleaned.)
-5. **Fleet-wide install:** daemon PATH fix (see "What remains" above) or
-   replace the infra release binary, restart the hydra daemon, and watch for
+5. **Fleet-wide install:** replace the infra release binary (see "What
+   remains" above), restart the hydra daemon, and watch for
    `Permission denied (os error 13)` on `issues.jsonl` (should be zero) and
    `NOT_INITIALIZED` storms (should be zero).
 6. **Rollback:** the current 0.2.10 binary remains at
