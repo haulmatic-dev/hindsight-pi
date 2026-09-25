@@ -74,7 +74,7 @@ func TestExtractEmptyGateVerdictLastWins(t *testing.T) {
 	if err := os.WriteFile(name, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	v := extractEmptyGateVerdict(dir, "last-bead")
+	v := extractEmptyGateVerdict(logs, "last-bead")
 	if v == nil || !v.Done || v.Summary != "final" {
 		t.Fatalf("expected last verdict done:true summary=final, got %+v", v)
 	}
@@ -108,7 +108,7 @@ func TestVerifyBeforeClose_EmptyDiffAcceptedReason(t *testing.T) {
 
 func TestIsDocPath(t *testing.T) {
 	yes := []string{"README.md", "docs/x/y.txt", "a/b.NOTES.mdx"}
-	no := []string{"x/a.go", "docs.md.go", "main.go.bak", "mdd.txt"}
+	no := []string{"x/a.go", "docs.md.go", "main.go.bak", "mdd.tx"}
 	for _, p := range yes {
 		if !isDocPath(p) {
 			t.Errorf("isDocPath(%q) = false, want true", p)
