@@ -28,6 +28,23 @@ func TestWorkerEnv_SetsPiOffline(t *testing.T) {
 	}
 }
 
+// No implicit KIMI_API_KEY: workers ride the llm-router lane where the router
+// injects the upstream key, so an unconfigured worker env must carry no API
+// key var at all (routing-audit leftover; see bead "Remove inert KIMI_API_KEY").
+func TestWorkerEnv_NoImplicitKimiAPIKey(t *testing.T) {
+	t.Setenv("KIMI_API_KEY", "sk-test-inert")
+	b := NewWorkerEnvBuilder(DefaultConfig())
+	env := b.Build(types.Bead{ID: "x", Project: "p"}, "/tmp/p", "orchestrator", 0)
+	for _, e := range env {
+		if strings.HasPrefix(e, "KIMI_API_KEY=") {
+			t.Errorf("worker env must not carry inert KIMI_API_KEY, got %q", e)
+		}
+		if e == "HYDRA_PI_API_KEY_NAME=KIMI_API_KEY" || e == "HYDRA_PI_API_KEY_NAME=" {
+			t.Errorf("HYDRA_PI_API_KEY_NAME must stay unset when api_key_name is not configured, got %q", e)
+		}
+	}
+}
+
 func TestBeadPhase(t *testing.T) {
 	tests := []struct {
 		name  string
