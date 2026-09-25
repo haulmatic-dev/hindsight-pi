@@ -14,11 +14,13 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // ContextPackVersion is the pack schema version. Bump on breaking schema
@@ -342,6 +344,109 @@ func RequirementTermsForBead(title string) []string {
 		terms = terms[:8]
 	}
 	return terms
+}
+
+// --- per-project pack-write circuit breaker --------------------------------
+
+// PackBreakerOpenEventType is the typed event emitted once when a project's
+// pack writes fail repeatedly and the breaker opens (fail-open telemetry,
+// never a spawn gate).
+const PackBreakerOpenEventType = "pack_breaker_open"
+
+// PackBreakerCloseEventType is emitted when pack writes succeed again and
+// the breaker resets.
+const PackBreakerCloseEventType = "pack_breaker_close"
+
+const (
+	// packBreakerThreshold is how many consecutive ensureContextPack calls
+	// with a write failure it takes to open the breaker. Below the threshold
+	// each failure still schedules a short backoff so a hot retry loop (the
+	// 2-3s scheduler tick) is damped from the first failure.
+	packBreakerThreshold = 3
+	// packBreakerBaseBackoff is the backoff after the first failing call;
+	// it doubles with each consecutive failure up to the max.
+	packBreakerBaseBackoff = time.Minute
+	// packBreakerMaxBackoff caps exponential growth (30m: long enough to
+	// stop br lock storms, short enough that an operator chmod heals within
+	// half an hour without a restart).
+	packBreakerMaxBackoff = 30 * time.Minute
+)
+
+// packBreakerState is the per-project circuit state for pack writes.
+type packBreakerState struct {
+	failures     int
+	openUntil    time.Time
+	nextBackoff  time.Duration
+	openNotified bool
+}
+
+// packBreakers maps project path -> circuit state. Guarded by packBreakerMu.
+// Keyed on project path (not repo name): two projects sharing a repo name
+// have separate br stores and separate failure domains.
+
+func (s *WorkerSpawner) packBreakerAllowed(project string, now time.Time) bool {
+	s.packBreakerMu.Lock()
+	defer s.packBreakerMu.Unlock()
+	st, ok := s.packBreakers[project]
+	if !ok {
+		return true
+	}
+	return !now.Before(st.openUntil)
+}
+
+// packBreakerFailure records one failed pack-write pass for a project and
+// schedules exponential backoff; at the threshold the breaker opens and emits
+// one typed telemetry event (repeats stay quiet until a success resets).
+func (s *WorkerSpawner) packBreakerFailure(project, bead string, now time.Time, cause error) {
+	s.packBreakerMu.Lock()
+	defer s.packBreakerMu.Unlock()
+	st, ok := s.packBreakers[project]
+	if !ok {
+		st = &packBreakerState{}
+		s.packBreakers[project] = st
+	}
+	st.failures++
+	if st.nextBackoff == 0 {
+		st.nextBackoff = packBreakerBaseBackoff
+	}
+	st.openUntil = now.Add(st.nextBackoff)
+	if st.nextBackoff < packBreakerMaxBackoff {
+		st.nextBackoff *= 2
+	}
+	if st.nextBackoff > packBreakerMaxBackoff {
+		st.nextBackoff = packBreakerMaxBackoff
+	}
+	opened := st.failures >= packBreakerThreshold
+	if opened && !st.openNotified {
+		st.openNotified = true
+		if s.eventSink != nil {
+			s.eventSink.Emit(Event{Type: PackBreakerOpenEventType, Project: project, Bead: bead,
+				Reason: "write_failures",
+				Detail: fmt.Sprintf("context pack writes failed %d times consecutively (store unwritable?), skipping pack for %s (fail-open): %v",
+					st.failures, st.openUntil.Sub(now).Round(time.Second), cause)})
+		}
+		log.Printf("[ContextPack] pack breaker OPEN for %s after %d consecutive write failures, backoff %s (fail-open): %v",
+			project, st.failures, st.openUntil.Sub(now).Round(time.Second), cause)
+	}
+}
+
+// packBreakerSuccess resets the circuit after a fully successful write pass.
+func (s *WorkerSpawner) packBreakerSuccess(project string, now time.Time) {
+	s.packBreakerMu.Lock()
+	defer s.packBreakerMu.Unlock()
+	st, ok := s.packBreakers[project]
+	if !ok || st.failures == 0 {
+		return
+	}
+	wasOpen := st.openNotified
+	s.packBreakers[project] = &packBreakerState{}
+	if wasOpen {
+		if s.eventSink != nil {
+			s.eventSink.Emit(Event{Type: PackBreakerCloseEventType, Project: project,
+				Reason: "write_ok", Detail: "context pack writes succeeding again, breaker reset"})
+		}
+		log.Printf("[ContextPack] pack breaker RESET for %s after successful write", project)
+	}
 }
 
 // logPackMiss emits one pack_miss event per dropped anchor and a summary

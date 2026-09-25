@@ -54,6 +54,12 @@ type WorkerSpawner struct {
 
 	spawnFailureMu sync.RWMutex
 	spawnFailures  map[string]*spawnFailureInfo // bead ID -> last spawn failure
+
+	// packBreaker is the per-project circuit breaker for context-pack writes:
+	// a store the daemon cannot write must not be hammered on every 2-3s
+	// scheduler tick. Guarded by packBreakerMu; see context_pack.go.
+	packBreakerMu sync.Mutex
+	packBreakers  map[string]*packBreakerState
 }
 
 const defaultParkedRespawnTimeout = 10 * time.Minute
@@ -850,6 +856,14 @@ func (s *WorkerSpawner) ensureContextPack(bead types.Bead, projectPath string) {
 	if s.chainCompletionDetector == nil || s.beadsClient == nil || projectPath == "" {
 		return
 	}
+	// Circuit breaker: if pack writes for this project keep failing (e.g. the
+	// daemon user cannot write the br store), stop rebuilding/retrying on
+	// every spawn and ride the exponential backoff instead. Fail-open: the
+	// spawn proceeds unguided.
+	if !s.packBreakerAllowed(bead.Project, time.Now()) {
+		log.Printf("[ContextPack] breaker open for %s; skipping pack for %s (fail-open)", bead.Project, bead.ID)
+		return
+	}
 	chain, ok := s.chainCompletionDetector.FindChainByBead(bead.ID)
 	if !ok {
 		// Chain-of-one fallback: standalone beads (fix-beads spawned outside a
@@ -960,9 +974,11 @@ func (s *WorkerSpawner) writePackToChain(chain *ChainInfo, projectPath string, b
 		log.Printf("[ContextPack] marshal failed for chain of %s (fail-open): %v", bead.ID, err)
 		return
 	}
+	writeErr := error(nil)
 	for _, id := range chain.AllBeadIDs {
 		if err := s.beadsClient.UpdateBeadAgentContext(projectPath, bead.Repo, id, string(raw)); err != nil {
 			log.Printf("[ContextPack] %s write failed for %s (fail-open): %v", eventType, id, err)
+			writeErr = err
 			continue
 		}
 		if s.eventSink != nil {
@@ -970,6 +986,13 @@ func (s *WorkerSpawner) writePackToChain(chain *ChainInfo, projectPath string, b
 				Reason: "sha_" + pack.BaseSHA[:min(12, len(pack.BaseSHA))],
 				Detail: "context pack written to chain member (base_sha " + pack.BaseSHA + ")"})
 		}
+	}
+	// Breaker accounting: one failure/success per write pass (not per member),
+	// so a large chain does not trip the threshold on a single tick.
+	if writeErr != nil {
+		s.packBreakerFailure(bead.Project, string(bead.ID), time.Now(), writeErr)
+	} else {
+		s.packBreakerSuccess(bead.Project, time.Now())
 	}
 }
 
