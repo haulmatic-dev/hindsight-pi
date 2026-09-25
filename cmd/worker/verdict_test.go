@@ -51,6 +51,32 @@ func TestParseVerdictAbandon(t *testing.T) {
 	}
 }
 
+func TestNormalizeVerdictHollowGreen(t *testing.T) {
+	v := parseVerdict(`HYDRA_VERDICT: {"done": true, "ac_met": ["exit 0, 9 tests"], "ac_unmet": [],
+"verification": [{"cmd": "npx jest", "result": "exit 0, 9 tests (it.failing)"}, {"cmd": "npx jest e2e", "result": "Cannot find module '../e2e-harness'"}]}`)
+	if v == nil || !v.Done {
+		t.Fatalf("verdict should parse as done before normalization: %+v", v)
+	}
+	nv := normalizeVerdict(v)
+	if nv.Done {
+		t.Errorf("done verdict with load-crash evidence must be downgraded, got done=true")
+	}
+	if !nv.HollowGreen {
+		t.Errorf("HollowGreen flag not set")
+	}
+	if len(nv.ACUnmet) == 0 {
+		t.Errorf("load errors must be recorded as unmet ACs")
+	}
+}
+
+func TestNormalizeVerdictCleanPassUnchanged(t *testing.T) {
+	v := parseVerdict(`HYDRA_VERDICT: {"done": true, "verification": [{"cmd": "go test ./...", "result": "ok 0.5s, 17 passed"}]}`)
+	nv := normalizeVerdict(v)
+	if !nv.Done || nv.HollowGreen || len(nv.ACUnmet) != 0 {
+		t.Errorf("clean pass must not be downgraded: %+v", nv)
+	}
+}
+
 func TestDecideTurnEnd(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -64,6 +90,7 @@ func TestDecideTurnEnd(t *testing.T) {
 		{"unmet ACs nudge with list", `{"done": true, "ac_unmet": ["req-003"]}`, 0, true, "req-003"},
 		{"abandon does not nudge", `{"done": false, "summary": "blocked"}`, 0, false, ""},
 		{"cap stops nudging", ``, 3, false, ""},
+		{"hollow-green nudges with reason", `{"done": false, "hollow_green": true, "ac_unmet": ["load errors"], "summary": "downgraded"}`, 0, true, "hollow-green"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

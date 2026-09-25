@@ -329,7 +329,13 @@ the worker it observes.
 verdict by turn end → the **worker** nudges in-session
 (`HYDRA_MAX_NUDGES`, default 3), not a kill. The old behavior — judge
 completion by exit code and `git diff` alone — is how finished work got
-rejected as `empty-diff`.
+rejected as `empty-diff`. Verdict acceptance also runs the **hollow-green
+gate** (`normalizeVerdict`): a `done:true` verdict whose verification
+entries quote suite load crashes (`Cannot find module`, `Test suite
+failed to run`, `SyntaxError`) is downgraded to `done:false` with the
+load errors recorded as unmet ACs — expected-failure wrappers over suites
+that fail to import are not written tests (ajantha-srv-telematics RED
+bead, 2026-09-25).
 
 **Park-and-resume.** Error classification is **marker-first** (`park.go`
 `decideParkClass`): Kimi's error `type` field lies — overload arrives as

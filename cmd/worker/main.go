@@ -1630,6 +1630,12 @@ func executeWithPi(
 				}
 				v := parseVerdict(turn.Text())
 				if v != nil {
+					// Hollow-green gate (2026-09-25): a done verdict whose quoted
+					// verification output contains suite load crashes (Cannot find
+					// module, Test suite failed to run, SyntaxError) is downgraded
+					// to done=false — expected-failure wrappers over import errors
+					// are not written tests. The nudge loop tells the agent why.
+					v = normalizeVerdict(v)
 					result.Verdict = v
 				}
 				if nudge, reason := decideTurnEnd(v, nudgeCount, verdictNudgeCap); nudge {
