@@ -1636,7 +1636,7 @@ func executeWithPi(
 					// to done=false — expected-failure wrappers over import errors
 					// are not written tests. The nudge loop tells the agent why.
 					v = normalizeVerdict(v)
-					result.Verdict = v
+					result.Verdict = dedupVerdict(bead.ID.String(), v)
 				}
 				if nudge, reason := decideTurnEnd(v, nudgeCount, verdictNudgeCap); nudge {
 					nudgeCount++

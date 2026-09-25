@@ -335,7 +335,12 @@ entries quote suite load crashes (`Cannot find module`, `Test suite
 failed to run`, `SyntaxError`) is downgraded to `done:false` with the
 load errors recorded as unmet ACs — expected-failure wrappers over suites
 that fail to import are not written tests (ajantha-srv-telematics RED
-bead, 2026-09-25).
+bead, 2026-09-25). Emission is **idempotent per bead** (2026-09-25, bead
+gwce follow-up): `dedupVerdict` (worker, key = bead ID + SHA-256 of the
+normalized verdict JSON) consumes a re-emitted identical verdict at
+acceptance, and `VerdictRetainer.Retain` (daemon) consumes a duplicate
+verdict-memory write per (bead_id, output hash); a verdict whose content
+genuinely changed still passes both gates.
 
 **Park-and-resume.** Error classification is **marker-first** (`park.go`
 `decideParkClass`): Kimi's error `type` field lies — overload arrives as

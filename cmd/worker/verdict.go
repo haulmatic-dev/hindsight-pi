@@ -1,9 +1,13 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
+	"sync"
 )
 
 // verdictNudgeCap is how many times the worker re-prompts a live pi session
@@ -85,6 +89,48 @@ func normalizeVerdict(v *Verdict) *Verdict {
 	if v.Summary == "" {
 		v.Summary = "verdict downgraded: quoted verification output shows suite-level load crashes, not passing tests"
 	}
+	return v
+}
+
+// Verdict idempotency (2026-09-25): a live session that is re-prompted or
+// re-entered can emit the same HYDRA_VERDICT twice for one bead (observed on
+// bead gwce: done:true at 22:15 and 22:50, 35 minutes apart, bead still
+// in_progress). The second emission is consumed, not re-emitted: dedup key is
+// bead ID + hash of the normalized verdict, so a genuinely new verdict (agent
+// kept working and changed its claim) still passes through.
+var (
+	verdictSeenMu sync.Mutex
+	verdictSeen   = map[string]struct{}{}
+)
+
+// verdictHash returns the dedup hash for a verdict: bead ID plus the SHA-256
+// of the normalized verdict JSON.
+func verdictHash(beadID string, v *Verdict) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		b = []byte(fmt.Sprintf("%v", v))
+	}
+	s := sha256.Sum256(append([]byte(beadID+"|"), b...))
+	return hex.EncodeToString(s[:])
+}
+
+// dedupVerdict returns the verdict only on first emission for this bead.
+// A repeat emission with the same content returns nil and logs — the verdict
+// was already recorded once, so the caller must not overwrite result.Verdict
+// or re-trigger downstream emission paths. Errors marshalling fall back to
+// pointer-identity tolerance: a nil verdict is passed through untouched.
+func dedupVerdict(beadID string, v *Verdict) *Verdict {
+	if v == nil {
+		return nil
+	}
+	key := verdictHash(beadID, v)
+	verdictSeenMu.Lock()
+	defer verdictSeenMu.Unlock()
+	if _, seen := verdictSeen[key]; seen {
+		log.Printf("[Worker:verdict] duplicate HYDRA_VERDICT for bead %s (hash %s) — consumed, not re-emitted", beadID, key[:12])
+		return nil
+	}
+	verdictSeen[key] = struct{}{}
 	return v
 }
 

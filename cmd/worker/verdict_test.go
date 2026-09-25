@@ -127,3 +127,40 @@ func mustRPC(t *testing.T, prompt string) string {
 	}
 	return string(b)
 }
+
+func TestDedupVerdict_FirstPassSecondConsumed(t *testing.T) {
+	v := &Verdict{Done: true, Summary: "x"}
+	if got := dedupVerdict("hydra-dup1", v); got != v {
+		t.Fatal("first emission must pass through")
+	}
+	if got := dedupVerdict("hydra-dup1", v); got != nil {
+		t.Fatalf("duplicate emission must be consumed, got %+v", got)
+	}
+}
+
+func TestDedupVerdict_DifferentVerdictSameBeadPasses(t *testing.T) {
+	v1 := &Verdict{Done: true, Summary: "x"}
+	v2 := &Verdict{Done: false, Summary: "still working"}
+	if got := dedupVerdict("hydra-dup2", v1); got != v1 {
+		t.Fatal("first emission must pass through")
+	}
+	if got := dedupVerdict("hydra-dup2", v2); got != v2 {
+		t.Fatal("different verdict for same bead must pass through")
+	}
+}
+
+func TestDedupVerdict_SameVerdictDifferentBeadPasses(t *testing.T) {
+	v := &Verdict{Done: true}
+	if got := dedupVerdict("hydra-dup3", v); got != v {
+		t.Fatal("first bead emission must pass through")
+	}
+	if got := dedupVerdict("hydra-dup4", v); got != v {
+		t.Fatal("same verdict for a different bead must pass through")
+	}
+}
+
+func TestDedupVerdict_NilVerdictNoop(t *testing.T) {
+	if got := dedupVerdict("hydra-dup5", nil); got != nil {
+		t.Fatal("nil verdict must stay nil")
+	}
+}
