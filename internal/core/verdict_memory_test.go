@@ -279,3 +279,46 @@ func TestVerdictRetainer_RetainAdjudicationPOSTsExpectedContent(t *testing.T) {
 		}
 	}
 }
+
+func TestVerdictRetainer_DuplicateVerdictConsumed(t *testing.T) {
+	var requestCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"success":true,"memory_id":"m3"}`))
+	}))
+	defer srv.Close()
+
+	client := hindsight.NewClient(hindsight.WithBaseURL(srv.URL), hindsight.WithEnabled(true))
+	r := NewVerdictRetainer(client)
+
+	bead := &types.Bead{ID: types.BeadID("hydra-gwce"), Title: "Dup"}
+	mem := buildFailedCloseMemory("hydra", bead, "same cause", 1)
+	r.Retain(mem)
+	r.Retain(mem) // duplicate emission for the same bead — must be consumed
+
+	if requestCount != 1 {
+		t.Fatalf("POST count = %d, want 1 (duplicate verdict must not be re-emitted)", requestCount)
+	}
+}
+
+func TestVerdictRetainer_DistinctVerdictsRetained(t *testing.T) {
+	var requestCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"success":true,"memory_id":"m4"}`))
+	}))
+	defer srv.Close()
+
+	client := hindsight.NewClient(hindsight.WithBaseURL(srv.URL), hindsight.WithEnabled(true))
+	r := NewVerdictRetainer(client)
+
+	bead := &types.Bead{ID: types.BeadID("hydra-gwce2"), Title: "Distinct"}
+	r.Retain(buildFailedCloseMemory("hydra", bead, "cause one", 1))
+	r.Retain(buildFailedCloseMemory("hydra", bead, "cause two", 1))
+
+	if requestCount != 2 {
+		t.Fatalf("POST count = %d, want 2 (different verdict content must pass through)", requestCount)
+	}
+}
