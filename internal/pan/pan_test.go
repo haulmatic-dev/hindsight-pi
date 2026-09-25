@@ -365,6 +365,19 @@ func TestBuildPromptListsRepairWhitelist(t *testing.T) {
 	}
 }
 
+func TestBuildPromptPublisherWedgeIsHumanProblem(t *testing.T) {
+	prompt := BuildPrompt(nil)
+	for _, want := range []string{
+		"branch protection, required approvals, or permissions",
+		"do NOT repair:park-campaign",
+		"repair:log-improvement",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing publisher-wedge human-problem guidance %q", want)
+		}
+	}
+}
+
 func TestCandidatesBlockedBeads(t *testing.T) {
 	store := &fakeStore{}
 	s := New(Config{Enabled: true}, store, nil)
