@@ -173,6 +173,10 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 			},
 			// Fleet health digest: Pan's eyes (see collectHealthDigest).
 			DigestFunc: o.collectHealthDigest,
+			// Tier-1 trajectory pre-filters: mechanical outlier detection over
+			// live workers' pi sessions (see collectWorkerTrajectory). Tier-2
+			// LLM judgment only wakes on flagged trajectories.
+			TrajectoryFunc: o.collectWorkerTrajectory,
 		}, o.registryStore, nil)
 
 		// Judge-degradation telemetry: Pan's pi judge failing silently for weeks

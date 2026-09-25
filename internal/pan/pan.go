@@ -87,6 +87,16 @@ type Config struct {
 	// these with registry-derived candidates. Nil means "none" and is fail-open.
 	BlockedBeads BlockedBeadsFunc
 
+	// TrajectoryFunc gathers tier-1 mechanical trajectory telemetry for a live
+	// worker (pi session parsing on the daemon side). Called from Candidates
+	// for working workers only, and only past trajectoryMinAge — young workers
+	// are mid-first-turn and always look idle. Nil disables the class.
+	TrajectoryFunc func(beadID string) (Trajectory, bool)
+
+	// BeadClass reports the bead's phase class ("syntax", "red", "green",
+	// "fix", ...) for turn-baseline selection. Nil means "default".
+	BeadClass func(beadID string) string
+
 	// DigestFunc returns the daemon-collected fleet health digest: Pan's eyes.
 	// Called every tick (cheap). Projects carrying anomaly flags become
 	// "<key>-campaign-anomaly" pseudo-candidates, so fleet-level trouble wakes
@@ -986,6 +996,21 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 			// exactly such a worker live (srv-smart-engine-pes, 2026-08-07).
 			reason = fmt.Sprintf(
 				"no heartbeat for %v (threshold %v)", now.Sub(w.LastHeartbeat), s.cfg.HungAfter)
+		}
+		// Tier-1 trajectory pre-filters: mechanical signals over the worker's
+		// pi session. Only outliers become candidates — tier-2 LLM judgment
+		// budget follows the anomaly rate, healthy trajectories never burn it.
+		if reason == "" && s.cfg.TrajectoryFunc != nil &&
+			w.State == registry.StateWorking && now.Sub(w.StartedAt) >= trajectoryMinAge {
+			if t, ok := s.cfg.TrajectoryFunc(w.BeadID); ok {
+				class := "default"
+				if s.cfg.BeadClass != nil {
+					class = s.cfg.BeadClass(w.BeadID)
+				}
+				if anoms := t.Anomalies(class); len(anoms) > 0 {
+					reason = "TRAJECTORY: " + strings.Join(anoms, "; ")
+				}
+			}
 		}
 		if reason == "" {
 			continue
