@@ -527,6 +527,20 @@ func (s *Scheduler) Tick() error {
 			continue
 		}
 
+		// The same bypass must not ignore BLOCKING edges: a bead whose
+		// dependencies are still open (e.g. a HOLD gate) is not retryable yet.
+		// 2026-09-25: rcoy/tin0/qfcr retry-spawned straight through the
+		// telematics pause gate because this path never consulted the DAG.
+		if o.dag != nil {
+			o.dagMu.RLock()
+			if node, ok := o.dag.GetNode(beadIDStr); ok && node.InDegree > 0 {
+				o.dagMu.RUnlock()
+				log.Printf("⏸️  Skipping retry of bead %s: blocked by %d open dependencies", beadIDStr, node.InDegree)
+				continue
+			}
+			o.dagMu.RUnlock()
+		}
+
 		// Check rate limiting
 		if !o.spawnRateLimiter.CanSpawn() {
 			log.Printf("[RateLimit] Blocking spawn for bead %s: rate limit exceeded", bead.ID)
