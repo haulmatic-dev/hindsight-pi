@@ -28,6 +28,64 @@ type Verdict struct {
 	FilesChanged []string            `json:"files_changed"`
 	Verification []VerificationEntry `json:"verification"`
 	Summary      string              `json:"summary"`
+	// HollowGreen marks a done verdict whose verification output actually
+	// shows suites that crashed at load/import time. Set by normalizeVerdict;
+	// such a verdict is downgraded to done=false before acceptance (hollow
+	// green: ajantha-srv-telematics RED bead closed done:true while its
+	// suites died with "Cannot find module ../e2e-harness").
+	HollowGreen bool `json:"hollow_green,omitempty"`
+}
+
+// loadCrashSignatures are output fragments that prove a test suite failed to
+// even load — these are not expected-failure assertions, they mean no test
+// ran. Matched case-insensitively against verdict verification results.
+var loadCrashSignatures = []string{
+	"cannot find module",
+	"test suite failed to run",
+	"syntaxerror",
+}
+
+// loadCrashEvidence returns the signatures found in the verdict's
+// verification entries (empty when none). Checks result text only — cmd is
+// the command name, not evidence.
+func loadCrashEvidence(v *Verdict) []string {
+	if v == nil {
+		return nil
+	}
+	var found []string
+	for _, e := range v.Verification {
+		lowered := strings.ToLower(e.Result)
+		for _, sig := range loadCrashSignatures {
+			if strings.Contains(lowered, sig) {
+				found = append(found, sig)
+			}
+		}
+	}
+	return found
+}
+
+// normalizeVerdict rejects hollow-green closures: a done verdict whose
+// verification output contains import/load errors proves suites crashed at
+// load time, so the acceptance criteria are NOT met regardless of any exit 0
+// the agent quoted. The verdict is downgraded to done=false with the load
+// errors recorded as unmet ACs, so the nudge loop (and any downstream
+// retention) sees the real state instead of the hollow pass.
+func normalizeVerdict(v *Verdict) *Verdict {
+	if v == nil || !v.Done {
+		return v
+	}
+	evidence := loadCrashEvidence(v)
+	if len(evidence) == 0 {
+		return v
+	}
+	v.Done = false
+	v.HollowGreen = true
+	v.ACUnmet = append(v.ACUnmet,
+		"verification contains load errors (suites failed to import/run): "+strings.Join(evidence, ", "))
+	if v.Summary == "" {
+		v.Summary = "verdict downgraded: quoted verification output shows suite-level load crashes, not passing tests"
+	}
+	return v
 }
 
 const verdictMarker = "HYDRA_VERDICT:"
@@ -96,6 +154,9 @@ func parseVerdict(text string) *Verdict {
 // no unmet ACs and an abandon verdict are both valid closures — only they
 // end the turn cleanly.
 func decideTurnEnd(v *Verdict, nudges, cap int) (nudge bool, reason string) {
+	if v != nil && v.HollowGreen {
+		return true, "hollow-green verdict: verification output shows suites that failed to load (import errors), which is not a written test passing or expected-failing — fix the suites or mark the task not done"
+	}
 	if v != nil && (v.Done && len(v.ACUnmet) == 0 || !v.Done && v.Summary != "") {
 		return false, ""
 	}
