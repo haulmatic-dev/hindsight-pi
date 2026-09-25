@@ -207,6 +207,46 @@ func TestCreateFixBead_DescriptionIncludesExitCodeWithNoLog(t *testing.T) {
 	}
 }
 
+// A fix bead for an original whose worker log recorded a HYDRA_VERDICT must
+// carry the verdict block verbatim plus the verify-first directive, so the fix
+// worker knows which ACs were already met before redoing anything.
+func TestCreateFixBead_DescriptionIncludesOriginalVerdict(t *testing.T) {
+	t.Setenv("HYDRA_HOME", t.TempDir())
+	projectPath := t.TempDir()
+	closer, mock := setupFixCauseCloser(t, projectPath)
+
+	projectName := filepath.Base(projectPath)
+	origID := types.BeadID(fmt.Sprintf("%s-7", projectName))
+	orig := types.Bead{
+		ID:       origID,
+		Title:    "GREEN: Implement verdict-aware fix beads",
+		Project:  projectName,
+		Priority: 1,
+		Status:   types.StatusInProgress,
+	}
+	mock.addBead(orig)
+
+	writeTestWorkerLog(t, string(origID),
+		"2026-09-25T10:00:00Z [stderr] HYDRA_VERDICT: {\"done\": true, \"ac_met\": [\"req-001\"], \"ac_unmet\": []}",
+		"2026-09-25T10:00:01Z [stderr] exit status 1")
+
+	worker := &types.Worker{BeadID: origID}
+	if err := closer.Close(worker, false, 1); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	fixBead := findFixBead(mock)
+	if fixBead == nil {
+		t.Fatalf("expected a fix bead to be created, got none")
+	}
+	if !strings.Contains(fixBead.Description, `"ac_met": ["req-001"]`) {
+		t.Errorf("fix bead description missing original verdict ac_met list:\n%s", fixBead.Description)
+	}
+	if !strings.Contains(fixBead.Description, "VERIFY FIRST") {
+		t.Errorf("fix bead description missing verify-first directive:\n%s", fixBead.Description)
+	}
+}
+
 // AC-5 regression guard: the recursion cap and its tests must keep working
 // after the cause/dedup changes.
 func TestCreateFixBead_CauseAndDedupDoNotAffectRecursionCap(t *testing.T) {

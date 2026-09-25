@@ -1630,7 +1630,13 @@ func executeWithPi(
 				}
 				v := parseVerdict(turn.Text())
 				if v != nil {
-					result.Verdict = v
+					// Hollow-green gate (2026-09-25): a done verdict whose quoted
+					// verification output contains suite load crashes (Cannot find
+					// module, Test suite failed to run, SyntaxError) is downgraded
+					// to done=false — expected-failure wrappers over import errors
+					// are not written tests. The nudge loop tells the agent why.
+					v = normalizeVerdict(v)
+					result.Verdict = dedupVerdict(bead.ID.String(), v)
 				}
 				if nudge, reason := decideTurnEnd(v, nudgeCount, verdictNudgeCap); nudge {
 					nudgeCount++
@@ -2155,7 +2161,8 @@ func phaseGuidance(bead types.Bead) string {
 			"- Improve names, structure, and duplication only.\n" +
 			"- If you find a real bug, do NOT fix it here: record it with `cm add` and finish the refactor unchanged."
 	case strings.HasPrefix(title, "FIX:") || strings.EqualFold(bead.Type, "fix"):
-		return "FIX discipline — root-cause protocol, follow strictly:\n" +
+		return "FIX discipline — verify first, then root-cause; follow strictly:\n" +
+			"0. VERIFY-FIRST (before ANY redo): re-run the original task's verification commands against the worktree you inherited. If they all pass, the work was already done — close immediately citing that evidence in your HYDRA_VERDICT and do NOT modify files. Only redo what verification proves broken. The original attempt may have recorded a done verdict (see the original-verdict block in this prompt, if present) — an exit-code failure does not mean the work is bad.\n" +
 			"1. REPRODUCE: run the failing command/test first; capture the exact error text.\n" +
 			"2. ISOLATE: form ONE hypothesis; design the smallest experiment that can disprove it (a single command, a tiny probe). Do not fix anything yet.\n" +
 			"3. VERIFY the hypothesis with that experiment. Wrong? Form the next hypothesis from the new evidence — never stack two unverified guesses.\n" +

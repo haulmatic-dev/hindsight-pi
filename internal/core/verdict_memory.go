@@ -1,8 +1,11 @@
 package core
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/hindsight"
@@ -12,22 +15,47 @@ import (
 // VerdictRetainer posts verdict memories to Hindsight. It is deliberately
 // fail-open: nil receiver, nil client, disabled client, nil memory, and HTTP
 // errors are all silent no-ops. Memory observes the pipeline, never gates it.
+//
+// Idempotency (2026-09-25): daemon re-entry (worker re-registration, close
+// retry) can re-process the same verdict for one bead (observed on bead gwce:
+// two done:true emissions 35 minutes apart while the bead stayed
+// in_progress). Retain dedups on bead ID + SHA-256 of the memory output, so
+// a repeat verdict write is consumed, not re-emitted — no double-close, no
+// double verdict-memory writes, no re-entry storms.
 type VerdictRetainer struct {
 	client HindsightClient
+
+	seenMu sync.Mutex
+	seen   map[string]struct{}
 }
 
 // NewVerdictRetainer creates a retainer backed by the supplied Hindsight client.
 // A nil client disables retention but still yields a safe no-op retainer.
 func NewVerdictRetainer(client HindsightClient) *VerdictRetainer {
-	return &VerdictRetainer{client: client}
+	return &VerdictRetainer{client: client, seen: map[string]struct{}{}}
 }
 
 // Retain synchronously sends a non-nil memory to Hindsight. Any error is
-// logged and swallowed; it is never returned.
+// logged and swallowed; it is never returned. Duplicate verdicts for the
+// same bead (identical output hash) are consumed silently — retention is
+// idempotent per (bead_id, verdict hash).
 func (r *VerdictRetainer) Retain(mem *hindsight.ExecutionMemory) {
 	if r == nil || mem == nil || r.client == nil || !r.client.IsEnabled() {
 		return
 	}
+	h := sha256.Sum256([]byte(mem.ExecutionResult.Output))
+	key := mem.BeadID.String() + "|" + hex.EncodeToString(h[:])
+	r.seenMu.Lock()
+	if r.seen == nil {
+		r.seen = map[string]struct{}{}
+	}
+	if _, dup := r.seen[key]; dup {
+		r.seenMu.Unlock()
+		log.Printf("[VerdictRetainer] duplicate verdict for bead %s (hash %s) — consumed, not retained", mem.BeadID, key[len(key)-12:])
+		return
+	}
+	r.seen[key] = struct{}{}
+	r.seenMu.Unlock()
 	if _, err := r.client.Retain(mem); err != nil {
 		log.Printf("[VerdictRetainer] retain failed for bead %s: %v", mem.BeadID, err)
 	}

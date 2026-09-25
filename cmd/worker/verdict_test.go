@@ -51,6 +51,32 @@ func TestParseVerdictAbandon(t *testing.T) {
 	}
 }
 
+func TestNormalizeVerdictHollowGreen(t *testing.T) {
+	v := parseVerdict(`HYDRA_VERDICT: {"done": true, "ac_met": ["exit 0, 9 tests"], "ac_unmet": [],
+"verification": [{"cmd": "npx jest", "result": "exit 0, 9 tests (it.failing)"}, {"cmd": "npx jest e2e", "result": "Cannot find module '../e2e-harness'"}]}`)
+	if v == nil || !v.Done {
+		t.Fatalf("verdict should parse as done before normalization: %+v", v)
+	}
+	nv := normalizeVerdict(v)
+	if nv.Done {
+		t.Errorf("done verdict with load-crash evidence must be downgraded, got done=true")
+	}
+	if !nv.HollowGreen {
+		t.Errorf("HollowGreen flag not set")
+	}
+	if len(nv.ACUnmet) == 0 {
+		t.Errorf("load errors must be recorded as unmet ACs")
+	}
+}
+
+func TestNormalizeVerdictCleanPassUnchanged(t *testing.T) {
+	v := parseVerdict(`HYDRA_VERDICT: {"done": true, "verification": [{"cmd": "go test ./...", "result": "ok 0.5s, 17 passed"}]}`)
+	nv := normalizeVerdict(v)
+	if !nv.Done || nv.HollowGreen || len(nv.ACUnmet) != 0 {
+		t.Errorf("clean pass must not be downgraded: %+v", nv)
+	}
+}
+
 func TestDecideTurnEnd(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -64,6 +90,7 @@ func TestDecideTurnEnd(t *testing.T) {
 		{"unmet ACs nudge with list", `{"done": true, "ac_unmet": ["req-003"]}`, 0, true, "req-003"},
 		{"abandon does not nudge", `{"done": false, "summary": "blocked"}`, 0, false, ""},
 		{"cap stops nudging", ``, 3, false, ""},
+		{"hollow-green nudges with reason", `{"done": false, "hollow_green": true, "ac_unmet": ["load errors"], "summary": "downgraded"}`, 0, true, "hollow-green"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -99,4 +126,41 @@ func mustRPC(t *testing.T, prompt string) string {
 		t.Fatalf("rpcPromptLine: %v", err)
 	}
 	return string(b)
+}
+
+func TestDedupVerdict_FirstPassSecondConsumed(t *testing.T) {
+	v := &Verdict{Done: true, Summary: "x"}
+	if got := dedupVerdict("hydra-dup1", v); got != v {
+		t.Fatal("first emission must pass through")
+	}
+	if got := dedupVerdict("hydra-dup1", v); got != nil {
+		t.Fatalf("duplicate emission must be consumed, got %+v", got)
+	}
+}
+
+func TestDedupVerdict_DifferentVerdictSameBeadPasses(t *testing.T) {
+	v1 := &Verdict{Done: true, Summary: "x"}
+	v2 := &Verdict{Done: false, Summary: "still working"}
+	if got := dedupVerdict("hydra-dup2", v1); got != v1 {
+		t.Fatal("first emission must pass through")
+	}
+	if got := dedupVerdict("hydra-dup2", v2); got != v2 {
+		t.Fatal("different verdict for same bead must pass through")
+	}
+}
+
+func TestDedupVerdict_SameVerdictDifferentBeadPasses(t *testing.T) {
+	v := &Verdict{Done: true}
+	if got := dedupVerdict("hydra-dup3", v); got != v {
+		t.Fatal("first bead emission must pass through")
+	}
+	if got := dedupVerdict("hydra-dup4", v); got != v {
+		t.Fatal("same verdict for a different bead must pass through")
+	}
+}
+
+func TestDedupVerdict_NilVerdictNoop(t *testing.T) {
+	if got := dedupVerdict("hydra-dup5", nil); got != nil {
+		t.Fatal("nil verdict must stay nil")
+	}
 }

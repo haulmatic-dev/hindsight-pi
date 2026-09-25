@@ -223,6 +223,7 @@ from a measured pathology:
    a `### What failed last time` fenced block in the fix bead's description —
    the retry starts from evidence, not from zero. Verified live: 26/26 fix
    beads in run B1 carried cause blocks.
+1b. **Verify-first (2026-09-25, the tin0/jx78 redo):** fix-bead prompts now open with a step-0 VERIFY-FIRST directive and the description carries a `### Original verdict already recorded` fenced block — `ExtractRecordedVerdict` pulls the original's HYDRA_VERDICT (ac_met list verbatim) from the newest worker log. The fix worker re-runs the original's verification commands first; if they pass it closes citing that evidence without modifying files. Also: fix-bead `phaseGuidance` (cmd/worker) leads with the same directive. Defense in depth with the Pan FIX-AUDIT close; the worker directive is the last resort when Pan's re-verification is inconclusive.
 2. **Deduped:** an open/in-progress fix bead for the same original blocks a
    duplicate (`fix_deduped` event). *Known gap:* fix beads created by the TDD
    validation path bypass this — run D3 produced five identical FR
@@ -329,7 +330,18 @@ the worker it observes.
 verdict by turn end → the **worker** nudges in-session
 (`HYDRA_MAX_NUDGES`, default 3), not a kill. The old behavior — judge
 completion by exit code and `git diff` alone — is how finished work got
-rejected as `empty-diff`.
+rejected as `empty-diff`. Verdict acceptance also runs the **hollow-green
+gate** (`normalizeVerdict`): a `done:true` verdict whose verification
+entries quote suite load crashes (`Cannot find module`, `Test suite
+failed to run`, `SyntaxError`) is downgraded to `done:false` with the
+load errors recorded as unmet ACs — expected-failure wrappers over suites
+that fail to import are not written tests (ajantha-srv-telematics RED
+bead, 2026-09-25). Emission is **idempotent per bead** (2026-09-25, bead
+gwce follow-up): `dedupVerdict` (worker, key = bead ID + SHA-256 of the
+normalized verdict JSON) consumes a re-emitted identical verdict at
+acceptance, and `VerdictRetainer.Retain` (daemon) consumes a duplicate
+verdict-memory write per (bead_id, output hash); a verdict whose content
+genuinely changed still passes both gates.
 
 **Park-and-resume.** Error classification is **marker-first** (`park.go`
 `decideParkClass`): Kimi's error `type` field lies — overload arrives as
@@ -364,7 +376,7 @@ that are READY but have no live worker row because they hit retry exhaustion
 or a spawn failure. Without these candidates Pan cannot judge the blockers
 that would otherwise deadlock the fleet (e.g. a worktree conflict that
 exhausts retries while the pool still reports phantom placeholders). Fail-open:
-Pan down or unparseable advice → the deterministic rules below still run. **Disabled** until configured with its own provider key
+Pan down or unparseable advice → the deterministic rules below still run. Since 2026-09-25 Pan also carries the closure-audit duty: open auto-fix beads (`auto-fix` label, type `fix`) become `FIX-AUDIT:` candidates carrying the original close reason, any recorded HYDRA_VERDICT snippet, and a daemon-side re-verification (the original bead's scoped test gate re-run in the inherited worktree, cached 30m). A verdict claiming done plus a verified re-check lets Pan `close_satisfied` the fix bead before a worker redoes finished work; a contradiction lets the fix proceed and flags the original verdict as hollow — a recorded verdict alone never closes anything (the jx78 case: done:true recorded while the suites failed at load, 0 tests ran). **Disabled** until configured with its own provider key
 (`shepherd.pan` in config; see `hydra-config.yaml.example` for a `minimax` / `MiniMax-M2.7` configuration) — it must not
 share the fleet's Kimi account.
 

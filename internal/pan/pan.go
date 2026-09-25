@@ -54,6 +54,33 @@ type BlockedBead struct {
 // Nil means "none" and must never panic.
 type BlockedBeadsFunc func() []BlockedBead
 
+// FixBead is an open auto-fix bead together with the recorded evidence of the
+// original closure it exists to redo. Pan's closure-audit duty: judge whether
+// a worker still needs to redo finished work before one is spawned.
+type FixBead struct {
+	BeadID          string
+	OriginalID      string // original bead the fix was created for
+	CloseReason     string // why the original closed as failed
+	RecordedVerdict string // HYDRA_VERDICT (or equivalent) recorded with the original closure; "" if none
+}
+
+// FixVerification is the outcome of a cheap re-verification of the original
+// verdict's own evidence in the inherited worktree. Status is one of
+// "verified", "contradicted", "unknown".
+type FixVerification struct {
+	Status string
+	Detail string
+}
+
+// FixBeadsFunc returns the current set of open auto-fix beads. Nil means
+// "none" and must never panic.
+type FixBeadsFunc func() []FixBead
+
+// FixVerifierFunc cheaply re-verifies a fix bead's original verdict by running
+// the verdict's own commands in the inherited worktree. Must never panic;
+// return Status "unknown" on any doubt.
+type FixVerifierFunc func(fixBeadID, originalID string) FixVerification
+
 // Config tunes Pan. A zero Config is valid and disabled.
 type Config struct {
 	Enabled  bool
@@ -86,6 +113,12 @@ type Config struct {
 	// (retry exhaustion, spawn failure, worktree conflict, etc.). Pan unions
 	// these with registry-derived candidates. Nil means "none" and is fail-open.
 	BlockedBeads BlockedBeadsFunc
+
+	// FixBeads returns open auto-fix beads for the closure-audit sweep. Pan
+	// judges each: verdict says done AND re-verification confirms → close_satisfied
+	// before a worker redoes finished work; verification contradicts the verdict
+	// → let the fix proceed and flag the original verdict as hollow. Nil disables.
+	FixBeads FixBeadsFunc
 
 	// TrajectoryFunc gathers tier-1 mechanical trajectory telemetry for a live
 	// worker (pi session parsing on the daemon side). Called from Candidates
@@ -463,6 +496,13 @@ type Shepherd struct {
 	repairLimits  map[string]time.Time // bead → last repair run
 	repairResults map[string]error     // bead → last repair error (for rate-limit detail)
 
+	// fixVerify is the closure-audit re-verifier; fixVerCache rate-limits it:
+	// re-verification runs real commands, so each bead is verified at most
+	// once per fixVerTTL (unknown results retry on the same horizon).
+	fixVerify    FixVerifierFunc
+	fixVerMu     sync.Mutex
+	fixVerCache  map[string]fixVerEntry
+
 	// scanLive records which beads held a live (working/parked) worker row at
 	// the most recent Candidates() scan. Tick uses it to tell worker-origin
 	// decisions from blocked-origin ones at decision-execution time (br-4y5,
@@ -486,6 +526,33 @@ type Shepherd struct {
 
 	judgeFailures int  // consecutive pi-invocation failures (reset on success)
 	judgeDegraded bool // loud degraded signal already fired for this outage
+}
+
+const fixVerifyCacheTTL = 30 * time.Minute
+
+type fixVerEntry struct {
+	ver FixVerification
+	at  time.Time
+}
+
+// fixVerification returns the (rate-limited) re-verification result for a fix
+// bead. Verified/contradicted results are cached for fixVerifyCacheTTL; the
+// verifier runs real gate commands, so it must never fire every tick.
+func (s *Shepherd) fixVerification(fixBeadID, originalID string) FixVerification {
+	s.fixVerMu.Lock()
+	defer s.fixVerMu.Unlock()
+	if e, ok := s.fixVerCache[fixBeadID]; ok && time.Since(e.at) < fixVerifyCacheTTL {
+		return e.ver
+	}
+	ver := FixVerification{Status: "unknown", Detail: "no verifier configured"}
+	if s.fixVerify != nil {
+		ver = s.fixVerify(fixBeadID, originalID)
+	}
+	if s.fixVerCache == nil {
+		s.fixVerCache = make(map[string]fixVerEntry)
+	}
+	s.fixVerCache[fixBeadID] = fixVerEntry{ver: ver, at: time.Now()}
+	return ver
 }
 
 // recordVerdict notes a non-terminal decision (continue/steer/compact) so
@@ -567,6 +634,16 @@ func (s *Shepherd) SetOnRepairEvent(fn func(beadID, action, result, detail strin
 // SetBlockedBeads injects the optional blocked-bead source.
 func (s *Shepherd) SetBlockedBeads(fn BlockedBeadsFunc) {
 	s.cfg.BlockedBeads = fn
+}
+
+// SetFixBeads injects the optional open auto-fix bead source (closure audit).
+func (s *Shepherd) SetFixBeads(fn FixBeadsFunc) {
+	s.cfg.FixBeads = fn
+}
+
+// SetFixVerifier injects the optional cheap re-verifier for fix-bead audits.
+func (s *Shepherd) SetFixVerifier(fn FixVerifierFunc) {
+	s.fixVerify = fn
 }
 
 // SetTerminalBead injects the optional terminal-bead detector.
@@ -1046,6 +1123,34 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 		}
 	}
 
+	// Closure-audit sweep: open auto-fix beads whose original closed as failed.
+	// Judgment duty: verdict says done AND re-verification confirms → close
+	// the fix before a worker redoes finished work; verification contradicts
+	// the verdict → let the fix proceed and flag the verdict as hollow
+	// (jx78, 2026-09-25: recorded done:true proved hollow — suites failed at
+	// load, 0 tests ran).
+	if s.cfg.FixBeads != nil {
+		for _, f := range s.cfg.FixBeads() {
+			if live[f.BeadID] {
+				continue
+			}
+			if IsPseudoBeadID(f.BeadID) {
+				continue
+			}
+			ver := s.fixVerification(f.BeadID, f.OriginalID)
+			reason := fmt.Sprintf("FIX-AUDIT: open auto-fix bead for original %s (close reason: %s)",
+				f.OriginalID, truncate(f.CloseReason, 160))
+			if f.RecordedVerdict != "" {
+				reason += "; recorded verdict: " + truncate(f.RecordedVerdict, 160)
+			}
+			reason += fmt.Sprintf("; re-verification: %s — %s", ver.Status, truncate(ver.Detail, 200))
+			out = append(out, Candidate{
+				Record: registry.WorkerRecord{BeadID: f.BeadID},
+				Reason: reason,
+			})
+		}
+	}
+
 	// Fleet health digest: Pan's eyes. Projects carrying anomaly flags become
 	// campaign-anomaly pseudo-candidates even when no bead-level class fires —
 	// the fix for the 2026-09-13→16 silence, where gate execution, close
@@ -1171,10 +1276,15 @@ needs a judgment call. For EVERY worker decide exactly one action:
 - "steer": inject guidance into the live session (payload: the steering message)
 - "compact-and-continue": session context is exhausted; compact then continue
 - "abandon-with-summary": give up gracefully (payload: what was done and what remains)
-- "close_satisfied": the bead's acceptance criteria are already met on the working branch and the worker found nothing to do; close it without a worker
+- "close_satisfied": the bead's acceptance criteria are already met on the working branch and the worker found nothing to do; close it without a worker. For FIX-AUDIT candidates this closes the redundant fix bead after the satisfied gate re-proves acceptance daemon-side.
 - "repair:<name>": execute a whitelisted daemon-side repair (payload: for log-improvement, the improvement text; ignored otherwise). Only for BLOCKED beads with no live worker row. The only valid repair names are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park, prune-worktree-registration, re-push-integration, park-campaign, log-improvement, integrate-stranded. No other repair:<name> strings exist; if none fit, choose continue or abandon-with-summary.
 
 Rescue recipes (hard-won; prefer the repair matching the cause):
+- FIX-AUDIT candidates are OPEN auto-fix beads whose original bead closed as failed; each reason carries the close reason, any recorded verdict, and a re-verification status of the original evidence in the inherited worktree. Judge whether a worker still needs to redo the work:
+  - Recorded verdict claims done AND re-verification says "verified" → "close_satisfied" (closing the fix prevents redoing finished work). Never close on a verdict alone: a recorded verdict can be hollow (jx78: done:true recorded while the suites failed at load, 0 tests ran).
+  - Re-verification says "contradicted" → "continue" (the fix must proceed); if the recorded verdict claims done, say in the message that the original verdict is hollow and cite the re-verification detail.
+  - Re-verification "unknown" → "continue" (keep the fix) unless the fix-bead description clearly shows acceptance already met.
+  - Never abandon-with-summary or repair: a FIX-AUDIT candidate.
 - Hard-park labels (worktree-unavailable, integration-exhausted) are durable by design — the scheduler never retries them. Use repair:clear-hard-park when the named cause is plausibly fixed or transient (worktree directory exists, store parses clean, push path repaired). Do not clear a park whose cause is still present.
 - Many BLOCKED beads with the same reason = a shared wedge. Prefer one repair:prune-worktree-registration (project-scoped) over per-bead repairs.
 - repair:reset-retries clears the retry counter after the underlying cause is fixed; useless while the cause persists.
