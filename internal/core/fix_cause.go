@@ -25,23 +25,8 @@ func ExtractFailureCause(logDir, beadID string, maxBytes int) string {
 		return ""
 	}
 
-	matches, err := filepath.Glob(filepath.Join(logDir, safeBeadID(beadID)+"-*.log"))
-	if err != nil || len(matches) == 0 {
-		return ""
-	}
-
-	// Newest file by modification time wins.
-	sort.Slice(matches, func(i, j int) bool {
-		fi, errI := os.Stat(matches[i])
-		fj, errJ := os.Stat(matches[j])
-		if errI != nil || errJ != nil {
-			return matches[i] > matches[j]
-		}
-		return fi.ModTime().After(fj.ModTime())
-	})
-
-	f, err := os.Open(matches[0])
-	if err != nil {
+	f := newestWorkerLog(logDir, beadID)
+	if f == nil {
 		return ""
 	}
 	defer f.Close()
@@ -119,6 +104,64 @@ func ExtractFailureCause(logDir, beadID string, maxBytes int) string {
 		parts[0] = parts[0][len(parts[0])-maxBytes:]
 	}
 	return strings.Join(parts, "\n")
+}
+
+// ExtractRecordedVerdict returns the HYDRA_VERDICT block the original worker
+// recorded in its final message, verbatim and bounded. Fix-bead prompts carry
+// it so the fix worker knows what the previous attempt already claimed (and
+// which ACs were already met) before redoing anything.
+func ExtractRecordedVerdict(logDir, beadID string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	f := newestWorkerLog(logDir, beadID)
+	if f == nil {
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	var lines []string
+	found := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !found && verdictPattern.FindStringIndex(payload(line)) != nil {
+			found = true
+		}
+		if found {
+			lines = append(lines, line)
+		}
+	}
+	if !found || len(lines) == 0 {
+		return ""
+	}
+	block := strings.Join(lines, "\n")
+	if len(block) > maxBytes {
+		block = block[:maxBytes]
+	}
+	return block
+}
+
+// newestWorkerLog opens the newest worker log for the given bead, or nil when
+// none exists. Newest wins by modification time.
+func newestWorkerLog(logDir, beadID string) *os.File {
+	matches, err := filepath.Glob(filepath.Join(logDir, safeBeadID(beadID)+"-*.log"))
+	if err != nil || len(matches) == 0 {
+		return nil
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		fi, errI := os.Stat(matches[i])
+		fj, errJ := os.Stat(matches[j])
+		if errI != nil || errJ != nil {
+			return matches[i] > matches[j]
+		}
+		return fi.ModTime().After(fj.ModTime())
+	})
+	f, err := os.Open(matches[0])
+	if err != nil {
+		return nil
+	}
+	return f
 }
 
 // safeBeadID mirrors the sanitisation openWorkerLogFile applies to bead IDs

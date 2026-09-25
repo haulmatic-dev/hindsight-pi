@@ -223,6 +223,7 @@ from a measured pathology:
    a `### What failed last time` fenced block in the fix bead's description —
    the retry starts from evidence, not from zero. Verified live: 26/26 fix
    beads in run B1 carried cause blocks.
+1b. **Verify-first (2026-09-25, the tin0/jx78 redo):** fix-bead prompts now open with a step-0 VERIFY-FIRST directive and the description carries a `### Original verdict already recorded` fenced block — `ExtractRecordedVerdict` pulls the original's HYDRA_VERDICT (ac_met list verbatim) from the newest worker log. The fix worker re-runs the original's verification commands first; if they pass it closes citing that evidence without modifying files. Also: fix-bead `phaseGuidance` (cmd/worker) leads with the same directive. Defense in depth with the Pan FIX-AUDIT close; the worker directive is the last resort when Pan's re-verification is inconclusive.
 2. **Deduped:** an open/in-progress fix bead for the same original blocks a
    duplicate (`fix_deduped` event). *Known gap:* fix beads created by the TDD
    validation path bypass this — run D3 produced five identical FR

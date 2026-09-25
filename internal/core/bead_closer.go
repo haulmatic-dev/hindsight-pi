@@ -543,7 +543,18 @@ func (c *BeadCloser) createFixBeadForFailedCloseWithExitCode(bead *types.Bead, p
 		description.WriteString(cause)
 		description.WriteString("\n```\n\n")
 	}
-	description.WriteString("Address the failure above, then re-run the original task and ensure it closes as `completed`.")
+	// Include the original attempt's recorded HYDRA_VERDICT verbatim (observed
+	// 2026-09-25: tin0, fix bead for jx78, spent 60+ min rewriting work the
+	// original had already committed green — its done verdict was never shown
+	// to the fix worker). Without it the fix worker cannot tell finished work
+	// from broken work.
+	if verdict := ExtractRecordedVerdict(workersLogDir(), priorityBeadID, 600); verdict != "" {
+		description.WriteString("### Original verdict already recorded (verify, do not blindly redo)\n\n")
+		description.WriteString("```\n")
+		description.WriteString(verdict)
+		description.WriteString("\n```\n\n")
+	}
+	description.WriteString("VERIFY FIRST: re-run the original task's verification commands against the worktree you inherited. If they all pass, close this fix bead immediately citing that evidence and do NOT modify files. Only redo what verification proves broken.")
 
 	req := types.CreateBeadRequest{
 		Title:        title,
