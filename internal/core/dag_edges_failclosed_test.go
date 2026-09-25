@@ -117,3 +117,20 @@ func TestIsHoldBead(t *testing.T) {
 		}
 	}
 }
+
+// TestShouldSpawnWorker_RejectsHoldBead: the spawn funnel itself must refuse
+// HOLD gates — enumeration-site filters leak (zibq was DAG-ready with
+// InDegree 0, passed BV-Plan + filterByDAG, and was executed-and-closed via
+// the immediate-scheduling path on 2026-09-25, hours after mz0v died the
+// same way through the enumeration-site gap).
+func TestShouldSpawnWorker_RejectsHoldBead(t *testing.T) {
+	s, _ := newTestScheduler(t, 5, GovernorConfig{})
+	hold := &Node{Bead: types.Bead{ID: "gate-1", Title: "HOLD: campaign paused", Status: types.StatusOpen}}
+	if s.ShouldSpawnWorker(hold) {
+		t.Fatal("ShouldSpawnWorker returned true for a HOLD gate bead")
+	}
+	normal := &Node{Bead: types.Bead{ID: "work-1", Title: "RED: write tests", Type: "test", Status: types.StatusOpen}}
+	if !s.ShouldSpawnWorker(normal) {
+		t.Fatal("ShouldSpawnWorker returned false for a normal open bead")
+	}
+}

@@ -745,5 +745,15 @@ func (s *Scheduler) ShouldSpawnWorker(node *Node) bool {
 		log.Printf("Skipping epic (organizational): %s", beadID)
 		return false
 	}
+	// HOLD gates are dependencies, not work. This is the spawn funnel —
+	// enumeration-site filters alone leak: the immediate-scheduling path
+	// (BV-Plan candidates → filterByDAG → SpawnWorkersForNodes) reaches a
+	// ready HOLD bead directly, and a worker that executes it closes the gate
+	// and silently unblocks everything parked behind it (telematics mz0v and
+	// zibq, both executed-and-closed within hours, 2026-09-25).
+	if isHoldBead(node.Bead) {
+		log.Printf("⏸️  Skipping HOLD bead at spawn funnel (gate; closes via operator, not worker): %s", beadID)
+		return false
+	}
 	return true
 }

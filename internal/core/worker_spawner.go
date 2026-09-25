@@ -384,6 +384,16 @@ const worktreeUnavailableLabel = "worktree-unavailable"
 func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 	beadIDStr := bead.ID.String()
 
+	// Last-line defense: never spawn a worker on a HOLD gate, no matter which
+	// path reached the spawner. A worker treats any bead as work and closes
+	// it; for a gate that silently releases every dependent (mz0v, zibq —
+	// 2026-09-25).
+	if isHoldBead(bead) {
+		err := fmt.Errorf("refusing to spawn worker on HOLD gate bead: %s", beadIDStr)
+		log.Printf("⏸️  %v", err)
+		return nil, err
+	}
+
 	agentTypes := types.DetermineAgentTypes(bead.Type)
 	if len(agentTypes) == 0 {
 		err := fmt.Errorf("no agent type found for bead type: %s", bead.Type)
