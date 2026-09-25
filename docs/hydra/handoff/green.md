@@ -1,16 +1,20 @@
 # green handoff
 
 ## What changed (files + one line each)
-- cmd/worker/main.go: moved execution-report write out of executeWithPi into runWorker (after Duration/Attempts final); added ExecutionResult.TurnCount set from rpc turn count; record now includes `turns`; readExecutionOutputFromFile parses duration/attempts/turns/tokens.
-- cmd/worker/execution_report_test.go: new round-trip regression test proving attempts=3/turns=12/duration=7m/tokens survive write+read.
-- CHANGELOG.md: Fixed entries for the telemetry bug and the HYDRA_VERDICT re-entry investigation.
+- internal/pan/pan.go: added FixBead/FixVerification/FixBeadsFunc/FixVerifierFunc types, Config.FixBeads, SetFixBeads/SetFixVerifier, 30-minute-cached fixVerification(), FIX-AUDIT candidates in Candidates() (suppressed on live worker rows and pseudo-beads), and closure-audit judgment rules in BuildPrompt (verdict+verified → close_satisfied; contradicted → continue + flag verdict hollow; unknown → keep fix).
+- internal/core/fix_audit.go: BuildFixBeads (scans projects for open auto-fix/fix-type beads, extracts close reason + recorded HYDRA_VERDICT snippet) and BuildFixVerifier (re-runs the original bead's scoped test gate in the original's inherited worktree; verified/contradicted/unknown on doubt).
+- internal/core/service_starter.go: wires SetFixBeads + SetFixVerifier into the Pan shepherd.
+- internal/pan/fix_audit_test.go, internal/core/fix_audit_test.go: regression tests.
+- CHANGELOG.md, docs/architecture/shepherd.md: operator-facing entries.
 
 ## Verification (commands run + pass/fail)
-- `go build ./...` — pass.
-- `go vet ./cmd/worker/` — pass.
-- `go test ./cmd/worker/ -run TestExecutionReportRoundTrip` — PASS.
-- `go test ./cmd/worker/` — PASS (2.630s, full package).
+- `go build ./...` — PASS.
+- `go vet ./internal/pan/ ./internal/core/` — PASS.
+- `go test ./internal/pan/ -count=1` — PASS (full package).
+- `go test ./internal/core/ -run 'TestBuildFixVerifier|TestFixAuditExtraction|TestSatisfied|TestCloseSatisfied|TestBuildCloseSatisfied' -count=1` — PASS.
 
 ## Open edges for the next phase
-- HYDRA_VERDICT re-entry (bead gwce, done:true twice 2026-09-24): root cause is daemon-side integration failure, not worker telemetry. Log evidence: `[Integrate] FAILED ajantha-srv-telematics-gwce ... CONFLICT (modify/delete): test/jest-e2e.json deleted in HEAD and modified in hydra/wt-ajantha-srv-telematics-gwce` → close failed → bead re-executed → hard-parked `integration-exhausted`. Both runs parsed done:true with success=true. No code change made; a candidate fix lives in the integration-retest/reconciliation layer, not the worker.
-- Tokens in reports come from the whole cumulative rpc session turn stats (can exceed per-run spend when the session resumes); per-attempt attribution is a possible follow-up.
+- FixBeads scan lists every project's store every Pan tick (fail-open per store); if store counts grow, add a scan interval cache like shouldPresentPseudo.
+- close_satisfied on a FIX-AUDIT candidate follows the existing fail-closed satisfied gate (ratchet guard, acceptance command, scoped gates) — no new bypass introduced.
+- Recorded-verdict claim uses the description snippet only; hollow detection (`"done"` + `true` substring) is deliberately crude — the prompt instructs the judge to weigh it, not to trust it.
+- reJudgeInterval (15m) re-presents unchanged candidate sets; combined with the 30m fix-verifier cache this bounds gate runs to ≤1 per 30m per fix bead.

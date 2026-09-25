@@ -252,6 +252,10 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 			return len(changed) == 0, true
 		})
 		o.panShepherd.SetOnCloseSatisfied(BuildCloseSatisfied(o))
+		// Closure-audit duty: open auto-fix beads become judgment candidates;
+		// a recorded verdict alone never closes them (jx78 hollow verdict).
+		o.panShepherd.SetFixBeads(BuildFixBeads(o))
+		o.panShepherd.SetFixVerifier(BuildFixVerifier(o))
 		o.panShepherd.SetOnAbandonWithSummary(BuildAbandonWithSummary(o))
 
 		// Pan repair handlers: whitelisted daemon-side actions that clear
