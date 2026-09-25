@@ -313,20 +313,40 @@ func candidateSignature(cands []Candidate) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// judgmentUnchanged reports whether this candidate set is byte-identical
-// (by signature) to the last judged one AND the re-judge valve has not
-// expired. On skip it logs once; on change (or valve expiry) it records the
-// new signature and lets the tick proceed to judgment.
-func (s *Shepherd) judgmentUnchanged(cands []Candidate) bool {
-	sig := candidateSignature(cands)
+// freshCandidates filters out candidates whose state hash was already
+// judged within the re-judge valve, returning only those that need a fresh
+// judgment. Keyed PER CANDIDATE, not per set: a whole-set signature reset
+// whenever ANY candidate's volatile fields moved (token-budget counts,
+// digest text), re-judging stable parked candidates every tick — the
+// dup-continue trickle (2026-10-04: Pan re-judged a parked, already-pending
+// candidate every ~2min, each verdict a duplicate 'continue' the pending
+// queue then skipped; constant small GLM burn, zero new information).
+// The re-judge valve still backstops per candidate: a permanently stuck
+// candidate is re-presented at most every reJudgeInterval so verdict memory
+// (ContinuedRecently etc.) decays and heals. Entries older than the valve
+// are pruned so the cache cannot grow unbounded under candidate churn.
+func (s *Shepherd) freshCandidates(cands []Candidate) []Candidate {
+	out := make([]Candidate, 0, len(cands))
+	now := time.Now()
 	s.dedupMu.Lock()
 	defer s.dedupMu.Unlock()
-	if sig == s.lastSig && time.Since(s.lastJudgedAt) < reJudgeInterval {
-		return true
+	if s.judged == nil {
+		s.judged = make(map[string]time.Time)
 	}
-	s.lastSig = sig
-	s.lastJudgedAt = time.Now()
-	return false
+	for sig, at := range s.judged {
+		if now.Sub(at) > reJudgeInterval {
+			delete(s.judged, sig)
+		}
+	}
+	for _, c := range cands {
+		sig := candidateSignature([]Candidate{c})
+		if last, ok := s.judged[sig]; ok && now.Sub(last) < reJudgeInterval {
+			continue
+		}
+		s.judged[sig] = now
+		out = append(out, c)
+	}
+	return out
 }
 
 // shouldPresentPseudo rate-limits pseudo-bead candidacy: an unchanged
@@ -499,9 +519,9 @@ type Shepherd struct {
 	// fixVerify is the closure-audit re-verifier; fixVerCache rate-limits it:
 	// re-verification runs real commands, so each bead is verified at most
 	// once per fixVerTTL (unknown results retry on the same horizon).
-	fixVerify    FixVerifierFunc
-	fixVerMu     sync.Mutex
-	fixVerCache  map[string]fixVerEntry
+	fixVerify   FixVerifierFunc
+	fixVerMu    sync.Mutex
+	fixVerCache map[string]fixVerEntry
 
 	// scanLive records which beads held a live (working/parked) worker row at
 	// the most recent Candidates() scan. Tick uses it to tell worker-origin
@@ -517,9 +537,8 @@ type Shepherd struct {
 	pseudoMu   sync.Mutex
 	pseudoSeen map[string]pseudoSeenEntry // pseudo-bead → last presented reason
 
-	dedupMu      sync.Mutex
-	lastSig      string    // candidate-set signature of the last judgment
-	lastJudgedAt time.Time // when the last judgment ran (valve backstop)
+	dedupMu sync.Mutex
+	judged  map[string]time.Time // per-candidate state-hash → last judged (valve backstop)
 
 	efficacyMu     sync.Mutex
 	repairEfficacy map[string]int // repair key → consecutive attempts
@@ -692,7 +711,8 @@ func (s *Shepherd) Tick(ctx context.Context) {
 	if len(cands) == 0 {
 		return
 	}
-	if s.judgmentUnchanged(cands) {
+	cands = s.freshCandidates(cands)
+	if len(cands) == 0 {
 		return
 	}
 	log.Printf("[Pan] %d candidate(s) need judgment", len(cands))
