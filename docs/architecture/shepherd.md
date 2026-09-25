@@ -368,6 +368,28 @@ Pan down or unparseable advice → the deterministic rules below still run. **Di
 (`shepherd.pan` in config; see `hydra-config.yaml.example` for a `minimax` / `MiniMax-M2.7` configuration) — it must not
 share the fleet's Kimi account.
 
+**Pan tier-1 trajectory intelligence (2026-09-25).** Pan's candidate classes
+are failure-residue snapshots; a worker can look healthy (output flowing,
+tokens accruing, heartbeat fresh) while looping — the tin0 case: 73+ minutes
+redoing committed work. Tier-1 mechanical pre-filters close the gap cheaply.
+`TrajectoryFunc` (wired to `collectWorkerTrajectory` in `service_starter.go`)
+parses a live worker's pi session jsonl under
+`$HYDRA_HOME/sessions/<session-id>/` into a `pan.Trajectory` (turn count,
+test runs, edits since last test, most-repeated bash command). `Candidates`
+applies conservative thresholds — turns > 2× the bead-class baseline
+(SYNTAX 5, RED 20, GREEN 30, fix 10, default 40), same command ≥ 8 times,
+≥ 6 edits without an intervening test run, ≥ 8 test runs, ≥ 15 turns with
+edits but zero file-creating writes (no-new-files-in-N-turns), and one file
+re-edited ≥ 3 times since the last test run (same-file-reedited) — and only flagged
+workers become `TRAJECTORY:` candidates. The prompt's rescue-recipe catalog
+names the tier-2 protocol for TRAJECTORY candidates: converging → continue/
+steer with a specific redirect; goal already satisfied → close_satisfied
+with cited evidence; clearly looping → abandon-with-summary; slow-but-
+progressing must never be abandoned. Healthy trajectories never reach
+Pan's LLM: the tier-2 judgment budget follows the anomaly rate. Workers
+younger than 10 minutes are skipped (mid-first-turn grace). Fail-open: a
+missing/unreadable session disables the class for that bead.
+
 **Pan abandon audit and live-slot refusal.** Since 2026-09-11 every
 `abandon-with-summary` decision is audited with its rationale: one
 `[Pan] abandon-with-summary audit` line per decision logging the bead, the

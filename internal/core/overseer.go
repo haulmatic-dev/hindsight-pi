@@ -256,6 +256,19 @@ func NewOverseer(config *Config) *Overseer {
 	// Initialize DAG builder
 	o.dagBuilder = NewDAGBuilder(o.errorLogger)
 
+	// Prefer bv --robot-graph for DAG edges: one call per repo replaces the
+	// per-bead br show N+1 pattern (86 CLI calls per rebuild) that contended on
+	// the br store and silently dropped gate edges under load (2026-09-25).
+	if o.bvClient != nil {
+		o.dagBuilder.EdgeFetcher = func(projectPath, repoName string) (map[string][]string, error) {
+			dir := projectPath
+			if repoName != "" {
+				dir = projectPath + "/" + repoName
+			}
+			return o.bvClient.RobotGraphEdges(dir)
+		}
+	}
+
 	// Initialize impact analyzer
 
 	// Initialize worker environment builder + provider failover breaker

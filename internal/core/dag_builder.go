@@ -15,6 +15,11 @@ type DAGBuilder struct {
 	// listing so later resolution uses the real store even when several
 	// projects share a repo name.
 	Provenance *BeadProvenanceIndex
+	// EdgeFetcher, when set, returns the full dependency map (dependent ->
+	// blockers) for a repo in one call (bv --robot-graph). On success the
+	// per-bead GetBead loop is skipped entirely, eliminating the N+1 br show
+	// contention window (2026-09-25: lock contention dropped 43 gate edges).
+	EdgeFetcher func(projectPath, repoName string) (map[string][]string, error)
 }
 
 // NewDAGBuilder creates a new DAG builder.
@@ -22,6 +27,32 @@ func NewDAGBuilder(errorLogger *ErrorLogger) *DAGBuilder {
 	return &DAGBuilder{
 		errorLogger: errorLogger,
 	}
+}
+
+// depsUnknownMarker marks beads whose dependency set could not be determined.
+// GetReadyNodes treats them as blocked (fail-closed): a bead with unknown
+// dependencies must never schedule as ready, because the fallback list path
+// carries no edges and gates silently stop binding (2026-09-25 incident).
+const depsUnknownMarker = "deps_unknown"
+
+// markDepsUnknown flags a bead as having an undetermined dependency set.
+func markDepsUnknown(bead *types.Bead) {
+	if bead.Metadata == nil {
+		bead.Metadata = make(map[string]string)
+	}
+	bead.Metadata[depsUnknownMarker] = "true"
+}
+
+// toBeadIDs converts string IDs to BeadIDs.
+func toBeadIDs(ids []string) []types.BeadID {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]types.BeadID, len(ids))
+	for i, id := range ids {
+		out[i] = types.BeadID(id)
+	}
+	return out
 }
 
 // note records the listed bead IDs against their source path.
@@ -67,6 +98,17 @@ func (b *DAGBuilder) Build(dag *DAG, beadsClient BeadsClient, projects []types.P
 			}
 			b.note(project.Path, beads)
 
+			if b.EdgeFetcher != nil {
+				if deps, err := b.EdgeFetcher(project.Path, ""); err == nil {
+					for i := range beads {
+						beads[i].Dependencies = toBeadIDs(deps[string(beads[i].ID)])
+					}
+					allBeads = append(allBeads, beads...)
+					continue
+				}
+				log.Printf("[DAG] EdgeFetcher failed for %s, falling back to per-bead fetch", project.Name)
+			}
+
 			for _, bead := range beads {
 				fullBead, err := beadsClient.GetBead(project.Path, "", bead.ID)
 				if err != nil {
@@ -76,7 +118,8 @@ func (b *DAGBuilder) Build(dag *DAG, beadsClient BeadsClient, projects []types.P
 						Err:     err,
 					}
 					b.errorLogger.GracefulDegradation("beadsClient", "GetBead",
-						fmt.Sprintf("using list data for %s", bead.ID), fetchErr)
+						fmt.Sprintf("marking deps unknown for %s", bead.ID), fetchErr)
+					markDepsUnknown(&bead)
 					allBeads = append(allBeads, bead)
 				} else {
 					allBeads = append(allBeads, *fullBead)
@@ -100,6 +143,17 @@ func (b *DAGBuilder) Build(dag *DAG, beadsClient BeadsClient, projects []types.P
 				sourcePath := resolveRepoPath(project, repo)
 				b.note(sourcePath, beads)
 
+				if b.EdgeFetcher != nil {
+					if deps, err := b.EdgeFetcher(project.Path, repo.Name); err == nil {
+						for i := range beads {
+							beads[i].Dependencies = toBeadIDs(deps[string(beads[i].ID)])
+						}
+						allBeads = append(allBeads, beads...)
+						continue
+					}
+					log.Printf("[DAG] EdgeFetcher failed for %s/%s, falling back to per-bead fetch", project.Name, repo.Name)
+				}
+
 				for _, bead := range beads {
 					fullBead, err := beadsClient.GetBead(project.Path, repo.Name, bead.ID)
 					if err != nil {
@@ -110,7 +164,8 @@ func (b *DAGBuilder) Build(dag *DAG, beadsClient BeadsClient, projects []types.P
 							Err:     err,
 						}
 						b.errorLogger.GracefulDegradation("beadsClient", "GetBead",
-							fmt.Sprintf("using list data for %s", bead.ID), fetchErr)
+							fmt.Sprintf("marking deps unknown for %s", bead.ID), fetchErr)
+						markDepsUnknown(&bead)
 						allBeads = append(allBeads, bead)
 					} else {
 						allBeads = append(allBeads, *fullBead)

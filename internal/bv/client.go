@@ -298,6 +298,63 @@ func (c *Client) GetRelatedBeads(projectPath string, beadID string) (*RelatedBea
 	return executeRobotCommand[RelatedBeadsResponse](c, projectPath, "--robot-related", extraArgs)
 }
 
+// graphEdge is one edge in bv --robot-graph adjacency output.
+type graphEdge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Type string `json:"type"`
+}
+
+// robotGraphResponse mirrors bv --robot-graph JSON (adjacency.nodes/edges).
+type robotGraphResponse struct {
+	Adjacency struct {
+		Edges []graphEdge `json:"edges"`
+	} `json:"adjacency"`
+}
+
+// RobotGraphEdges returns the dependency map for a repo in ONE bv call
+// (dependent -> blockers), replacing the per-bead `br show` N+1 pattern that
+// contended on the br store during DAG rebuilds (2026-09-25: 43 gate edges
+// silently dropped when br show failed under lock contention).
+//
+// bv edge semantics: {from: X, to: Y, type: "blocks"} means Y blocks X, i.e.
+// X depends on Y. Only "blocks" edges constrain scheduling; other types
+// (parent-child, discovered-from) are structural, not ordering constraints.
+//
+// Unlike the other robot commands this does NOT degrade to an empty success:
+// an empty edge map is a valid graph state, so callers cannot distinguish
+// "no edges" from "bv broken". Error propagates; caller decides fail policy.
+func (c *Client) RobotGraphEdges(projectPath string) (map[string][]string, error) {
+	if !c.IsHealthy() {
+		return nil, fmt.Errorf("bv unhealthy")
+	}
+
+	var output []byte
+	var err error
+	if projectPath != "" {
+		output, err = c.execInDir(projectPath, "bv", "--robot-graph", "--format", "json")
+	} else {
+		output, err = c.exec("bv", "--robot-graph", "--format", "json")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("bv --robot-graph failed: %w", err)
+	}
+
+	var resp robotGraphResponse
+	if err := json.Unmarshal(output, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse --robot-graph JSON: %w", err)
+	}
+
+	deps := make(map[string][]string, len(resp.Adjacency.Edges))
+	for _, e := range resp.Adjacency.Edges {
+		if e.Type != "blocks" {
+			continue
+		}
+		deps[e.From] = append(deps[e.From], e.To)
+	}
+	return deps, nil
+}
+
 // GetImpactNetwork retrieves bead impact network
 func (c *Client) GetImpactNetwork(projectPath string, beadID string) (*ImpactNetworkResponse, error) {
 	var extraArgs []string

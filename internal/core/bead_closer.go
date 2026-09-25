@@ -5,31 +5,33 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // BeadCloser closes beads via beadsClient based on worker completion status.
 type BeadCloser struct {
-	sessionMu         sync.Mutex
-	sessionBase       map[string]string // bead ID -> branch HEAD commit recorded at spawn; close-time committed evidence starts here
-	integMu           sync.Mutex
-	integFails        map[string]int       // bead ID -> consecutive integrate/push failures (reset on success; in-memory like other caps)
-	sourceIndex       *BeadProvenanceIndex // nil-safe; bead->store provenance
-	beadsClient       BeadsClient
-	intelligenceHub   *IntelligenceHub
-	projectResolver   *ProjectResolver
-	validationService *ValidationService
-	config            *Config
-	events            *EventSink              // nil-safe; structured decision stream (Shepherd C1)
-	worktreeManager   *WorktreeManager        // per-chain git isolation; nil = disabled
-	chainKeyFn        func(types.Bead) string // maps a bead to its chain's worktree key
-	isChainMember     func(types.BeadID) bool // reports whether a bead belongs to a registered multi-bead chain
-	retainer          *VerdictRetainer        // nil-safe; Hindsight verdict retention (Shepherd D3)
-	gateRunner        *GateRunner             // nil until SetGateRunner; daemon_owned projects fail closed without it
-	retryManager      *RetryManager           // clears retry residue on verified close
-	workerSpawner     *WorkerSpawner          // clears spawn-failure residue on verified close
-	sessionResumePilot *SessionResumePilot    // session-file resume quality metrics
+	sessionMu          sync.Mutex
+	sessionBase        map[string]string // bead ID -> branch HEAD commit recorded at spawn; close-time committed evidence starts here
+	integMu            sync.Mutex
+	integFails         map[string]int       // bead ID -> consecutive integrate/push failures (reset on success; in-memory like other caps)
+	integLastFail      map[string]time.Time // bead ID -> last integrate failure time (rapid-fire contention detection)
+	sourceIndex        *BeadProvenanceIndex // nil-safe; bead->store provenance
+	beadsClient        BeadsClient
+	intelligenceHub    *IntelligenceHub
+	projectResolver    *ProjectResolver
+	validationService  *ValidationService
+	config             *Config
+	events             *EventSink              // nil-safe; structured decision stream (Shepherd C1)
+	worktreeManager    *WorktreeManager        // per-chain git isolation; nil = disabled
+	chainKeyFn         func(types.Bead) string // maps a bead to its chain's worktree key
+	isChainMember      func(types.BeadID) bool // reports whether a bead belongs to a registered multi-bead chain
+	retainer           *VerdictRetainer        // nil-safe; Hindsight verdict retention (Shepherd D3)
+	gateRunner         *GateRunner             // nil until SetGateRunner; daemon_owned projects fail closed without it
+	retryManager       *RetryManager           // clears retry residue on verified close
+	workerSpawner      *WorkerSpawner          // clears spawn-failure residue on verified close
+	sessionResumePilot *SessionResumePilot     // session-file resume quality metrics
 }
 
 // SetWorktreeManager enables commit-on-close and singleton integrate-on-close
@@ -414,6 +416,43 @@ const integrationExhaustedLabel = "integration-exhausted"
 // burned four full worker cycles in four minutes this way (2026-09-16).
 const maxConsecutiveIntegrationFailures = 3
 
+// integrationBackoffBase is the delay before the first integrate retry; it
+// grows exponentially per consecutive failure. A retry arriving sooner than
+// the base is rapid-fire contention and does not advance the cap.
+const integrationBackoffBase = 30 * time.Second
+
+// integrationBackoffMax caps the exponential backoff between integrate retries.
+const integrationBackoffMax = 8 * time.Minute
+
+// extractConflictPaths pulls the file paths out of a git merge failure's
+// stderr ("CONFLICT (content): Merge conflict in CHANGELOG.md" etc.) so the
+// exhaustion event names the contended files. Fail-open: no matches = nil.
+func extractConflictPaths(detail string) []string {
+	var paths []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(detail, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "CONFLICT") {
+			continue
+		}
+		for _, sep := range []string{"Merge conflict in ", "add/rm conflict in ", "rename/rename conflict in ", "modify/delete: "} {
+			if idx := strings.Index(line, sep); idx >= 0 {
+				path := strings.TrimSpace(line[idx+len(sep):])
+				if i := strings.IndexAny(path, " \t(:"); i >= 0 {
+					path = strings.TrimRight(path[:i], " :(")
+				}
+				path = strings.Trim(path, " :(")
+				if path != "" && !seen[path] {
+					seen[path] = true
+					paths = append(paths, path)
+				}
+				break
+			}
+		}
+	}
+	return paths
+}
+
 // escalatedLabel is the durable marker for beads a verified-close rejection
 // escalated to a human at max attempts. Unlike a status, a label is visible
 // to every consumer that decides respawn: Charon orphan recovery, the
@@ -653,6 +692,22 @@ func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, st
 	detail := cause.Error()
 	log.Printf("[Integrate] FAILED %s at %s: %s — bead left open, worktree preserved", beadID, stage, detail)
 
+	// Contention backoff: parallel same-repo closes merge conflicting
+	// CHANGELOG.md/.gitignore entries within seconds of each other (telematics
+	// cd8h/yc2/tg7g/rylg, 2026-09-24: three failures in eleven minutes, none
+	// backoff-spaced). Space retries exponentially before the caller re-enters
+	// integration; rapid-fire re-entry (arriving before the backoff horizon)
+	// is contention, not a distinct failure, and does not advance the cap.
+	c.integMu.Lock()
+	last := c.integLastFail[beadID]
+	now := time.Now()
+	if c.integLastFail == nil {
+		c.integLastFail = map[string]time.Time{}
+	}
+	c.integLastFail[beadID] = now
+	c.integMu.Unlock()
+	rapidFire := !last.IsZero() && now.Sub(last) < integrationBackoffBase
+
 	// Terminal bead: integration already happened on a previous close attempt;
 	// do not resurrect (same guard as rejectClose).
 	if c.beadsClient != nil {
@@ -672,9 +727,21 @@ func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, st
 	if c.integFails == nil {
 		c.integFails = map[string]int{}
 	}
-	c.integFails[beadID]++
+	if rapidFire {
+		log.Printf("[Integrate] %s rapid-fire retry (%v since last failure) — contention, not counted toward exhaustion cap", beadID, now.Sub(last).Round(time.Second))
+	} else {
+		c.integFails[beadID]++
+	}
 	failures := c.integFails[beadID]
 	c.integMu.Unlock()
+	if !rapidFire {
+		delay := integrationBackoffBase * time.Duration(1<<min(failures-1, 4)) // 30s,1m,2m,4m,8m capped
+		if delay > integrationBackoffMax {
+			delay = integrationBackoffMax
+		}
+		log.Printf("[Integrate] %s backing off %v before next integrate attempt", beadID, delay)
+		time.Sleep(delay)
+	}
 
 	if c.beadsClient != nil {
 		if err := c.beadsClient.UpdateBeadStatus(projectPath, bead.ID, types.StatusOpen); err != nil {
@@ -687,12 +754,18 @@ func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, st
 			// the one every respawn path (scheduler, Charon, Pan) already
 			// skips; only Pan repair or a human clears it.
 			labels = append(labels, integrationExhaustedLabel)
+			conflictPaths := extractConflictPaths(detail)
+			evtFields := map[string]any{}
+			if len(conflictPaths) > 0 {
+				evtFields["conflict_paths"] = conflictPaths
+			}
 			c.events.EmitRepo(projectPath, Event{Type: "integration-exhausted", Project: repoName,
 				Bead: beadID, Reason: "consecutive_failures_capped",
-				Detail: fmt.Sprintf("%d consecutive integration failures (last at %s: %s) — hard-parked", failures, stage, detail)})
+				Detail: fmt.Sprintf("%d consecutive integration failures (last at %s: %s) — hard-parked", failures, stage, detail),
+				Fields: evtFields})
 			AppendActivity(projectPath, beadID, "integration-exhausted: hard-parked")
-			log.Printf("[Integrate] %s hit %d consecutive integration failures — labeled %s (hard-park; clear only when the cause is fixed)",
-				beadID, failures, integrationExhaustedLabel)
+			log.Printf("[Integrate] %s hit %d consecutive integration failures — labeled %s (hard-park; clear only when the cause is fixed) conflict_paths=%v",
+				beadID, failures, integrationExhaustedLabel, conflictPaths)
 		}
 		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, labels); err != nil {
 			log.Printf("[Integrate] Failed to label %s: %v", beadID, err)

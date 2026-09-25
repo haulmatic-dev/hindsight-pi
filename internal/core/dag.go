@@ -4,6 +4,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -228,15 +229,27 @@ func (d *DAG) canReachWithVisited(from, to string, visited map[string]bool) bool
 }
 
 // GetReadyNodes returns all nodes that are ready to execute (InDegree == 0).
+// Beads whose dependency set could not be determined (deps_unknown, set when
+// both the graph-wide edge fetch and the per-bead fallback fail) are treated
+// as blocked: readiness with unknown deps is how gate beads silently stop
+// binding (2026-09-25: br show contention dropped 43 gate edges).
 func (d *DAG) GetReadyNodes() []*Node {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
 	ready := make([]*Node, 0)
+	depsUnknown := 0
 	for _, node := range d.nodes {
+		if node.Bead.Metadata != nil && node.Bead.Metadata[depsUnknownMarker] == "true" {
+			depsUnknown++
+			continue
+		}
 		if node.InDegree == 0 && node.Bead.Status == types.StatusOpen {
 			ready = append(ready, node)
 		}
+	}
+	if depsUnknown > 0 {
+		log.Printf("[DAG] %d bead(s) held back: dependency set unknown (fail-closed)", depsUnknown)
 	}
 
 	return ready
