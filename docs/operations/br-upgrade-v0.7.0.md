@@ -44,7 +44,63 @@ chmods to the store mode after creation). The port is
    `/opt/dev-tools/bin/br` shim remains as defense-in-depth (read-only
    subcommand normalization + repair).
 
-## Staged rollout (root-side, mandatory)
+## Rollout executed 2026-09-25 (hydra user), canary PASSED
+
+What was actually done and verified:
+
+1. **Binary deployed** to `/opt/dev-tools/config/pi/bin/br` (v0.7.0, release
+   build from the ported tree; `BR_SHIM_DEBUG` run confirms the
+   `/opt/dev-tools/bin/br` shim resolves it as `BR_REAL` when
+   `/opt/dev-tools/config/pi/bin` precedes the infra target dir on PATH).
+   `BR_REAL=/opt/dev-tools/config/pi/bin/br` also works explicitly.
+2. **Store migration recipe verified on a throwaway copy, then executed on
+   real stores.** v0.7.0 expects schema 19; fleet stores were schema 11, and
+   `doctor migrate-schema plan` only supports sources 13–18. The working
+   in-place recipe (established fleet pattern, JSONL authoritative):
+   ```bash
+   # snapshot, then:
+   mv .beads/beads.db{,-wal,-shm} /tmp/…-old-schema.db   # plus -fsqlite-ns-* and .fsqlite-migration-state
+   rm -rf .beads/.br_recovery
+   br init        # creates schema-19 db and auto-imports issues.jsonl; config.yaml prefix preserved
+   br stats       # verify issue counts match pre-migration
+   ```
+3. **Canary store `/home/ajantha/projects/srv-telematics` MIGRATED:** 205
+   issues / 37 open preserved verbatim (IDs, statuses, comments), create +
+   close through the shim works (`ajantha-srv-telematics-hhsv`),
+   `issues.jsonl` 0660 hydra:beads, and 75 minutes of daemon polls show zero
+   `os error 13` / `NOT_INITIALIZED`. Old 0.2.10 (still first real-br hit on
+   the daemon's PATH) reads and writes the v19 store without reverting
+   `user_version` — verified by a no-op `br update`.
+4. **`/home/ajantha/projects/webapp` MIGRATED:** 37 issues preserved,
+   init/import clean.
+5. **Backups for rollback:** `/tmp/telematics-beads.db.bak`,
+   `/tmp/webapp-beads.db.bak`, `/tmp/webapp-issues.jsonl.bak`, plus the
+   displaced v11 families at `/tmp/tel-old-schema.db*`,
+   `/tmp/webapp-old-schema.db*`.
+
+What remains (root-side, one shell):
+
+- **Daemon PATH fix:** the daemon's PATH is
+  `/opt/dev-tools/bin:…infra/target/release…` — the shim's `find_real_br`
+  resolves to the old 0.2.10 binary at
+  `/opt/dev-tools/components/infra/services/beads-rust/beads_rust/target/release/br`
+  (root-owned; hydra user cannot replace it). One-line systemd drop-in:
+  `Environment=PATH=/opt/dev-tools/config/pi/bin:/opt/dev-tools/bin:…` (or
+  root replaces the infra release binary after the rsync below), then
+  `systemctl restart hydra`.
+- **`/opt/dev-tools/components/hydra/.beads`** was intentionally left at
+  schema 11: the daemon recreated a v11 DB there after the first migration
+  attempt (old binary via its PATH) and old 0.2.10 operates it correctly.
+  After the PATH fix, apply the same `mv db family; br init` recipe to it
+  (snapshot `/tmp/hydra-main-beads.db.bak` already taken).
+- **`/opt/dev-tools/components/infra/.beads`**: root:root 755/644, not
+  writable by the hydra user at all; migrate during the same root-side
+  shell (it is effectively read-only for the daemon already).
+- **Fleet binary install:** replace the infra vendored tree + rebuild (steps
+  1–3 below) so `/opt/dev-tools/components/…/target/release/br` itself
+  becomes v0.7.0 — that also fixes the daemon without a PATH change.
+
+## Staged rollout (root-side runbook)
 
 br is the most load-bearing binary in the fleet. Execute in order:
 
@@ -77,15 +133,15 @@ br is the most load-bearing binary in the fleet. Execute in order:
    (The release binary used for the verified canary was built at
    `/tmp/br-apply-tgt/release/br`; rebuild from the applied tree instead if
    /tmp was cleaned.)
-5. **Fleet-wide install:** swap `$HYDRA_HOME/bin/br` or the PATH target for
-   the new release build, restart the hydra daemon, and watch for
+5. **Fleet-wide install:** daemon PATH fix (see "What remains" above) or
+   replace the infra release binary, restart the hydra daemon, and watch for
    `Permission denied (os error 13)` on `issues.jsonl` (should be zero) and
    `NOT_INITIALIZED` storms (should be zero).
-6. **Rollback:** keep the current 0.2.10 binary at
-   `/opt/dev-tools/bin/br-0.2.10.bak`; restore + daemon restart if the canary
-   shows regressions. The store format migration (schema bumped by 0.7.0)
-   is forward-only — rollback after writes requires restoring from the
-   pre-upgrade `.beads` snapshot, so snapshot each canary store before step 4.
+6. **Rollback:** the current 0.2.10 binary remains at
+   `/opt/dev-tools/components/infra/services/beads-rust/beads_rust/target/release/br`
+   (untouched; root-owned); displaced v11 families are under `/tmp/*-old-schema.db*`.
+   Schema migration is forward-only — rollback of a migrated store requires
+   restoring from the pre-migration snapshot and downgrading the binary.
 
 ## Notes
 
@@ -96,3 +152,9 @@ br is the most load-bearing binary in the fleet. Execute in order:
   vendoring required.
 - `docs/hydra/handoff/beads-rust-jsonl-setgid-0660.patch` is now historical:
   superseded by `beads-rust-v0.7.0-port.patch`. Do not apply both.
+- `br init` on a store directory with an existing v11 `beads.db` refuses
+  ("ordinary commands never migrate"); the db family must be moved aside
+  first (see executed recipe above). `config.yaml` `issue_prefix` is
+  preserved across re-init; all issue IDs come from `issues.jsonl`.
+- Old 0.2.10 and new v0.7.0 coexist safely on a v19 store (read+write,
+  no schema revert) — verified; this is what makes the staged swap safe.
