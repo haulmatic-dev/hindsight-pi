@@ -120,6 +120,16 @@ type Config struct {
 	// → let the fix proceed and flag the original verdict as hollow. Nil disables.
 	FixBeads FixBeadsFunc
 
+	// TrajectoryFunc gathers tier-1 mechanical trajectory telemetry for a live
+	// worker (pi session parsing on the daemon side). Called from Candidates
+	// for working workers only, and only past trajectoryMinAge — young workers
+	// are mid-first-turn and always look idle. Nil disables the class.
+	TrajectoryFunc func(beadID string) (Trajectory, bool)
+
+	// BeadClass reports the bead's phase class ("syntax", "red", "green",
+	// "fix", ...) for turn-baseline selection. Nil means "default".
+	BeadClass func(beadID string) string
+
 	// DigestFunc returns the daemon-collected fleet health digest: Pan's eyes.
 	// Called every tick (cheap). Projects carrying anomaly flags become
 	// "<key>-campaign-anomaly" pseudo-candidates, so fleet-level trouble wakes
@@ -1064,6 +1074,21 @@ func (s *Shepherd) Candidates() ([]Candidate, error) {
 			reason = fmt.Sprintf(
 				"no heartbeat for %v (threshold %v)", now.Sub(w.LastHeartbeat), s.cfg.HungAfter)
 		}
+		// Tier-1 trajectory pre-filters: mechanical signals over the worker's
+		// pi session. Only outliers become candidates — tier-2 LLM judgment
+		// budget follows the anomaly rate, healthy trajectories never burn it.
+		if reason == "" && s.cfg.TrajectoryFunc != nil &&
+			w.State == registry.StateWorking && now.Sub(w.StartedAt) >= trajectoryMinAge {
+			if t, ok := s.cfg.TrajectoryFunc(w.BeadID); ok {
+				class := "default"
+				if s.cfg.BeadClass != nil {
+					class = s.cfg.BeadClass(w.BeadID)
+				}
+				if anoms := t.Anomalies(class); len(anoms) > 0 {
+					reason = "TRAJECTORY: " + strings.Join(anoms, "; ")
+				}
+			}
+		}
 		if reason == "" {
 			continue
 		}
@@ -1267,6 +1292,17 @@ Rescue recipes (hard-won; prefer the repair matching the cause):
 - PUSH-PENDING candidates mean commits exist locally but not on origin. Prefer repair:re-push-integration once; if the reason is branch protection or permissions and a retry already failed, that is a human problem — say so in reasoning instead of looping repairs.
 - Candidates ending in -push-pending are project-level pseudo-beads, not beads: never abandon-with-summary or close_satisfied them — only repair:re-push-integration applies. If the reason is divergence or permissions, it is a human problem; say so in reasoning and move on.
 - Candidates ending in -campaign-anomaly are fleet-level findings from the health digest (their reason carries the anomaly and a compact fleet snapshot). Three verbs apply: repair:park-campaign to freeze that project's campaign (the scheduler skips all spawns for the project; reversible; the default for chain-discipline violations), repair:unpark-campaign to release the campaign once the anomaly is understood, and repair:log-improvement to record a hydra improvement proposal for human review (payload = the proposal). Never abandon or close them. Prefer log-improvement when the right fix is a hydra code change rather than a containment.
+- Candidates whose reason starts with TRAJECTORY were flagged by mechanical
+  tier-1 pre-filters (turn-count outliers vs their bead-class baseline,
+  repeated commands, edits without test runs, test-fix-test loops, no new
+  files, same file re-edited without verifying). This is your tier-2 deep
+  judgment — the worker is mid-flight, not dead. Read the flags and decide:
+  converging → "continue" (or "steer" with a specific redirect naming what
+  to do differently); the bead's goal already satisfied on the working
+  branch → "close_satisfied" (cite the evidence in the message); clearly
+  looping with no convergence → "abandon-with-summary" (payload: what was
+  done and what remains). Do NOT abandon a trajectory that is slow but
+  making measurable progress.
 - Stranded worktrees (a hydra/wt-<key> branch is ahead of the working branch, the owning bead is terminal or unknown, and there is no live worker or active in-progress chain) are repaired with repair:integrate-stranded. A clean merge integrates the branch and removes the worktree; a merge conflict quarantines it to hydra/quarantine/<key> and labels the bead stranded-conflict; a post-merge verification failure labels integration-unverified.
 - Never repair for merges, PRs, deploys, or repo content edits — those are human-only; if the state needs one, explain it in reasoning.
 
