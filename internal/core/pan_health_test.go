@@ -85,6 +85,38 @@ func TestCollectHealthDigestChainedParallel(t *testing.T) {
 	}
 }
 
+func TestCollectHealthDigestDiskWatermark(t *testing.T) {
+	tw := setupTestOverseer(t)
+	o := tw.overseer
+
+	// Real filesystem is well below 100% on a healthy box: watermark 1 must
+	// fire, default watermark must not.
+	o.SetDiskWatermark(1, "/")
+	d := o.collectHealthDigest()
+	if d.DiskUsedPct <= 0 || d.DiskUsedPct > 100 {
+		t.Fatalf("DiskUsedPct = %d, want 1..100", d.DiskUsedPct)
+	}
+	if len(d.HostAnomalies) == 0 || !strings.Contains(d.HostAnomalies[0], "disk usage") {
+		t.Errorf("expected disk anomaly at watermark 1, got %v", d.HostAnomalies)
+	}
+	if !strings.Contains(d.Text(), "host: disk=") {
+		t.Errorf("digest text missing host disk line: %q", d.Text())
+	}
+
+	o.SetDiskWatermark(101, "/")
+	d2 := o.collectHealthDigest()
+	if len(d2.HostAnomalies) != 0 {
+		t.Errorf("watermark 101 must not fire, got %v", d2.HostAnomalies)
+	}
+	if d2.DiskUsedPct == 0 {
+		t.Errorf("DiskUsedPct telemetry missing below watermark")
+	}
+	// Text must stay silent when no host anomalies: stable digests (PR #236).
+	if strings.Contains(d2.Text(), "host:") {
+		t.Errorf("host line emitted without anomalies: %q", d2.Text())
+	}
+}
+
 func TestCollectHealthDigestNoWorkersNoAnomaly(t *testing.T) {
 	tw := setupTestOverseer(t)
 	o := tw.overseer
