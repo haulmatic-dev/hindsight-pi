@@ -68,6 +68,38 @@ func TestTrajectoryAnomaliesTestFixLoop(t *testing.T) {
 	}
 }
 
+func TestTrajectoryAnomaliesNoNewFiles(t *testing.T) {
+	// 20 turns, edits present, zero file-creating writes → flag.
+	tra := Trajectory{Turns: 20, DistinctEdits: 3, EditsSinceTest: 1}
+	got := tra.Anomalies("green")
+	if len(got) != 1 || !stringsContains(got[0], "no new files") {
+		t.Fatalf("want no-new-files flag, got %v", got)
+	}
+	// New files exist → no flag.
+	tra.NewFiles = 2
+	if got := tra.Anomalies("green"); len(got) != 0 {
+		t.Fatalf("new files present must not flag: %v", got)
+	}
+	// Below floor turns → no flag.
+	tra.Turns = 14
+	tra.NewFiles = 0
+	if got := tra.Anomalies("green"); len(got) != 0 {
+		t.Fatalf("below turn floor must not flag: %v", got)
+	}
+}
+
+func TestTrajectoryAnomaliesReeditedFile(t *testing.T) {
+	tra := Trajectory{ReeditedFile: "main.go", ReeditedCount: 3}
+	got := tra.Anomalies("fix")
+	if len(got) != 1 || !stringsContains(got[0], "same-file-reedited") {
+		t.Fatalf("want reedited-file flag, got %v", got)
+	}
+	tra.ReeditedCount = 2
+	if got := tra.Anomalies("fix"); len(got) != 0 {
+		t.Fatalf("below reedit floor must not flag: %v", got)
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || stringsContains(s, sub))
 }

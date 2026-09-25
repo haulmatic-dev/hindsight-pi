@@ -28,6 +28,15 @@ type Trajectory struct {
 	// bash command; empty when no bash ran.
 	RepeatedCommand string
 	RepeatedCount   int
+
+	// NewFiles counts file-creating write calls over the whole trajectory.
+	// A trajectory with many turns but zero new files is polishing or
+	// wandering, not building (the tin0 signature: redoing committed work).
+	NewFiles int
+	// ReeditedFile/ReeditedCount name the single file edited most often since
+	// the last test run: the same-file-reedited-without-test-run signal.
+	ReeditedFile  string
+	ReeditedCount int
 }
 
 // TurnBaselines are per-bead-class expected turn budgets before a trajectory
@@ -66,6 +75,14 @@ const editsSinceTestFloor = 6
 // test-fix-test loop where each fix fails the same way.
 const testRunsFloor = 8
 
+// noNewFilesFloorTurns: past this many turns with zero file-creating writes,
+// a working trajectory is not building anything new.
+const noNewFilesFloorTurns = 15
+
+// reeditedFloor: one file edited this many times since the last test run is
+// blind thrashing, not iteration (each pass should be verified by a run).
+const reeditedFloor = 3
+
 // BaselineFor returns the turn baseline for a bead class (lowercase).
 func BaselineFor(class string) int {
 	if b, ok := TurnBaselines[strings.ToLower(class)]; ok {
@@ -99,6 +116,16 @@ func (t Trajectory) Anomalies(class string) []string {
 		out = append(out, fmt.Sprintf(
 			"%d test runs in one trajectory — possible test-fix-test loop",
 			t.TestRuns))
+	}
+	if t.Turns >= noNewFilesFloorTurns && t.NewFiles == 0 && t.DistinctEdits > 0 {
+		out = append(out, fmt.Sprintf(
+			"%d turns with edits but no new files created — polishing, wandering, or redoing committed work",
+			t.Turns))
+	}
+	if t.ReeditedFile != "" && t.ReeditedCount >= reeditedFloor {
+		out = append(out, fmt.Sprintf(
+			"file %q edited %d times since last test run — same-file-reedited-without-verifying",
+			truncate(t.ReeditedFile, 60), t.ReeditedCount))
 	}
 	return out
 }

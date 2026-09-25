@@ -85,4 +85,37 @@ func TestTrajectoryResetAfterTestRun(t *testing.T) {
 	if tra.EditsSinceTest != 1 {
 		t.Errorf("EditsSinceTest = %d, want 1 (test run resets the counter)", tra.EditsSinceTest)
 	}
+	if tra.ReeditedCount != 1 || tra.ReeditedFile != "a.go" {
+		t.Errorf("ReeditedFile/Count = %q/%d, want a.go/1 (per-file counts reset on test run)", tra.ReeditedFile, tra.ReeditedCount)
+	}
+}
+
+func TestTrajectoryNewFilesAndReedit(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "sessions", "bead-z")
+	lines := []string{
+		`{"type":"toolCall","name":"write","arguments":{"file_path":"new.go"}}`,
+		`{"type":"toolCall","name":"edit","arguments":{"file_path":"main.go"}}`,
+		`{"type":"toolCall","name":"edit","arguments":{"file_path":"main.go"}}`,
+		`{"type":"toolCall","name":"edit","arguments":{"file_path":"main.go"}}`,
+		`{"type":"toolCall","name":"read","arguments":{"file_path":"main.go"}}`,
+	}
+	writeSessionFile(t, dir, "session.jsonl", lines)
+	tra, ok := gatherWorkerTrajectory(dir)
+	if !ok {
+		t.Fatal("want ok=true")
+	}
+	if tra.NewFiles != 1 {
+		t.Errorf("NewFiles = %d, want 1", tra.NewFiles)
+	}
+	if tra.ReeditedFile != "main.go" || tra.ReeditedCount != 3 {
+		t.Errorf("Reedited = %q/%d, want main.go/3", tra.ReeditedFile, tra.ReeditedCount)
+	}
+	if tra.DistinctEdits != 2 {
+		t.Errorf("DistinctEdits = %d, want 2 (write + edit paths)", tra.DistinctEdits)
+	}
+	// Tier-1 must flag the blind re-editing.
+	anoms := tra.Anomalies("fix")
+	if len(anoms) == 0 || !strings.Contains(anoms[0], "same-file-reedited") {
+		t.Errorf("expected same-file-reedited flag, got %v", anoms)
+	}
 }

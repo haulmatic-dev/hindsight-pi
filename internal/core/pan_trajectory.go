@@ -40,10 +40,14 @@ type trajectoryAccum struct {
 	editPaths      map[string]bool
 	bashCounts     map[string]int
 	sawAnyToolCall bool
+	newFiles       int
+	// perFileEdits: per-path edit counts since the most recent test run
+	// (reset with editsSinceTest). Max entry is the reedited-file signal.
+	perFileEdits map[string]int
 }
 
 func newTrajectoryAccum() trajectoryAccum {
-	return trajectoryAccum{editPaths: map[string]bool{}, bashCounts: map[string]int{}}
+	return trajectoryAccum{editPaths: map[string]bool{}, bashCounts: map[string]int{}, perFileEdits: map[string]int{}}
 }
 
 // collectWorkerTrajectory builds the pan.Trajectory for a bead from its pi
@@ -83,11 +87,17 @@ func gatherWorkerTrajectory(dir string) (pan.Trajectory, bool) {
 		return pan.Trajectory{}, false
 	}
 
-	// Most repeated normalized bash command.
+	// Most repeated normalized bash command and most-reedited file.
 	cmd, count := "", 0
 	for c, n := range acc.bashCounts {
 		if n > count {
 			cmd, count = c, n
+		}
+	}
+	file, fcount := "", 0
+	for f, n := range acc.perFileEdits {
+		if n > fcount {
+			file, fcount = f, n
 		}
 	}
 
@@ -98,6 +108,9 @@ func gatherWorkerTrajectory(dir string) (pan.Trajectory, bool) {
 		DistinctEdits:   len(acc.editPaths),
 		RepeatedCommand: cmd,
 		RepeatedCount:   count,
+		NewFiles:        acc.newFiles,
+		ReeditedFile:    file,
+		ReeditedCount:   fcount,
 	}, true
 }
 
@@ -159,6 +172,7 @@ func accumulateTrajectoryLine(acc *trajectoryAccum, line []byte) {
 			if isTrajectoryTestRun(cmd) {
 				acc.testRuns++
 				acc.editsSinceTest = 0
+				acc.perFileEdits = map[string]int{}
 				return
 			}
 			acc.bashCounts[cmd]++
@@ -170,7 +184,13 @@ func accumulateTrajectoryLine(acc *trajectoryAccum, line []byte) {
 			if p != "" {
 				acc.editPaths[p] = true
 			}
+			if root.Name == "write" || root.Name == "create_file" {
+				acc.newFiles++
+			}
 			acc.editsSinceTest++
+			if p != "" {
+				acc.perFileEdits[p]++
+			}
 		}
 	}
 }
