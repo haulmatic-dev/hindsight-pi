@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/pan"
@@ -154,7 +155,51 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 		}
 	}
 	sort.Slice(digest.Projects, func(i, j int) bool { return digest.Projects[i].Key < digest.Projects[j].Key })
+	collectDiskWatermark(&digest, o.diskStatPath, o.diskWatermarkPct)
 	return digest
+}
+
+// diskWatermarkPct / diskStatPath: injection points for tests; production
+// leaves them zero so collectDiskWatermark applies the defaults (85%, "/").
+
+// SetDiskWatermark overrides the host disk watermark and statfs path (tests
+// and deployments whose runtime state lives off the root filesystem).
+func (o *Overseer) SetDiskWatermark(pct int, path string) {
+	o.diskWatermarkPct = pct
+	o.diskStatPath = path
+}
+
+// defaultDiskWatermarkPct: above this used-percentage of the filesystem
+// holding the runtime state, the digest flags host-level disk pressure.
+// The 2026-09-25 incident hit 100% with zero warning (br I/O error 28,
+// bead creation failed fleet-wide).
+const defaultDiskWatermarkPct = 85
+
+// collectDiskWatermark stats the filesystem at path ("" → "/", which holds
+// /tmp, $HYDRA_HOME and the working state) and attaches a host anomaly when
+// used% >= watermark. Fail-open: a statfs error never blocks the digest.
+func collectDiskWatermark(d *pan.HealthDigest, path string, watermark int) {
+	if path == "" {
+		path = "/"
+	}
+	if watermark <= 0 {
+		watermark = defaultDiskWatermarkPct
+	}
+	var fs syscall.Statfs_t
+	if err := syscall.Statfs(path, &fs); err != nil {
+		return // fail open
+	}
+	total := fs.Blocks * uint64(fs.Bsize)
+	if total == 0 {
+		return
+	}
+	usedPct := int(((total - fs.Bfree) * 100) / total)
+	d.DiskUsedPct = usedPct
+	if usedPct >= watermark {
+		d.HostAnomalies = append(d.HostAnomalies, fmt.Sprintf(
+			"disk usage %d%% on %s exceeds watermark %d%% — run systemd-tmpfiles cleanup and cap caches before br starts failing with I/O error 28",
+			usedPct, path, watermark))
+	}
 }
 
 // depRelated reports whether beads a and b reference each other directly.

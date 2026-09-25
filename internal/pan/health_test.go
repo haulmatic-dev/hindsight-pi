@@ -48,6 +48,12 @@ func TestHealthDigestText(t *testing.T) {
 		t.Errorf("projects not sorted by key: %q", text)
 	}
 
+	// Host anomalies render as a host line with disk telemetry.
+	h := HealthDigest{DiskUsedPct: 97, HostAnomalies: []string{"disk usage 97% on / exceeds watermark 85%"}}
+	if got := h.Text(); !strings.Contains(got, "host: disk=97% ANOMALIES=[disk usage 97% on / exceeds watermark 85%]") {
+		t.Errorf("host line missing: %q", got)
+	}
+
 	// Cap: a huge fleet cannot blow the prompt.
 	big := HealthDigest{}
 	for i := 0; i < 200; i++ {

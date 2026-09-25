@@ -97,6 +97,8 @@ type Overseer struct {
 	workerSpawner    *WorkerSpawner
 	pushPendingMu    sync.Mutex
 	pushPending      map[string]*PushPendingEntry // projectPath → stranded-push state
+	diskWatermarkPct int                          // host disk watermark (0 = default 85%)
+	diskStatPath     string                       // statfs path ("" = "/")
 	dag              *DAG
 	dagMu            sync.RWMutex
 	dagNavigator     *DAGNavigator
