@@ -141,7 +141,25 @@ Typed events on the fail-open event stream (never gate the pipeline):
 SHA), `pack_miss` (one per dropped anchor, reason `anchor_gone`),
 `pack_scout` (one per scout pass — reason `scout_ok`/`scout_failed`, detail
 carries requirement/mapping counts and duration for cost attribution),
-`pack_reservation_offscope` (advisory, reason `off_anchor_reservation`).
+`pack_reservation_offscope` (advisory, reason `off_anchor_reservation`),
+`pack_breaker_open` (one per open — a project's pack writes failed 3 times
+consecutively; detail carries the failure count and backoff) and
+`pack_breaker_close` (writes succeeding again, breaker reset).
+
+## Write circuit breaker
+
+When a project's br store is unwritable by the daemon user, pack writes would
+otherwise be retried on every 2-3s scheduler tick, generating exactly the br
+lock contention that blinds the DAG builder. `ensureContextPack` therefore
+rides a per-project circuit breaker (state in `WorkerSpawner.packBreakers`,
+logic in `context_pack.go`): each failed write pass schedules exponential
+backoff (1m doubling per consecutive failure, 30m cap) during which spawns
+proceed unguided; at 3 consecutive failures the breaker opens and emits one
+`pack_breaker_open` event (repeats stay quiet until reset); a fully
+successful write pass emits `pack_breaker_close` and resets the breaker.
+Breaker accounting is per write pass, not per chain member, so large chains
+cannot trip it on a single tick. Skip and open paths stay fail-open: the
+pack is an optimization and never gates a spawn.
 
 ## Failure model
 
