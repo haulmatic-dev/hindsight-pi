@@ -1357,15 +1357,26 @@ func (o *Overseer) Resume() {
 	log.Println("▶️  Overseer resumed")
 }
 
-// SetMaxWorkers updates the maximum number of concurrent workers
+// SetMaxWorkers updates the maximum number of concurrent workers. Both the
+// state controller and the AIMD concurrency governor are updated: the governor
+// keeps its own ceiling/limit, so without syncing it silently clamps any
+// runtime increase to its construction-time value until daemon restart.
 func (o *Overseer) SetMaxWorkers(count int) {
 	o.stateController.SetMaxWorkers(count)
+	o.concurrencyGovernor.SetMaxWorkers(count)
 	log.Printf("🔧 Max workers set to %d", count)
 }
 
 // GetMaxWorkers returns the current maximum worker count
 func (o *Overseer) GetMaxWorkers() int {
 	return o.stateController.GetMaxWorkers()
+}
+
+// GetConcurrencyLimit returns the AIMD governor's current effective limit
+// (0 when the governor is disabled/unlimited). Used by the API to expose and
+// verify that runtime SetMaxWorkers updates reach the governor.
+func (o *Overseer) GetConcurrencyLimit() int {
+	return o.concurrencyGovernor.Limit()
 }
 
 // GetDAGStats returns statistics about the current DAG
