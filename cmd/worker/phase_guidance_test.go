@@ -17,8 +17,8 @@ func TestPhaseGuidance(t *testing.T) {
 		{"RED: Write tests for X", "task", "fails for the RIGHT reason"},
 		{"GREEN: Implement X", "task", "MINIMUM that makes the failing tests pass"},
 		{"REFACTOR: Optimize X", "task", "Behavior must not change"},
-		{"Fix: COMPLIANCE GATE", "fix", "root-cause protocol"},
-		{"anything", "fix", "root-cause protocol"},
+		{"Fix: COMPLIANCE GATE", "fix", "VERIFY-FIRST"},
+		{"anything", "fix", "VERIFY-FIRST"},
 		{"Discovery: X", "task", ""},
 		{"SYNTAX: Check X", "task", ""},
 		{"EPIC: X", "epic", ""},
@@ -41,8 +41,8 @@ func TestPhaseGuidance(t *testing.T) {
 // final prompt.
 func TestBuildPiPrompt_IncludesPhaseGuidance(t *testing.T) {
 	p := buildPiPrompt(types.Bead{Type: "fix", Title: "Fix: broken gate", Description: "d"}, nil, promptExtras{})
-	if !strings.Contains(p, "REPRODUCE") || !strings.Contains(p, "root-cause protocol") {
-		t.Error("fix-bead prompt must carry the root-cause protocol")
+	if !strings.Contains(p, "REPRODUCE") || !strings.Contains(p, "VERIFY-FIRST") || !strings.Contains(p, "do NOT modify files") {
+		t.Error("fix-bead prompt must carry the verify-first directive and root-cause protocol")
 	}
 	p2 := buildPiPrompt(types.Bead{Type: "task", Title: "Discovery: X", Description: "d"}, nil, promptExtras{})
 	if strings.Contains(p2, "root-cause protocol") {
