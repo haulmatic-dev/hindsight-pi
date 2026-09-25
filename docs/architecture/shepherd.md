@@ -402,6 +402,18 @@ Pan's LLM: the tier-2 judgment budget follows the anomaly rate. Workers
 younger than 10 minutes are skipped (mid-first-turn grace). Fail-open: a
 missing/unreadable session disables the class for that bead.
 
+**Per-candidate judgment dedup.** Pan judges at most once per candidate
+state: `freshCandidates` (`internal/pan/pan.go`) keys a cache by candidate
+state hash (bead ID + state + normalized reason — volatile fields like ages
+and token counts stripped) and drops candidates already judged within the
+15-minute re-judge valve. The cache is per candidate, not per set: one
+churning candidate (live token counts, digest text) no longer forces the
+whole set through the LLM — the 2026-10-04 dup-continue trickle, where a
+stable parked bead was re-judged every tick and each verdict was a
+duplicate `continue` the pending queue skipped. A changed state re-judges
+immediately; the valve backstop re-presents a permanently stuck candidate
+at most every 15 minutes so verdict memory decays and heals.
+
 **Pan abandon audit and live-slot refusal.** Since 2026-09-11 every
 `abandon-with-summary` decision is audited with its rationale: one
 `[Pan] abandon-with-summary audit` line per decision logging the bead, the

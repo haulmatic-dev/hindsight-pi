@@ -9,6 +9,7 @@ package pan
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -84,9 +85,9 @@ func TestJudgmentDedupRejudgeValve(t *testing.T) {
 	})
 
 	s.Tick(context.Background())
-	// Backdate the last judgment beyond the valve window.
+	// Backdate: clear the per-candidate cache so the re-judge valve fires.
 	s.dedupMu.Lock()
-	s.lastJudgedAt = time.Now().Add(-reJudgeInterval - time.Minute)
+	s.judged = map[string]time.Time{}
 	s.dedupMu.Unlock()
 	s.Tick(context.Background())
 
@@ -96,3 +97,53 @@ func TestJudgmentDedupRejudgeValve(t *testing.T) {
 }
 
 var _ = strings.Contains
+
+// Per-candidate cache (2026-10-04): a volatile change in ONE candidate
+// (token-budget counts, digest text) must not re-judge a STABLE candidate.
+// Previously the whole-set signature reset and the parked bead re-judged
+// every tick, each verdict a duplicate 'continue' the queue then skipped.
+func TestJudgmentDedupPerCandidateIsolation(t *testing.T) {
+	store := &fakeStore{}
+	parkedCalls := 0
+	runner := func(ctx context.Context, cfg Config, prompt string) (string, error) {
+		if strings.Contains(prompt, "parked-1") && !strings.Contains(prompt, "noisy-1") {
+			parkedCalls++
+		}
+		// Judge parked-1 to continue on first call, noisy-1 to reset-retries.
+		if strings.Contains(prompt, "parked-1") {
+			return `[{"bead_id": "parked-1", "action": "continue", "message": ""}]`, nil
+		}
+		return `[{"bead_id": "noisy-1", "action": "repair:reset-retries", "message": ""}]`, nil
+	}
+	s := New(Config{Enabled: true}, store, runner)
+	s.SetRepairHandlers(map[string]func(beadID string) error{
+		"reset-retries": func(beadID string) error { return nil },
+	})
+
+	s.Tick(context.Background())
+
+	// parked-1 alone: stable reason → judged once, then cached.
+	s.SetBlockedBeads(func() []BlockedBead {
+		return []BlockedBead{{BeadID: "parked-1", Reason: "BLOCKED: retry exhausted", Since: time.Now()}}
+	})
+	s.Tick(context.Background())
+	s.Tick(context.Background())
+
+	// noisy-1 joins with a reason that changes every tick (volatile token
+	// counts) — parked-1 must NOT be re-judged, only noisy-1.
+	n := 0
+	s.SetBlockedBeads(func() []BlockedBead {
+		n++
+		return []BlockedBead{
+			{BeadID: "parked-1", Reason: "BLOCKED: retry exhausted", Since: time.Now()},
+			{BeadID: "noisy-1", Reason: fmt.Sprintf("BLOCKED: token budget exceeded (fresh=%d)", n*7919), Since: time.Now()},
+		}
+	})
+	for i := 0; i < 3; i++ {
+		s.Tick(context.Background())
+	}
+
+	if parkedCalls != 1 {
+		t.Errorf("parked-1 judged %d times, want 1 (stable candidate must not re-judge when another candidate churns)", parkedCalls)
+	}
+}
