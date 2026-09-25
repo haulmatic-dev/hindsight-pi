@@ -221,7 +221,9 @@ Install `scripts/hydra.service` per `docs/operations/SERVICE_SETUP.md`
   (`KEY=value`, no `export`):
   ```
   MINIMAX_API_KEY=...
-  KIMI_API_KEY=...
+  # KIMI_API_KEY is NOT needed here: workers reach Kimi via the local
+  # llm-router (kimi-router provider), which holds the upstream key itself.
+  # Only set it if you configure a direct kimi-coding provider.
   HINDSIGHT_API_LLM_API_KEY=...
   HINDSIGHT_API_LLM_BASE_URL=https://api.minimax.io/v1
   HINDSIGHT_API_LLM_MODEL=MiniMax-M2.7
