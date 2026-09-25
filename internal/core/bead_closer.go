@@ -945,7 +945,18 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 			}
 		}
 		if !alreadyIntegrated {
-			return c.rejectClose(bead, projectPath, repoName, "empty-diff")
+			// Pre-close diff gate (duty 2, 2026-09-24 campaign): an empty
+			// target diff is only closable when the worker's HYDRA_VERDICT
+			// self-reports an accepted reason (docs-only, chain-deferred-to-root,
+			// superseded). Empty + no reason => reject as before: reopen with
+			// prior context, never spawn a fix bead.
+			if !c.tryAcceptEmptyClose(bead, repoName, repoPath, changed) {
+				return c.rejectClose(bead, projectPath, repoName, "empty-diff")
+			}
+			// Docs-only changes sit outside code targets by definition, so the
+			// target scope gate would immediately re-reject the same close the
+			// empty gate just accepted. Skip scope once the empty gate accepts.
+			needScope = false
 		}
 	}
 

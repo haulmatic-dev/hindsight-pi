@@ -1,16 +1,16 @@
 # green handoff
 
 ## What changed (files + one line each)
-- cmd/worker/main.go: moved execution-report write out of executeWithPi into runWorker (after Duration/Attempts final); added ExecutionResult.TurnCount set from rpc turn count; record now includes `turns`; readExecutionOutputFromFile parses duration/attempts/turns/tokens.
-- cmd/worker/execution_report_test.go: new round-trip regression test proving attempts=3/turns=12/duration=7m/tokens survive write+read.
-- CHANGELOG.md: Fixed entries for the telemetry bug and the HYDRA_VERDICT re-entry investigation.
+- internal/core/empty_close_gate.go: new accepted-empty-reason helpers — parse last HYDRA_VERDICT from newest worker log (fail-open), match docs-only/chain-deferred-to-root/superseded against diff evidence, accept or leave rejection unchanged.
+- internal/core/bead_closer.go: verifyBeforeClose empty-diff branch consults tryAcceptEmptyClose before rejectClose; accepted close skips target-scope gate (docs-only changes are off-code-target by definition).
+- internal/core/bead_closer_empty_gate_test.go: unit tests for reason matching, verdict extraction (last-wins), doc-path classification, and 3 integration tests through verifyBeforeClose.
+- CHANGELOG.md: Added entry documenting the gate.
 
 ## Verification (commands run + pass/fail)
 - `go build ./...` — pass.
-- `go vet ./cmd/worker/` — pass.
-- `go test ./cmd/worker/ -run TestExecutionReportRoundTrip` — PASS.
-- `go test ./cmd/worker/` — PASS (2.630s, full package).
+- `go test ./internal/core/ -run 'TestAcceptedEmptyReason|TestExtractEmptyGateVerdictLastWins|TestVerifyBeforeClose_DocsOnly|TestVerifyBeforeClose_EmptyDiff|TestIsDocPath|TestAllDocsOnly'` — pass (narrow, then full internal/core package: 1060 passed).
 
 ## Open edges for the next phase
-- HYDRA_VERDICT re-entry (bead gwce, done:true twice 2026-09-24): root cause is daemon-side integration failure, not worker telemetry. Log evidence: `[Integrate] FAILED ajantha-srv-telematics-gwce ... CONFLICT (modify/delete): test/jest-e2e.json deleted in HEAD and modified in hydra/wt-ajantha-srv-telematics-gwce` → close failed → bead re-executed → hard-parked `integration-exhausted`. Both runs parsed done:true with success=true. No code change made; a candidate fix lives in the integration-retest/reconciliation layer, not the worker.
-- Tokens in reports come from the whole cumulative rpc session turn stats (can exceed per-run spend when the session resumes); per-attempt attribution is a possible follow-up.
+- Verdict parsing reads the newest `safeBeadID(beadID)-*.log` under $HYDRA_HOME/logs/workers; a bead whose log was rotated away silently keeps old reject behavior (fail-open by design).
+- Duty 1 (verdict precedence over non-zero exit) and duty 3 (phantom triangle-check reconciler) remain unimplemented — separate beads.
+- Docs-only acceptance trusts verdict tokens; an agent could self-report docs-only for code changes only if it also lies about changed files — evidence (changed file list) is still derived from git, not the verdict.
