@@ -364,7 +364,7 @@ that are READY but have no live worker row because they hit retry exhaustion
 or a spawn failure. Without these candidates Pan cannot judge the blockers
 that would otherwise deadlock the fleet (e.g. a worktree conflict that
 exhausts retries while the pool still reports phantom placeholders). Fail-open:
-Pan down or unparseable advice → the deterministic rules below still run. **Disabled** until configured with its own provider key
+Pan down or unparseable advice → the deterministic rules below still run. Since 2026-09-25 Pan also carries the closure-audit duty: open auto-fix beads (`auto-fix` label, type `fix`) become `FIX-AUDIT:` candidates carrying the original close reason, any recorded HYDRA_VERDICT snippet, and a daemon-side re-verification (the original bead's scoped test gate re-run in the inherited worktree, cached 30m). A verdict claiming done plus a verified re-check lets Pan `close_satisfied` the fix bead before a worker redoes finished work; a contradiction lets the fix proceed and flags the original verdict as hollow — a recorded verdict alone never closes anything (the jx78 case: done:true recorded while the suites failed at load, 0 tests ran). **Disabled** until configured with its own provider key
 (`shepherd.pan` in config; see `hydra-config.yaml.example` for a `minimax` / `MiniMax-M2.7` configuration) — it must not
 share the fleet's Kimi account.
 
