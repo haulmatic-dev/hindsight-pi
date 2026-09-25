@@ -162,19 +162,24 @@ func (m *WorktreeManager) WorktreeRecentlyActive(projectPath, key string, floor 
 	return recent
 }
 
-// changelogUnionEntry marks CHANGELOG.md for git's built-in union merge
-// driver: on conflict both sides' lines survive. Every worker appends its
-// changelog entry at the same anchor per the documentation doctrine, so any
-// two wt-branches from a parallel batch conflict there on integrate — the
-// close then fails and the bead reopens in a loop (webapp isk/hrx/lbu/1oi/cpm,
-// 2026-09-16). Worst union outcome is a rare duplicated entry, which a
-// changelog tolerates; a close-reopen loop does not get tolerated.
+// sharedUnionEntries marks append-only shared files for git's built-in union
+// merge driver: on conflict both sides' lines survive. Every worker appends
+// its changelog entry at the same anchor per the documentation doctrine, and
+// .gitignore entries are likewise append-only, so any two wt-branches from a
+// parallel batch conflict there on integrate — the close then fails and the
+// bead reopens in a loop (webapp isk/hrx/lbu/1oi/cpm, 2026-09-16; telematics
+// cd8h/yc2/tg7g/rylg, 2026-09-24). Worst union outcome is a rare duplicated
+// entry, which an append-only file tolerates; a close-reopen loop does not.
+var sharedUnionEntries = []string{"CHANGELOG.md merge=union", ".gitignore merge=union"}
+
+// legacy changelogUnionEntry kept for the existing attributes-file detection.
 const changelogUnionEntry = "CHANGELOG.md merge=union"
 
 // ensureChangelogUnionDriver idempotently enables the union merge driver for
-// CHANGELOG.md in the repo-local (uncommitted) .git/info/attributes, which
-// applies to every worktree and clone-local merge of that repo. Fail-open: a
-// repo we cannot inspect still gets its worktree.
+// every append-only shared file in sharedUnionEntries in the repo-local
+// (uncommitted) .git/info/attributes, which applies to every worktree and
+// clone-local merge of that repo. Fail-open: a repo we cannot inspect still
+// gets its worktree.
 func ensureChangelogUnionDriver(projectPath string) {
 	commonDir, err := gitOut(projectPath, "rev-parse", "--git-common-dir")
 	if err != nil {
@@ -191,7 +196,17 @@ func ensureChangelogUnionDriver(projectPath string) {
 		return
 	}
 	attrPath := filepath.Join(infoDir, "attributes")
-	if data, err := os.ReadFile(attrPath); err == nil && strings.Contains(string(data), changelogUnionEntry) {
+	var existing []byte
+	if data, err := os.ReadFile(attrPath); err == nil {
+		existing = data
+	}
+	var missing []string
+	for _, entry := range sharedUnionEntries {
+		if !strings.Contains(string(existing), entry) {
+			missing = append(missing, entry)
+		}
+	}
+	if len(missing) == 0 {
 		return
 	}
 	f, err := os.OpenFile(attrPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -200,11 +215,13 @@ func ensureChangelogUnionDriver(projectPath string) {
 		return
 	}
 	defer f.Close()
-	if _, err := f.WriteString(changelogUnionEntry + "\n"); err != nil {
-		log.Printf("[Worktree] changelog union driver: write %s: %v", attrPath, err)
-		return
+	for _, entry := range missing {
+		if _, err := f.WriteString(entry + "\n"); err != nil {
+			log.Printf("[Worktree] changelog union driver: write %s: %v", attrPath, err)
+			return
+		}
 	}
-	log.Printf("[Worktree] CHANGELOG.md union merge driver enabled for %s", projectPath)
+	log.Printf("[Worktree] union merge driver enabled for %v on %s", missing, projectPath)
 }
 
 // repoToplevel returns the absolute root of the git working tree that owns
@@ -573,6 +590,18 @@ func (m *WorktreeManager) IntegrateBranch(projectPath, key, branch string) error
 				}
 			}
 		}
+		// Append-only shared files (CHANGELOG.md, .gitignore): every parallel
+		// worker appends at the same anchor, so conflicts there are pure
+		// contention, not semantic disagreement. Resolve by union — both
+		// sides' lines survive — instead of failing the close (telematics
+		// cd8h/yc2/tg7g/rylg 2026-09-24). Only fires when ALL unmerged paths
+		// are in the shared set; anything else still aborts.
+		if resolved := unionResolveSharedConflicts(scratchPath); resolved {
+			if _, cerr := gitOut(scratchPath, "commit", "--no-edit"); cerr == nil {
+				log.Printf("[Worktree] auto-resolved append-only shared-file merge conflict (union) integrating %s", branch)
+				goto merged
+			}
+		}
 		_, _ = gitOut(scratchPath, "merge", "--abort")
 		return fmt.Errorf("integrate %s failed (worktree left at %s for inspection): %w", branch, wtPath, err)
 	}
@@ -664,6 +693,115 @@ func beadsOnlyConflict(projectPath string) bool {
 		}
 	}
 	return true
+}
+
+// sharedAppendOnlyPaths lists the files that are append-only by doctrine
+// (changelog discipline, ignore-file additions) and safe to union on merge
+// conflict.
+var sharedAppendOnlyPaths = map[string]bool{"CHANGELOG.md": true, ".gitignore": true}
+
+// unionResolveSharedConflicts resolves a failed merge whose unmerged paths are
+// ALL append-only shared files by union-merging each: base + ours + theirs
+// lines survive, matching git's merge=union driver for repos where the
+// attributes file was not yet installed. Returns false (leaving the merge
+// state intact) when any unmerged path is outside the shared set.
+func unionResolveSharedConflicts(projectPath string) bool {
+	out, err := gitOut(projectPath, "diff", "--name-only", "--diff-filter=U")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return false
+	}
+	paths := strings.Split(strings.TrimSpace(out), "\n")
+	for _, p := range paths {
+		if !sharedAppendOnlyPaths[strings.TrimSpace(p)] {
+			return false
+		}
+	}
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if !unionMergeFile(projectPath, p) {
+			return false
+		}
+	}
+	args := append([]string{"add", "--"}, paths...)
+	_, err = gitOut(projectPath, args...)
+	return err == nil
+}
+
+// unionMergeFile union-merges one path's conflict stages: it extracts the
+// base (:1), ours (:2) and theirs (:3) blobs, runs git merge-file --union,
+// and writes the result back into the worktree. Any failure returns false
+// with the merge still conflicted.
+func unionMergeFile(projectPath, path string) bool {
+	tmp, err := os.CreateTemp("", "hydra-union-")
+	if err != nil {
+		return false
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	stage := func(spec string) (string, bool) {
+		out, err := gitOut(projectPath, "show", spec)
+		if err != nil {
+			return "", false
+		}
+		return out, true
+	}
+	// A stage may be absent (add/add has no :1; delete/modify drops :3).
+	// Missing ours/theirs is fatal; a missing base just means no ancestor.
+	base, _ := stage(":1:" + path)
+	ours, ok := stage(":2:" + path)
+	if !ok {
+		return false
+	}
+	theirs, ok := stage(":3:" + path)
+	if !ok {
+		return false
+	}
+	baseF, err := os.CreateTemp("", "hydra-union-base-")
+	if err != nil {
+		return false
+	}
+	defer os.Remove(baseF.Name())
+	oursF, err := os.CreateTemp("", "hydra-union-ours-")
+	if err != nil {
+		return false
+	}
+	defer os.Remove(oursF.Name())
+	theirsF, err := os.CreateTemp("", "hydra-union-theirs-")
+	if err != nil {
+		return false
+	}
+	defer os.Remove(theirsF.Name())
+	if _, err := baseF.WriteString(base); err != nil {
+		return false
+	}
+	baseF.Close()
+	if _, err := oursF.WriteString(ours); err != nil {
+		return false
+	}
+	oursF.Close()
+	if _, err := theirsF.WriteString(theirs); err != nil {
+		return false
+	}
+	theirsF.Close()
+	// current file for merge-file is ours (stage 2), not base.
+	if _, err := tmp.WriteString(ours); err != nil {
+		return false
+	}
+	tmp.Close()
+	cmd := exec.Command("git", "merge-file", "--union", tmpPath, baseF.Name(), theirsF.Name())
+	// merge-file exits with the number of conflicts on --union success; only
+	// a hard failure (>127 per git docs, or exec error) is fatal.
+	if err := cmd.Run(); err != nil {
+		if _, isExit := err.(*exec.ExitError); !isExit {
+			return false
+		}
+	}
+	union, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return false
+	}
+	return os.WriteFile(filepath.Join(projectPath, path), union, 0o644) == nil
 }
 
 // QuarantineAndRemove preserves a failed chain's work on a quarantine branch
