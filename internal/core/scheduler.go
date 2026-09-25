@@ -443,6 +443,15 @@ func (s *Scheduler) Tick() error {
 			continue
 		}
 
+		// Skip HOLD beads: they are gates that exist only to be depended on.
+		// Executing one as work closes it and releases everything parked
+		// behind it (telematics mz0v executed-and-closed the campaign-wide
+		// pause gate, 2026-09-25).
+		if isHoldBead(bead) {
+			log.Printf("⏸️  Skipping HOLD bead (gate; closes via operator, not worker): %s", bead.ID)
+			continue
+		}
+
 		// Skip approval beads that are in progress
 		if bead.Type == "approval" {
 			log.Printf("⏸️  Skipping approval bead (waiting for user approval): %s", bead.ID)
@@ -514,7 +523,7 @@ func (s *Scheduler) Tick() error {
 		// satisfying every dep parked behind them and releasing whole
 		// campaigns (webapp-c36, 2026-09-16).
 		lt := strings.ToLower(strings.TrimSpace(bead.Type))
-		if lt == "approval-gate" || lt == "approval" || lt == "epic" {
+		if lt == "approval-gate" || lt == "approval" || lt == "epic" || isHoldBead(bead) {
 			continue
 		}
 
@@ -643,6 +652,24 @@ func (s *Scheduler) GetAvailableWorkerSlots() int {
 }
 
 // GetReadyNodes returns nodes that are ready for execution.
+// isHoldBead reports whether a bead is a HOLD gate — a bead whose only
+// purpose is to block dependents until an operator closes it. Recognized by
+// type "hold", label "hold", or a "HOLD:" title prefix. HOLD beads must
+// never be scheduled as work: a worker executing one will close it and
+// silently release every dependent (the approval-gate retry-queue incident
+// class, webapp-c36 2026-09-16; telematics mz0v 2026-09-25).
+func isHoldBead(bead types.Bead) bool {
+	if strings.EqualFold(strings.TrimSpace(bead.Type), "hold") {
+		return true
+	}
+	for _, l := range bead.Labels {
+		if strings.EqualFold(strings.TrimSpace(l), "hold") {
+			return true
+		}
+	}
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(bead.Title)), "HOLD:")
+}
+
 // GetReadyNodes returns ready nodes sorted by bead priority descending.
 // DAG.GetReadyNodes iterates a map (random order); the event-driven
 // TriggerImmediateSchedule path spawns from this list directly, so without
