@@ -62,6 +62,7 @@ func (cm *ConfigManager) UpdateConfig(newConfig *Config) error {
 
 	// Update operational parameters
 	o.stateController.SetMaxWorkers(newConfig.Overseer.MaxWorkers)
+	o.concurrencyGovernor.SetMaxWorkers(newConfig.Overseer.MaxWorkers)
 	o.stateController.SetBeadDiscoveryInterval(newConfig.Overseer.BeadDiscoveryInterval)
 
 	// Rebuild project-scoped state for added/removed projects without

@@ -82,6 +82,40 @@ func NewConcurrencyGovernor(maxWorkers int, cfg GovernorConfig) *ConcurrencyGove
 	}
 }
 
+// SetMaxWorkers updates the concurrency ceiling at runtime (e.g. after a
+// runtime max_workers bump via the API or config reload). Nil-safe.
+//
+// A decrease clamps the current limit down so the new ceiling takes effect
+// immediately. An increase raises the limit to the new ceiling immediately:
+// waiting for AIMD additive increase would leave the operator's bump ineffective
+// for the full cooldown/recovery window (observed 2026-09-24: runtime bump
+// 8->12 kept slots at 8 because the governor kept its construction-time limit).
+func (g *ConcurrencyGovernor) SetMaxWorkers(count int) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	old := g.limit
+	g.maxWorkers = count
+	if count <= 0 {
+		// Governor disabled; keep the limit pinned at zero for consistency
+		// with Limit()'s disabled semantics.
+		g.limit = 0
+		return
+	}
+	if g.limit > count {
+		g.limit = count
+	} else if g.limit < count && old < count {
+		g.limit = count
+	}
+	if g.limit != old {
+		g.lastChange = g.now()
+		g.window = g.window[:0]
+		g.emitChangeLocked(old, g.limit, "max_workers_updated")
+	}
+}
+
 // SetOnChange sets the hook called on every limit change. Nil-safe.
 func (g *ConcurrencyGovernor) SetOnChange(fn func(old, new int, reason string)) {
 	if g == nil {
