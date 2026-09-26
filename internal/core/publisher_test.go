@@ -148,6 +148,8 @@ type autoPRFakeExec struct {
 	ghErr    error
 	mergeErr error
 	lsFound  bool
+	openPR   string
+	listErr  error
 }
 
 type prMergeGhArgs struct {
@@ -170,6 +172,10 @@ func installAutoPRFake(f *autoPRFakeExec) func() {
 	origPush := autoPRGitPush
 	origLs := autoPRLsRemote
 	origGh := autoPRGhCreate
+	origList := autoPRGhListOpen
+	autoPRGhListOpen = func(repoPath, head, token string) (string, error) {
+		return f.openPR, f.listErr
+	}
 	autoPRGitPush = func(repoPath, ref, token string) error {
 		f.pushes = append(f.pushes, autoPRPushArgs{repoPath, ref, token})
 		return nil
@@ -192,6 +198,7 @@ func installAutoPRFake(f *autoPRFakeExec) func() {
 		autoPRGitPush = origPush
 		autoPRLsRemote = origLs
 		autoPRGhCreate = origGh
+		autoPRGhListOpen = origList
 	}
 }
 
@@ -267,18 +274,62 @@ func TestAutoPR_SkipsWhenLabelPresent(t *testing.T) {
 	}
 }
 
-func TestAutoPR_SkipsWhenRemoteBranchExists(t *testing.T) {
-	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/42", lsFound: true}
+func TestAutoPR_SkipsWhenRemoteBranchHasOpenPR(t *testing.T) {
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/42", lsFound: true, openPR: "https://github.com/x/y/pull/7"}
 	restore := installAutoPRFake(fake)
 	defer restore()
 	bc := &autoPRFakeBeadsClient{}
 	bead := &types.Bead{ID: "proj-abc", Title: "Add foo"}
 	maybeOpenAutoPR(bc, &Config{Output: OutputConfig{Push: true, AutoPR: true}}, "/tmp", "", "main", bead)
-	if len(fake.pushes) > 0 {
-		t.Fatalf("expected no push when remote branch exists, got %d", len(fake.pushes))
+	if len(fake.prPushes) > 0 {
+		t.Fatalf("expected no force-push when open PR exists, got %d", len(fake.prPushes))
 	}
 	if len(fake.ghCreate) > 0 {
-		t.Fatalf("expected no gh create when remote branch exists, got %d", len(fake.ghCreate))
+		t.Fatalf("expected no gh create when open PR exists, got %d", len(fake.ghCreate))
+	}
+}
+
+func TestAutoPR_UpdatesStaleBranchWithoutOpenPR(t *testing.T) {
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/42", lsFound: true}
+	restore := installAutoPRFake(fake)
+	defer restore()
+	restorePR := installPRMergeFake(fake)
+	defer restorePR()
+	bc := &autoPRFakeBeadsClient{}
+	bead := &types.Bead{ID: "proj-abc", Title: "Add foo"}
+	maybeOpenAutoPR(bc, &Config{Output: OutputConfig{Push: true, AutoPR: true}}, "/tmp", "", "main", bead)
+	if len(fake.prPushes) != 1 {
+		t.Fatalf("expected 1 force-push to update stale branch, got %d", len(fake.prPushes))
+	}
+	if fake.prPushes[0].ref != "refs/heads/dogfood/proj-abc" {
+		t.Errorf("force-push ref = %q, want refs/heads/dogfood/proj-abc", fake.prPushes[0].ref)
+	}
+	if len(fake.ghCreate) != 1 {
+		t.Fatalf("expected 1 gh create for stale branch, got %d", len(fake.ghCreate))
+	}
+	g := fake.ghCreate[0]
+	if g.base != "main" || g.head != "dogfood/proj-abc" {
+		t.Errorf("unexpected gh args: %+v", g)
+	}
+	if got := bc.labels["proj-abc"]; !sliceStrEqual(got, []string{"pr-open"}) {
+		t.Errorf("labels = %v, want [pr-open]", got)
+	}
+}
+
+func TestAutoPR_ListOpenFailsFallsBackToPush(t *testing.T) {
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/42", lsFound: true, listErr: errors.New("gh down")}
+	restore := installAutoPRFake(fake)
+	defer restore()
+	restorePR := installPRMergeFake(fake)
+	defer restorePR()
+	bc := &autoPRFakeBeadsClient{}
+	bead := &types.Bead{ID: "proj-abc", Title: "Add foo"}
+	maybeOpenAutoPR(bc, &Config{Output: OutputConfig{Push: true, AutoPR: true}}, "/tmp", "", "main", bead)
+	if len(fake.prPushes) != 1 {
+		t.Fatalf("expected force-push fallback when gh pr list fails, got %d", len(fake.prPushes))
+	}
+	if len(fake.ghCreate) != 1 {
+		t.Fatalf("expected PR creation attempt when gh pr list fails, got %d", len(fake.ghCreate))
 	}
 }
 
