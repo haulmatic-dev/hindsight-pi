@@ -131,8 +131,9 @@ func SetPublishEventSink(s *EventSink) { publishEvents = s }
 
 // PR-merge exec-layer hooks. Overridden in tests to avoid real git/gh calls.
 var (
-	prMergeGitPush = defaultPRMergeGitPush
-	autoPRGhMerge  = defaultAutoPRGhMerge
+	prMergeGitPush   = defaultPRMergeGitPush
+	autoPRGhMerge    = defaultAutoPRGhMerge
+	autoPRGhListOpen = defaultAutoPRGhListOpen
 )
 
 // PublishViaPR lands HEAD onto a protected base branch without a direct push:
@@ -239,12 +240,22 @@ func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName
 			return false
 		}
 	}
-	if out, err := autoPRLsRemote(projectPath, "origin", "refs/heads/"+head); err == nil && strings.TrimSpace(out) != "" {
-		log.Printf("[AutoPR] skipping %s: %s already exists on origin", bead.ID, head)
-		return false
-	}
 	token := autoPRResolveToken()
-	if err := autoPRGitPush(projectPath, "refs/heads/"+head, token); err != nil {
+	if out, err := autoPRLsRemote(projectPath, "origin", "refs/heads/"+head); err == nil && strings.TrimSpace(out) != "" {
+		// The dogfood branch already exists on origin from an earlier spawn
+		// cycle. Skip only when an open PR already covers it; otherwise
+		// force-update the branch to the current integration commits and
+		// open the PR that was never created (or was closed without merge).
+		if url, err := autoPRGhListOpen(projectPath, head, token); err == nil && strings.TrimSpace(url) != "" {
+			log.Printf("[AutoPR] skipping %s: %s already exists on origin with open PR %s", bead.ID, head, strings.TrimSpace(url))
+			return false
+		}
+		log.Printf("[AutoPR] %s: %s exists on origin without an open PR; force-updating branch to current integration commits", bead.ID, head)
+		if err := prMergeGitPush(projectPath, "refs/heads/"+head, token); err != nil {
+			log.Printf("[AutoPR] failed for %s: force-push %s: %v", bead.ID, head, err)
+			return false
+		}
+	} else if err := autoPRGitPush(projectPath, "refs/heads/"+head, token); err != nil {
 		log.Printf("[AutoPR] failed for %s: push %s: %v", bead.ID, head, err)
 		return false
 	}
@@ -328,6 +339,27 @@ func defaultAutoPRGitPush(repoPath, ref, token string) error {
 		return fmt.Errorf("push HEAD:%s: %w", ref, err)
 	}
 	return nil
+}
+
+// defaultAutoPRGhListOpen returns the URL of an open PR whose head is the
+// given branch, or "" when none exists. Used to decide whether an existing
+// dogfood branch on origin already has a PR covering it.
+func defaultAutoPRGhListOpen(repoPath, head, token string) (string, error) {
+	cmd := exec.Command("gh", "pr", "list",
+		"--head", head,
+		"--state", "open",
+		"--json", "url",
+		"--jq", ".[0].url",
+	)
+	cmd.Dir = repoPath
+	if token != "" {
+		cmd.Env = append(os.Environ(), "GH_TOKEN="+token)
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("gh pr list: %w\n%s", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func defaultAutoPRLsRemote(repoPath, remote, ref string) (string, error) {
