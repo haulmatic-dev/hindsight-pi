@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/registry"
 )
@@ -13,7 +12,7 @@ import (
 // test reaches the runner again with unchanged candidates.
 func forceReJudgment(s *Shepherd) {
 	s.dedupMu.Lock()
-	s.lastJudgedAt = time.Now().Add(-2 * reJudgeInterval)
+	s.judged = nil // clear cache so the judgment runs
 	s.dedupMu.Unlock()
 }
 

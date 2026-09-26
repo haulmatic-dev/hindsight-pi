@@ -221,7 +221,9 @@ Install `scripts/hydra.service` per `docs/operations/SERVICE_SETUP.md`
   (`KEY=value`, no `export`):
   ```
   MINIMAX_API_KEY=...
-  KIMI_API_KEY=...
+  # KIMI_API_KEY is NOT needed here: workers reach Kimi via the local
+  # llm-router (kimi-router provider), which holds the upstream key itself.
+  # Only set it if you configure a direct kimi-coding provider.
   HINDSIGHT_API_LLM_API_KEY=...
   HINDSIGHT_API_LLM_BASE_URL=https://api.minimax.io/v1
   HINDSIGHT_API_LLM_MODEL=MiniMax-M2.7
@@ -371,6 +373,32 @@ EOF
 
 **Verify:** `touch /usr/bin/.probe && rm /usr/bin/.probe`, then
 `/sbin/ausearch -k pi_bin_dir -ts recent` shows CREATE/DELETE with pid/ppid.
+
+## 9c. Disk janitor — tmpfiles age rules + disk watermark *(production)*
+
+Without a cleanup rule, /tmp grows unbounded and the box dies at 100%:
+2026-09-25 found 237.6G across 8015 top-level /tmp entries (leaked mongo-mem
+fixtures, npm/cargo temp, worker execution reports) and br started failing
+with `I/O error 28` — bead creation was blocked fleet-wide. `/root/.cache`
+(uv 8.9G, pip 5G) and `/root/.hermes/sessions` (15G) were close behind.
+
+Install the tmpfiles rule shipped with this repo:
+
+```bash
+sudo cp packaging/systemd/hydra-tmpfiles.conf /etc/tmpfiles.d/hydra-tmpfiles.conf
+sudo systemd-tmpfiles --clean   # apply immediately, no reboot
+```
+
+That ages out /tmp entries after 7 days and /root/.cache +
+/root/.hermes/sessions entries after 30 days; `systemd-tmpfiles-clean.timer`
+runs it daily. No tmpreaper needed.
+
+The daemon also reports host disk usage as telemetry: when the filesystem
+holding `/` exceeds the 85% watermark, the Pan fleet digest carries a
+`host: disk=N%` anomaly line (fail-open — a statfs error never blocks the
+digest). This is telemetry only; it does not gate spawns. Raise/lower the
+watermark in code (`defaultDiskWatermarkPct` in `internal/core/pan_health.go`)
+or inject per-deployment via `Overseer.SetDiskWatermark`.
 
 ## 10. Deploy and upgrade procedure
 

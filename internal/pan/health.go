@@ -57,6 +57,15 @@ type ProjectHealth struct {
 // zero tokens and zero shell noise.
 type HealthDigest struct {
 	Projects []ProjectHealth
+	// HostAnomalies are host-level (not per-project) findings: disk-space
+	// watermark breaches on the filesystem holding the working state. They are
+	// advisory telemetry — rendered in Text() so every Pan judgment sees them —
+	// but never become campaign-anomaly pseudo-candidates, because the repair
+	// verbs (park-campaign etc.) resolve a project from the key and "host" is
+	// not a project (2026-09-25 disk-full incident: /tmp filled the root fs and
+	// br I/O error 28 blocked bead creation fleet-wide).
+	HostAnomalies []string
+	DiskUsedPct   int
 }
 
 // Anomalous returns the projects carrying at least one anomaly flag.
@@ -85,6 +94,9 @@ func (d HealthDigest) Text() string {
 			fmt.Fprintf(&b, " ANOMALIES=[%s]", strings.Join(p.Anomalies, "; "))
 		}
 		b.WriteString("\n")
+	}
+	if len(d.HostAnomalies) > 0 {
+		fmt.Fprintf(&b, "host: disk=%d%% ANOMALIES=[%s]\n", d.DiskUsedPct, strings.Join(d.HostAnomalies, "; "))
 	}
 	s := b.String()
 	if len(s) > maxLen {

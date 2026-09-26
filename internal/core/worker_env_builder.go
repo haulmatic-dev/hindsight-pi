@@ -57,7 +57,12 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 	// into workers and break tests that assert the flag is absent.
 	baseEnv := make([]string, 0, len(os.Environ()))
 	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "HYDRA_DAEMON_GATES=") {
+		// HYDRA_DAEMON_GATES: inherited value would leak wrong state into
+		// workers. KIMI_API_KEY: routing-audit leftover — workers ride the
+		// llm-router lane (kimi-router baseUrl 127.0.0.1:9900) where the
+		// router injects the upstream key itself, so the inherited key never
+		// reaches api.kimi.com and only confuses audits.
+		if !strings.HasPrefix(e, "HYDRA_DAEMON_GATES=") && !strings.HasPrefix(e, "KIMI_API_KEY=") {
 			baseEnv = append(baseEnv, e)
 		}
 	}
@@ -141,16 +146,19 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 		}
 	}
 
-	// Pass API key to worker if configured (with fallback to pi.standard-agent.llm)
+	// Pass API key to worker only when explicitly configured (with fallback to
+	// pi.standard-agent.llm). No built-in default: workers ride the llm-router
+	// lane (provider kimi-router, baseUrl 127.0.0.1:9900) where the router
+	// injects the upstream key itself, so a default KIMI_API_KEY env var is
+	// inert and only confuses routing audits.
 	apiKeyName := b.config.Agents.Pi.ApiKeyName
 	if apiKeyName == "" && b.config.Pi.StandardAgent.LLM.ApiKeyName != "" {
 		apiKeyName = b.config.Pi.StandardAgent.LLM.ApiKeyName
 	}
-	if apiKeyName == "" {
-		apiKeyName = "KIMI_API_KEY"
-	}
-	if apiKey := os.Getenv(apiKeyName); apiKey != "" {
-		env = append(env, fmt.Sprintf("%s=%s", apiKeyName, apiKey))
+	if apiKeyName != "" {
+		if apiKey := os.Getenv(apiKeyName); apiKey != "" {
+			env = append(env, fmt.Sprintf("%s=%s", apiKeyName, apiKey))
+		}
 	}
 
 	// Add Hindsight configuration
@@ -283,9 +291,9 @@ func (b *WorkerEnvBuilder) buildPiEnv(bead types.Bead) []string {
 	if p.Timeout == "" {
 		p.Timeout = "10m"
 	}
-	if p.ApiKeyName == "" {
-		p.ApiKeyName = "KIMI_API_KEY"
-	}
+	// p.ApiKeyName intentionally left empty when unset: no implicit default
+	// key name. Workers using the llm-router lane need no API key env at all,
+	// and an unused KIMI_API_KEY default leaked into every worker env.
 
 	// Provider failover: when the selected provider's circuit is open due to
 	// repeated rate-limit (429) failures, use the configured fallback.
@@ -310,13 +318,12 @@ func (b *WorkerEnvBuilder) buildPiEnv(bead types.Bead) []string {
 		piConfigDir = b.config.Pi.WorkerConfigDir
 	}
 
-	return []string{
+	env := []string{
 		"HYDRA_PI_ENABLED=true",
 		fmt.Sprintf("HYDRA_PI_PROVIDER=%s", p.Provider),
 		fmt.Sprintf("HYDRA_PI_MODEL=%s", p.Model),
 		fmt.Sprintf("HYDRA_PI_THINKING_LEVEL=%s", p.ThinkingLevel),
 		fmt.Sprintf("HYDRA_PI_TIMEOUT=%s", p.Timeout),
-		fmt.Sprintf("HYDRA_PI_API_KEY_NAME=%s", p.ApiKeyName),
 		fmt.Sprintf("HYDRA_PI_CONFIG_DIR=%s", piConfigDir),
 		// Protocol selection. Without these two the worker cannot know the
 		// daemon's agents.pi.mode at all: workers are separate processes
@@ -334,4 +341,11 @@ func (b *WorkerEnvBuilder) buildPiEnv(bead types.Bead) []string {
 		fmt.Sprintf("HYDRA_PI_TURN_BUDGET=%d", p.TurnBudgetForPhase(phase)),
 		fmt.Sprintf("HYDRA_PI_TURN_BUDGET_CADENCE=%d", p.ReminderCadence()),
 	}
+	// API key name is forwarded only when explicitly configured — an empty
+	// HYDRA_PI_API_KEY_NAME would re-introduce the inert-key default the
+	// worker side no longer has.
+	if p.ApiKeyName != "" {
+		env = append(env, fmt.Sprintf("HYDRA_PI_API_KEY_NAME=%s", p.ApiKeyName))
+	}
+	return env
 }

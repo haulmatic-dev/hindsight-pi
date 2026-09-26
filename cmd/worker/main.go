@@ -782,11 +782,10 @@ func parsePiConfig() PiConfig {
 	// Parse the per-phase extension allowlist chosen by the daemon.
 	cfg.Extensions = parseExtensionList(os.Getenv("HYDRA_PI_EXTENSIONS"))
 
-	// Parse API key name
+	// Parse API key name. No implicit default: the daemon forwards
+	// HYDRA_PI_API_KEY_NAME only when api_key_name is explicitly configured,
+	// and workers riding the llm-router lane need no API key env at all.
 	cfg.APIKeyName = os.Getenv("HYDRA_PI_API_KEY_NAME")
-	if cfg.APIKeyName == "" {
-		cfg.APIKeyName = "KIMI_API_KEY" // Default API key name
-	}
 
 	// Parse config directory
 	cfg.ConfigDir = os.Getenv("HYDRA_PI_CONFIG_DIR")
