@@ -118,6 +118,11 @@ var (
 	autoPRGitPush  = defaultAutoPRGitPush
 	autoPRLsRemote = defaultAutoPRLsRemote
 	autoPRGhCreate = defaultAutoPRGhCreate
+	// autoPRGhListOpen reports whether an open PR already tracks the head
+	// branch. Used to distinguish a stranded dogfood branch (pushed by an
+	// earlier cycle, PR never created — hydra-f40k) from one already being
+	// carried by an open PR.
+	autoPRGhListOpen = defaultAutoPRGhListOpen
 )
 
 // publishEvents carries publisher telemetry into the typed event stream.
@@ -225,9 +230,13 @@ func prSafeName(s string) string {
 
 // maybeOpenAutoPR creates a PR when a push to the protected base branch was
 // rejected. It is fail-open: any error is logged and false is returned (the
-// caller then fails the integration closed). Returns true only when the PR was
-// actually created — the caller may then treat the integration as preserved
-// via the PR.
+// caller then fails the integration closed). Returns true only when the work
+// is verified landed — either the PR it created reached MERGED state, or an
+// already-open PR tracking the dogfood branch was merged now. A leftover
+// dogfood branch alone is NOT proof of preservation: an earlier cycle can
+// have pushed it while PR creation never happened (the 2026-09-25 f40k
+// incident stranded five verified closes exactly this way), and an open PR
+// can have been left unmerged by its originator integration.
 func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName, branch string, bead *types.Bead) bool {
 	if cfg == nil || !cfg.AutoPREnabled() || beadsClient == nil || bead == nil || branch == "" {
 		return false
@@ -239,21 +248,34 @@ func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName
 			return false
 		}
 	}
-	if out, err := autoPRLsRemote(projectPath, "origin", "refs/heads/"+head); err == nil && strings.TrimSpace(out) != "" {
-		log.Printf("[AutoPR] skipping %s: %s already exists on origin", bead.ID, head)
-		return false
-	}
 	token := autoPRResolveToken()
-	if err := autoPRGitPush(projectPath, "refs/heads/"+head, token); err != nil {
-		log.Printf("[AutoPR] failed for %s: push %s: %v", bead.ID, head, err)
-		return false
+	if out, err := autoPRLsRemote(projectPath, "origin", "refs/heads/"+head); err == nil && strings.TrimSpace(out) != "" {
+		open, err := autoPRGhListOpen(projectPath, head, token)
+		if err != nil {
+			log.Printf("[AutoPR] %s: listing PRs for %s: %v (fail open)", bead.ID, head, err)
+			return false
+		}
+		if open {
+			// The branch is already carried by an open PR — but the earlier
+			// integration may never have merged it. Land it now; only a
+			// verified MERGED state counts as preserved.
+			if err := autoPRGhMerge(projectPath, head, token); err != nil {
+				log.Printf("[AutoPR] %s: open PR for %s exists but merge failed: %v", bead.ID, head, err)
+				return false
+			}
+			log.Printf("[Output] auto-PR merged for %s: %s", bead.ID, head)
+			return true
+		}
+		log.Printf("[AutoPR] %s: %s exists on origin with no open PR — recovering stranded branch", bead.ID, head)
 	}
 	title := bead.Title
 	if title == "" {
 		title = "Hydra auto-PR"
 	}
-	body := "Authored by a Hydra dogfood run."
-	url, err := autoPRGhCreate(projectPath, branch, head, title, body, token)
+	// PublishViaPR force-updates the bead-owned dogfood branch, opens the PR,
+	// merges with --admin, and verifies MERGED state — a created-but-unmerged
+	// PR must not count as preserved (that was the f40k strand factory).
+	url, err := PublishViaPR(projectPath, branch, head, title, token)
 	if err != nil {
 		log.Printf("[AutoPR] failed for %s: %v", bead.ID, err)
 		return false
@@ -311,6 +333,26 @@ func autoPRResolveToken() string {
 		return strings.TrimSpace(rest)
 	}
 	return ""
+}
+
+// defaultAutoPRGhListOpen reports whether at least one open PR tracks head.
+// gh pr list --head matches by branch name; a non-zero exit fails open at the
+// caller (the caller returns false = not preserved).
+func defaultAutoPRGhListOpen(repoPath, head, token string) (bool, error) {
+	cmd := exec.Command("gh", "pr", "list", "--head", head, "--state", "open", "--json", "number", "--jq", "length")
+	cmd.Dir = repoPath
+	if token != "" {
+		cmd.Env = append(os.Environ(), "GH_TOKEN="+token)
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("gh pr list: %w", err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return false, fmt.Errorf("gh pr list: parse count %q: %w", strings.TrimSpace(string(out)), err)
+	}
+	return n > 0, nil
 }
 
 func defaultAutoPRGitPush(repoPath, ref, token string) error {

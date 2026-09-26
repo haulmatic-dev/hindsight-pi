@@ -92,7 +92,11 @@ push
 rejections return the exact remote stderr (GH006 included) instead of a
 collapsed "protected branch" summary. A rejected push routes to `maybeOpenAutoPR`
 when `output.auto_pr` is on; a created PR preserves the work via the dogfood
-branch and the close proceeds, otherwise the close fails. When branch
+branch and the close proceeds, otherwise the close fails. If `dogfood/<bead-id>`
+already exists on origin from an earlier cycle, AutoPR no longer skips entirely:
+it checks for an open PR on that head — skipping only when one exists, otherwise
+force-updating the branch to the current integration commits and opening the PR
+(so the tip always matches the work being integrated). When branch
 protection on the working branch is permanent, `output.pr_merge: true` skips
 the futile direct push entirely: the publisher force-pushes HEAD to
 `dogfood/<bead-id>`, runs `gh pr create` + `gh pr merge --merge --admin`, and

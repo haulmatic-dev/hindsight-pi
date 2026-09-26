@@ -139,15 +139,18 @@ func (m *autoPRFakeBeadsClient) AddDependency(projectPath, repoName string, bead
 }
 
 type autoPRFakeExec struct {
-	pushes   []autoPRPushArgs
-	lsRemote []autoPRLsArgs
-	ghCreate []autoPRGhArgs
-	prPushes []autoPRPushArgs
-	ghMerge  []prMergeGhArgs
-	ghURL    string
-	ghErr    error
-	mergeErr error
-	lsFound  bool
+	pushes      []autoPRPushArgs
+	lsRemote    []autoPRLsArgs
+	ghCreate    []autoPRGhArgs
+	prPushes    []autoPRPushArgs
+	ghMerge     []prMergeGhArgs
+	ghListOpen  []string
+	ghURL       string
+	ghErr       error
+	mergeErr    error
+	lsFound     bool
+	listOpen    bool
+	listOpenErr error
 }
 
 type prMergeGhArgs struct {
@@ -170,6 +173,9 @@ func installAutoPRFake(f *autoPRFakeExec) func() {
 	origPush := autoPRGitPush
 	origLs := autoPRLsRemote
 	origGh := autoPRGhCreate
+	origPrPush := prMergeGitPush
+	origMerge := autoPRGhMerge
+	origList := autoPRGhListOpen
 	autoPRGitPush = func(repoPath, ref, token string) error {
 		f.pushes = append(f.pushes, autoPRPushArgs{repoPath, ref, token})
 		return nil
@@ -188,10 +194,25 @@ func installAutoPRFake(f *autoPRFakeExec) func() {
 		}
 		return f.ghURL, nil
 	}
+	prMergeGitPush = func(repoPath, ref, token string) error {
+		f.prPushes = append(f.prPushes, autoPRPushArgs{repoPath, ref, token})
+		return nil
+	}
+	autoPRGhMerge = func(repoPath, head, token string) error {
+		f.ghMerge = append(f.ghMerge, prMergeGhArgs{repoPath, head, token})
+		return f.mergeErr
+	}
+	autoPRGhListOpen = func(repoPath, head, token string) (bool, error) {
+		f.ghListOpen = append(f.ghListOpen, head)
+		return f.listOpen, f.listOpenErr
+	}
 	return func() {
 		autoPRGitPush = origPush
 		autoPRLsRemote = origLs
 		autoPRGhCreate = origGh
+		prMergeGitPush = origPrPush
+		autoPRGhMerge = origMerge
+		autoPRGhListOpen = origList
 	}
 }
 
@@ -233,11 +254,11 @@ func TestAutoPR_OpensPR(t *testing.T) {
 	bc := &autoPRFakeBeadsClient{}
 	bead := &types.Bead{ID: "proj-abc", Title: "Add foo", Labels: []string{"fr"}}
 	maybeOpenAutoPR(bc, &Config{Output: OutputConfig{Push: true, AutoPR: true}}, "/tmp", "", "main", bead)
-	if len(fake.pushes) != 1 {
-		t.Fatalf("expected 1 push, got %d", len(fake.pushes))
+	if len(fake.prPushes) != 1 {
+		t.Fatalf("expected 1 force push, got %d", len(fake.prPushes))
 	}
-	if fake.pushes[0].ref != "refs/heads/dogfood/proj-abc" {
-		t.Errorf("push ref = %q, want refs/heads/dogfood/proj-abc", fake.pushes[0].ref)
+	if fake.prPushes[0].ref != "refs/heads/dogfood/proj-abc" {
+		t.Errorf("push ref = %q, want refs/heads/dogfood/proj-abc", fake.prPushes[0].ref)
 	}
 	if len(fake.ghCreate) != 1 {
 		t.Fatalf("expected 1 gh create, got %d", len(fake.ghCreate))
@@ -245,6 +266,9 @@ func TestAutoPR_OpensPR(t *testing.T) {
 	g := fake.ghCreate[0]
 	if g.base != "main" || g.head != "dogfood/proj-abc" || g.title != "Add foo" || g.body != "Authored by a Hydra dogfood run." {
 		t.Errorf("unexpected gh args: %+v", g)
+	}
+	if len(fake.ghMerge) != 1 {
+		t.Fatalf("expected the PR to be merged after creation, got %d merges", len(fake.ghMerge))
 	}
 	wantLabels := []string{"fr", "pr-open"}
 	if got := bc.labels["proj-abc"]; !sliceStrEqual(got, wantLabels) {
@@ -267,18 +291,70 @@ func TestAutoPR_SkipsWhenLabelPresent(t *testing.T) {
 	}
 }
 
-func TestAutoPR_SkipsWhenRemoteBranchExists(t *testing.T) {
-	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/42", lsFound: true}
+// TestAutoPR_MergesExistingOpenPR: a leftover dogfood branch WITH an open PR
+// tracking it is the hydra-f40k strand signature — the earlier integration
+// pushed the branch but never merged. The fallback must land it now (verified
+// MERGED), not skip.
+func TestAutoPR_MergesExistingOpenPR(t *testing.T) {
+	fake := &autoPRFakeExec{lsFound: true, listOpen: true}
 	restore := installAutoPRFake(fake)
 	defer restore()
 	bc := &autoPRFakeBeadsClient{}
 	bead := &types.Bead{ID: "proj-abc", Title: "Add foo"}
 	maybeOpenAutoPR(bc, &Config{Output: OutputConfig{Push: true, AutoPR: true}}, "/tmp", "", "main", bead)
-	if len(fake.pushes) > 0 {
-		t.Fatalf("expected no push when remote branch exists, got %d", len(fake.pushes))
+	if len(fake.ghMerge) != 1 {
+		t.Fatalf("expected the existing open PR to be merged, got %d merges", len(fake.ghMerge))
 	}
-	if len(fake.ghCreate) > 0 {
-		t.Fatalf("expected no gh create when remote branch exists, got %d", len(fake.ghCreate))
+	if fake.ghMerge[0].head != "dogfood/proj-abc" {
+		t.Errorf("merge head = %q, want dogfood/proj-abc", fake.ghMerge[0].head)
+	}
+	if len(fake.prPushes) > 0 || len(fake.ghCreate) > 0 {
+		t.Fatalf("expected no force-push or PR create when an open PR already tracks the branch, got pushes=%d creates=%d", len(fake.prPushes), len(fake.ghCreate))
+	}
+}
+
+// TestAutoPR_RecoversBranchWithoutOpenPR: a leftover dogfood branch with NO
+// open PR is a stranded artifact — the 2026-09-25 f40k incident. The fallback
+// must refresh the branch and open + merge the PR, not skip.
+func TestAutoPR_RecoversBranchWithoutOpenPR(t *testing.T) {
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/43", lsFound: true, listOpen: false}
+	restore := installAutoPRFake(fake)
+	defer restore()
+	bc := &autoPRFakeBeadsClient{}
+	bead := &types.Bead{ID: "proj-abc", Title: "Add foo", Labels: []string{"fr"}}
+	maybeOpenAutoPR(bc, &Config{Output: OutputConfig{Push: true, AutoPR: true}}, "/tmp", "", "main", bead)
+	if len(fake.prPushes) != 1 || fake.prPushes[0].ref != "refs/heads/dogfood/proj-abc" {
+		t.Fatalf("expected force push of refs/heads/dogfood/proj-abc, got %+v", fake.prPushes)
+	}
+	if len(fake.ghCreate) != 1 || len(fake.ghMerge) != 1 {
+		t.Fatalf("expected create + merge, got creates=%d merges=%d", len(fake.ghCreate), len(fake.ghMerge))
+	}
+	wantLabels := []string{"fr", "pr-open"}
+	if got := bc.labels["proj-abc"]; !sliceStrEqual(got, wantLabels) {
+		t.Errorf("labels = %v, want %v", got, wantLabels)
+	}
+	if desc := bc.descriptions["proj-abc"]; !strings.Contains(desc, "https://github.com/x/y/pull/43") {
+		t.Errorf("description missing URL: %q", desc)
+	}
+}
+
+// TestAutoPR_FailClosedWhenMergeFails: a created-but-unmerged PR must NOT
+// count as integration preserved — the caller must still see the failure.
+func TestAutoPR_FailClosedWhenMergeFails(t *testing.T) {
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/44", mergeErr: errors.New("merge conflict")}
+	restore := installAutoPRFake(fake)
+	defer restore()
+	bc := &autoPRFakeBeadsClient{}
+	bead := &types.Bead{ID: "proj-abc", Title: "Add foo"}
+	maybeOpenAutoPR(bc, &Config{Output: OutputConfig{Push: true, AutoPR: true}}, "/tmp", "", "main", bead)
+	if len(fake.ghCreate) != 1 || len(fake.ghMerge) != 1 {
+		t.Fatalf("expected create + merge attempt, got creates=%d merges=%d", len(fake.ghCreate), len(fake.ghMerge))
+	}
+	if len(bc.labels) > 0 {
+		t.Fatalf("expected no label update on unmerged PR, got %v", bc.labels)
+	}
+	if len(bc.descriptions) > 0 {
+		t.Fatalf("expected no description update on unmerged PR, got %v", bc.descriptions)
 	}
 }
 
@@ -289,8 +365,8 @@ func TestAutoPR_FailOpenOnGhError(t *testing.T) {
 	bc := &autoPRFakeBeadsClient{}
 	bead := &types.Bead{ID: "proj-abc", Title: "Add foo"}
 	maybeOpenAutoPR(bc, &Config{Output: OutputConfig{Push: true, AutoPR: true}}, "/tmp", "", "main", bead)
-	if len(fake.pushes) != 1 {
-		t.Fatalf("expected push to happen, got %d", len(fake.pushes))
+	if len(fake.prPushes) != 1 {
+		t.Fatalf("expected force push to happen, got %d", len(fake.prPushes))
 	}
 	if len(bc.labels) > 0 {
 		t.Fatalf("expected no label update on gh failure, got %v", bc.labels)
@@ -324,11 +400,11 @@ func TestPublishAfterIntegrate_AutoPRWhenVerificationFails(t *testing.T) {
 	closer.SetWorktreeManager(NewWorktreeManager(), nil, nil)
 	closer.publishAfterIntegrate(repo, &types.Bead{ID: "bead-xyz", Title: "Fix things"})
 
-	if len(fake.pushes) != 1 {
-		t.Fatalf("expected auto-pr push, got %d", len(fake.pushes))
+	if len(fake.prPushes) != 1 {
+		t.Fatalf("expected auto-pr force push, got %d", len(fake.prPushes))
 	}
-	if fake.pushes[0].ref != "refs/heads/dogfood/bead-xyz" {
-		t.Errorf("unexpected auto-pr ref %q", fake.pushes[0].ref)
+	if fake.prPushes[0].ref != "refs/heads/dogfood/bead-xyz" {
+		t.Errorf("unexpected auto-pr ref %q", fake.prPushes[0].ref)
 	}
 	if len(fake.ghCreate) != 1 {
 		t.Fatalf("expected gh pr create, got %d", len(fake.ghCreate))
