@@ -554,3 +554,63 @@ func TestPublishViaPR_PropagatesCreateFailure(t *testing.T) {
 		t.Fatalf("merge must not run when PR creation failed, got %+v", fake.ghMerge)
 	}
 }
+
+// TestPublishAfterIntegrate_PRTipAlreadyMerged_NoOp: when the bead's tip is
+// already contained in the remote base branch (a racing duplicate close
+// landed it first — hydra-kf2t, 2026-09-27), the second integrate attempt
+// must no-op instead of creating a second PR.
+func TestPublishAfterIntegrate_PRTipAlreadyMerged_NoOp(t *testing.T) {
+	repo, _ := setupReachableRemote(t)
+	commitFile(t, repo, "file.txt", "a")
+	git(t, repo, "push", "-u", "origin", "main")
+
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/9"}
+	restore := installAutoPRFake(fake)
+	restoreMerge := installPRMergeFake(fake)
+	defer restore()
+	defer restoreMerge()
+
+	origProbe := tipMergedProbe
+	tipMergedProbe = func(string, string) bool { return true }
+	defer func() { tipMergedProbe = origProbe }()
+
+	closer := NewBeadCloser(&autoPRFakeBeadsClient{}, nil, nil, nil,
+		&Config{Output: OutputConfig{Push: true, PRMerge: true}})
+	closer.SetWorktreeManager(NewWorktreeManager(), nil, nil)
+	if err := closer.publishAfterIntegrate(repo, &types.Bead{ID: "bead-9", Title: "Fix things"}); err != nil {
+		t.Fatalf("duplicate integrate must no-op, got: %v", err)
+	}
+	if len(fake.ghCreate) != 0 {
+		t.Fatalf("no PR may be created for an already-landed tip, got %+v", fake.ghCreate)
+	}
+}
+
+// TestPublishAfterIntegrate_PRNoCommitsBetween_Benign: when gh pr create
+// rejects with "No commits between" (the winning close's PR merge landed the
+// same tip between our pre-check and the create), the publish must be
+// treated as landed, not failed — no integration-failed reopen, no scary
+// FAILED log path.
+func TestPublishAfterIntegrate_PRNoCommitsBetween_Benign(t *testing.T) {
+	repo, _ := setupReachableRemote(t)
+	commitFile(t, repo, "file.txt", "a")
+	git(t, repo, "push", "-u", "origin", "main")
+	// Move the local tip past origin/main so the real probe reports
+	// not-yet-landed and the run reaches gh pr create.
+	commitFile(t, repo, "file.txt", "b")
+
+	fake := &autoPRFakeExec{ghErr: errors.New("gh pr create: exit status 1\npull request create failed: GraphQL: No commits between development and dogfood/bead-10 (createPullRequest)")}
+	restore := installAutoPRFake(fake)
+	restoreMerge := installPRMergeFake(fake)
+	defer restore()
+	defer restoreMerge()
+
+	closer := NewBeadCloser(&autoPRFakeBeadsClient{}, nil, nil, nil,
+		&Config{Output: OutputConfig{Push: true, PRMerge: true}})
+	closer.SetWorktreeManager(NewWorktreeManager(), nil, nil)
+	if err := closer.publishAfterIntegrate(repo, &types.Bead{ID: "bead-10", Title: "Fix things"}); err != nil {
+		t.Fatalf("no-commits-between must be a benign no-op, got: %v", err)
+	}
+	if len(fake.ghCreate) != 1 {
+		t.Fatalf("expected one create attempt before the benign classification, got %d", len(fake.ghCreate))
+	}
+}

@@ -241,6 +241,16 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 		if err := c.runDaemonGates(bead, projectName, projectPath, repoName, gateWt); err != nil {
 			return err
 		}
+		// Re-check terminality after the (potentially minutes-long) gate run:
+		// a duplicate close can start while the first is still running gates.
+		// Observed live 2026-09-27 (hydra-kf2t): Charon orphan recovery
+		// respawned a worker because the bead stayed in_progress during a
+		// seven-minute daemon gate, producing a second close that raced the
+		// first into integrate. Skip instead of double-integrating.
+		if fresh, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID); err == nil && fresh != nil && fresh.Status.IsTerminal() {
+			log.Printf("[closeBead] Bead %s closed while gates ran (status: %s); skipping integrate/close", bead.ID, fresh.Status)
+			return nil
+		}
 	}
 
 	// Commit the chain worktree's changes for this bead before closing, and
@@ -418,8 +428,10 @@ const maxConsecutiveIntegrationFailures = 3
 
 // integrationBackoffBase is the delay before the first integrate retry; it
 // grows exponentially per consecutive failure. A retry arriving sooner than
-// the base is rapid-fire contention and does not advance the cap.
-const integrationBackoffBase = 30 * time.Second
+// the base is rapid-fire contention and does not advance the cap. Var, not
+// const: tests shrink it — the real sleeps (30s→210s cumulative) dominated
+// the internal/core suite (2026-09-27 gate runs, 444s of 600s budget).
+var integrationBackoffBase = 30 * time.Second
 
 // integrationBackoffMax caps the exponential backoff between integrate retries.
 const integrationBackoffMax = 8 * time.Minute
@@ -646,8 +658,26 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 	remote := c.config.OutputPushRemote()
 	if c.config.PRMergeEnabled() {
 		head := "dogfood/" + string(bead.ID)
+		// Duplicate-landing dedup: a racing close attempt may have already
+		// landed this bead's tip via PR (hydra-kf2t, 2026-09-27: two closes
+		// integrated the same singleton seconds apart). Skip when the local
+		// tip is already contained in the remote base branch.
+		if tipMergedProbe(projectPath, branch) {
+			log.Printf("[Output] %s tip already merged into %s — duplicate integrate after PR landing, no-op", bead.ID, branch)
+			AppendActivity(projectPath, string(bead.ID), "already landed (duplicate integrate no-op)")
+			return nil
+		}
 		url, err := PublishViaPR(projectPath, branch, head, bead.Title, autoPRResolveToken())
 		if err != nil {
+			// Benign race loser: the winning close's PR merge landed the same
+			// tip between our pre-check and gh pr create, so GitHub reports
+			// "No commits between". Treat as landed, not as an integration
+			// failure.
+			if isPRNoCommitsBetween(err) {
+				log.Printf("[Output] %s already merged into %s (gh pr create reported no commits between) — duplicate integrate treated as landed", bead.ID, branch)
+				AppendActivity(projectPath, string(bead.ID), "already landed (duplicate integrate no-op)")
+				return nil
+			}
 			log.Printf("[Output] PR merge failed for %s: %s", bead.ID, err)
 			AppendActivity(projectPath, string(bead.ID), "PR merge failed: "+err.Error())
 			return fmt.Errorf("push %s via PR to %s/%s: %w", bead.ID, remote, branch, err)
