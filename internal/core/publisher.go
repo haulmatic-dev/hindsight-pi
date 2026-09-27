@@ -140,6 +140,34 @@ var (
 	autoPRGhMerge  = defaultAutoPRGhMerge
 )
 
+// tipMergedProbe reports whether repoPath's HEAD is already contained in the
+// remote base branch — i.e. a prior integrate/PR merge landed the same work.
+// Overridden in tests.
+var tipMergedProbe = defaultTipMergedProbe
+
+// defaultTipMergedProbe fetches the remote base quietly and asks
+// merge-base --is-ancestor. Fail-open: any git fault returns false so the
+// caller proceeds with the normal publish path.
+func defaultTipMergedProbe(repoPath, base string) bool {
+	if _, err := gitOut(repoPath, "fetch", "--quiet", "origin", base); err != nil {
+		return false
+	}
+	tip, err := gitOut(repoPath, "rev-parse", "HEAD")
+	if err != nil {
+		return false
+	}
+	return isAncestorOf(repoPath, strings.TrimSpace(tip), "origin/"+base)
+}
+
+// isPRNoCommitsBetween reports the benign duplicate-landing race: the winning
+// close's PR merge landed the tip between the loser's pre-check and gh pr
+// create, so GitHub rejects the PR with "No commits between <base> and
+// <head>" (hydra-kf2t, 2026-09-27). The work is already on the base branch —
+// treat it as landed.
+func isPRNoCommitsBetween(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "No commits between")
+}
+
 // PublishViaPR lands HEAD onto a protected base branch without a direct push:
 // force-push HEAD to the dogfood feature branch, open a PR into base, merge
 // it with `gh pr merge --merge --admin`, and verify the PR actually reached
