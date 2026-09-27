@@ -386,6 +386,7 @@ Install the tmpfiles rule shipped with this repo:
 
 ```bash
 sudo cp packaging/systemd/hydra-tmpfiles.conf /etc/tmpfiles.d/hydra-tmpfiles.conf
+sudo systemd-tmpfiles --reload /etc/tmpfiles.d/hydra-tmpfiles.conf  # pick up the new rule, no reboot
 sudo systemd-tmpfiles --clean   # apply immediately, no reboot
 ```
 
