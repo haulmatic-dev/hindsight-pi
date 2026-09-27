@@ -477,6 +477,10 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("HYDRA_HOME", tmp); err != nil {
 		panic("could not isolate HYDRA_HOME: " + err.Error())
 	}
+	// Shrink the integrate backoff: failIntegration sleeps integrationBackoffBase
+	// × 2^n per consecutive failure, so tests looping it spent 210s+120s+30s+30s
+	// asleep and pushed the package past the 10m test timeout (gate 2026-09-27).
+	integrationBackoffBase = time.Millisecond
 
 	code := m.Run()
 
