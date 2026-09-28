@@ -657,3 +657,40 @@ func TestDefaultPRMergeGitPush_RedactsToken(t *testing.T) {
 		t.Fatalf("expected redacted placeholder in error, got: %v", err)
 	}
 }
+
+// TestPublishViaPR_FallsBackToDaemonToken proves an empty caller token (the
+// periodic publish path only carries the project owner's PAT, absent for
+// daemon-owned repos) resolves the daemon credential instead of invoking gh
+// unauthenticated (2026-09-28: publish tick looped on gh pr create exit
+// status 4 for the hydra repo).
+func TestPublishViaPR_FallsBackToDaemonToken(t *testing.T) {
+	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/9"}
+	restore := installPRMergeFake(fake)
+	defer restore()
+	origCreate := autoPRGhCreate
+	autoPRGhCreate = func(repoPath, base, head, title, body, token string) (string, error) {
+		fake.ghCreate = append(fake.ghCreate, autoPRGhArgs{repoPath, base, head, title, body, token})
+		return fake.ghURL, fake.ghErr
+	}
+	defer func() { autoPRGhCreate = origCreate }()
+	origResolve := prMergeResolveToken
+	prMergeResolveToken = func() string { return "FALLBACK_TOK" }
+	defer func() { prMergeResolveToken = origResolve }()
+
+	url, err := PublishViaPR("/tmp/x", "main", "dogfood/publish-x", "t", "")
+	if err != nil {
+		t.Fatalf("PublishViaPR: %v", err)
+	}
+	if url == "" {
+		t.Fatal("expected PR URL")
+	}
+	if len(fake.prPushes) != 1 || fake.prPushes[0].token != "FALLBACK_TOK" {
+		t.Fatalf("push token = %+v, want FALLBACK_TOK", fake.prPushes)
+	}
+	if len(fake.ghCreate) != 1 || fake.ghCreate[0].token != "FALLBACK_TOK" {
+		t.Fatalf("create token = %+v, want FALLBACK_TOK", fake.ghCreate)
+	}
+	if len(fake.ghMerge) != 1 || fake.ghMerge[0].token != "FALLBACK_TOK" {
+		t.Fatalf("merge token = %+v, want FALLBACK_TOK", fake.ghMerge)
+	}
+}
