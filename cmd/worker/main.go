@@ -1104,7 +1104,10 @@ func executeWithRetry(
 // permission_error / access_terminated_error payload (observed live
 // 2026-07-27, where it was misclassified as a code failure and spawned 36
 // useless fix beads, each retried 4x — a feedback loop that burned more of
-// the very quota that was already exhausted).
+// the very quota that was already exhausted). OpenRouter returns quota
+// exhaustion as HTTP 402 with type billing_error (observed live 2026-09-28:
+// "requires more credits, or fewer max_tokens" — misclassified as a code
+// failure, so every worker turn died and respawned with no spawn freeze).
 // transientOverloadMarkers identify provider CAPACITY errors, which are not the
 // same thing as being rate limited for sending too much.
 //
@@ -1182,6 +1185,9 @@ func isConcurrencyLimit(errStr string) bool {
 var quotaErrorMarkers = []string{
 	"usage limit",
 	"billing cycle",
+	"billing_error",
+	"requires more credits",
+	"insufficient credits",
 	"quota",
 	"permission_error",
 	"access_terminated",
