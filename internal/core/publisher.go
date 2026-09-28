@@ -140,6 +140,10 @@ var (
 	autoPRGhMerge  = defaultAutoPRGhMerge
 )
 
+// prMergeResolveToken resolves the daemon's own GitHub credential for PR
+// operations when the caller has no project-owner token. Overridden in tests.
+var prMergeResolveToken = autoPRResolveToken
+
 // tipMergedProbe reports whether repoPath's HEAD is already contained in the
 // remote base branch — i.e. a prior integrate/PR merge landed the same work.
 // Overridden in tests.
@@ -180,6 +184,13 @@ func isPRNoCommitsBetween(err error) bool {
 func PublishViaPR(projectPath, base, featureBranch, title, token string) (string, error) {
 	if projectPath == "" || base == "" || featureBranch == "" {
 		return "", fmt.Errorf("pr merge: empty project, base, or feature branch")
+	}
+	// Token fallback: the periodic publish path only has the project owner's
+	// PAT, which is absent for daemon-owned repos (hydra itself). Fall back
+	// to the daemon's credential instead of invoking gh unauthenticated
+	// (2026-09-28: publish tick looped on gh pr create exit status 4).
+	if token == "" {
+		token = prMergeResolveToken()
 	}
 	if err := prMergeGitPush(projectPath, "refs/heads/"+featureBranch, token); err != nil {
 		return "", fmt.Errorf("pr merge: push %s: %w", featureBranch, err)
