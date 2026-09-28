@@ -207,9 +207,14 @@ func defaultPRMergeGitPush(repoPath, ref, token string) error {
 		target = "origin"
 	}
 	// Force: the dogfood branch is hydra-owned per-id, and a retry after a
-	// failed merge must be able to move it.
-	if _, err := gitOut(repoPath, "push", "--force", target, "HEAD:"+ref); err != nil {
-		return fmt.Errorf("push HEAD:%s: %w", ref, err)
+	// failed merge must be able to move it. --no-verify: client-side pre-push
+	// hooks (husky lint:ci && build) are interactive-dev affordances that
+	// strand verified closes in headless daemon checkouts — the daemon already
+	// ran its own gates (2026-09-27: 64 telematics commits stranded locally).
+	// redactToken: the authenticated URL embeds the GitHub PAT and gitOut
+	// error strings carry the full command — never let it reach logs.
+	if _, err := gitOut(repoPath, "push", "--force", "--no-verify", target, "HEAD:"+ref); err != nil {
+		return fmt.Errorf("push HEAD:%s: %s", ref, redactToken(err.Error(), token))
 	}
 	return nil
 }
@@ -395,7 +400,7 @@ func defaultAutoPRGitPush(repoPath, ref, token string) error {
 	// --no-verify: same rationale as PushBranch — client-side hooks are
 	// interactive-dev affordances that break in headless daemon checkouts.
 	if _, err := gitOut(repoPath, "push", "--no-verify", target, "HEAD:"+ref); err != nil {
-		return fmt.Errorf("push HEAD:%s: %w", ref, err)
+		return fmt.Errorf("push HEAD:%s: %s", ref, redactToken(err.Error(), token))
 	}
 	return nil
 }
