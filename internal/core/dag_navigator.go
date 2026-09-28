@@ -109,10 +109,11 @@ func (n *DAGNavigator) GetReadyBeads(completed map[string]bool) []types.Bead {
 			// the shared main checkout (2026-09-11/12 corruption incidents).
 			continue
 		}
-		if hasBeadLabel(node.Bead.Labels, worktreeUnavailableLabel) {
-			// Hard-parked by a fail-closed worktree spawn: the chain worktree
-			// was unavailable and isolation must never silently downgrade to
-			// the shared main checkout (2026-09-11/12 corruption incidents).
+		if hasBeadLabel(node.Bead.Labels, integrationExhaustedLabel) {
+			// Hard-parked by failIntegration after maxConsecutiveIntegrationFailures:
+			// the close repeatedly failed at integrate/push. Scheduling it here
+			// respawned the bead into the same failing integrate (ag6i, 2026-09-27:
+			// ~95 respawns). Only Pan repair or a human clears the label.
 			continue
 		}
 		if completed != nil && completed[string(node.Bead.ID)] {
