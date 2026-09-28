@@ -52,6 +52,27 @@ func TestClassifyFailure_QuotaIsItsOwnInfraCode(t *testing.T) {
 	}
 }
 
+const (
+	openrouter402 = `402 {"error":{"type":"billing_error","message":"You don't have enough credits to run this request. Learn more: https://openrouter.ai/docs#limits. If you've run out of credits, you'll need to purchase more credits, or set a lower max_tokens limit"}}`
+)
+
+func TestIsQuotaError402Billing(t *testing.T) {
+	for _, payload := range []string{openrouter402, "requires more credits, or fewer max_tokens"} {
+		if got := isQuotaError(payload); !got {
+			t.Errorf("isQuotaError(%q) = false, want true (OpenRouter 402 billing_error must classify as quota)", payload)
+		}
+	}
+}
+
+// The 2026-09-28 OpenRouter credit exhaustion must classify as exit 6 so the
+// provider breaker freezes spawning instead of respawning every turn.
+func TestClassifyFailure_OpenRouter402IsQuota(t *testing.T) {
+	got := classifyFailure(&ExecutionResult{Success: false, Error: openrouter402})
+	if got != 6 {
+		t.Errorf("classifyFailure(OpenRouter 402) = %d, want 6 (quota cooldown)", got)
+	}
+}
+
 func TestClassifyFailure_CodeFailureStillOne(t *testing.T) {
 	got := classifyFailure(&ExecutionResult{Success: false, Error: "./main.go:12:2: undefined: Foo"})
 	if got != 1 {
