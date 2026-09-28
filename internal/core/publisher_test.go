@@ -614,3 +614,46 @@ func TestPublishAfterIntegrate_PRNoCommitsBetween_Benign(t *testing.T) {
 		t.Fatalf("expected one create attempt before the benign classification, got %d", len(fake.ghCreate))
 	}
 }
+
+// TestDefaultPRMergeGitPush_SkipsPrePushHooks proves daemon dogfood pushes
+// bypass client-side pre-push hooks (husky lint:ci && build): a hook that
+// always fails must not block the push — the daemon already ran its own
+// gates, and a hook failure strands verified closes (2026-09-27: 64
+// telematics commits stranded locally on an eslint error in integrated work).
+func TestDefaultPRMergeGitPush_SkipsPrePushHooks(t *testing.T) {
+	repo, remote := setupReachableRemote(t)
+	commitFile(t, repo, "file.txt", "a")
+	hookPath := filepath.Join(repo, ".git", "hooks", "pre-push")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write pre-push hook: %v", err)
+	}
+	if err := defaultPRMergeGitPush(repo, "refs/heads/dogfood/test", ""); err != nil {
+		t.Fatalf("push with failing pre-push hook must succeed via --no-verify, got: %v", err)
+	}
+	// Sanity: the hook without --no-verify really would have failed.
+	if _, err := gitOut(repo, "push", "--force", "origin", "HEAD:refs/heads/dogfood/test2"); err == nil {
+		t.Fatal("control push without --no-verify unexpectedly succeeded — hook not armed")
+	}
+	if out, err := gitOut(remote, "rev-parse", "refs/heads/dogfood/test"); err != nil || strings.TrimSpace(out) == "" {
+		t.Fatalf("dogfood branch missing on remote after push: %v", err)
+	}
+}
+
+// TestDefaultPRMergeGitPush_RedactsToken proves the authenticated push URL's
+// embedded PAT never reaches error strings (2026-09-27: a failing pre-push
+// hook put the full token into the daemon log 906 times).
+func TestDefaultPRMergeGitPush_RedactsToken(t *testing.T) {
+	repo := setupLocalRepo(t)
+	commitFile(t, repo, "file.txt", "a")
+	gitRun(t, repo, "remote", "add", "origin", "https://127.0.0.1:1/x/y.git")
+	err := defaultPRMergeGitPush(repo, "refs/heads/dogfood/test", "SECRETTOKEN123")
+	if err == nil {
+		t.Fatal("expected push to unreachable host to fail")
+	}
+	if strings.Contains(err.Error(), "SECRETTOKEN123") {
+		t.Fatalf("error leaked the token: %v", err)
+	}
+	if !strings.Contains(err.Error(), "***") {
+		t.Fatalf("expected redacted placeholder in error, got: %v", err)
+	}
+}
