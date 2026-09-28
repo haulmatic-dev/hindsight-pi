@@ -207,12 +207,13 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 				log.Printf("[Retry] Bead %s carries the %q label (worktree hard-parked); skipping retry queue", beadID, worktreeUnavailableLabel)
 				continue
 			}
-			if hasBeadLabel(bead.Labels, worktreeUnavailableLabel) {
-				// Hard-parked: the chain worktree could not be created and the
-				// spawn failed closed. Retrying would hit the same failure and,
-				// worse, past behavior silently ran the worker in the shared main
-				// checkout (2026-09-11/12 corruption incidents). Wait for a human.
-				log.Printf("[Retry] Bead %s carries the %q label (worktree hard-parked); skipping retry queue", beadID, worktreeUnavailableLabel)
+			if hasBeadLabel(bead.Labels, integrationExhaustedLabel) {
+				// Hard-parked after maxConsecutiveIntegrationFailures: the close
+				// repeatedly failed at integrate/push and the durable cap label
+				// is the quarantine. Retrying here respawned the bead into the
+				// same failing integrate ~95x (ag6i, 2026-09-27). Pan repair or a
+				// human clears the label.
+				log.Printf("[Retry] Bead %s carries the %q label (integration hard-parked); skipping retry queue", beadID, integrationExhaustedLabel)
 				continue
 			}
 			readyBeads = append(readyBeads, bead)

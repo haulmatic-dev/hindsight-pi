@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/beads"
+	"github.com/haulmatic-dev/hydra/internal/registry"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -486,4 +487,46 @@ func TestMain(m *testing.M) {
 
 	os.RemoveAll(tmp)
 	os.Exit(code)
+}
+
+// 2026-09-27 402 outage: a frozen provider makes workers look dead (stale
+// heartbeat), so orphan recovery reopened in_progress beads of PARKED
+// campaigns and the scheduler respawned them straight through the Pan park.
+// The park funnel must be consulted on the orphan-reopen path too.
+func TestRecoverOrphanInProgressBeads_SkipsParkedCampaign(t *testing.T) {
+	beadID := "test-orphan-parked"
+	charon, exec := setupOrphanCharon(t, beadListJSON(beadID, time.Now().Add(-10*time.Minute)), 5*time.Minute)
+
+	st, err := registry.Open(":memory:")
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	charon.SetRegistry(st)
+
+	projectPath := t.TempDir()
+	key := projectKey(projectPath)
+	if err := st.SetProjectPark(key, true, "402 outage"); err != nil {
+		t.Fatalf("SetProjectPark: %v", err)
+	}
+	charon.SetProjectsProvider(func() []types.Project {
+		return []types.Project{{Name: "test", Path: projectPath}}
+	})
+
+	n := charon.recoverOrphanInProgressBeads()
+	if n != 0 {
+		t.Fatalf("recovered %d beads from a parked campaign; want 0", n)
+	}
+	if got := exec.CountCalls("br list"); got != 0 {
+		t.Fatalf("parked campaign must not even be listed, got %d br list calls", got)
+	}
+
+	// Unpark: recovery proceeds normally again.
+	if err := st.SetProjectPark(key, false, ""); err != nil {
+		t.Fatalf("SetProjectPark unpark: %v", err)
+	}
+	n = charon.recoverOrphanInProgressBeads()
+	if n != 1 {
+		t.Fatalf("after unpark expected 1 orphan recovery, got %d", n)
+	}
 }

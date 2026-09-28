@@ -827,6 +827,18 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 			continue // empty multi: nothing to scan, bv/br exit non-zero
 		}
 		for _, target := range repoScanTargets(project) {
+			// Park funnel: orphan recovery must not bypass a parked campaign. During
+			// the 2026-09-27 402 outage, parked campaigns kept respawning in-progress
+			// beads — a frozen provider makes workers look dead (stale heartbeat),
+			// recovery reopened their beads, and the scheduler spawned straight
+			// through the Pan park. Same rule as campaignParked on both spawn paths:
+			// the park must be consulted on the orphan-reopen path too.
+			if j.registryStore != nil {
+				if park, ok, perr := j.registryStore.ProjectParkInfo(projectKey(target)); perr == nil && ok && park.Parked {
+					log.Printf("[Charon] ⏸️  Skipping orphan recovery in %s: campaign parked (Pan)", target)
+					continue
+				}
+			}
 			beadList, err := j.beadsClient.ListBeads(target, "")
 			if err != nil {
 				log.Printf("[Charon] ❌ Failed to list beads for orphan recovery in project %s (path: %s): %v", project.Name, target, err)
