@@ -154,7 +154,7 @@ func TestPublishBranchViaPR_RebaseRetryOnConflict(t *testing.T) {
 	origPush := prMergeBranchPush
 	origCreate := autoPRGhCreate
 	origMerge := autoPRGhMerge
-	origToken := prMergeResolveToken
+	origIdentity := publishIdentityResolver
 	attempts := 0
 	prMergeBranchPush = func(repoPath, localRef, ref, token string) error { return nil }
 	autoPRGhCreate = func(repoPath, base, head, title, body, token string) (string, error) {
@@ -167,12 +167,14 @@ func TestPublishBranchViaPR_RebaseRetryOnConflict(t *testing.T) {
 		}
 		return nil
 	}
-	prMergeResolveToken = func() string { return "" }
+	publishIdentityResolver = func(string) (PublishIdentity, error) {
+		return PublishIdentity{Owner: "t", Token: "T", Source: "test"}, nil
+	}
 	t.Cleanup(func() {
 		prMergeBranchPush = origPush
 		autoPRGhCreate = origCreate
 		autoPRGhMerge = origMerge
-		prMergeResolveToken = origToken
+		publishIdentityResolver = origIdentity
 	})
 
 	url, err := PublishBranchViaPR("/tmp/proj", "main", "hydra/wt-abc", "dogfood/x", "title", "")

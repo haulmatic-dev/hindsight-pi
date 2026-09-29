@@ -188,6 +188,17 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 	// Add Pi configuration
 	env = append(env, b.buildPiEnv(bead)...)
 
+	// Owner-identity commit authorship (OPERATOR RULE 2026-09-29): worker
+	// commits authored as the bead owner. GIT_AUTHOR_* / GIT_COMMITTER_* env
+	// govern every `git commit` the agent runs in the worktree.
+	name, email := resolveGitAuthorFor(projectPath)
+	env = append(env,
+		"GIT_AUTHOR_NAME="+name,
+		"GIT_AUTHOR_EMAIL="+email,
+		"GIT_COMMITTER_NAME="+name,
+		"GIT_COMMITTER_EMAIL="+email,
+	)
+
 	return env
 }
 

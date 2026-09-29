@@ -408,6 +408,18 @@ func (m *WorktreeManager) ensureWorktreeLocked(projectPath, key string) (string,
 	if err := resetWorktree(wtPath, base); err != nil {
 		return "", fmt.Errorf("worktree reset after add %s: %w", wtPath, err)
 	}
+	// Owner-identity commit authorship (OPERATOR RULE 2026-09-29): pin the
+	// bead owner's git user.name/user.email in the worktree so every commit
+	// (agent or daemon) is authored as the owner. Always resolvable — the
+	// daemon service account identity is the default.
+	if name, email := resolveGitAuthorFor(projectPath); name != "" {
+		if _, err := gitOut(wtPath, "config", "user.name", name); err != nil {
+			log.Printf("[Worktree] set user.name in %s: %v", wtPath, err)
+		}
+		if _, err := gitOut(wtPath, "config", "user.email", email); err != nil {
+			log.Printf("[Worktree] set user.email in %s: %v", wtPath, err)
+		}
+	}
 	return wtPath, nil
 }
 

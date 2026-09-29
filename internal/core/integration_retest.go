@@ -103,7 +103,7 @@ type IntegrationRetestStage struct {
 	gitFn       func(dir string, args ...string) (string, error)
 	mergeTreeFn func(projectPath, base, branch string) (out string, exit int, err error)
 	landFn      func(projectPath, base, featureBranch, title, token string) (string, error)
-	tokenFn     func() string
+	tokenFn     func(projectPath string) (string, error)
 
 	mu          sync.Mutex
 	attempts    map[string]int
@@ -126,7 +126,13 @@ func NewIntegrationRetestStage(cfg IntegrationRetestConfig, full *Config, beadsC
 		gitFn:       gitOut,
 		mergeTreeFn: defaultMergeTree,
 		landFn:      PublishViaPR,
-		tokenFn:     autoPRResolveToken,
+		tokenFn: func(projectPath string) (string, error) {
+			id, err := resolvePublishIdentityFor(projectPath)
+			if err != nil {
+				return "", err
+			}
+			return id.Token, nil
+		},
 		attempts:    map[string]int{},
 		lastAttempt: map[string]time.Time{},
 	}
@@ -505,7 +511,13 @@ func (s *IntegrationRetestStage) land(projectPath, scratch, base string, bead *t
 	if _, err := s.gitFn(scratch, "switch", "-c", feature); err != nil {
 		return retestOutcome{}, fmt.Errorf("create %s: %w", feature, err)
 	}
-	url, err := s.landFn(scratch, base, feature, bead.Title+" (integration retest)", s.tokenFn())
+	// Owner-identity (fail-closed): the retest lands under the bead owner's
+	// PAT; an unresolved identity aborts the retest attempt.
+	token, err := s.tokenFn(projectPath)
+	if err != nil {
+		return retestOutcome{}, fmt.Errorf("publish identity: %w", err)
+	}
+	url, err := s.landFn(scratch, base, feature, bead.Title+" (integration retest)", token)
 	if err != nil {
 		return retestOutcome{}, err
 	}

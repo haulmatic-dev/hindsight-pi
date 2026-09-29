@@ -432,6 +432,28 @@ scripts/verify-deploy.sh
 
 ## 11. GitHub access (for PR-flow projects)
 
+**Owner-identity publish (OPERATOR RULE 2026-09-29, fail-closed):** every
+publish-path git/GitHub operation — commit authorship, push, PR open, PR
+comment, merge — runs under the **bead owner's** PAT and git identity. The
+owner's PAT must exist at `/home/<user>/.hydra/.github-token` (mode 0600):
+
+```bash
+sudo install -d -m 700 -o <user> -g <user> /home/<user>/.hydra
+echo "ghp_xxx" | sudo tee /home/<user>/.hydra/.github-token >/dev/null
+sudo chown <user>:<user> /home/<user>/.hydra/.github-token
+sudo chmod 600 /home/<user>/.hydra/.github-token
+```
+
+There are NO fallbacks for user-owned projects: an unresolved owner PAT
+blocks the publish with a typed `publish_identity_missing` event (no
+`GH_TOKEN`, no daemon `~/.git-credentials`). The daemon service account
+(`hydra`) owns its own repo's beads, so its own credential —
+`GH_TOKEN` or the daemon `~/.git-credentials` — is the sanctioned source
+for hydra-repo publishes. Commit authorship comes from the user's
+`~/.hydra/config.yaml` (`user:` name/email) and is pinned into every
+worktree (`git config user.name/user.email` + `GIT_AUTHOR_*`/`GIT_COMMITTER_*`
+worker env).
+
 Workers integrate via worktrees; humans/agents push PRs using a token in
 `~/.git-credentials`. The installed `gh` is old — use:
 

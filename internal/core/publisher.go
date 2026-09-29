@@ -258,10 +258,6 @@ var (
 	prMergeBranchPush = defaultPRMergeBranchPush
 )
 
-// prMergeResolveToken resolves the daemon's own GitHub credential for PR
-// operations when the caller has no project-owner token. Overridden in tests.
-var prMergeResolveToken = autoPRResolveToken
-
 // tipMergedProbe reports whether repoPath's HEAD is already contained in the
 // remote base branch — i.e. a prior integrate/PR merge landed the same work.
 // Overridden in tests.
@@ -342,12 +338,16 @@ func PublishViaPR(projectPath, base, featureBranch, title, token string) (string
 	if projectPath == "" || base == "" || featureBranch == "" {
 		return "", fmt.Errorf("pr merge: empty project, base, or feature branch")
 	}
-	// Token fallback: the periodic publish path only has the project owner's
-	// PAT, which is absent for daemon-owned repos (hydra itself). Fall back
-	// to the daemon's credential instead of invoking gh unauthenticated
-	// (2026-09-28: publish tick looped on gh pr create exit status 4).
+	// Owner-identity fail-closed: an empty caller token resolves the bead
+	// owner's publish identity (project -> owning user -> owner PAT). An
+	// unresolved identity blocks the publish — no daemon-credential fallback
+	// for non-daemon-owned projects (OPERATOR RULE 2026-09-29).
 	if token == "" {
-		token = prMergeResolveToken()
+		id, iderr := resolvePublishIdentityFor(projectPath)
+		if iderr != nil {
+			return "", fmt.Errorf("pr merge: %w", iderr)
+		}
+		token = id.Token
 	}
 	if err := prMergeGitPush(projectPath, "refs/heads/"+featureBranch, token); err != nil {
 		return "", fmt.Errorf("pr merge: push %s: %w", featureBranch, err)
@@ -455,7 +455,11 @@ func publishBranchViaPRCreate(projectPath, base, localBranch, featureBranch, tit
 		return "", fmt.Errorf("pr merge: empty project, base, local branch, or feature branch")
 	}
 	if token == "" {
-		token = prMergeResolveToken()
+		id, iderr := resolvePublishIdentityFor(projectPath)
+		if iderr != nil {
+			return "", fmt.Errorf("pr merge: %w", iderr)
+		}
+		token = id.Token
 	}
 	if err := prMergeBranchPush(projectPath, localBranch, "refs/heads/"+featureBranch, token); err != nil {
 		return "", fmt.Errorf("pr merge: push %s: %w", featureBranch, err)
@@ -560,6 +564,10 @@ func prSafeName(s string) string {
 // have pushed it while PR creation never happened (the 2026-09-25 f40k
 // incident stranded five verified closes exactly this way), and an open PR
 // can have been left unmerged by its originator integration.
+// Owner-identity: every publish-path git/GitHub op runs under the bead
+// owner's PAT + git identity, fail-closed with no fallbacks (OPERATOR RULE
+// 2026-09-29). maybeOpenAutoPR is fail-open itself: an unresolved identity
+// logs and returns false (the caller then fails the integration closed).
 func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName, branch string, bead *types.Bead) bool {
 	if cfg == nil || !cfg.AutoPREnabled() || beadsClient == nil || bead == nil || branch == "" {
 		return false
@@ -571,7 +579,12 @@ func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName
 			return false
 		}
 	}
-	token := autoPRResolveToken()
+	id, iderr := resolvePublishIdentityFor(projectPath)
+	if iderr != nil {
+		log.Printf("[AutoPR] %s: %v (fail closed)", bead.ID, iderr)
+		return false
+	}
+	token := id.Token
 	if out, err := autoPRLsRemote(projectPath, "origin", "refs/heads/"+head); err == nil && strings.TrimSpace(out) != "" {
 		open, err := autoPRGhListOpen(projectPath, head, token)
 		if err != nil {
@@ -632,35 +645,6 @@ func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName
 	}
 	log.Printf("[Output] auto-PR created: %s", url)
 	return true
-}
-
-// autoPRResolveToken prefers GH_TOKEN, then parses x-access-token from the
-// ~/.git-credentials store used by the git push path.
-func autoPRResolveToken() string {
-	if t := os.Getenv("GH_TOKEN"); t != "" {
-		return t
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	data, err := os.ReadFile(filepath.Join(home, ".git-credentials"))
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		idx := strings.Index(line, "x-access-token:")
-		if idx < 0 {
-			continue
-		}
-		rest := line[idx+len("x-access-token:"):]
-		end := strings.IndexAny(rest, "@ \t")
-		if end >= 0 {
-			return rest[:end]
-		}
-		return strings.TrimSpace(rest)
-	}
-	return ""
 }
 
 // defaultAutoPRGhListOpen reports whether at least one open PR tracks head.

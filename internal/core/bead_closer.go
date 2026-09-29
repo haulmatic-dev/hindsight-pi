@@ -76,6 +76,23 @@ func NewBeadCloser(beadsClient BeadsClient, intelligenceHub *IntelligenceHub, pr
 // SetEventSink attaches the structured event stream. Nil stays a no-op.
 func (c *BeadCloser) SetEventSink(s *EventSink) { c.events = s }
 
+// ownerTokenForPublish resolves the bead owner's publish identity for the
+// project and emits the typed identity event (publish_identity_resolved /
+// publish_identity_missing). Fail-closed: an unresolved identity is an error.
+func (c *BeadCloser) ownerTokenForPublish(projectPath string, bead types.Bead) (string, error) {
+	id, err := resolvePublishIdentityFor(projectPath)
+	if err != nil {
+		if c.events != nil {
+			c.events.EmitRepo(projectPath, Event{Type: "publish_identity_missing", Bead: string(bead.ID), Reason: "owner_pat_unresolved", Detail: err.Error()})
+		}
+		return "", err
+	}
+	if c.events != nil {
+		c.events.EmitRepo(projectPath, Event{Type: "publish_identity_resolved", Bead: string(bead.ID), Fields: map[string]any{"owner": id.Owner, "token_source": id.Source}})
+	}
+	return id.Token, nil
+}
+
 // SetVerdictRetainer attaches Hindsight verdict retention (Shepherd D3).
 // Nil stays a no-op.
 func (c *BeadCloser) SetVerdictRetainer(r *VerdictRetainer) { c.retainer = r }
@@ -882,7 +899,11 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 			AppendActivity(projectPath, string(bead.ID), "already landed (duplicate integrate no-op)")
 			return nil
 		}
-		url, err := PublishViaPR(projectPath, prBase, head, bead.Title, autoPRResolveToken())
+		token, terr := c.ownerTokenForPublish(projectPath, *bead)
+		if terr != nil {
+			return fmt.Errorf("publish identity: %w", terr)
+		}
+		url, err := PublishViaPR(projectPath, prBase, head, bead.Title, token)
 		if err != nil {
 			// Tier-2 (product) repo: the PR is open but not auto-merged —
 			// treat the close as waiting-on-human-merge, not a failure
@@ -992,7 +1013,11 @@ func (c *BeadCloser) publishSingletonViaPR(projectPath string, bead *types.Bead,
 		}
 	}
 	head := "dogfood/" + string(bead.ID)
-	url, err := PublishBranchViaPR(projectPath, base, c.worktreeManager.BranchName(key), head, bead.Title, autoPRResolveToken())
+	token, terr := c.ownerTokenForPublish(projectPath, *bead)
+	if terr != nil {
+		return fmt.Errorf("publish identity: %w", terr)
+	}
+	url, err := PublishBranchViaPR(projectPath, base, c.worktreeManager.BranchName(key), head, bead.Title, token)
 	if err != nil {
 		// Tier-2 (product) repo: PR open, waiting on human merge — close
 		// succeeds without integration failure (operator policy 2026-09-29).

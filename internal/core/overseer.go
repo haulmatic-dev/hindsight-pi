@@ -535,6 +535,20 @@ func NewOverseer(config *Config) *Overseer {
 	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o.validationService, config)
 	o.beadCloser.SetSourceIndex(o.beadSource)
 
+	// Owner-identity publish (OPERATOR RULE 2026-09-29): project -> owning
+	// user -> owner PAT, fail-closed for non-daemon-owned projects.
+	SetPublishIdentityResolver(func(projectPath string) (PublishIdentity, error) {
+		return ResolvePublishIdentity(projectPath, o.getUserContextForProject(projectPath))
+	})
+	SetPublishGitAuthorResolver(func(projectPath string) (string, string, bool) {
+		uc := o.getUserContextForProject(projectPath)
+		if uc != nil {
+			name, email := uc.GitAuthor()
+			return name, email, true
+		}
+		return "", "", false // resolveGitAuthorFor falls back to the service account
+	})
+
 	// Daemon gate runner (FR-002): attach to the close path and recover any
 	// artifacts the previous daemon incarnation died inside (running + dead
 	// PID -> interrupted, never trusted). Fail-open: recovery errors are
@@ -883,11 +897,23 @@ var benignPublishReasons = map[string]bool{
 }
 
 // publishOneProject runs PublishRepo for a single project and tracks the
-// push-pending state. Returns PublishRepo's result verbatim.
+// push-pending state. Returns PublishRepo's result verbatim. Push
+// authenticates with the bead owner's PAT (owner-identity publish,
+// fail-closed via ResolvePublishIdentity; daemon-owned repos use the service
+// account's own credential).
 func (o *Overseer) publishOneProject(project types.Project, active map[string]bool) (bool, string) {
+	id, err := ResolvePublishIdentity(project.Path, o.getUserContextForProject(project.Path))
 	token := ""
-	if uc := o.getUserContextForProject(project.Path); uc != nil {
-		token = uc.Token
+	if err != nil {
+		log.Printf("[Publish] %s: %v (publish blocked, fail-closed)", project.Path, err)
+		if o.eventSink != nil {
+			o.eventSink.Emit(Event{Type: "publish_identity_missing", Project: project.Name, Reason: "owner_pat_unresolved", Detail: err.Error()})
+		}
+	} else {
+		token = id.Token
+		if o.eventSink != nil {
+			o.eventSink.Emit(Event{Type: "publish_identity_resolved", Project: project.Name, Fields: map[string]any{"owner": id.Owner, "token_source": id.Source}})
+		}
 	}
 	pushed, reason := PublishRepo(o.worktreeManager, project.Path, token, o.config.PRMergeEnabled(), active, o.terminalBeadChecker(project.Path))
 	if pushed && o.tier1Deployer != nil && o.tier1Deployer.cfg.Enabled &&
