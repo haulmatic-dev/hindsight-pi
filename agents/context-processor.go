@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/degrade"
 	"github.com/haulmatic-dev/hydra/internal/hindsight"
 	"github.com/haulmatic-dev/hydra/pkg/logger"
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -193,6 +194,9 @@ func (p *ContextProcessor) QueryHindsight(ctx context.Context, bead types.Bead) 
 	ctx, cancel := context.WithTimeout(ctx, p.maxQueryLatency)
 	defer cancel()
 
+	// FR-032: count the fail-open recall attempt so a subsystem at 0% success
+	// (e.g. the 500ms-timeout bug, hydra-bye7) surfaces in the Pan digest.
+	degrade.RecordAttempt("hindsight-recall")
 	resp, err := p.hindsightClient.Search(query, string(bead.Type), 5)
 	latency := time.Since(start)
 
@@ -217,6 +221,7 @@ func (p *ContextProcessor) QueryHindsight(ctx context.Context, bead types.Bead) 
 
 	// Cache the result
 	p.cache.Set(cacheKey, result)
+	degrade.RecordSuccess("hindsight-recall")
 
 	p.logger.Debug("Hindsight query completed",
 		"bead_id", string(bead.ID),
@@ -245,6 +250,7 @@ func (p *ContextProcessor) QueryHindsightByID(ctx context.Context, beadID types.
 	ctx, cancel := context.WithTimeout(ctx, p.maxQueryLatency)
 	defer cancel()
 
+	degrade.RecordAttempt("hindsight-recall")
 	resp, err := p.hindsightClient.SearchByBead(string(beadID), "")
 	latency := time.Since(start)
 
@@ -268,6 +274,7 @@ func (p *ContextProcessor) QueryHindsightByID(ctx context.Context, beadID types.
 	}
 
 	p.cache.Set(cacheKey, result)
+	degrade.RecordSuccess("hindsight-recall")
 
 	return result, nil
 }
@@ -294,6 +301,7 @@ func (p *ContextProcessor) QueryHindsightWithQuery(ctx context.Context, query st
 	ctx, cancel := context.WithTimeout(ctx, p.maxQueryLatency)
 	defer cancel()
 
+	degrade.RecordAttempt("hindsight-recall")
 	resp, err := p.hindsightClient.Search(query, "", limit)
 	latency := time.Since(start)
 
@@ -317,6 +325,7 @@ func (p *ContextProcessor) QueryHindsightWithQuery(ctx context.Context, query st
 	}
 
 	p.cache.Set(cacheKey, result)
+	degrade.RecordSuccess("hindsight-recall")
 
 	return result, nil
 }
