@@ -774,6 +774,16 @@ func (c *BeadCloser) verifiedCloseEnabled() bool {
 // push is disabled or when a rejected push was routed to a successfully
 // created auto-PR (work is then preserved on the dogfood branch + PR instead
 // of the working branch).
+func (c *BeadCloser) emitIntegrationBaseMismatch(projectPath, base, source string) {
+	logIntegrationBaseMismatch(projectPath, base, source)
+	if cur := currentBranch(projectPath); cur != "" && cur != base {
+		c.events.EmitRepo(projectPath, Event{Type: "integration_base_mismatch",
+			Reason: "checkout_on_other_branch",
+			Detail: fmt.Sprintf("resolved integration base %q (source: %s) differs from checkout branch %q — using %q", base, source, cur, base),
+			Fields: map[string]any{"resolved_base": base, "source": source, "checkout_branch": cur}})
+	}
+}
+
 func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead) error {
 	if c.config == nil || !c.config.OutputPushEnabled() || c.worktreeManager == nil {
 		return nil
@@ -797,7 +807,7 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 	if prBase == "" {
 		return fmt.Errorf("push %s: no integration base for %s", bead.ID, projectPath)
 	}
-	logIntegrationBaseMismatch(projectPath, prBase, prBaseSource)
+	c.emitIntegrationBaseMismatch(projectPath, prBase, prBaseSource)
 	if c.config.PRMergeEnabled() {
 		head := "dogfood/" + string(bead.ID)
 		// Duplicate-landing dedup: a racing close attempt may have already
@@ -881,7 +891,7 @@ func (c *BeadCloser) publishSingletonViaPR(projectPath string, bead *types.Bead,
 	if base == "" {
 		return fmt.Errorf("pr-first close %s: no integration base for %s", bead.ID, projectPath)
 	}
-	logIntegrationBaseMismatch(projectPath, base, baseSource)
+	c.emitIntegrationBaseMismatch(projectPath, base, baseSource)
 	// Duplicate-landing pre-check on the WORKTREE BRANCH tip (not the
 	// checkout HEAD): a racing close may have already landed this branch via
 	// PR. Fail-open on any git fault so the normal PR path proceeds.
