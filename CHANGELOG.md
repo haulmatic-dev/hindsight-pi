@@ -7,6 +7,12 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Pan bead-filing actuator (FR-022): new `file-bead` decision action — Pan files an improvement bead (label `pan-filed`, type `task`, priority 2) for human triage instead of mutating fleet state directly. Guarded by signature dedupe (one filed bead per project + normalized title per session; volatile durations normalized) and a cap of 2 open `pan-filed` beads per project enforced in the overseer filer. Valid for pseudo-beads (campaign-anomaly/push-pending findings become filed proposals). Tests: `internal/pan/file_bead_test.go`, `TestFilePanBeadCapAndLabel` (internal/core/pan_filer_test.go).
+
+### Changed
+- Pan repair verbs shrank to the hygiene set (FR-022): `repair-worktree`, `reap-placeholder`, `reset-retries`, `repair-bead-store`, `clear-hard-park`. Campaign containment (`park/unpark-campaign`), push/integration, pruning and `log-improvement` verbs are no longer proposable by Pan — those situations surface as filed improvement beads (`file-bead`) for human review instead. Daemon-side handlers and the project-scoped rate limiter remain (unreachable via Pan verdicts). Judgment prompt rewritten to match. Tests: `TestRepairWhitelistShrunkToHygieneSet`, `TestCampaignAnomalyWhitelistAndGuards` (internal/pan/).
+
 ### Changed
 - Chain handoffs are per-bead fragments (FR-001, autonomous-resolution-layer PRD): the worker prompt now directs every bead that changed files to write `docs/hydra/handoff/<phase>-<bead-id>.md` instead of the shared `docs/hydra/handoff/<phase>.md`. Parallel beads of the same phase (notably discovery FRs) previously collided on one file — `discovery.md` alone accounted for 568 of 570 integrate failures. `handoffPhaseRank` ranks fragments by phase prefix so `green-5xvh.md` still sorts with green; the loader needed no change. Tests: `TestChainHandoffFragmentName`, `TestHandoffPhaseRankFragments`, `TestLoadChainContextFragmentOrder` (cmd/worker/chain_handoff_test.go).
 
