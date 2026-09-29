@@ -1047,10 +1047,16 @@ func executeWithRetry(
 		streamLog(mcpClient, "info", fmt.Sprintf("Execution attempt %d/%d", attempt+1, policy.MaxRetries+1))
 
 		// Query Hindsight + CASS for context enrichment before execution
-		// (only on first attempt; CASS bullets are reused across attempts)
-		var hindsightContext *agents.ContextEnrichment
+		// (only on first attempt; CASS bullets are reused across attempts).
+		// Recall runs concurrently with worker startup (skill flags, Pi
+		// spawn) inside executeWithPi; the result is awaited lazily at
+		// prompt-build time.
+		var hindsightCtx *hindsightContextFuture
 		if attempt == 0 {
-			hindsightContext = queryHindsightForContext(bead, config, mcpClient)
+			hindsightCtx = newHindsightContextFuture()
+			go func() {
+				hindsightCtx.complete(queryHindsightForContext(bead, config, mcpClient))
+			}()
 			cassBullets = queryCASSBullets(bead)
 		}
 
@@ -1058,7 +1064,7 @@ func executeWithRetry(
 		// inner retry for transient Pi-startup flakes (provider-list fetch),
 		// which cost no LLM tokens and usually clear within a couple tries.
 		extras := promptExtras{PrevFailure: prevFailure, CassBullets: cassBullets}
-		result, lastErr = executePiWithStartupRetry(bead, config.Pi, mcpClient, projectPath, hindsightContext, extras)
+		result, lastErr = executePiWithStartupRetry(bead, config.Pi, mcpClient, projectPath, hindsightCtx, extras)
 		result.Attempts = attempt + 1
 
 		if lastErr != nil || (result != nil && !result.Success) {
@@ -1386,14 +1392,14 @@ func executePiWithStartupRetry(
 	piConfig PiConfig,
 	mcpClient *mcp.Client,
 	projectPath string,
-	hindsightContext *agents.ContextEnrichment,
+	hindsightCtx *hindsightContextFuture,
 	extras promptExtras,
 ) (*ExecutionResult, error) {
 	const maxStartupRetries = 6
 	var result *ExecutionResult
 	var err error
 	for i := 0; ; i++ {
-		result, err = executeWithPi(bead, piConfig, mcpClient, projectPath, hindsightContext, extras)
+		result, err = executeWithPi(bead, piConfig, mcpClient, projectPath, hindsightCtx, extras)
 		if i >= maxStartupRetries || !isTransientStartupFailure(result, err) {
 			return result, err
 		}
@@ -1455,7 +1461,7 @@ func executeWithPi(
 	piConfig PiConfig,
 	mcpClient *mcp.Client,
 	projectPath string,
-	hindsightContext *agents.ContextEnrichment,
+	hindsightCtx *hindsightContextFuture,
 	extras promptExtras,
 ) (*ExecutionResult, error) {
 	result := &ExecutionResult{
@@ -1492,7 +1498,7 @@ func executeWithPi(
 	startTime := time.Now()
 
 	// Build pi command
-	cmd, piSessionID, piSessionDir := buildPiCommand(bead, piConfig, projectPath, hindsightContext)
+	cmd, piSessionID, piSessionDir := buildPiCommand(bead, piConfig, projectPath, hindsightCtx)
 	if piSessionID != "" && activeReporter != nil {
 		activeReporter.SetSessionID(piSessionID)
 	}
@@ -1553,7 +1559,7 @@ func executeWithPi(
 	extras.ChainContext = loadChainContext(cmd.Dir)
 
 	// Build the prompt message
-	prompt := buildPiPrompt(bead, hindsightContext, extras, piConfig)
+	prompt := buildPiPrompt(bead, hindsightCtx.Get(), extras, piConfig)
 	fullSha, headSha := promptPrefixDigest(prompt)
 	// Prefix-stability metric (2026-09-14): identical digests across beads of
 	// a project mean the provider-side prefix cache pays. The `account` field
@@ -1934,7 +1940,7 @@ func readExecutionOutputFromFile(filepath string) (*ExecutionResult, error) {
 }
 
 // buildPiCommand builds the Pi agent CLI command
-func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hindsightContext *agents.ContextEnrichment) (*exec.Cmd, string, string) {
+func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hindsightCtx *hindsightContextFuture) (*exec.Cmd, string, string) {
 	// Find pi binary
 	piPath := os.Getenv("HYDRA_PI_PATH")
 	if piPath == "" {
@@ -2456,6 +2462,34 @@ func renderContextPack(pack *core.ContextPack) string {
 		"- PARALLEL TOOL CALLS: batch independent reads/searches into one assistant message.\n" +
 		"- FAILURE PROTOCOL: the same test failing twice with an identical error → stop editing, report the error verbatim, and exit.")
 	return sb.String()
+}
+
+// hindsightContextFuture is a promise for the Hindsight pre-execution
+// recall. The query is started concurrently with worker startup work
+// (skill-flag building, Pi spawn — together ~10s) so a multi-second recall
+// adds ~0 wall time. A nil future resolves to a nil enrichment.
+type hindsightContextFuture struct {
+	done chan struct{}
+	val  *agents.ContextEnrichment
+}
+
+func newHindsightContextFuture() *hindsightContextFuture {
+	return &hindsightContextFuture{done: make(chan struct{})}
+}
+
+// complete stores the result and unblocks Get callers.
+func (f *hindsightContextFuture) complete(val *agents.ContextEnrichment) {
+	f.val = val
+	close(f.done)
+}
+
+// Get blocks until the recall completes. Nil receiver → nil enrichment.
+func (f *hindsightContextFuture) Get() *agents.ContextEnrichment {
+	if f == nil {
+		return nil
+	}
+	<-f.done
+	return f.val
 }
 
 // queryHindsightForContext queries Hindsight for relevant context before agent execution
