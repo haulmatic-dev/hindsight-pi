@@ -12,7 +12,32 @@ wedged integrate-stranded flow), not per-bead breakage. Before any park can be
 cleared, the pipeline itself must be confirmed healthy — otherwise clearing the
 parks just feeds the beads back into a broken path.
 
-## Findings
+## Update: both branches superseded — do NOT rebase (2026-09-29, second pass)
+
+Deeper diff inspection reversed the initial rebase recommendation. Neither
+branch carries unique, still-needed work:
+
+- **hydra-014y** (clear-escalation implementation): `origin/development` already
+  contains a newer iteration of the same work — the origin version of
+  `internal/core/service_starter.go` has the clear-escalation handler plus
+  `escalationTTL`, `ResolveIntegrationBase`-based zero-diff checks, and the FR-030
+  PR-triage service, none of which exist on the 014y branch. Rebasing 014y would
+  REVERT those newer changes (`git diff origin/development hydra/wt-hydra-014y --
+  internal/core/service_starter.go` shows -62/+5, deleting origin-side code).
+- **hydra-d778** (FR-002 shared-infra spawn exclusivity, `exclusive_paths`):
+  FR-003 "target-scope overlap serialization at spawn" (`84bffe1`) landed on
+  `origin/development` with `internal/core/target_overlap.go` + scheduler wiring,
+  addressing the same spawn-time overlap problem using the close-path target
+  parser. `spawn_exclusivity.go` never landed and `exclusive_paths` appears
+  nowhere on origin. Same line of `docs/architecture/system-loop.md` was
+  rewritten by both FR-002 and FR-003, hence the conflict.
+
+**Revised disposition:** the parks are correct and durable; the conflicts are
+irrelevant because the branches are obsolete. Apply `abandon-with-summary` to
+both beads citing this supersession (human/Pan-owned — the live bead store is
+outside this worktree). Do NOT rebase, do NOT clear the parks for a retry.
+
+## Original findings (first pass)
 
 ### 1. The integration path itself is healthy
 
@@ -66,7 +91,7 @@ FR-011) exists for exactly this shape: rebase the worktree branch onto
 `origin/<base>` and retry, or land via a `dogfood/<id>-retest` PR after a clean
 merge-tree check.
 
-## Conclusion
+## Conclusion (first pass; see revised disposition above)
 
 **The integration/merge pipeline is NOT wedged.** The working branch state is
 the issue: `hydra/wt-hydra-d778` and `hydra/wt-hydra-014y` are stale relative to
