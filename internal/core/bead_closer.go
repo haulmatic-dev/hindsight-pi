@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -883,6 +884,15 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 		}
 		url, err := PublishViaPR(projectPath, prBase, head, bead.Title, autoPRResolveToken())
 		if err != nil {
+			// Tier-2 (product) repo: the PR is open but not auto-merged —
+			// treat the close as waiting-on-human-merge, not a failure
+			// (operator publish policy 2026-09-29).
+			var pw *PRWaitingError
+			if errors.As(err, &pw) {
+				log.Printf("[Output] %s PR open, waiting on human merge: %s", bead.ID, pw.URL)
+				AppendActivity(projectPath, string(bead.ID), "PR open — waiting on human merge: "+pw.URL)
+				return nil
+			}
 			// Benign race loser: the winning close's PR merge landed the same
 			// tip between our pre-check and gh pr create, so GitHub reports
 			// "No commits between". Treat as landed, not as an integration
@@ -984,6 +994,14 @@ func (c *BeadCloser) publishSingletonViaPR(projectPath string, bead *types.Bead,
 	head := "dogfood/" + string(bead.ID)
 	url, err := PublishBranchViaPR(projectPath, base, c.worktreeManager.BranchName(key), head, bead.Title, autoPRResolveToken())
 	if err != nil {
+		// Tier-2 (product) repo: PR open, waiting on human merge — close
+		// succeeds without integration failure (operator policy 2026-09-29).
+		var pw *PRWaitingError
+		if errors.As(err, &pw) {
+			log.Printf("[Output] %s PR-first close: PR open, waiting on human merge: %s", bead.ID, pw.URL)
+			AppendActivity(projectPath, string(bead.ID), "PR open — waiting on human merge: "+pw.URL)
+			return nil
+		}
 		if isPRNoCommitsBetween(err) {
 			log.Printf("[Output] %s already merged into %s (gh pr create reported no commits between) — duplicate PR-first close treated as landed", bead.ID, base)
 			AppendActivity(projectPath, string(bead.ID), "already landed (duplicate integrate no-op)")

@@ -28,6 +28,14 @@ func NewServiceStarter(overseer *Overseer) *ServiceStarter {
 func (s *ServiceStarter) Start(ctx context.Context) error {
 	o := s.overseer
 
+	// Tier-1 PR auto-merge allowlist (operator publish policy 2026-09-29):
+	// repos listed in output.pr_auto_merge_repos / matching deploy.repo_path
+	// admin-merge their integration PRs; product repos stop at PR-open and
+	// the close is treated as waiting-on-human-merge, not an integration
+	// failure. nil would mean legacy always-merge, so install unconditionally.
+	cfg := o.config
+	SetPRAutoMergeGate(func(projectPath string) bool { return cfg.IsPRAutoMergeRepo(projectPath) })
+
 	// Start orphan process janitor
 	if o.orphanJanitor != nil {
 		o.orphanJanitor.Start()

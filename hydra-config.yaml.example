@@ -293,6 +293,13 @@ output:
   # This is an operator-side toggle; apply it in /etc/hydra/hydra.yaml.
   auto_pr: false
 
+  # Tier-1 PR auto-merge allowlist (tier policy 2026-09-29): absolute repo
+  # paths that may admin-merge their integration PRs — and only when the PR
+  # base is "development". deploy.repo_path is implicitly on this list.
+  # Unlisted (product) repos NEVER auto-merge: the PR is left open and the
+  # close completes as waiting-on-human-merge, not an integration failure.
+  pr_auto_merge_repos: []
+
 
 
 # Self-healing: session-file resume pilot (opt-in).

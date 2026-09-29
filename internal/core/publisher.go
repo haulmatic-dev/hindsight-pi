@@ -302,6 +302,33 @@ func isPRAlreadyExists(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "already exists") && strings.Contains(err.Error(), "a pull request for branch")
 }
 
+// PRWaitingError reports that the integration PR was created/left open but
+// NOT merged: the repo is not on the tier-1 auto-merge allowlist
+// (output.pr_auto_merge_repos / deploy.repo_path), so the close is treated
+// as waiting-on-human-merge, not an integration failure (operator publish
+// policy 2026-09-29). Callers detect it with errors.As.
+type PRWaitingError struct{ URL string }
+
+func (e *PRWaitingError) Error() string {
+	return "PR left open — waiting on human merge: " + e.URL
+}
+
+// prAutoMergeGate decides whether projectPath may admin-merge its PRs.
+// nil gate = legacy behavior (always merge). Set via SetPRAutoMergeGate.
+var prAutoMergeGate func(projectPath string) bool
+
+// SetPRAutoMergeGate installs the tier-1 auto-merge allowlist gate. The
+// daemon wires this from output.pr_auto_merge_repos + deploy.repo_path at
+// startup. nil gate (unset) preserves the legacy always-merge behavior.
+func SetPRAutoMergeGate(gate func(projectPath string) bool) {
+	prAutoMergeGate = gate
+}
+
+// prMergeAllowed reports whether projectPath may admin-merge.
+func prMergeAllowed(projectPath string) bool {
+	return prAutoMergeGate == nil || prAutoMergeGate(projectPath)
+}
+
 // PublishViaPR lands HEAD onto a protected base branch without a direct push:
 // force-push HEAD to the dogfood feature branch, open a PR into base, merge
 // it with `gh pr merge --merge --admin`, and verify the PR actually reached
@@ -335,10 +362,29 @@ func PublishViaPR(projectPath, base, featureBranch, title, token string) (string
 		// fail closed instead of merging blind (hydra-6zwl, 2026-09-29).
 		return "", fmt.Errorf("pr merge: create PR: %w", err)
 	}
-	if err := autoPRGhMerge(projectPath, featureBranch, token); err != nil {
-		return url, fmt.Errorf("pr merge: merge %s: %w", url, err)
+	if err := mergeOrLeaveOpen(projectPath, base, url, featureBranch, token); err != nil {
+		return url, err
 	}
 	return url, nil
+}
+
+// mergeOrLeaveOpen admin-merges the PR only under the conservative tier-1
+// policy (operator 2026-09-29): the repo must be on the auto-merge allowlist
+// (hydra repo — output.pr_auto_merge_repos / deploy.repo_path) AND the PR
+// base must be "development" (until FR-030 lands). Otherwise the PR is left
+// open and a PRWaitingError is returned so the caller treats the close as
+// waiting-on-human-merge.
+func mergeOrLeaveOpen(projectPath, base, url, featureBranch, token string) error {
+	// Base restriction applies only when a gate is installed; nil gate =
+	// legacy always-merge (tests, unconfigured daemons).
+	if !prMergeAllowed(projectPath) || (prAutoMergeGate != nil && base != "development") {
+		log.Printf("[Publish] %s → %s: tier policy — PR left open (waiting on human merge): %s", projectPath, base, url)
+		return &PRWaitingError{URL: url}
+	}
+	if err := autoPRGhMerge(projectPath, featureBranch, token); err != nil {
+		return fmt.Errorf("pr merge: merge %s: %w", url, err)
+	}
+	return nil
 }
 
 func defaultPRMergeGitPush(repoPath, ref, token string) error {
@@ -424,8 +470,8 @@ func publishBranchViaPRCreate(projectPath, base, localBranch, featureBranch, tit
 		// fail closed instead of merging blind (hydra-6zwl, 2026-09-29).
 		return "", fmt.Errorf("pr merge: create PR: %w", err)
 	}
-	if err := autoPRGhMerge(projectPath, featureBranch, token); err != nil {
-		return url, fmt.Errorf("pr merge: merge %s: %w", url, err)
+	if err := mergeOrLeaveOpen(projectPath, base, url, featureBranch, token); err != nil {
+		return url, err
 	}
 	return url, nil
 }
@@ -535,7 +581,12 @@ func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName
 		if open {
 			// The branch is already carried by an open PR — but the earlier
 			// integration may never have merged it. Land it now; only a
-			// verified MERGED state counts as preserved.
+			// verified MERGED state counts as preserved. Non-allowlisted
+			// (product) repos leave the PR open — waiting-on-human counts.
+			if !prMergeAllowed(projectPath) || (prAutoMergeGate != nil && branch != "development") {
+				log.Printf("[AutoPR] %s: open PR for %s left for human merge (tier policy: %s → %s not auto-mergeable)", bead.ID, head, branch, head)
+				return true
+			}
 			if err := autoPRGhMerge(projectPath, head, token); err != nil {
 				log.Printf("[AutoPR] %s: open PR for %s exists but merge failed: %v", bead.ID, head, err)
 				return false
@@ -678,6 +729,15 @@ func defaultGhPRView(repoPath, head, token string) (string, error) {
 // resolveOrCreatePR returns autoPRGhCreate's URL, falling back to resolving
 // the pre-existing PR when create reports "already exists".
 func resolveOrCreatePR(repoPath, base, head, title, body, token string) (string, error) {
+	// Pre-check before create: a PR for this head may already exist (created
+	// by an earlier close attempt that failed at a later step). Skip create
+	// and reuse the existing PR; a list error fails open to the create path.
+	if open, lerr := autoPRGhListOpen(repoPath, head, token); lerr == nil && open {
+		if url, rerr := resolveExistingPR(repoPath, head, token); rerr == nil {
+			log.Printf("[Publish] open PR already tracks %s — skipping create, reusing: %s", head, url)
+			return url, nil
+		}
+	}
 	url, err := autoPRGhCreate(repoPath, base, head, title, body, token)
 	if err == nil {
 		return url, nil

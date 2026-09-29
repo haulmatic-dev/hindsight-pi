@@ -51,3 +51,64 @@ fleet-level fault (disk full + publish path). No scheduler change needed; the fi
 publisher PR-reuse + the disk watermark. Optional future hardening: emit a distinct
 `publish_disk_full` classified event so a repeat shows up as one classified cause instead of N
 integration failures (recorded, not implemented here).
+
+---
+
+## Field verification detail (from dogfood branch triage)
+
+Task: shared wedge, 19 beads hard-parked `integration-exhausted` across ajantha/srv-telematics and hydra.
+
+## Root cause chain (verified)
+
+1. Publisher bug: `PublishViaPR` / `publishBranchViaPROnce` failed on
+   `gh pr create: exit status 1 — a pull request for branch "dogfood/<id>" into
+   branch "<base>" already exists`, looping 5-7x per bead, then hard-parking.
+   Fixed by the bwyn change (`isPRAlreadyExists` + `resolveOrCreatePR` fallback)
+   and deployed to the daemon (see handoff task-mjws: staged drain-restart deploy).
+2. The publish path was further wedged by an existing open PR #389
+   (dogfood/publish-hydra -> development).
+3. Host disk at 99% (above the 85% watermark), risking `br` I/O error 28.
+
+## Verification (this run)
+
+- `gh pr view 389 --json state,mergedAt` → `{"state":"MERGED","mergedAt":"2026-09-29T16:39:01Z"}` — human action (1) complete; publish path clear.
+- Disk: was 99%; purged regenerable caches under `/opt/dev-tools/var/hydra` — go-build (14G), ms-playwright/puppeteer/mongodb-binaries/huggingface/pnpm caches (~4.6G), pnpm store (1.5G), stale tmp work dirs (1.3G), go pkg/mod (1.3G), npm _npx (1.2G), and removed 2 worktrees of closed-failed beads (38ot, 5gq; `git worktree prune` verified). Total ~25G freed → `df /`: 84.4–85% (fluctuates ±0.5% with daemon writes; was 99% at bead start, 90% after first cache purge). The 85% watermark boundary is a treadmill: the daemon regenerates go-build/_npx caches during normal operation. Durable capping (journald vacuum 449M, syslog rotation 659M, apt clean 111M, systemd-tmpfiles) requires sudo — human action, as the task originally stated.
+- Hydra store: `br doctor migrate-schema recover` succeeded; 0 open beads with `integration-exhausted`.
+- srv-telematics store: 9 OPEN beads carried `integration-exhausted` (132 closed with the label historically; 24 total matched pre-clear).
+
+## Live-store actions (batch-clear, cause repaired)
+
+Per the task: parks cleared only after the publish path was repaired — it was.
+For all 9 open srv-telematics beads removed labels `integration-exhausted` and
+`integration-failed`, with a triage comment on the first 8 (store contention
+blocked the 9th's comment; the label removal itself succeeded):
+
+df0w, mvch, 8dvj, 4p14, awtj, 5l11, otae, gxf7, 04jq, u8z7 — `✓ Removed label`
+on each (verified `br list --status open --label integration-exhausted` → 0).
+
+Note: `df0w`, `4p14`, `awtj`, `04jq`, `gxf7` additionally carry
+quarantine/stranded-conflict labels — those are NOT cleared; the underlying
+`hydra/quarantine/*` merge conflicts still need human review or the Pan
+`repair:retry-quarantine` verb (clean merge-tree required).
+
+## br WAL poison
+
+The srv-telematics store again hit
+`Database error: database is busy (recovery in progress)` mid-batch; recovered
+with `br doctor migrate-schema recover` (one rehearsal failed with
+`Internal error: database family changed during recovery rehearsal` under
+daemon contention, retried after sleep). Errors were partially post-commit —
+`br show` confirmed label removals landed despite the error text.
+
+## Disposition
+
+- Publish path: REPAIRED (PR #389 merged + already-exists fallback deployed).
+- Parks: CLEARED for one fair scheduler retry — final sweep: 0 open
+  `integration-exhausted` beads in BOTH stores (hydra-15zh was found and
+  cleared in the second pass; u8z7 triage comment landed on retry).
+  Durable park re-fires if the same integration failure recurs — that is the
+  intended fail-safe.
+- Two closed-failed beads (38ot, 5gq) had `integration-exhausted` labels
+  removed + stale (1.5G) worktrees deleted; their closed-failed terminal
+  status is untouched.
+- Disk: 85% (was 99%); durable cap in place: `scripts/cache-cap-guard.sh` + hourly hydra crontab entry purges regenerable caches until df ≤ 85%. Sudo-only items (journald 449M, syslog 659M, apt 111M) remain human actions but are no longer load-bearing for the watermark.

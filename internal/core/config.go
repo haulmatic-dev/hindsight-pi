@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -328,6 +329,12 @@ type OutputConfig struct {
 	// built-in hydra/ and dogfood/). Branches outside these namespaces
 	// never silently count as published.
 	WritableBranchPrefixes []string `yaml:"writable_branch_prefixes"`
+	// PRAutoMergeRepos lists absolute repo paths allowed to admin-merge their
+	// integration PRs (tier-1 repos, e.g. the hydra self-repo). Repos not on
+	// this list (product repos) stop at PR-open: the PR is created/left open
+	// and the close is treated as waiting-on-human-merge, NOT an integration
+	// failure. deploy.repo_path is implicitly on the list.
+	PRAutoMergeRepos []string `yaml:"pr_auto_merge_repos"`
 }
 
 // WorktreeConfig controls git-worktree behaviour used by the daemon.
@@ -444,6 +451,25 @@ func (c *Config) WritableBranchPrefixes() []string {
 		return nil
 	}
 	return c.Output.WritableBranchPrefixes
+}
+
+// IsPRAutoMergeRepo reports whether the repo at projectPath is allowed to
+// admin-merge its integration PRs. Empty/nil config → false (fail safe:
+// product default is stop-at-PR-open).
+func (c *Config) IsPRAutoMergeRepo(projectPath string) bool {
+	if c == nil || projectPath == "" {
+		return false
+	}
+	clean := filepath.Clean(projectPath)
+	if c.Deploy.RepoPath != "" && filepath.Clean(c.Deploy.RepoPath) == clean {
+		return true
+	}
+	for _, p := range c.Output.PRAutoMergeRepos {
+		if p != "" && filepath.Clean(p) == clean {
+			return true
+		}
+	}
+	return false
 }
 
 // PRMergeEnabled reports whether integrates must land via PR + gh pr merge
