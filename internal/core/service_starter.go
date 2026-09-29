@@ -50,13 +50,6 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	} else {
 		o.registryStore = regStore
 		log.Printf("[Registry] Initialized")
-		// FR-034: the integration breaker's optional project park goes through
-		// the same registry store the scheduler's ProjectParkInfo gate reads.
-		if o.beadCloser != nil && o.beadCloser.breaker != nil {
-			o.beadCloser.breaker.setParkProject(func(project, reason string) error {
-				return regStore.SetProjectPark(project, true, "integration-wedge: "+reason)
-			})
-		}
 		if o.workerSpawner != nil {
 			o.workerSpawner.SetRegistryStore(regStore)
 		}
@@ -461,6 +454,25 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 			},
 			"park-campaign":   o.parkCampaignRepair,
 			"unpark-campaign": o.unparkCampaignRepair,
+			// retry-quarantine requeues a stranded-conflict bead whose
+			// hydra/quarantine/<key> branch now merges clean against the base
+			// (the base moved since the conflict). Still conflicted -> refused,
+			// bead stays quarantined.
+			"retry-quarantine": func(beadID string) error {
+				id := types.BeadID(beadID)
+				projectPath := projectPathForID(id)
+				if projectPath == "" {
+					return fmt.Errorf("retry-quarantine: project path unresolved for %s", beadID)
+				}
+				key := o.chainKeyForBead(types.Bead{ID: id})
+				if err := QuarantineReattemptRepair(projectPath, key, o.beadsClient, o.eventSink); err != nil {
+					return err
+				}
+				if o.retryManager != nil {
+					o.retryManager.ResetRetryCount(beadID)
+				}
+				return nil
+			},
 		})
 		o.panShepherd.SetLogImprovement(o.logImprovementRepair)
 

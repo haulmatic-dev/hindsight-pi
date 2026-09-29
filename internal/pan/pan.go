@@ -204,6 +204,7 @@ var repairWhitelist = map[string]bool{
 	"repair-bead-store": true,
 	"clear-hard-park":   true,
 	"clear-escalation":  true,
+	"retry-quarantine":  true,
 }
 
 // pseudoBeadSuffix marks synthetic project-level candidates (e.g.
@@ -555,8 +556,8 @@ type Shepherd struct {
 	rejectedMu      sync.Mutex
 	rejectedActions map[string]bool // beadID + "/" + action; unknown repair actions remembered per session
 
-	filedMu       sync.Mutex
-	filedSigs     map[string]bool // project-scope + normalized title; one bead per signature per session (FR-022)
+	filedMu   sync.Mutex
+	filedSigs map[string]bool // project-scope + normalized title; one bead per signature per session (FR-022)
 
 	pseudoMu   sync.Mutex
 	pseudoSeen map[string]pseudoSeenEntry // pseudo-bead → last presented reason
@@ -1407,7 +1408,7 @@ needs a judgment call. For EVERY worker decide exactly one action:
 - "abandon-with-summary": give up gracefully (payload: what was done and what remains)
 - "close_satisfied": the bead's acceptance criteria are already met on the working branch and the worker found nothing to do; close it without a worker. For FIX-AUDIT candidates this closes the redundant fix bead after the satisfied gate re-proves acceptance daemon-side.
 - "file-bead": file an improvement bead for a human to triage (payload: first line = the bead title, remaining lines = the problem description). Use for fleet-level or product-level findings no repair verb covers: shared wedges, push/branch-protection problems, campaign anomalies. Deduplicated per project by signature and capped at 2 open pan-filed beads per project; duplicates are silently skipped.
-- "repair:<name>": execute a whitelisted daemon-side repair (payload ignored). Only for BLOCKED beads with no live worker row. The only valid repair names — the hygiene set — are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park, clear-escalation. No other repair:<name> strings exist; if none fit, choose continue, abandon-with-summary, or file-bead.
+- "repair:<name>": execute a whitelisted daemon-side repair (payload ignored). Only for BLOCKED beads with no live worker row. The only valid repair names — the hygiene set — are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park, clear-escalation, retry-quarantine. No other repair:<name> strings exist; if none fit, choose continue, abandon-with-summary, or file-bead.
 
 Rescue recipes (hard-won; prefer the repair matching the cause):
 - FIX-AUDIT candidates are OPEN auto-fix beads whose original bead closed as failed; each reason carries the close reason, any recorded verdict, and a re-verification status of the original evidence in the inherited worktree. Judge whether a worker still needs to redo the work:
@@ -1434,6 +1435,7 @@ Rescue recipes (hard-won; prefer the repair matching the cause):
   done and what remains). Do NOT abandon a trajectory that is slow but
   making measurable progress.
 - Stranded worktrees (a hydra/wt-<key> branch is ahead of the working branch, the owning bead is terminal or unknown, and there is no live worker or active in-progress chain) are repaired with repair:integrate-stranded. A clean merge integrates the branch and removes the worktree; a merge conflict quarantines it to hydra/quarantine/<key> and labels the bead stranded-conflict; a post-merge verification failure labels integration-unverified.
+- Quarantined strands (bead labeled stranded-conflict, branch on hydra/quarantine/<key>): the base branch may have moved since the conflict. Use repair:retry-quarantine — it merge-trees the quarantine branch against the current base and, only if now clean, restores the branch and re-queues the bead through the ordinary integration paths; if it still conflicts, the repair is refused and the bead stays quarantined. Prefer retry-quarantine over clear-hard-park for stranded-conflict beads.
 - Never repair for merges, PRs, deploys, or repo content edits — those are human-only; if the state needs one, explain it in reasoning.
 
 Rules:

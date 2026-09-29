@@ -42,7 +42,6 @@ type BeadCloser struct {
 	chainKeyFn         func(types.Bead) string // maps a bead to its chain's worktree key
 	isChainMember      func(types.BeadID) bool // reports whether a bead belongs to a registered multi-bead chain
 	retainer           *VerdictRetainer        // nil-safe; Hindsight verdict retention (Shepherd D3)
-	breaker            *IntegrationBreaker     // nil-safe; fleet-wide integration-exhausted circuit breaker (FR-034)
 	gateRunner         *GateRunner             // nil until SetGateRunner; daemon_owned projects fail closed without it
 	retryManager       *RetryManager           // clears retry residue on verified close
 	workerSpawner      *WorkerSpawner          // clears spawn-failure residue on verified close
@@ -75,10 +74,6 @@ func NewBeadCloser(beadsClient BeadsClient, intelligenceHub *IntelligenceHub, pr
 
 // SetEventSink attaches the structured event stream. Nil stays a no-op.
 func (c *BeadCloser) SetEventSink(s *EventSink) { c.events = s }
-
-// SetIntegrationBreaker attaches the fleet-wide integration-exhausted circuit
-// breaker (FR-034). Nil stays a no-op.
-func (c *BeadCloser) SetIntegrationBreaker(b *IntegrationBreaker) { c.breaker = b }
 
 // SetVerdictRetainer attaches Hindsight verdict retention (Shepherd D3).
 // Nil stays a no-op.
@@ -314,20 +309,32 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 				// the singleton's worktree branch is pushed to origin and landed
 				// via PR — no local merge into the working branch. The daemon
 				// gates already ran above, so the PR merge happens gates-green.
-				if hasGitRemote(projectPath) {
-					if iErr := c.publishSingletonViaPR(projectPath, bead, key); iErr != nil {
-						return c.failIntegration(bead, projectPath, repoName, "integrate", iErr)
+				// Per-repo integration gate: serialize sibling closes so only
+				// one bead at a time merges into the same base branch, and wait
+				// out a short repo cooldown after a sibling's failure (shared
+				// wedge must not burn every bead's exhaustion cap).
+				integErr := integrationGate(projectPath, func() error {
+					if hasGitRemote(projectPath) {
+						if iErr := c.publishSingletonViaPR(projectPath, bead, key); iErr != nil {
+							return errStage{"integrate", iErr}
+						}
+					} else {
+						// No-remote fallback: legacy local --no-ff merge, then the
+						// ordinary push path (a no-op when push is disabled).
+						if iErr := c.worktreeManager.Integrate(projectPath, key); iErr != nil {
+							return errStage{"integrate", iErr}
+						}
+						if pErr := c.publishAfterIntegrate(projectPath, bead); pErr != nil {
+							return errStage{"push", pErr}
+						}
 					}
-				} else {
-					// No-remote fallback: legacy local --no-ff merge, then the
-					// ordinary push path (a no-op when push is disabled).
-					if iErr := c.worktreeManager.Integrate(projectPath, key); iErr != nil {
-						return c.failIntegration(bead, projectPath, repoName, "integrate", iErr)
-					}
-					if pErr := c.publishAfterIntegrate(projectPath, bead); pErr != nil {
-						return c.failIntegration(bead, projectPath, repoName, "push", pErr)
-					}
+					return nil
+				})
+				if integErr != nil {
+					es := integErr.(errStage)
+					return c.failIntegration(bead, projectPath, repoName, es.stage, es.err)
 				}
+				resetIntegrationCooldown(projectPath)
 				c.resetIntegrationFailures(string(bead.ID))
 				c.worktreeManager.Remove(projectPath, key)
 				log.Printf("[Worktree] integrated singleton %s", bead.ID)
@@ -885,6 +892,17 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 				AppendActivity(projectPath, string(bead.ID), "already landed (duplicate integrate no-op)")
 				return nil
 			}
+			// Benign duplicate-PR race: a PR for this dogfood head already
+			// exists (created by an earlier close or integration-retest). The
+			// PR is the landing vehicle — PublishViaPR already merged it; only
+			// surface an error when the merge itself failed (fleet wedge
+			// 2026-09-29: qj74/otae/0po4/242b/ycmu hard-parked
+			// integration-exhausted on this error with an open PR waiting).
+			if isPRAlreadyExists(err) {
+				log.Printf("[Output] %s: existing PR for %s → %s reused and merged", bead.ID, head, prBase)
+				AppendActivity(projectPath, string(bead.ID), "landed via existing PR")
+				return nil
+			}
 			log.Printf("[Output] PR merge failed for %s: %s", bead.ID, err)
 			AppendActivity(projectPath, string(bead.ID), "PR merge failed: "+err.Error())
 			return fmt.Errorf("push %s via PR to %s/%s: %w", bead.ID, remote, prBase, err)
@@ -1070,9 +1088,6 @@ func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, st
 				Detail: fmt.Sprintf("%d consecutive integration failures (last at %s: %s) — hard-parked", failures, stage, detail),
 				Fields: evtFields})
 			AppendActivity(projectPath, beadID, "integration-exhausted: hard-parked")
-			// FR-034: feed the fleet-wide breaker — one wedge event per project
-			// per window instead of 11 silent per-bead parks (srv-telematics).
-			c.breaker.RecordExhaustion(repoName, beadID, stage, detail)
 			log.Printf("[Integrate] %s hit %d consecutive integration failures — labeled %s (hard-park; clear only when the cause is fixed) conflict_paths=%v",
 				beadID, failures, integrationExhaustedLabel, conflictPaths)
 		}

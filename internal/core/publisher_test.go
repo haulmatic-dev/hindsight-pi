@@ -145,9 +145,6 @@ type autoPRFakeExec struct {
 	prPushes    []autoPRPushArgs
 	ghMerge     []prMergeGhArgs
 	ghListOpen  []string
-	ghResolve   []string
-	resolveURL  string
-	resolveErr  error
 	ghURL       string
 	ghErr       error
 	mergeErr    error
@@ -179,11 +176,6 @@ func installAutoPRFake(f *autoPRFakeExec) func() {
 	origPrPush := prMergeGitPush
 	origMerge := autoPRGhMerge
 	origList := autoPRGhListOpen
-	origResolve := autoPRGhResolveURL
-	autoPRGhResolveURL = func(repoPath, head, token string) (string, error) {
-		f.ghResolve = append(f.ghResolve, head)
-		return f.resolveURL, f.resolveErr
-	}
 	autoPRGitPush = func(repoPath, ref, token string) error {
 		f.pushes = append(f.pushes, autoPRPushArgs{repoPath, ref, token})
 		return nil
@@ -221,7 +213,6 @@ func installAutoPRFake(f *autoPRFakeExec) func() {
 		prMergeGitPush = origPrPush
 		autoPRGhMerge = origMerge
 		autoPRGhListOpen = origList
-		autoPRGhResolveURL = origResolve
 	}
 }
 
@@ -564,70 +555,6 @@ func TestPublishViaPR_PropagatesCreateFailure(t *testing.T) {
 	}
 }
 
-// TestPublishViaPR_AlreadyExistsResolvesExistingPR: gh pr create failing
-// with "already exists" must fall back to the existing open PR (resolved by
-// head) and merge it, not loop retries (srv-telematics wedge, 2026-09).
-func TestPublishViaPR_AlreadyExistsResolvesExistingPR(t *testing.T) {
-	fake := &autoPRFakeExec{
-		ghErr:      errors.New(`gh pr create: exit status 1
-a pull request for branch "dogfood/z" into branch "main" already exists`),
-		resolveURL: "https://github.com/x/y/pull/7",
-	}
-	restore := installAutoPRFake(fake)
-	restoreMerge := installPRMergeFake(fake)
-	defer restore()
-	defer restoreMerge()
-
-	url, err := PublishViaPR("/tmp/x", "main", "dogfood/z", "T", "TOK")
-	if err != nil {
-		t.Fatalf("PublishViaPR: %v", err)
-	}
-	if url != fake.resolveURL {
-		t.Fatalf("url = %q, want resolved %q", url, fake.resolveURL)
-	}
-	if len(fake.ghResolve) != 1 || fake.ghResolve[0] != "dogfood/z" {
-		t.Fatalf("resolve calls = %+v, want one for dogfood/z", fake.ghResolve)
-	}
-	if len(fake.ghMerge) != 1 {
-		t.Fatalf("merge must run once on the resolved PR, got %+v", fake.ghMerge)
-	}
-}
-
-// TestPublishViaPR_AlreadyExistsResolveFailsClosed: when the existing PR
-// cannot be resolved, the publish fails closed — never treated as landed.
-func TestPublishViaPR_AlreadyExistsResolveFailsClosed(t *testing.T) {
-	fake := &autoPRFakeExec{
-		ghErr:      errors.New("gh pr create: already exists"),
-		resolveErr: errors.New("gh pr view: no pull requests found"),
-	}
-	restore := installAutoPRFake(fake)
-	restoreMerge := installPRMergeFake(fake)
-	defer restore()
-	defer restoreMerge()
-
-	url, err := PublishViaPR("/tmp/x", "main", "dogfood/z", "T", "TOK")
-	if err == nil || url != "" {
-		t.Fatalf("expected fail-closed error, got (%q, %v)", url, err)
-	}
-	if len(fake.ghMerge) != 0 {
-		t.Fatalf("merge must not run, got %+v", fake.ghMerge)
-	}
-}
-
-// TestPublishViaPR_NonAlreadyExistsErrorPassthrough: other create failures
-// still propagate unchanged.
-func TestPublishViaPR_NonAlreadyExistsErrorPassthrough(t *testing.T) {
-	fake := &autoPRFakeExec{ghErr: errors.New("gh pr create: HTTP 403")}
-	restore := installAutoPRFake(fake)
-	restoreMerge := installPRMergeFake(fake)
-	defer restore()
-	defer restoreMerge()
-
-	if url, err := PublishViaPR("/tmp/x", "main", "dogfood/z", "T", "TOK"); err == nil || url != "" {
-		t.Fatalf("expected passthrough error, got (%q, %v)", url, err)
-	}
-}
-
 // TestPublishAfterIntegrate_PRTipAlreadyMerged_NoOp: when the bead's tip is
 // already contained in the remote base branch (a racing duplicate close
 // landed it first — hydra-kf2t, 2026-09-27), the second integrate attempt
@@ -765,5 +692,59 @@ func TestPublishViaPR_FallsBackToDaemonToken(t *testing.T) {
 	}
 	if len(fake.ghMerge) != 1 || fake.ghMerge[0].token != "FALLBACK_TOK" {
 		t.Fatalf("merge token = %+v, want FALLBACK_TOK", fake.ghMerge)
+	}
+}
+
+// TestIsPRAlreadyExists_Classification: the fleet-wide 2026-09-29 wedge
+// (qj74/otae/0po4/242b/ycmu/…) hard-parked beads integration-exhausted
+// because `gh pr create` failed with "a pull request for branch ... already
+// exists" — an open PR is the landing vehicle, not a failure.
+func TestIsPRAlreadyExists_Classification(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"exact gh wording", errors.New(`pr merge: create PR: gh pr create: exit status 1
+a pull request for branch "dogfood/hydra-ycmu" into branch "main" already exists:
+https://github.com/haulmatic-dev/hydra/pull/366`), true},
+		{"other already-exists (DAG node)", errors.New("node hydra-abc already exists in DAG"), false},
+		{"no commits between", errors.New("No commits between development and dogfood/x"), false},
+		{"unrelated", errors.New("gh: connection refused"), false},
+	}
+	for _, tc := range cases {
+		if got := isPRAlreadyExists(tc.err); got != tc.want {
+			t.Errorf("%s: isPRAlreadyExists=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestPublishAfterIntegrate_PRAlreadyExists_Benign: when gh pr create
+// reports that a PR for this dogfood head already exists, the publish must
+// proceed to merge the existing PR instead of counting an integration
+// failure (which hard-parked the bead integration-exhausted).
+func TestPublishAfterIntegrate_PRAlreadyExists_Benign(t *testing.T) {
+	repo, _ := setupReachableRemote(t)
+	commitFile(t, repo, "file.txt", "a")
+	git(t, repo, "push", "-u", "origin", "main")
+	commitFile(t, repo, "file.txt", "b")
+
+	fake := &autoPRFakeExec{ghErr: errors.New(`gh pr create: exit status 1
+a pull request for branch "dogfood/bead-11" into branch "main" already exists:
+https://github.com/x/y/pull/42`)}
+	restore := installAutoPRFake(fake)
+	restoreMerge := installPRMergeFake(fake)
+	defer restore()
+	defer restoreMerge()
+
+	closer := NewBeadCloser(&autoPRFakeBeadsClient{}, nil, nil, nil,
+		&Config{Output: OutputConfig{Push: true, PRMerge: true}})
+	closer.SetWorktreeManager(NewWorktreeManager(), nil, nil)
+	if err := closer.publishAfterIntegrate(repo, &types.Bead{ID: "bead-11", Title: "Fix things"}); err != nil {
+		t.Fatalf("pr-already-exists must be benign (merge existing PR), got: %v", err)
+	}
+	if len(fake.ghMerge) == 0 {
+		t.Fatal("existing PR must be merged, but gh pr merge was never invoked")
 	}
 }
