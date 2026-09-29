@@ -28,14 +28,19 @@
     plus 1,460 >1d — daemon execution-output JSON, already harvested into
     events/logs). **Largest single lever: ~6G.**
   - Net: **85% used, 68G free** — at the 85% watermark, no longer exceeding.
-- Not doable as uid `hydra` (no sudo, verified `sudo -n true` → password
-  required):
-  - `journalctl --vacuum-size` / `journalctl --user --vacuum-size` — both
-    "No journal files were opened due to insufficient permissions"
-    (`/var/log` 1.7G, `/var/backups` 1.6G).
-  - Cache caps: journald `SystemMaxUse`, ajantha npm cache purge
-    (`/home/ajantha/.npm` 560M, permission denied). Hydra's own npm cache
-    was cleaned (8.8M → 5.9M).
+- **Cache caps now active (no root needed):**
+  - `scripts/cache-cap-guard.sh` added to the repo — hourly cron entry
+    already existed (`17 * * * *` in the hydra crontab) but pointed at a
+    nonexistent file; the script now backs it. Caps: /tmp/hydra-executions
+    24h retention, go-build cache 7d, user tmpfiles clean. Verified run:
+    rc=0.
+  - `~/.config/user-tmpfiles.d/hydra-executions.conf` installed
+    (`d /tmp/hydra-executions ... 1d`), `systemd-tmpfiles --user --clean`
+    rc=0.
+  - Net after all caps: **83% used, 75G free** — below the 85% watermark.
+- Still operator (root) only: journald `SystemMaxUse` + `journalctl
+  --vacuum-size` (`/var/log` 1.7G, `/var/backups` 1.6G), ajantha npm cache
+  (`/home/ajantha/.npm` 560M).
 - **Operator follow-up (as root):** journalctl vacuum, set
   `SystemMaxUse=500M` in `/etc/systemd/journald.conf`, `npm cache clean
   --force` as ajantha. Optionally add a tmpfiles rule / cron for

@@ -13,8 +13,10 @@
 - Purged /tmp/hydra-executions >24h (5,704 + 1,460 files, ~6G) — VERIFIED via find counts.
 - `df -h /` — 85% used, 68G free (was 99%) — watermark met.
 - `gh pr view 389 --json state` — {"state":"MERGED"} — wedge PR resolved (human merged).
-- `sudo -n true` — FAILED (password required) → journal vacuum + cache caps remain operator (root) follow-up.
+- `sudo -n true` — FAILED (password required) → journald vacuum + SystemMaxUse cap remain operator (root) follow-up.
+- `bash scripts/cache-cap-guard.sh` — rc=0, pruned 5MiB; new script caps /tmp/hydra-executions (24h) + go-build (7d); user-tmpfiles rule installed; cron entry now backed.
+- `df -h /` — 83% used, 75G free — below watermark.
 
 ## Open edges for the next phase
 - Operator: redeploy daemon from development (stale-binary root cause, same as mjws).
-- Operator (root): journalctl --vacuum-size, SystemMaxUse cap, npm cache clean for ajantha; add tmpfiles/cron retention for /tmp/hydra-executions (24h) — it re-accumulates at ~6G.
+- Operator (root): journald SystemMaxUse cap + vacuum; ajantha npm cache.
