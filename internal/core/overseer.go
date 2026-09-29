@@ -534,6 +534,11 @@ func NewOverseer(config *Config) *Overseer {
 	// Initialize bead closer
 	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o.validationService, config)
 	o.beadCloser.SetSourceIndex(o.beadSource)
+	// FR-034: fleet-wide integration-exhausted circuit breaker. Observability
+	// (one wedge event per project/window) is on by default; project parking
+	// is an operator opt-in via park_project and is attached later in
+	// service_starter once the registry store exists.
+	o.beadCloser.SetIntegrationBreaker(NewIntegrationBreaker(config.Overseer.IntegrationBreaker, nil, nil))
 
 	// Daemon gate runner (FR-002): attach to the close path and recover any
 	// artifacts the previous daemon incarnation died inside (running + dead
@@ -553,6 +558,7 @@ func NewOverseer(config *Config) *Overseer {
 	o.eventSink = events
 	SetPublishEventSink(events)
 	o.beadCloser.SetEventSink(events)
+	o.beadCloser.breaker.setEventSink(events)
 	o.providerPool.SetEventSink(events)
 	o.orphanJanitor.SetEventSink(events)
 	// Integration-retest stage (Tier A): periodic mechanical recheck of

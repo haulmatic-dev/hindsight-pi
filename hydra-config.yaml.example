@@ -325,3 +325,18 @@ integration_retest:
   enabled: false
   max_attempts: 5            # counted outcomes (conflict/gates-failed) per bead, then give up
   retry_interval: 1h         # minimum gap between retest attempts on one bead
+
+# Fleet-wide integration-failure circuit breaker (FR-034). When a project
+# accumulates `threshold` integration-exhausted hard-parks inside `window`,
+# ONE typed `integration-wedge` event names the shared cause instead of the
+# wedge surfacing only as per-bead parks (2026-09-29 srv-telematics: 11 beads
+# parked in one window). `park_project` additionally parks the project (the
+# scheduler stops spawning into the wedge) until an operator unparks it.
+# The breaker is pure observability by default and never blocks the close path.
+# integrated_breaker lives under overseer:
+#   overseer:
+#     integration_breaker:
+#       enabled: true
+#       threshold: 5
+#       window: 30m
+#       park_project: false
