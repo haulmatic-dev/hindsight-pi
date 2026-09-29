@@ -2,11 +2,48 @@ package core
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
+
+// beadIDTokenRe matches bead-ID-shaped tokens (e.g. hydra-5az8,
+// srv-smart-engine-0n6ga_4e316b8f) so they can be scrubbed from failure
+// signatures: two beads failing for the same reason must produce the same
+// signature regardless of which bead it happened to.
+var beadIDTokenRe = regexp.MustCompile(`([a-z0-9][a-z0-9_-]*/)?[a-z0-9][a-z0-9_-]*-[0-9a-z]{3,5}\b`)
+
+// FailureSignature normalizes a close-failure into a cluster key:
+// operation + error class with bead IDs scrubbed, lowercased and
+// whitespace-collapsed (PRD FR-020). The operation is typically the
+// integrate/commit stage ("integrate", "commit", "push", "worker-exit").
+func FailureSignature(operation, cause string) string {
+	s := strings.ToLower(operation + "|" + cause)
+	s = beadIDTokenRe.ReplaceAllString(s, "<bead>")
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 512 {
+		s = s[:512]
+	}
+	return s
+}
+
+// SignatureLabel returns the durable bead label that carries a failure
+// signature on both the meta fix bead and the parked originals, so clustering
+// and release survive daemon restarts (labels are the only close/verdict
+// storage the beads file has).
+func SignatureLabel(sig string) string {
+	sum := sha256.Sum256([]byte(sig))
+	return fmt.Sprintf("fix-sig-%x", sum[:4])
+}
+
+// fixClusteredLabel marks a bead that failed and was parked against an open
+// meta fix bead sharing its failure signature instead of getting its own
+// per-bead fix bead. It is cleared when the meta bead closes (release).
+const fixClusteredLabel = "fix-clustered"
 
 // workersLogDir returns the directory where per-bead worker logs are stored.
 // It mirrors the path construction in openWorkerLogFile so the two cannot drift.
