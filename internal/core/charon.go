@@ -38,21 +38,21 @@ type Charon struct {
 	// matches for chain members (gybo4, 2026-09-10: a live chain worktree was
 	// integrated while its worker was spawning, and the worker's pi exec died
 	// with a chdir ENOENT misattributed to the pi binary).
-	chainKeyForBeadID   func(types.BeadID) string
-	onStaleActiveWorker func(beadID string)
-	lastWorktreeGC      time.Time // throttles the stale-worktree sweep
-	lastRegistryReap    time.Time // throttles the ghost-registry-row sweep
-	registryStore       *registry.Store
-	heartbeatHungAfter  time.Duration            // stale registry heartbeat → hung worker
-	maxBeadTokens       int64                    // soft cap: steer + Pan candidate (0 = disabled); hard backstop = 2x
-	panArbiter          func(beadID string) bool // fresh Pan continue verdict = stay of execution
-	steeredMu           sync.Mutex
-	steeredAt           map[string]time.Time // bead → last budget steer (rate limit)
-	retryManager        *RetryManager        // Charon kills consume retry budget (else infra-classified free respawns loop)
+	chainKeyForBeadID       func(types.BeadID) string
+	onStaleActiveWorker     func(beadID string)
+	lastWorktreeGC          time.Time // throttles the stale-worktree sweep
+	lastRegistryReap        time.Time // throttles the ghost-registry-row sweep
+	registryStore           *registry.Store
+	heartbeatHungAfter      time.Duration            // stale registry heartbeat → hung worker
+	maxBeadTokens           int64                    // soft cap: steer + Pan candidate (0 = disabled); hard backstop = 2x
+	panArbiter              func(beadID string) bool // fresh Pan continue verdict = stay of execution
+	steeredMu               sync.Mutex
+	steeredAt               map[string]time.Time     // bead → last budget steer (rate limit)
+	retryManager            *RetryManager            // Charon kills consume retry budget (else infra-classified free respawns loop)
 	chainCompletionDetector *ChainCompletionDetector // active-chain guard for stranded-work detection
-	maxWorkers          int                  // pool size ceiling for phantom-slot deadlock detection
-	events              *EventSink           // structured event stream; nil-safe
-	deadlockScans       int                  // consecutive scans seeing active>=max and zero live PIDs
+	maxWorkers              int                      // pool size ceiling for phantom-slot deadlock detection
+	events                  *EventSink               // structured event stream; nil-safe
+	deadlockScans           int                      // consecutive scans seeing active>=max and zero live PIDs
 }
 
 // JanitorStats tracks cleanup statistics
@@ -827,18 +827,13 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 			continue // empty multi: nothing to scan, bv/br exit non-zero
 		}
 		for _, target := range repoScanTargets(project) {
-			// Park funnel: orphan recovery must not bypass a parked campaign. During
-			// the 2026-09-27 402 outage, parked campaigns kept respawning in-progress
-			// beads — a frozen provider makes workers look dead (stale heartbeat),
-			// recovery reopened their beads, and the scheduler spawned straight
-			// through the Pan park. Same rule as campaignParked on both spawn paths:
-			// the park must be consulted on the orphan-reopen path too.
-			if j.registryStore != nil {
-				if park, ok, perr := j.registryStore.ProjectParkInfo(projectKey(target)); perr == nil && ok && park.Parked {
-					log.Printf("[Charon] ⏸️  Skipping orphan recovery in %s: campaign parked (Pan)", target)
-					continue
-				}
-			}
+			// Park does NOT gate orphan recovery. Park's contract is: stop NEW
+			// spawns — the scheduler already consults ProjectParkInfo on every spawn
+			// path, so reopening a bead for a parked project does not respawn it.
+			// Reaping dead workers is hygiene, not spawning: skipping it here let a
+			// parked project's dead workers leak "running" tracker rows until the
+			// daemon tracked 6/6 phantom slots with 0 live processes and the whole
+			// fleet stalled (live incident 2026-09-29 10:20 UTC).
 			beadList, err := j.beadsClient.ListBeads(target, "")
 			if err != nil {
 				log.Printf("[Charon] ❌ Failed to list beads for orphan recovery in project %s (path: %s): %v", project.Name, target, err)

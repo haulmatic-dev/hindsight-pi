@@ -489,11 +489,14 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// 2026-09-27 402 outage: a frozen provider makes workers look dead (stale
-// heartbeat), so orphan recovery reopened in_progress beads of PARKED
-// campaigns and the scheduler respawned them straight through the Pan park.
-// The park funnel must be consulted on the orphan-reopen path too.
-func TestRecoverOrphanInProgressBeads_SkipsParkedCampaign(t *testing.T) {
+// Park must NOT block orphan recovery (live incident 2026-09-29 10:20 UTC):
+// park's contract is to stop NEW spawns — the scheduler consults
+// ProjectParkInfo on every spawn path, so reopening a bead for a parked
+// project does not respawn it. Skipping recovery for parked projects instead
+// leaked dead workers' "running" tracker rows into 6/6 phantom slots and
+// stalled the whole fleet. Recovery must run: bead reopened, ghost row
+// reaped.
+func TestRecoverOrphanInProgressBeads_ParkedCampaignStillRecovers(t *testing.T) {
 	beadID := "test-orphan-parked"
 	charon, exec := setupOrphanCharon(t, beadListJSON(beadID, time.Now().Add(-10*time.Minute)), 5*time.Minute)
 
@@ -513,20 +516,19 @@ func TestRecoverOrphanInProgressBeads_SkipsParkedCampaign(t *testing.T) {
 		return []types.Project{{Name: "test", Path: projectPath}}
 	})
 
-	n := charon.recoverOrphanInProgressBeads()
-	if n != 0 {
-		t.Fatalf("recovered %d beads from a parked campaign; want 0", n)
-	}
-	if got := exec.CountCalls("br list"); got != 0 {
-		t.Fatalf("parked campaign must not even be listed, got %d br list calls", got)
+	// Dead worker holding a "running" tracker row: the exact phantom-slot
+	// leak from the parked-project incident.
+	if err := charon.workerTracker.TrackWorkerWithPGID(12345, 12345, beadID, t.TempDir()); err != nil {
+		t.Fatalf("TrackWorkerWithPGID: %v", err)
 	}
 
-	// Unpark: recovery proceeds normally again.
-	if err := st.SetProjectPark(key, false, ""); err != nil {
-		t.Fatalf("SetProjectPark unpark: %v", err)
-	}
-	n = charon.recoverOrphanInProgressBeads()
+	n := charon.recoverOrphanInProgressBeads()
 	if n != 1 {
-		t.Fatalf("after unpark expected 1 orphan recovery, got %d", n)
+		t.Fatalf("parked campaign must still recover its orphan bead, got %d", n)
 	}
-}
+	if n := exec.CountCalls("br update " + beadID + " --status open"); n != 1 {
+		t.Errorf("expected one UpdateBeadStatus(open) call, got %d; calls:\n%v", n, exec.Calls())
+	}
+	if rec, ok := charon.workerTracker.GetWorkerByBead(beadID); ok && rec.Status == "running" {
+		t.Errorf("expected dead worker row to be reaped despite park, still running: %+v", rec)
+	}}
