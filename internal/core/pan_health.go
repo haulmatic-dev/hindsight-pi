@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/degrade"
 	"github.com/haulmatic-dev/hydra/internal/pan"
 	"github.com/haulmatic-dev/hydra/internal/registry"
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -75,10 +76,13 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 			key := projectKey(target)
 			ph := pan.ProjectHealth{Key: key}
 
+			degrade.RecordAttempt("pan-store-scan")
 			beads, err := o.beadsClient.ListBeads(target, "")
 			if err != nil {
+				log.Printf("[PanHealth] store scan failed for %s (fail open): %v", target, err)
 				continue // fail open per store
 			}
+			degrade.RecordSuccess("pan-store-scan")
 			statusByID := make(map[string]types.BeadStatus, len(beads))
 			depsByID := make(map[string][]string, len(beads))
 			for _, b := range beads {
@@ -156,6 +160,13 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 	}
 	sort.Slice(digest.Projects, func(i, j int) bool { return digest.Projects[i].Key < digest.Projects[j].Key })
 	collectDiskWatermark(&digest, o.diskStatPath, o.diskWatermarkPct)
+	// FR-032: snapshot fail-open degradation counters; degraded subsystems
+	// (0% success over the window) surface in the digest like host anomalies.
+	for _, st := range degrade.Snapshot() {
+		if st.Degraded() {
+			digest.Degradations = append(digest.Degradations, st.String())
+		}
+	}
 	return digest
 }
 

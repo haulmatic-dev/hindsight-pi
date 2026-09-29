@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/haulmatic-dev/hydra/internal/degrade"
 )
 
 // Retain-content policy (Sink A, PRD verdict memory): the extraction LLM
@@ -28,6 +30,12 @@ var (
 	thinkingSignatureRe = regexp.MustCompile(`"thinkingSignature"\s*:\s*"[^"]*"`)
 	base64RunRe         = regexp.MustCompile(`[A-Za-z0-9+/]{` + fmt.Sprint(base64RunMinLength) + `,}={0,2}`)
 )
+
+// recordRetainAttempt / recordRetainSuccess feed the FR-032 fail-open
+// degradation counters: retention is fail-open (errors logged and swallowed),
+// so a permanently dead Hindsight would otherwise be invisible.
+func recordRetainAttempt() { degrade.RecordAttempt("hindsight-retain") }
+func recordRetainSuccess() { degrade.RecordSuccess("hindsight-retain") }
 
 // buildRetainContent decides what the worker stores in Hindsight for a run.
 // Verdict path when a verdict was parsed; sanitized-output fallback otherwise.

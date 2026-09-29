@@ -66,6 +66,10 @@ type HealthDigest struct {
 	// br I/O error 28 blocked bead creation fleet-wide).
 	HostAnomalies []string
 	DiskUsedPct   int
+	// Degradations are FR-032 fail-open degradation counters at 0% success
+	// within the window (internal/degrade): "name 0/N" fragments. Advisory
+	// telemetry like HostAnomalies — never pseudo-candidates.
+	Degradations []string
 }
 
 // Anomalous returns the projects carrying at least one anomaly flag.
@@ -97,6 +101,9 @@ func (d HealthDigest) Text() string {
 	}
 	if len(d.HostAnomalies) > 0 {
 		fmt.Fprintf(&b, "host: disk=%d%% ANOMALIES=[%s]\n", d.DiskUsedPct, strings.Join(d.HostAnomalies, "; "))
+	}
+	if len(d.Degradations) > 0 {
+		fmt.Fprintf(&b, "host: degradations=[%s] — fail-open subsystem at 0%% success; check its backing service\n", strings.Join(d.Degradations, ", "))
 	}
 	s := b.String()
 	if len(s) > maxLen {

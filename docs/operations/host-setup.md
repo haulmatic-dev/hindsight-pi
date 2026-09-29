@@ -270,6 +270,7 @@ when wrong:
 | `projects.multi_user_discovery` | Default `true`. Enables scanning `/home/*/.hydra/config.yaml` for per-user projects. Set to `false` only to run a purely config-listed fleet. |
 | `projects.auto_discover_exclude` | Directory names or paths excluded from auto-discovery. Applies to both the explicit `projects.auto_discover` path walk and multi-user `type: multi` + `auto_discover: true` discovery. Use to silence non-Hydra directories (e.g. `demo`) or, operator-side, to keep a project like `webapp` out of discovery until its fix is deployed and verified live. |
 | `deploy.enabled` (FR-031) | Opt-in (default `false`) tier-1 canary deploy with automatic rollback: after a publish lands on `deploy.repo_path`, the daemon pins max_workers to 0 (drain precondition — deploys are skipped with a typed event if workers are in flight), backs up the daemon binary, builds + atomically swaps, restarts, and runs `scripts/verify-deploy.sh`; verify failure triggers automatic rollback to the previous binary + restart. Requires `repo_path` (the hydra repo) and, by default, systemd unit `hydra`. Every step emits typed deploy events. |
+| `HYDRA_DEGRADE_WINDOW` (env, FR-032) | Fail-open degradation counter window (Go duration, default `24h`). A fail-open subsystem at 0% success over the window (>= 3 attempts) renders a `host: degradations=[name 0/N]` line in the Pan health digest. Worker-process counters are process-local; daemon-side counters (Pan store scans) surface in the digest. |
 
 ### Multi-user project discovery
 

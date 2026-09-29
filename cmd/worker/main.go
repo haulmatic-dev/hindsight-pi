@@ -2612,6 +2612,7 @@ func recordExecutionResult(
 	}
 
 	// Retain the execution memory in hindsight
+	recordRetainAttempt()
 	retainResult, err := hindsightClient.Retain(memory)
 	if err != nil {
 		log.Printf("[WARN] Failed to retain execution memory: %v", err)
@@ -2620,6 +2621,7 @@ func recordExecutionResult(
 		log.Printf("[WARN] Hindsight retention failed: %s", retainResult.Error)
 		streamLog(mcpClient, "warn", fmt.Sprintf("Hindsight retention failed: %s", retainResult.Error))
 	} else {
+		recordRetainSuccess()
 		log.Printf("✅ Retained execution memory in Hindsight (memory_id: %s)", retainResult.MemoryID)
 		streamLog(mcpClient, "info", fmt.Sprintf("Retained execution memory in Hindsight"))
 	}
@@ -2670,6 +2672,7 @@ func recordExecutionResultSync(
 	}
 
 	// Retain the execution memory in hindsight
+	recordRetainAttempt()
 	retainResult, err := hindsightClient.Retain(memory)
 	if err != nil {
 		return fmt.Errorf("failed to retain execution memory: %w", err)
@@ -2679,6 +2682,7 @@ func recordExecutionResultSync(
 		return fmt.Errorf("hindsight retention failed: %s", retainResult.Error)
 	}
 
+	recordRetainSuccess()
 	log.Printf("✅ Retained execution memory in Hindsight (memory_id: %s)", retainResult.MemoryID)
 	return nil
 }
