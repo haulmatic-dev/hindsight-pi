@@ -656,6 +656,14 @@ type ValidationConfig struct {
 	// success but edited nothing" case. Ops can disable this if a
 	// workflow legitimately closes beads without file changes.
 	RequireDiffOnClose bool `yaml:"require_diff_on_close"`
+
+	// DisableFixSignatureClustering (default false = clustering on, PRD
+	// FR-020) restores the legacy one-fix-bead-per-failed-close behaviour:
+	// close-fail errors with the same normalized signature share one open
+	// meta fix bead and later failures are parked against it instead of
+	// spawning per-bead fix beads. Disable only to bisect clustering
+	// regressions.
+	DisableFixSignatureClustering bool `yaml:"disable_fix_signature_clustering"`
 }
 
 // TargetScopeMode returns the normalized scope gate enforcement mode.
