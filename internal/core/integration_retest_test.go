@@ -110,20 +110,20 @@ func TestAllowAttemptRateLimitAndCap(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	s.now = func() time.Time { return now }
 
-	if !s.allowAttempt("b1") {
+	if !s.allowAttempt("/proj", "b1") {
 		t.Fatal("first attempt must be allowed")
 	}
-	if s.allowAttempt("b1") {
+	if s.allowAttempt("/proj", "b1") {
 		t.Fatal("second attempt inside retry interval must be denied")
 	}
 	now = now.Add(2 * time.Hour)
-	if !s.allowAttempt("b1") {
+	if !s.allowAttempt("/proj", "b1") {
 		t.Fatal("attempt after retry interval must be allowed")
 	}
 	s.countAttempt("b1")
 	s.countAttempt("b1") // hits MaxAttempts=2
 	now = now.Add(2 * time.Hour)
-	if s.allowAttempt("b1") {
+	if s.allowAttempt("/proj", "b1") {
 		t.Fatal("attempt beyond cap must be denied")
 	}
 }

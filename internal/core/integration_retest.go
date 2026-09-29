@@ -108,7 +108,14 @@ type IntegrationRetestStage struct {
 	mu          sync.Mutex
 	attempts    map[string]int
 	lastAttempt map[string]time.Time
+	lastOpen    map[string]time.Time // repoPath -> last successful integration (fast-path window)
+	sweeping    map[string]bool      // repoPath -> fast-path sweep in flight
 }
+
+// retestFastPathWindow: how long after a successful integration on a repo
+// the per-bead RetryInterval is bypassed for that repo's parked beads. The
+// attempt cap (MaxAttempts) always applies.
+const retestFastPathWindow = 5 * time.Minute
 
 // NewIntegrationRetestStage builds the stage. Nil beadsClient/events are
 // tolerated (stage is inert); the gate runner may be nil when no project
@@ -135,6 +142,8 @@ func NewIntegrationRetestStage(cfg IntegrationRetestConfig, full *Config, beadsC
 		},
 		attempts:    map[string]int{},
 		lastAttempt: map[string]time.Time{},
+		lastOpen:    map[string]time.Time{},
+		sweeping:    map[string]bool{},
 	}
 }
 
@@ -156,6 +165,9 @@ func (s *IntegrationRetestStage) runProject(project types.Project, activeKeys ma
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[IntegrationRetest] PANIC recovering for %s: %v (stage continues)", project.Name, r)
+			s.mu.Lock()
+			delete(s.sweeping, project.Path)
+			s.mu.Unlock()
 		}
 	}()
 	if s.beadsClient == nil || project.Path == "" {
@@ -173,6 +185,53 @@ func (s *IntegrationRetestStage) runProject(project types.Project, activeKeys ma
 		}
 		s.runBead(project, bead)
 	}
+}
+
+// NotifyRepoOpen is the fast-path absorption hook: called after a successful
+// integration on projectPath, it (a) opens the fast-path window for that
+// repo and (b) sweeps the repo's parked beads immediately in the background.
+// Serialized per repo (a sweep already in flight skips), fully fail-open.
+func (s *IntegrationRetestStage) NotifyRepoOpen(projectPath string, projects []types.Project) {
+	if s == nil || !s.Enabled() || projectPath == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.sweeping[projectPath] {
+		s.mu.Unlock()
+		return
+	}
+	s.sweeping[projectPath] = true
+	s.mu.Unlock()
+	var target *types.Project
+	for i := range projects {
+		if projects[i].Path == projectPath {
+			target = &projects[i]
+			break
+		}
+	}
+	if target == nil {
+		return
+	}
+	s.mu.Lock()
+	s.lastOpen[projectPath] = s.now()
+	s.mu.Unlock()
+	go func(p types.Project) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[IntegrationRetest] PANIC in fast-path sweep for %s: %v", filepath.Base(p.Path), r)
+			}
+			s.mu.Lock()
+			delete(s.sweeping, p.Path)
+			s.mu.Unlock()
+		}()
+		log.Printf("[IntegrationRetest] fast-path absorption: integration opened on %s — sweeping parked beads now", filepath.Base(p.Path))
+		s.runProject(p, nil)
+		// Belt-and-braces: a panic that escaped runProject's own recover must
+		// still clear the flag so later opens can sweep again.
+		s.mu.Lock()
+		delete(s.sweeping, p.Path)
+		s.mu.Unlock()
+	}(*target)
 }
 
 // selectBead is the pure selector: label match, not terminal, not parked for
@@ -193,7 +252,7 @@ func (s *IntegrationRetestStage) selectBead(projectPath string, bead *types.Bead
 	if activeKeys[string(bead.ID)] {
 		return false
 	}
-	if !s.allowAttempt(string(bead.ID)) {
+	if !s.allowAttempt(projectPath, string(bead.ID)) {
 		return false
 	}
 	return s.findBranch(projectPath, bead) != ""
@@ -201,14 +260,21 @@ func (s *IntegrationRetestStage) selectBead(projectPath string, bead *types.Bead
 
 // allowAttempt enforces the per-bead retry interval and the global attempt
 // cap. Errors and panics never increment — only counted outcomes do.
-func (s *IntegrationRetestStage) allowAttempt(beadID string) bool {
+// When the repo's integration path recently opened (fast-path absorption),
+// the retry-interval gap is bypassed so a backlog of parked siblings is
+// absorbed immediately instead of one-per-RetryInterval.
+func (s *IntegrationRetestStage) allowAttempt(projectPath, beadID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.attempts[beadID] >= s.cfg.MaxAttempts {
 		return false
 	}
 	if last, ok := s.lastAttempt[beadID]; ok && s.now().Sub(last) < s.cfg.RetryIntervalDuration() {
-		return false
+		// Fast-path bypass: only while the window is open for this repo.
+		opened, ok := s.lastOpen[projectPath]
+		if !ok || s.now().Sub(opened) >= retestFastPathWindow {
+			return false
+		}
 	}
 	s.lastAttempt[beadID] = s.now()
 	return true
