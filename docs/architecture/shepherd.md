@@ -76,8 +76,17 @@ file is an empty stream, not an error).
 
 ## 2. Close verdicts & quarantine (A1) — `bead_closer.go`, `worktree_manager.go`, `chain_completion_*.go`
 
-Singleton close is fail-closed end to end (2026-09-06, hydra-xnx incident): the
-merge is verified (`git merge-base --is-ancestor <wt-branch> HEAD`) before
+Singleton close is fail-closed end to end (2026-09-06, hydra-xnx incident). FR-010
+PR-first close contract: when the project has a remote configured, the
+singleton's worktree branch is pushed to origin and landed via PR
+(`PublishBranchViaPR`: force-push branch → `dogfood/<bead-id>`, `gh pr create`
+into the working branch, `gh pr merge --merge --admin`, verified MERGED via
+`gh pr view`) — the daemon gates have already run, so the PR merge lands
+gates-green, and NO local merge into the working branch happens (duplicate-
+landing pre-check compares the wt-branch tip against origin/<base>; the
+legacy local `git merge --no-ff` is demoted to the no-remote fallback).
+Otherwise (no remote), the legacy path holds: the merge is verified
+(`git merge-base --is-ancestor <wt-branch> HEAD`) before
 "integrated singleton" is logged, the push is verified (`ls-remote` ref match
 inside `PushBranch`) before "pushed" is logged, and the worktree is removed
 only after both land. Either failure emits `integration-failed`, reopens the

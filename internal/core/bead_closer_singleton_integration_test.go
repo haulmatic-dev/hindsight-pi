@@ -257,11 +257,11 @@ func TestBeadCloser_IntegrateErrorFailsClose(t *testing.T) {
 	}
 }
 
-// TestBeadCloser_PushRejectionFailsClosed: a GH006-style branch-protection
-// rejection must not be swallowed — the bead stays open, the worktree is
-// preserved, the local merge stays, and the event carries the exact remote
-// error. This is the hydra-xnx 2026-09-06 incident: "pushed" was logged, the
-// bead closed, and the gate-verified commits dangled unreferenced.
+// TestBeadCloser_PushRejectionFailsClosed: under the FR-010 PR-first close
+// contract a failed PR (create/merge) must not be swallowed — the bead stays
+// open, the worktree is preserved, and the event carries the exact error.
+// The hydra-xnx 2026-09-06 incident: "pushed" was logged, the bead closed,
+// and the gate-verified commits dangled unreferenced.
 func TestBeadCloser_PushRejectionFailsClosed(t *testing.T) {
 	projectPath := initGitRepoWithCommit(t)
 	t.Setenv("HYDRA_HOME", t.TempDir())
@@ -271,8 +271,6 @@ func TestBeadCloser_PushRejectionFailsClosed(t *testing.T) {
 	git(t, projectPath, "remote", "add", "origin", remote)
 	git(t, projectPath, "push", "-u", "origin", "main")
 	baseSHA := headCommit(t, projectPath)
-	// Branch protection rejects every subsequent push, GH006-style.
-	writeHook(t, remote, "pre-receive", "#!/bin/sh\necho \"remote: error: GH006: Protected branch update failed. Changes must be made through a pull request.\" >&2\nexit 1\n")
 
 	m := NewWorktreeManager()
 	beadID := types.BeadID("pushrej-abc")
@@ -306,19 +304,29 @@ func TestBeadCloser_PushRejectionFailsClosed(t *testing.T) {
 	closer.config.Output.Remote = "origin"
 	closer.SetEventSink(NewEventSink(""))
 
+	// PR-first contract: stub the PR exec hooks and fail the PR create — the
+	// merge never happens, so the close must fail closed.
+	origPush := prMergeBranchPush
+	origCreate := autoPRGhCreate
+	prMergeBranchPush = func(repoPath, localRef, ref, token string) error { return nil }
+	autoPRGhCreate = func(repoPath, base, head, title, body, token string) (string, error) {
+		return "", execErr("gh pr create: remote: error: GH006: Protected branch update failed")
+	}
+	defer func() { prMergeBranchPush = origPush; autoPRGhCreate = origCreate }()
+
 	err = closer.Close(&types.Worker{BeadID: beadID}, true, 0)
 	if err == nil {
-		t.Fatal("Close() should fail closed on push rejection, got nil")
+		t.Fatal("Close() should fail closed on PR failure, got nil")
 	}
-	if !strings.Contains(err.Error(), "integration-failed") {
-		t.Fatalf("Close() error = %v, want integration-failed", err)
+	if !strings.Contains(err.Error(), "pr-first close") {
+		t.Fatalf("Close() error = %v, want pr-first close", err)
 	}
 
-	if !strings.Contains(buf.String(), "push verification FAILED") && !strings.Contains(buf.String(), "push skipped") {
-		t.Fatalf("expected push failure in log, got:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "pr-first close") || !strings.Contains(buf.String(), "[Integrate] FAILED") {
+		t.Fatalf("expected PR failure in log, got:\n%s", buf.String())
 	}
 	if strings.Contains(buf.String(), "integrated singleton") {
-		t.Fatalf("'integrated singleton' logged over a rejected push:\n%s", buf.String())
+		t.Fatalf("'integrated singleton' logged over a failed PR:\n%s", buf.String())
 	}
 
 	// Bead left open.
@@ -335,21 +343,17 @@ func TestBeadCloser_PushRejectionFailsClosed(t *testing.T) {
 		t.Fatal("expected worktree branch to remain after rejected push")
 	}
 
-	// Local merge landed (integrate succeeded; only push failed).
-	got, rErr := os.ReadFile(filepath.Join(projectPath, "feature.txt"))
-	if rErr != nil {
-		t.Fatalf("expected local merge to land feature.txt: %v", rErr)
-	}
-	if string(got) != "feature work\n" {
-		t.Fatalf("feature.txt = %q, want %q", got, "feature work\n")
+	// No local merge landed under the PR-first contract.
+	if _, rErr := os.Stat(filepath.Join(projectPath, "feature.txt")); rErr == nil {
+		t.Fatal("feature.txt leaked into local working branch; PR-first close must not merge locally")
 	}
 
-	// Remote ref did NOT advance.
+	// Remote ref did NOT advance (the PR merge was stubbed to fail).
 	if out := git(t, projectPath, "ls-remote", remote, "refs/heads/main"); !strings.Contains(out, baseSHA) {
 		t.Fatalf("remote main moved: ls-remote = %q, want base %s", out, baseSHA)
 	}
 
-	// Typed event carries the exact remote error.
+	// Typed event carries the exact error.
 	events, rErr := ReadEvents(filepath.Join(projectPath, ".hydra", "events.jsonl"))
 	if rErr != nil {
 		t.Fatalf("ReadEvents: %v", rErr)
@@ -358,11 +362,8 @@ func TestBeadCloser_PushRejectionFailsClosed(t *testing.T) {
 	for _, ev := range events {
 		if ev.Type == "integration-failed" {
 			found = true
-			if ev.Reason != "push_failed" {
-				t.Errorf("integration-failed reason = %q, want push_failed", ev.Reason)
-			}
-			if !strings.Contains(ev.Detail, "GH006") {
-				t.Errorf("integration-failed detail missing exact remote error: %q", ev.Detail)
+			if !strings.Contains(ev.Detail, "pr-first close") && !strings.Contains(ev.Detail, "GH006") {
+				t.Errorf("integration-failed detail missing exact PR error: %q", ev.Detail)
 			}
 		}
 	}
@@ -371,11 +372,11 @@ func TestBeadCloser_PushRejectionFailsClosed(t *testing.T) {
 	}
 }
 
-// TestBeadCloser_IntegratePushVerifiedSuccess: on the happy path the success
-// logs happen only after verification — the merge is confirmed to contain the
-// worktree branch tip and the remote ref is confirmed (ls-remote) to match the
-// local head before "integrated"/"pushed" are logged and the worktree is
-// removed.
+// TestBeadCloser_IntegratePushVerifiedSuccess: under the FR-010 PR-first
+// close contract the happy path pushes the worktree branch and lands it via
+// PR (create + verified MERGED merge); "integrated singleton" and the PR
+// success log happen only after the PR hook chain succeeded, and the
+// worktree is removed only then.
 func TestBeadCloser_IntegratePushVerifiedSuccess(t *testing.T) {
 	projectPath := initGitRepoWithCommit(t)
 	t.Setenv("HYDRA_HOME", t.TempDir())
@@ -417,6 +418,30 @@ func TestBeadCloser_IntegratePushVerifiedSuccess(t *testing.T) {
 	closer.config.Output.Remote = "origin"
 	closer.SetEventSink(NewEventSink(""))
 
+	// PR-first contract exec hooks: record what was pushed and where the PR
+	// was created; a nil merge error simulates a verified MERGED PR.
+	origProbe := tipMergedProbe
+	tipMergedProbe = func(string, string) bool { return false }
+	defer func() { tipMergedProbe = origProbe }()
+	var pushedRef, createBase, createHead string
+	origPush := prMergeBranchPush
+	origCreate := autoPRGhCreate
+	origMerge := autoPRGhMerge
+	prMergeBranchPush = func(repoPath, localRef, ref, token string) error {
+		pushedRef = localRef
+		return nil
+	}
+	autoPRGhCreate = func(repoPath, base, head, title, body, token string) (string, error) {
+		createBase, createHead = base, head
+		return "https://github.com/x/y/pull/7", nil
+	}
+	autoPRGhMerge = func(repoPath, head, token string) error { return nil }
+	defer func() {
+		prMergeBranchPush = origPush
+		autoPRGhCreate = origCreate
+		autoPRGhMerge = origMerge
+	}()
+
 	if err := closer.Close(&types.Worker{BeadID: beadID}, true, 0); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
@@ -425,19 +450,24 @@ func TestBeadCloser_IntegratePushVerifiedSuccess(t *testing.T) {
 	if !strings.Contains(logs, "integrated singleton") {
 		t.Fatalf("expected 'integrated singleton' in log:\n%s", logs)
 	}
-	if !strings.Contains(logs, "pushed "+string(beadID)+" to origin/main") {
-		t.Fatalf("expected verified push log line:\n%s", logs)
+	if !strings.Contains(logs, "PR-first close landed "+string(beadID)) {
+		t.Fatalf("expected verified PR-first close log line:\n%s", logs)
+	}
+	if pushedRef != "hydra/wt-"+key {
+		t.Fatalf("pushed localRef = %q, want hydra/wt-%s", pushedRef, key)
+	}
+	if createHead != "dogfood/"+key || createBase == "" {
+		t.Fatalf("PR create args head=%q base=%q, want head dogfood/%s and non-empty base", createHead, createBase, key)
 	}
 
-	// Worktree removed only after verified integrate+push.
+	// Worktree removed only after the PR-first close landed.
 	if branchExists(projectPath, "hydra/wt-"+key) {
-		t.Fatal("expected worktree branch removed after verified integrate+push")
+		t.Fatal("expected worktree branch removed after verified PR-first close")
 	}
 
-	// Remote ref advanced to the local merge commit.
-	local := headCommit(t, projectPath)
-	if !remoteHas(t, remote, "main", local) {
-		t.Fatalf("remote main missing verified merge commit %s", local)
+	// No local merge: the working branch must not contain the feature file.
+	if _, err := os.Stat(filepath.Join(projectPath, "feature.txt")); err == nil {
+		t.Fatal("feature.txt leaked into local working branch under PR-first contract")
 	}
 
 	// Bead closed, no integration-failed event.
