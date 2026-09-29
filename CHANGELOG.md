@@ -1122,3 +1122,6 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   work orders, eval harness definition).
 - Dogfood PRDs: sticky approval, Target-Files scope gate, worktree
   integration reliability.
+
+- Disposition note (docs): integration-exhausted hard-parks **hydra-ycmu** (duplicate closure for the identical root cause surfaced under hydra-242b — treat both heads as one manual-integration review) resolved via proven-rules decision tree.
+�
