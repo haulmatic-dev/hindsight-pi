@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -446,19 +447,39 @@ func defaultAutoPRGhMerge(repoPath, head, token string) error {
 		}
 		return fmt.Errorf("gh pr merge: %w\n%s", err, strings.TrimSpace(string(out)))
 	}
-	state, err := ghPRState(repoPath, head, env)
-	if err != nil {
-		return err
+	// gh pr merge exit 0 is authoritative for the merge itself, but the
+	// immediately-following state read can hit GitHub API eventual
+	// consistency (observed 2026-09-29: PR #401 merged at 18:27:59Z, state
+	// read at 18:28:02Z returned OPEN) — a single stale OPEN was counted as
+	// an integration failure and drove the bead to integration-exhausted
+	// hard-park. Retry the read before failing.
+	state := ""
+	var err error
+	for attempt := 0; attempt < mergeStateVerifyAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(mergeStateVerifyBackoff * time.Duration(attempt))
+		}
+		state, err = ghPRState(repoPath, head, env)
+		if err != nil {
+			return err
+		}
+		if state == "MERGED" {
+			return nil
+		}
 	}
-	if state != "MERGED" {
-		return fmt.Errorf("gh pr view: state=%q, want MERGED", state)
-	}
-	return nil
+	return fmt.Errorf("gh pr view: state=%q, want MERGED (after %d attempts)", state, mergeStateVerifyAttempts)
 }
 
 // ghPRState reads a PR's state via gh pr view. env carries GH_TOKEN when set.
 // Overridden in tests.
 var ghPRState = defaultGhPRState
+
+// Post-merge state-verify retry budget: GitHub API eventual consistency can
+// serve a stale OPEN for a few seconds right after `gh pr merge` succeeds.
+const (
+	mergeStateVerifyAttempts = 4
+	mergeStateVerifyBackoff  = 2 * time.Second
+)
 
 func defaultGhPRState(repoPath, head string, env []string) (string, error) {
 	view := exec.Command("gh", "pr", "view", head, "--json", "state", "--jq", ".state")
