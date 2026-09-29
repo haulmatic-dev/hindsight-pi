@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // chainContextMaxPerFile bounds a single embedded handoff; the block is tail
@@ -23,17 +25,52 @@ import (
 const chainContextMaxPerFile = 1500
 
 // handoffPhaseRank orders handoffs by chain phase, not alphabet (green.md
-// would sort before red.md). Unknown phases rank last, alphabetically.
+// would sort before red.md). FR-001: per-bead fragments (<phase>-<bead>.md)
+// rank with their phase via prefix match, so green-5xvh.md orders with green.
+// Unknown phases rank last, alphabetically.
 func handoffPhaseRank(name string) int {
-	switch strings.TrimSuffix(name, ".md") {
-	case "red", "test":
-		return 0
-	case "green":
-		return 1
-	case "refactor":
-		return 2
+	base := strings.TrimSuffix(name, ".md")
+	for _, p := range []struct {
+		prefix string
+		rank   int
+	}{{"red", 0}, {"test", 0}, {"green", 1}, {"refactor", 2}} {
+		if base == p.prefix || strings.HasPrefix(base, p.prefix+"-") {
+			return p.rank
+		}
 	}
 	return 3
+}
+
+// chainHandoffFragmentName returns the per-bead handoff path for a bead:
+// docs/hydra/handoff/<phase>-<bead-id>.md (FR-001). Parallel beads of the
+// same phase each write their own fragment — no shared discovery.md to
+// collide on at integrate time. The bead id is sanitized to its numeric
+// suffix, lowercased, filename-safe.
+func chainHandoffFragmentName(bead types.Bead) string {
+	phase := strings.ToLower(strings.TrimSpace(bead.Type))
+	if phase == "" {
+		phase = "unknown"
+	}
+	phase = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		return -1
+	}, phase)
+	id := strings.ToLower(string(bead.ID))
+	if i := strings.LastIndex(id, "-"); i >= 0 && i < len(id)-1 {
+		id = id[i+1:]
+	}
+	id = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		return -1
+	}, id)
+	if id == "" {
+		id = "bead"
+	}
+	return filepath.Join("docs", "hydra", "handoff", phase+"-"+id+".md")
 }
 
 // loadChainContext reads docs/hydra/handoff/*.md from the worktree, ordered
