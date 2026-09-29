@@ -9,9 +9,12 @@
 - `go build ./...` — PASS.
 - `go test ./internal/core/ -run 'TestResolveOrCreatePR|TestIsPRAlreadyExists|TestPRURLFromError' -count=1` — PASS.
 - `timeout 60 systemd-tmpfiles --clean` — ran (user-level perms only; no fatal errors).
-- `df -h /` — 86% used, 65G free (was 99%).
-- `sudo -n true` — FAILED (password required) → journal vacuum + cache caps NOT VERIFIED, recorded as operator follow-up.
+- `go clean -cache` — freed 1.5G daemon go-build cache.
+- Purged /tmp/hydra-executions >24h (5,704 + 1,460 files, ~6G) — VERIFIED via find counts.
+- `df -h /` — 85% used, 68G free (was 99%) — watermark met.
+- `gh pr view 389 --json state` — {"state":"MERGED"} — wedge PR resolved (human merged).
+- `sudo -n true` — FAILED (password required) → journal vacuum + cache caps remain operator (root) follow-up.
 
 ## Open edges for the next phase
-- Human: merge PR #389 (gh pr merge 389 --merge --admin), then redeploy daemon from development (stale-binary root cause, same as mjws).
-- Operator (root): journalctl --vacuum-size, SystemMaxUse cap, npm cache clean for ajantha; disk still above 85% watermark.
+- Operator: redeploy daemon from development (stale-binary root cause, same as mjws).
+- Operator (root): journalctl --vacuum-size, SystemMaxUse cap, npm cache clean for ajantha; add tmpfiles/cron retention for /tmp/hydra-executions (24h) — it re-accumulates at ~6G.

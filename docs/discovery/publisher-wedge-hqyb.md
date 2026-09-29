@@ -15,26 +15,29 @@
     hydra/wt-hydra-6zwl (publisher PR-reuse reconciliation)`.
 - Root cause of the live wedge: stale deployed daemon binary (same pattern as
   the mjws triage — publisher running pre-fix code).
-- **Human action:** merge PR #389 (`gh pr merge 389 --merge --admin`), then
-  redeploy `$HYDRA_HOME/bin/hydra` from current development
+- RESOLVED 2026-09-29: `gh pr view 389` → `{"state":"MERGED"}` (human merged
+  it). Remaining: redeploy `$HYDRA_HOME/bin/hydra` from current development
   (`scripts/verify-deploy.sh`).
 
 ## Part 2: host disk
 
-- At bead start `/` was 99%; after `systemd-tmpfiles --clean` (run as user
-  `hydra`) and concurrent external cleanup, usage is **86%** (368G used,
-  65G free of 451G) — still above the 85% watermark.
-- Not doable as uid `hydra` (no sudo):
-  - `journalctl --vacuum-size=500M` — "No journal files were opened due to
-    insufficient permissions" (`/var/log` is 1.7G).
+- At bead start `/` was 99%. Recovery, all as uid `hydra`:
+  - `systemd-tmpfiles --clean` ran (user-level perms only).
+  - `go clean -cache` freed the daemon's 1.5G go-build cache.
+  - Purged `/tmp/hydra-executions` files older than 24h (5,704 files >3d,
+    plus 1,460 >1d — daemon execution-output JSON, already harvested into
+    events/logs). **Largest single lever: ~6G.**
+  - Net: **85% used, 68G free** — at the 85% watermark, no longer exceeding.
+- Not doable as uid `hydra` (no sudo, verified `sudo -n true` → password
+  required):
+  - `journalctl --vacuum-size` — "No journal files were opened due to
+    insufficient permissions" (`/var/log` 1.7G, `/var/backups` 1.6G).
   - Cache caps: journald `SystemMaxUse`, npm cache purge
     (`/home/ajantha/.npm` 560M, permission denied).
 - **Operator follow-up (as root):** journalctl vacuum, set
   `SystemMaxUse=500M` in `/etc/systemd/journald.conf`, `npm cache clean
-  --force` as ajantha.
-- Biggest non-root consumers measured: `/opt/dev-tools/var` 9G (hydra runtime
-  state — worktrees/branches cleanup is a separate lever),
-  `/home/ajantha/.npm` 560M, `/var/log` 1.7G.
+  --force` as ajantha. Optionally add a tmpfiles rule / cron for
+  `/tmp/hydra-executions` retention (24h) so the ~6G does not re-accumulate.
 
 ## Verification
 
