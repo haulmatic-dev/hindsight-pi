@@ -145,6 +145,9 @@ type autoPRFakeExec struct {
 	prPushes    []autoPRPushArgs
 	ghMerge     []prMergeGhArgs
 	ghListOpen  []string
+	ghResolve   []string
+	resolveURL  string
+	resolveErr  error
 	ghURL       string
 	ghErr       error
 	mergeErr    error
@@ -176,6 +179,11 @@ func installAutoPRFake(f *autoPRFakeExec) func() {
 	origPrPush := prMergeGitPush
 	origMerge := autoPRGhMerge
 	origList := autoPRGhListOpen
+	origResolve := autoPRGhResolveURL
+	autoPRGhResolveURL = func(repoPath, head, token string) (string, error) {
+		f.ghResolve = append(f.ghResolve, head)
+		return f.resolveURL, f.resolveErr
+	}
 	autoPRGitPush = func(repoPath, ref, token string) error {
 		f.pushes = append(f.pushes, autoPRPushArgs{repoPath, ref, token})
 		return nil
@@ -213,6 +221,7 @@ func installAutoPRFake(f *autoPRFakeExec) func() {
 		prMergeGitPush = origPrPush
 		autoPRGhMerge = origMerge
 		autoPRGhListOpen = origList
+		autoPRGhResolveURL = origResolve
 	}
 }
 
@@ -552,6 +561,70 @@ func TestPublishViaPR_PropagatesCreateFailure(t *testing.T) {
 	}
 	if len(fake.ghMerge) != 0 {
 		t.Fatalf("merge must not run when PR creation failed, got %+v", fake.ghMerge)
+	}
+}
+
+// TestPublishViaPR_AlreadyExistsResolvesExistingPR: gh pr create failing
+// with "already exists" must fall back to the existing open PR (resolved by
+// head) and merge it, not loop retries (srv-telematics wedge, 2026-09).
+func TestPublishViaPR_AlreadyExistsResolvesExistingPR(t *testing.T) {
+	fake := &autoPRFakeExec{
+		ghErr:      errors.New(`gh pr create: exit status 1
+a pull request for branch "dogfood/z" into branch "main" already exists`),
+		resolveURL: "https://github.com/x/y/pull/7",
+	}
+	restore := installAutoPRFake(fake)
+	restoreMerge := installPRMergeFake(fake)
+	defer restore()
+	defer restoreMerge()
+
+	url, err := PublishViaPR("/tmp/x", "main", "dogfood/z", "T", "TOK")
+	if err != nil {
+		t.Fatalf("PublishViaPR: %v", err)
+	}
+	if url != fake.resolveURL {
+		t.Fatalf("url = %q, want resolved %q", url, fake.resolveURL)
+	}
+	if len(fake.ghResolve) != 1 || fake.ghResolve[0] != "dogfood/z" {
+		t.Fatalf("resolve calls = %+v, want one for dogfood/z", fake.ghResolve)
+	}
+	if len(fake.ghMerge) != 1 {
+		t.Fatalf("merge must run once on the resolved PR, got %+v", fake.ghMerge)
+	}
+}
+
+// TestPublishViaPR_AlreadyExistsResolveFailsClosed: when the existing PR
+// cannot be resolved, the publish fails closed — never treated as landed.
+func TestPublishViaPR_AlreadyExistsResolveFailsClosed(t *testing.T) {
+	fake := &autoPRFakeExec{
+		ghErr:      errors.New("gh pr create: already exists"),
+		resolveErr: errors.New("gh pr view: no pull requests found"),
+	}
+	restore := installAutoPRFake(fake)
+	restoreMerge := installPRMergeFake(fake)
+	defer restore()
+	defer restoreMerge()
+
+	url, err := PublishViaPR("/tmp/x", "main", "dogfood/z", "T", "TOK")
+	if err == nil || url != "" {
+		t.Fatalf("expected fail-closed error, got (%q, %v)", url, err)
+	}
+	if len(fake.ghMerge) != 0 {
+		t.Fatalf("merge must not run, got %+v", fake.ghMerge)
+	}
+}
+
+// TestPublishViaPR_NonAlreadyExistsErrorPassthrough: other create failures
+// still propagate unchanged.
+func TestPublishViaPR_NonAlreadyExistsErrorPassthrough(t *testing.T) {
+	fake := &autoPRFakeExec{ghErr: errors.New("gh pr create: HTTP 403")}
+	restore := installAutoPRFake(fake)
+	restoreMerge := installPRMergeFake(fake)
+	defer restore()
+	defer restoreMerge()
+
+	if url, err := PublishViaPR("/tmp/x", "main", "dogfood/z", "T", "TOK"); err == nil || url != "" {
+		t.Fatalf("expected passthrough error, got (%q, %v)", url, err)
 	}
 }
 
