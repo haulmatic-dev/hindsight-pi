@@ -32,6 +32,7 @@ type Config struct {
 	ComplianceCycle    ComplianceCycleConfig   `yaml:"compliance_cycle"`
 	Shepherd           ShepherdConfig          `yaml:"shepherd"`
 	Worktree           WorktreeConfig          `yaml:"worktree"`
+	Triage             TriageConfig            `yaml:"triage"`
 	Status             StatusConfig            `yaml:"status"`
 	IntegrationRetest  IntegrationRetestConfig `yaml:"integration_retest"`
 	SelfHealing        SelfHealingConfig       `yaml:"self_healing"`
@@ -328,6 +329,21 @@ type WorktreeConfig struct {
 	QuarantineAutoDrain bool `yaml:"quarantine_auto_drain"`
 }
 
+// TriageConfig configures the periodic LLM PR-triage pass (hydra-muvh,
+// FR-030): group overlapping dogfood/* PRs per product repo, ask the cheap
+// judge for merge order / duplicate / needs-human, and post advisory
+// comments + labels. Advice only: never merges, never closes. Provider/
+// Model/APIKeyName are separate from the worker fleet's (GLM-class cheap
+// model by design).
+type TriageConfig struct {
+	Enabled         bool   `yaml:"enabled"`
+	IntervalSeconds int    `yaml:"interval_seconds"`
+	Provider        string `yaml:"provider"`
+	Model           string `yaml:"model"`
+	Thinking        string `yaml:"thinking"`
+	APIKeyName      string `yaml:"api_key_name"`
+}
+
 // IntegrationRetestConfig controls the integration-retest stage (Tier A of
 // the integration-conflict plan): beads labelled integration-failed or
 // integration-exhausted get a periodic mechanical recheck — merge-tree
@@ -437,6 +453,7 @@ type rawConfig struct {
 	ComplianceCycle   ComplianceCycleConfig   `yaml:"compliance_cycle"`
 	Shepherd          ShepherdConfig          `yaml:"shepherd"`
 	Worktree          WorktreeConfig          `yaml:"worktree"`
+	Triage            TriageConfig            `yaml:"triage"`
 	Status            StatusConfig            `yaml:"status"`
 	IntegrationRetest IntegrationRetestConfig `yaml:"integration_retest"`
 	SelfHealing       SelfHealingConfig       `yaml:"self_healing"`
@@ -1003,6 +1020,7 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	config.Output = raw.Output
 	config.Worktree = raw.Worktree
+	config.Triage = raw.Triage
 	config.IntegrationRetest = raw.IntegrationRetest
 	config.IntegrationRetest.applyDefaults()
 	config.SelfHealing = raw.SelfHealing
@@ -1080,6 +1098,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 	}
 	config.Output = raw.Output
 	config.Worktree = raw.Worktree
+	config.Triage = raw.Triage
 	config.IntegrationRetest = raw.IntegrationRetest
 	config.IntegrationRetest.applyDefaults()
 	config.SelfHealing = raw.SelfHealing
