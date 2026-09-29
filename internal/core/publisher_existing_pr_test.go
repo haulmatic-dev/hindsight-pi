@@ -8,9 +8,12 @@ import (
 
 // createAlreadyExistsErr mimics the srv-telematics wedge output (2026-09-29):
 // gh pr create fails because a PR for the head branch was opened by an
-// earlier integration attempt.
+// earlier integration attempt. The URL is omitted deliberately: it exercises
+// the unresolvable path (no URL in the message AND gh pr view fails) — the
+// resolvable variant (URL embedded in the error, gh's real wording) is
+// covered by TestPublishAfterIntegrate_PRAlreadyExists_Benign.
 func createAlreadyExistsErr() error {
-	return errors.New("gh pr create: exit status 1\na pull request for branch \"dogfood/x\" into branch \"development\" already exists:\nhttps://github.com/owner/repo/pull/330")
+	return errors.New("gh pr create: exit status 1\na pull request for branch \"dogfood/x\" into branch \"development\" already exists:")
 }
 
 // stubPublishOnce sets the publish-path hooks to deterministic fakes and
