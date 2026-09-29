@@ -694,3 +694,57 @@ func TestPublishViaPR_FallsBackToDaemonToken(t *testing.T) {
 		t.Fatalf("merge token = %+v, want FALLBACK_TOK", fake.ghMerge)
 	}
 }
+
+// TestIsPRAlreadyExists_Classification: the fleet-wide 2026-09-29 wedge
+// (qj74/otae/0po4/242b/ycmu/…) hard-parked beads integration-exhausted
+// because `gh pr create` failed with "a pull request for branch ... already
+// exists" — an open PR is the landing vehicle, not a failure.
+func TestIsPRAlreadyExists_Classification(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"exact gh wording", errors.New(`pr merge: create PR: gh pr create: exit status 1
+a pull request for branch "dogfood/hydra-ycmu" into branch "main" already exists:
+https://github.com/haulmatic-dev/hydra/pull/366`), true},
+		{"other already-exists (DAG node)", errors.New("node hydra-abc already exists in DAG"), false},
+		{"no commits between", errors.New("No commits between development and dogfood/x"), false},
+		{"unrelated", errors.New("gh: connection refused"), false},
+	}
+	for _, tc := range cases {
+		if got := isPRAlreadyExists(tc.err); got != tc.want {
+			t.Errorf("%s: isPRAlreadyExists=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestPublishAfterIntegrate_PRAlreadyExists_Benign: when gh pr create
+// reports that a PR for this dogfood head already exists, the publish must
+// proceed to merge the existing PR instead of counting an integration
+// failure (which hard-parked the bead integration-exhausted).
+func TestPublishAfterIntegrate_PRAlreadyExists_Benign(t *testing.T) {
+	repo, _ := setupReachableRemote(t)
+	commitFile(t, repo, "file.txt", "a")
+	git(t, repo, "push", "-u", "origin", "main")
+	commitFile(t, repo, "file.txt", "b")
+
+	fake := &autoPRFakeExec{ghErr: errors.New(`gh pr create: exit status 1
+a pull request for branch "dogfood/bead-11" into branch "main" already exists:
+https://github.com/x/y/pull/42`)}
+	restore := installAutoPRFake(fake)
+	restoreMerge := installPRMergeFake(fake)
+	defer restore()
+	defer restoreMerge()
+
+	closer := NewBeadCloser(&autoPRFakeBeadsClient{}, nil, nil, nil,
+		&Config{Output: OutputConfig{Push: true, PRMerge: true}})
+	closer.SetWorktreeManager(NewWorktreeManager(), nil, nil)
+	if err := closer.publishAfterIntegrate(repo, &types.Bead{ID: "bead-11", Title: "Fix things"}); err != nil {
+		t.Fatalf("pr-already-exists must be benign (merge existing PR), got: %v", err)
+	}
+	if len(fake.ghMerge) == 0 {
+		t.Fatal("existing PR must be merged, but gh pr merge was never invoked")
+	}
+}
