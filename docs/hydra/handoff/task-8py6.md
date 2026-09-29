@@ -15,6 +15,7 @@
 
 ## Open edges for the next phase
 - Implement bead 1: clear quarantine label set ({integration-exhausted, integration-failed, stranded-conflict, stranded-work, integration-unverified, worktree-unavailable}) on terminal close — 62 ghost labels in srv-telematics alone.
+- Implement bead 2b: PR-reuse handling — `gh pr create` "a pull request for branch ... already exists" → locate existing PR by head and continue, never count as integration failure (proven playbook rule; d778's park cause).
 - Implement bead 2: quarantine-branch retention cap / auto-drain of quarantine branches whose owning bead is closed superseded/abandoned (91 branches and growing).
 - Human: resolve/drop the srv-telematics quarantine backlog; run `br doctor migrate-schema recover` on that store during a daemon-quiet window.
 - hydra-ycmu: abandon-with-summary; park stands.
