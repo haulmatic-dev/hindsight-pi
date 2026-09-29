@@ -351,6 +351,48 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				log.Printf("[PanRepair] clear-hard-park cleared %v on %s", toClear, beadID)
 				return nil
 			},
+			// clear-escalation drops a stale human-escalation mark: removes the
+			// escalated/needs-human/verified-close-escalated labels, reopens the
+			// bead, and resets its retry counter so the scheduler gives it one
+			// fair retry. Refuses when no escalation label is present so Pan
+			// cannot use it as a generic reopen.
+			"clear-escalation": func(beadID string) error {
+				id := types.BeadID(beadID)
+				projectPath := projectPathForID(id)
+				if projectPath == "" {
+					return fmt.Errorf("clear-escalation: project path unresolved for %s", beadID)
+				}
+				bead, err := o.beadsClient.GetBead(projectPath, id.Repo(), id)
+				if err != nil {
+					return fmt.Errorf("clear-escalation: GetBead %s: %w", beadID, err)
+				}
+				if bead == nil {
+					return fmt.Errorf("clear-escalation: %s not found", beadID)
+				}
+				var toClear []string
+				escLabels := map[string]bool{escalatedLabel: true, "needs-human": true, "verified-close-escalated": true}
+				for _, lbl := range bead.Labels {
+					if escLabels[lbl] {
+						toClear = append(toClear, lbl)
+					}
+				}
+				if !escLabels[escalatedLabel] {
+					return fmt.Errorf("clear-escalation: %s carries no %q label", beadID, escalatedLabel)
+				}
+				if err := o.beadsClient.RemoveBeadLabels(projectPath, id.Repo(), id, toClear); err != nil {
+					return fmt.Errorf("clear-escalation: remove labels on %s: %w", beadID, err)
+				}
+				if bead.Status != types.StatusOpen {
+					if err := o.beadsClient.UpdateBeadStatus(projectPath, id, types.StatusOpen); err != nil {
+						log.Printf("[PanRepair] clear-escalation: reopen %s failed (continuing): %v", beadID, err)
+					}
+				}
+				if o.retryManager != nil {
+					o.retryManager.ResetRetryCount(beadID)
+				}
+				log.Printf("[PanRepair] clear-escalation cleared %v on %s", toClear, beadID)
+				return nil
+			},
 			// prune-worktree-registration runs git worktree prune on the bead's
 			// project — the project-scoped fix for the registered-but-missing
 			// wedge class. Rate-limited per project, not per bead.

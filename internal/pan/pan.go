@@ -203,6 +203,7 @@ var repairWhitelist = map[string]bool{
 	"reset-retries":     true,
 	"repair-bead-store": true,
 	"clear-hard-park":   true,
+	"clear-escalation":  true,
 }
 
 // pseudoBeadSuffix marks synthetic project-level candidates (e.g.
@@ -1406,7 +1407,7 @@ needs a judgment call. For EVERY worker decide exactly one action:
 - "abandon-with-summary": give up gracefully (payload: what was done and what remains)
 - "close_satisfied": the bead's acceptance criteria are already met on the working branch and the worker found nothing to do; close it without a worker. For FIX-AUDIT candidates this closes the redundant fix bead after the satisfied gate re-proves acceptance daemon-side.
 - "file-bead": file an improvement bead for a human to triage (payload: first line = the bead title, remaining lines = the problem description). Use for fleet-level or product-level findings no repair verb covers: shared wedges, push/branch-protection problems, campaign anomalies. Deduplicated per project by signature and capped at 2 open pan-filed beads per project; duplicates are silently skipped.
-- "repair:<name>": execute a whitelisted daemon-side repair (payload ignored). Only for BLOCKED beads with no live worker row. The only valid repair names — the hygiene set — are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park. No other repair:<name> strings exist; if none fit, choose continue, abandon-with-summary, or file-bead.
+- "repair:<name>": execute a whitelisted daemon-side repair (payload ignored). Only for BLOCKED beads with no live worker row. The only valid repair names — the hygiene set — are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park, clear-escalation. No other repair:<name> strings exist; if none fit, choose continue, abandon-with-summary, or file-bead.
 
 Rescue recipes (hard-won; prefer the repair matching the cause):
 - FIX-AUDIT candidates are OPEN auto-fix beads whose original bead closed as failed; each reason carries the close reason, any recorded verdict, and a re-verification status of the original evidence in the inherited worktree. Judge whether a worker still needs to redo the work:
@@ -1415,6 +1416,7 @@ Rescue recipes (hard-won; prefer the repair matching the cause):
   - Re-verification "unknown" → "continue" (keep the fix) unless the fix-bead description clearly shows acceptance already met.
   - Never abandon-with-summary or repair: a FIX-AUDIT candidate.
 - Hard-park labels (worktree-unavailable, integration-exhausted) are durable by design — the scheduler never retries them. Use repair:clear-hard-park when the named cause is plausibly fixed or transient (worktree directory exists, store parses clean, push path repaired). Do not clear a park whose cause is still present.
+- Stale human escalations (BLOCKED, reason mentions "escalated to a human", aging in days, no live worker, no token progress): after roughly two days with no human response the escalation is stale — prefer repair:clear-escalation, which drops the escalated/needs-human labels and re-queues the bead for one scheduler retry (the retry counter is reset, so the bead gets a fair pass; if the same failure recurs, the escalation re-fires and human triage is the next step). If the bead's work is clearly obsolete, abandon-with-summary instead. Escalations younger than ~2 days may still get a human: leave blocked.
 - Many BLOCKED beads with the same reason = a shared wedge. Repairs are per-bead hygiene only now: fix one bead, and file-bead a proposal describing the shared wedge so a human can address the cause.
 - repair:reset-retries clears the retry counter after the underlying cause is fixed; useless while the cause persists.
 - repair:repair-bead-store restores a corrupted issues.jsonl from the newest clean backup; pick it when the reason mentions conflict markers or parse errors.
