@@ -29,6 +29,8 @@ No change to park semantics — durable parks + triage is the correct design and
 1. **Clear quarantine labels on terminal close** — when a bead closes (any reason), drop `integration-exhausted`, `integration-failed`, `stranded-conflict`, `stranded-work`, `integration-unverified`, `worktree-unavailable` from it (same set the operator quarantine-clear endpoint intersects against). 62/145 live labels in srv-telematics are ghosts on closed beads; today they keep pan fix-filers filing wedge beads forever.
 2. **Quarantine branch retention cap** — 91 `hydra/quarantine/*` branches will grow unbounded. Either enable `worktree.quarantine_auto_drain` for repos with a quarantine backlog > N after age > T, or prune quarantine branches when their owning bead closes as superseded/abandoned.
 
+3. **Treat `gh pr create` "a pull request for branch ... already exists" as PR-reuse, not an integration failure** — this proven playbook rule covers the d778-class park (PR #316 existed; the publisher retried `gh pr create` 4× and exhausted). On this error the publisher should locate the existing PR by head and proceed with merge/verification instead of counting a failure.
+
 Explicitly rejected again: Tier B agentic conflict resolution (deliberate human-only boundary, per integration-triage-iojl and integration-wedge-triage-10ka).
 
 ## Disposition
