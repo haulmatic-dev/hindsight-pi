@@ -880,6 +880,17 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 				AppendActivity(projectPath, string(bead.ID), "already landed (duplicate integrate no-op)")
 				return nil
 			}
+			// Benign duplicate-PR race: a PR for this dogfood head already
+			// exists (created by an earlier close or integration-retest). The
+			// PR is the landing vehicle — PublishViaPR already merged it; only
+			// surface an error when the merge itself failed (fleet wedge
+			// 2026-09-29: qj74/otae/0po4/242b/ycmu hard-parked
+			// integration-exhausted on this error with an open PR waiting).
+			if isPRAlreadyExists(err) {
+				log.Printf("[Output] %s: existing PR for %s → %s reused and merged", bead.ID, head, prBase)
+				AppendActivity(projectPath, string(bead.ID), "landed via existing PR")
+				return nil
+			}
 			log.Printf("[Output] PR merge failed for %s: %s", bead.ID, err)
 			AppendActivity(projectPath, string(bead.ID), "PR merge failed: "+err.Error())
 			return fmt.Errorf("push %s via PR to %s/%s: %w", bead.ID, remote, prBase, err)
