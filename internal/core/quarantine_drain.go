@@ -214,3 +214,37 @@ func QuarantineBranchExists(projectPath, key string) bool {
 func QuarantineBranchPath(key string) string {
 	return filepath.Join(quarantinePrefix, key)
 }
+
+// QuarantineBranch is one hydra/quarantine/* branch with its tip commit age.
+type QuarantineBranch struct {
+	Name      string    `json:"name"`
+	Committed time.Time `json:"committed"`
+}
+
+// ListQuarantineBranches returns the project's hydra/quarantine/* branches,
+// newest commit last. Read-only; used by the operator API (FR-033). Not a git
+// repo or no matching refs: empty list, nil error.
+func ListQuarantineBranches(projectPath string) ([]QuarantineBranch, error) {
+	if _, err := gitOut(projectPath, "rev-parse", "--git-dir"); err != nil {
+		return nil, nil // not a git repo, no-op
+	}
+	out, err := gitOut(projectPath, "for-each-ref",
+		"--format=%(refname:short) %(committerdate:unix)",
+		"refs/heads/"+quarantinePrefix+"*")
+	if err != nil {
+		return nil, nil // no matching refs is fine
+	}
+	var branches []QuarantineBranch
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		parts := strings.Fields(strings.TrimSpace(line))
+		if len(parts) < 2 {
+			continue
+		}
+		unix, _ := strconv.ParseInt(parts[1], 10, 64)
+		branches = append(branches, QuarantineBranch{
+			Name:      parts[0],
+			Committed: time.Unix(unix, 0).UTC(),
+		})
+	}
+	return branches, nil
+}
