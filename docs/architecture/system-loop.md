@@ -23,7 +23,7 @@ memory that this page references.
 flowchart TD
     PRD["PRD authored<br/><i>create-prd skill (adversarial review)</i>"] --> TB["task-breakdown<br/><i>pi-config/skills/task-breakdown</i><br/>+ prd-lint preflight"]
     TB --> GATE["approval gate<br/><b>human close</b>"]
-    GATE --> EXEC["bead execution<br/><i>worktree-isolated TDD chains<br/>RED→GREEN→REFACTOR→SYNTAX<br/>pi rpc + rtk/caveman/context-mode</i>"]
+    GATE --> EXEC["bead execution<br/><i>worktree-isolated TDD chains<br/>RED→GREEN→REFACTOR→SYNTAX<br/>pi rpc + rtk/caveman/context-mode<br/>spawn-time target-overlap deferral<br/>(scheduler.go: overlapping target files<br/>serialize, event spawn-deferred-target-overlap)</i>"]
     EXEC --> GATES{"verified close<br/><i>bead_closer.go</i><br/>TDD validation · diff gate ·<br/>scope gate (worktree-aware)"}
     GATES -->|reject| RETRY["reopen + Reflexion retry<br/><i>≤3 rounds, then escalate</i>"]
     RETRY --> EXEC
