@@ -69,6 +69,13 @@ projects:
     - name: my-project
       path: /path/to/my-project
       type: single
+      # Integration base for PR creation and merge-base checks (optional).
+      # When unset, the origin default branch (git symbolic-ref
+      # refs/remotes/origin/HEAD, falling back to origin/development then
+      # origin/main) is used. The main checkout's current branch is NEVER
+      # used as a base, so a checkout parked on a feature branch cannot
+      # redirect PRs to the wrong target.
+      # integration_branch: development
       # Daemon-owned deterministic gates (optional). When daemon_owned is
       # true, Hydra runs these commands in the chain worktree before a bead
       # can close. See AGENTS.md for the full E2E setup guide.

@@ -92,6 +92,10 @@ func TestBeadCloser_SingletonWithRemoteUsesPRFirst(t *testing.T) {
 	bare := t.TempDir()
 	runGit(t, bare, "init", "--bare", "--initial-branch=main")
 	runGit(t, projectPath, "remote", "add", "origin", bare)
+	// Push the base so the resolver finds an origin default (deterministic
+	// resolution, telematics 2026-09-29); a remote without any branch cannot
+	// yield a PR base.
+	runGit(t, projectPath, "push", "-u", "origin", "main")
 
 	m := NewWorktreeManager()
 	beadID := types.BeadID("singleton-pr")

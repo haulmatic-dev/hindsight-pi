@@ -710,6 +710,10 @@ type ProjectConfig struct {
 	Name  string       `yaml:"name"`
 	Path  string       `yaml:"path"`
 	Type  string       `yaml:"type"` // "single" or "multi"
+	// IntegrationBranch pins the integration base for PR creation and
+	// merge-base checks. Optional: when unset, the origin default branch is
+	// used. The main checkout's current branch is NEVER used as a base.
+	IntegrationBranch string       `yaml:"integration_branch,omitempty"`
 	Repos []RepoConfig `yaml:"repos,omitempty"`
 	Gates *GateSet     `yaml:"gates,omitempty"` // daemon-owned deterministic gates (FR-002); nil = legacy
 }
@@ -718,6 +722,9 @@ type ProjectConfig struct {
 type RepoConfig struct {
 	Name string `yaml:"name"`
 	Path string `yaml:"path"`
+	// IntegrationBranch pins the integration base for this repo (multi-repo
+	// projects). Optional; see ProjectConfig.IntegrationBranch.
+	IntegrationBranch string `yaml:"integration_branch,omitempty"`
 }
 
 // MCPConfig contains MCP (Model Context Protocol) Agent Mail settings

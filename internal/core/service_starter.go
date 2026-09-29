@@ -241,7 +241,12 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 			if !ok {
 				return false, false
 			}
-			base := currentBranch(projectPath)
+			base, baseSource, berr := ResolveIntegrationBase(o.config, projectPath)
+			if berr != nil {
+				log.Printf("[Pan] zero-diff check failed for %s (treating as unknown): %v", beadID, berr)
+				return false, false
+			}
+			logIntegrationBaseMismatch(projectPath, base, baseSource)
 			changed, err := changedFilesWithBase(wt, base)
 			if err != nil {
 				log.Printf("[Pan] zero-diff check failed for %s (treating as unknown): %v", beadID, err)
