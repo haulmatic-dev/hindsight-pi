@@ -322,6 +322,12 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 		return err
 	}
 
+	// FR-020: when a meta fix bead closes (any reason), release the parked
+	// originals that were clustered against its failure signature.
+	if bead != nil && c.fixClusteringEnabled() {
+		c.releaseParkedBeads(projectPath, repoName, bead)
+	}
+
 	// Purge scheduler residue for verified closes so closed beads cannot
 	// re-enter Pan candidacy or respawn decisions via stale retry/spawn
 	// records. Failure here is logged but must not fail the close.
@@ -542,13 +548,49 @@ func (c *BeadCloser) createFixBeadForFailedCloseWithExitCode(bead *types.Bead, p
 		}
 	}
 
+	// FR-020: failure-signature clustering. Extract the cause once, then
+	// check for an open meta fix bead carrying the same failure signature.
+	// One signature = one meta bead; later failures with the same signature
+	// are parked against it instead of spawning another per-bead fix bead
+	// (570 integrate failures from a handful of clusters produced 86
+	// quarantine branches before this). List errors fail open: when we
+	// cannot list beads we fall through to the legacy per-bead fix bead.
+	var cause string
+	var fixSigLabel string
+	clusteringActive := c.fixClusteringEnabled()
+	if clusteringActive {
+		cause = ExtractFailureCause(workersLogDir(), priorityBeadID, 2048)
+		sigLabel := SignatureLabel(FailureSignature("worker-exit", cause))
+		metaID, err := c.findOpenFixBeadBySignature(projectPath, repoName, sigLabel)
+		if err != nil {
+			log.Printf("[BeadCloser] Could not list beads for signature clustering while creating fix bead for %s: %v", priorityBeadID, err)
+		} else if metaID != "" {
+			log.Printf("[BeadCloser] Parking %s against meta fix bead %s (signature %s) instead of creating a new per-bead fix bead", priorityBeadID, metaID, sigLabel)
+			if c.beadsClient != nil {
+				if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{fixClusteredLabel, sigLabel}); err != nil {
+					log.Printf("[BeadCloser] Failed to label %s with %s: %v", bead.ID, fixClusteredLabel, err)
+				}
+				AppendActivity(projectPath, string(bead.ID), fmt.Sprintf("parked: open meta fix bead %s tracks this failure signature", metaID))
+				c.events.EmitRepo(projectPath, Event{Type: "fix_clustered", Project: repoName,
+					Bead: priorityBeadID, Reason: "meta_fix_exists",
+					Fields: map[string]any{"meta_fix": metaID, "signature": sigLabel}})
+			}
+			return nil
+		}
+		// No open meta bead with this signature: the fix bead we are about to
+		// create becomes the cluster's meta bead and carries the signature label.
+		fixSigLabel = sigLabel
+	}
+
 	var description strings.Builder
 	fmt.Fprintf(&description, "Auto-created fix bead because the original closed as `failed`.\n\n"+
 		"Original bead: %s\n"+
 		"Close reason: failed (worker exited non-zero or hit retry exhaustion; the original bead may still hold placeholder implementations)\n"+
 		"Exit code: %d\n\n", priorityBeadID, exitCode)
 
-	cause := ExtractFailureCause(workersLogDir(), priorityBeadID, 2048)
+	if cause == "" {
+		cause = ExtractFailureCause(workersLogDir(), priorityBeadID, 2048)
+	}
 	if cause != "" {
 		description.WriteString("### What failed last time\n\n")
 		description.WriteString("```\n")
@@ -575,6 +617,9 @@ func (c *BeadCloser) createFixBeadForFailedCloseWithExitCode(bead *types.Bead, p
 		Priority:     priority,
 		Dependencies: []types.BeadID{types.BeadID(priorityBeadID)},
 		Labels:       []string{"auto-fix", "failed-closure"},
+	}
+	if fixSigLabel != "" {
+		req.Labels = append(req.Labels, fixSigLabel)
 	}
 	newID, err := c.beadsClient.CreateBead(projectPath, req)
 	if err != nil && !strings.Contains(err.Error(), "already exists") {
@@ -625,6 +670,80 @@ func (c *BeadCloser) findOpenFixBeadForOriginal(projectPath, repoName string, or
 		}
 	}
 	return "", nil
+}
+
+// fixClusteringEnabled reports whether failure-signature clustering
+// (FR-020) is active. Default is on; disable_fix_signature_clustering
+// restores the legacy one-fix-bead-per-failure behaviour.
+func (c *BeadCloser) fixClusteringEnabled() bool {
+	return c.config == nil || !c.config.Validation.DisableFixSignatureClustering
+}
+
+// findOpenFixBeadBySignature returns the ID of an open or in-progress meta
+// fix bead carrying the given signature label. Empty ID + nil error when
+// none exists.
+func (c *BeadCloser) findOpenFixBeadBySignature(projectPath, repoName, sigLabel string) (types.BeadID, error) {
+	if c.beadsClient == nil {
+		return "", nil
+	}
+	beads, err := c.beadsClient.ListBeads(projectPath, repoName)
+	if err != nil {
+		return "", err
+	}
+	for _, b := range beads {
+		if b.Type != "fix" || b.Status.IsTerminal() {
+			continue
+		}
+		if hasBeadLabel(b.Labels, sigLabel) {
+			return b.ID, nil
+		}
+	}
+	return "", nil
+}
+
+// releaseParkedBeads clears the fix-clustered label from every open bead
+// parked against a closed meta fix bead, so its dependents and the
+// discovery loop can pick the parked originals up again (PRD FR-020:
+// "on meta-bead close, parked beads are released"). Fail-open: a release
+// error is logged and must not fail the meta bead's own close.
+func (c *BeadCloser) releaseParkedBeads(projectPath, repoName string, meta *types.Bead) {
+	if c.beadsClient == nil || meta == nil {
+		return
+	}
+	for _, label := range meta.Labels {
+		if !strings.HasPrefix(label, "fix-sig-") {
+			continue
+		}
+		beads, err := c.beadsClient.ListBeads(projectPath, repoName)
+		if err != nil {
+			log.Printf("[BeadCloser] Could not list beads to release parked originals of meta fix bead %s: %v", meta.ID, err)
+			return
+		}
+		for _, b := range beads {
+			// Parked originals are usually closed-failed (that is why they
+			// were being fixed) — do NOT skip terminal beads here; release
+			// must reopen them (PRD FR-020).
+			if !hasBeadLabel(b.Labels, fixClusteredLabel) || !hasBeadLabel(b.Labels, label) {
+				continue
+			}
+			if err := c.beadsClient.RemoveBeadLabels(projectPath, repoName, b.ID, []string{fixClusteredLabel}); err != nil {
+				log.Printf("[BeadCloser] Failed to release parked bead %s (meta %s): %v", b.ID, meta.ID, err)
+				continue
+			}
+			// A parked bead that already closed as failed is reopened: release
+			// means it becomes eligible for the scheduler again (PRD FR-020).
+			if b.Status.IsTerminal() {
+				if err := c.beadsClient.UpdateBeadStatus(projectPath, b.ID, types.StatusOpen); err != nil {
+					log.Printf("[BeadCloser] Failed to reopen released bead %s (meta %s): %v", b.ID, meta.ID, err)
+				}
+			}
+			AppendActivity(projectPath, string(b.ID), fmt.Sprintf("released: meta fix bead %s closed", meta.ID))
+			c.events.EmitRepo(projectPath, Event{Type: "fix_released", Project: repoName,
+				Bead: b.ID.String(), Reason: "meta_fix_closed",
+				Fields: map[string]any{"meta_fix": meta.ID, "signature": label}})
+			log.Printf("[BeadCloser] Released parked bead %s: meta fix bead %s closed", b.ID, meta.ID)
+		}
+	}
 }
 
 // verifiedCloseEnabled reports whether the verified-close gate is active.
