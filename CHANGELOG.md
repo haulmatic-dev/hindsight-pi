@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Target-scope overlap serialization at spawn (FR-003): a ready bead whose declared target files overlap a live worker's declared targets is deferred (skipped this tick, typed event `spawn-deferred-target-overlap`, fail-open) instead of spawned — two workers on the same files race, each close-path target-scope gate then mis-attributes the other's edits as off-scope, and merge integration hits structural conflicts. Reuses the close-path `beadTargetFiles` parser (no second parser); targets are normalized (symbol suffix stripped, `filepath.Clean`) exactly like the close-path scope gate. Consulted on both the scheduler spawn funnel and the retry queue; store-read failures fail open and the close-path gate remains the backstop. Tests: `TestTargetsOverlap`, `TestTargetScopeConflict_*` (internal/core/target_overlap_test.go).
+
 ### Changed
 - Chain handoffs are per-bead fragments (FR-001, autonomous-resolution-layer PRD): the worker prompt now directs every bead that changed files to write `docs/hydra/handoff/<phase>-<bead-id>.md` instead of the shared `docs/hydra/handoff/<phase>.md`. Parallel beads of the same phase (notably discovery FRs) previously collided on one file — `discovery.md` alone accounted for 568 of 570 integrate failures. `handoffPhaseRank` ranks fragments by phase prefix so `green-5xvh.md` still sorts with green; the loader needed no change. Tests: `TestChainHandoffFragmentName`, `TestHandoffPhaseRankFragments`, `TestLoadChainContextFragmentOrder` (cmd/worker/chain_handoff_test.go).
 
