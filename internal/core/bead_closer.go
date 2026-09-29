@@ -309,20 +309,32 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 				// the singleton's worktree branch is pushed to origin and landed
 				// via PR — no local merge into the working branch. The daemon
 				// gates already ran above, so the PR merge happens gates-green.
-				if hasGitRemote(projectPath) {
-					if iErr := c.publishSingletonViaPR(projectPath, bead, key); iErr != nil {
-						return c.failIntegration(bead, projectPath, repoName, "integrate", iErr)
+				// Per-repo integration gate: serialize sibling closes so only
+				// one bead at a time merges into the same base branch, and wait
+				// out a short repo cooldown after a sibling's failure (shared
+				// wedge must not burn every bead's exhaustion cap).
+				integErr := integrationGate(projectPath, func() error {
+					if hasGitRemote(projectPath) {
+						if iErr := c.publishSingletonViaPR(projectPath, bead, key); iErr != nil {
+							return errStage{"integrate", iErr}
+						}
+					} else {
+						// No-remote fallback: legacy local --no-ff merge, then the
+						// ordinary push path (a no-op when push is disabled).
+						if iErr := c.worktreeManager.Integrate(projectPath, key); iErr != nil {
+							return errStage{"integrate", iErr}
+						}
+						if pErr := c.publishAfterIntegrate(projectPath, bead); pErr != nil {
+							return errStage{"push", pErr}
+						}
 					}
-				} else {
-					// No-remote fallback: legacy local --no-ff merge, then the
-					// ordinary push path (a no-op when push is disabled).
-					if iErr := c.worktreeManager.Integrate(projectPath, key); iErr != nil {
-						return c.failIntegration(bead, projectPath, repoName, "integrate", iErr)
-					}
-					if pErr := c.publishAfterIntegrate(projectPath, bead); pErr != nil {
-						return c.failIntegration(bead, projectPath, repoName, "push", pErr)
-					}
+					return nil
+				})
+				if integErr != nil {
+					es := integErr.(errStage)
+					return c.failIntegration(bead, projectPath, repoName, es.stage, es.err)
 				}
+				resetIntegrationCooldown(projectPath)
 				c.resetIntegrationFailures(string(bead.ID))
 				c.worktreeManager.Remove(projectPath, key)
 				log.Printf("[Worktree] integrated singleton %s", bead.ID)
