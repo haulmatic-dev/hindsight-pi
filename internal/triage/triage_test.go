@@ -21,6 +21,23 @@ func mustJSON(t *testing.T, v any) []byte {
 	return b
 }
 
+func TestSlugFromRemoteURL(t *testing.T) {
+	cases := map[string]string{
+		"https://github.com/haulmatic-dev/dev-tools.git": "haulmatic-dev/dev-tools",
+		"https://github.com/o/r":                         "o/r",
+		"git@github.com:o/r.git":                         "o/r",
+	}
+	for in, want := range cases {
+		got, err := SlugFromRemoteURL(in)
+		if err != nil || got != want {
+			t.Errorf("SlugFromRemoteURL(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	if _, err := SlugFromRemoteURL("https://gitlab.com/o/r"); err == nil {
+		t.Error("non-github URL must error")
+	}
+}
+
 func TestGroupByOverlap(t *testing.T) {
 	prs := []PR{
 		{Number: 1, Files: []string{"a.go", "b.go"}},
@@ -75,41 +92,50 @@ func TestGroupByOverlapEmptyAndSingle(t *testing.T) {
 	}
 }
 
-// fake gh: pr list returns fixed entries; pr view returns per-number files.
-func fakeRunner(list []ghPRListEntry, files map[int][]string, failNumbers map[int]bool) GhRunner {
+// fake gh/git runner: "git remote get-url origin" → slug URL; "gh api
+// repos/<slug>/pulls..." → REST pull list / files.
+func restRunner(t *testing.T, slug string, pulls []restPull, files map[int][]string, failNumbers map[int]bool) GhRunner {
+	t.Helper()
 	return func(ctx context.Context, dir string, args ...string) ([]byte, error) {
-		if args[0] == "pr" && args[1] == "list" {
-			return json.Marshal(list)
+		if args[0] == "git" {
+			return []byte("https://github.com/" + slug + ".git"), nil
 		}
-		if args[0] == "pr" && args[1] == "view" {
-			var n int
-			fmt.Sscanf(args[2], "%d", &n)
-			if failNumbers[n] {
-				return nil, errors.New("gh pr view: boom")
+		rest := strings.Join(args[1:], " ")
+		if strings.Contains(rest, "/pulls?state=open") {
+			return mustJSON(t, pulls), nil
+		}
+		for _, p := range pulls {
+			if strings.Contains(rest, fmt.Sprintf("/pulls/%d/files", p.Number)) {
+				if failNumbers[p.Number] {
+					return nil, errors.New("gh api: boom")
+				}
+				fl := []restPullFile{}
+				for _, f := range files[p.Number] {
+					fl = append(fl, restPullFile{Filename: f})
+				}
+				return mustJSON(t, fl), nil
 			}
-			fl := []ghPRFile{}
-			for _, f := range files[n] {
-				fl = append(fl, ghPRFile{Path: f})
-			}
-			return json.Marshal(ghPRListEntry{Files: fl})
 		}
-		if args[0] == "pr" && args[1] == "comment" {
-			return []byte("https://example.invalid/comment"), nil
-		}
-		if args[0] == "pr" && args[1] == "edit" {
-			return []byte(""), nil
+		if strings.Contains(rest, "/labels") {
+			return []byte("[]"), nil
 		}
 		return nil, fmt.Errorf("unexpected args %v", args)
 	}
 }
 
 func TestCollectOpenDogfoodPRs(t *testing.T) {
-	list := []ghPRListEntry{
-		{Number: 10, Title: "t1", HeadRefName: "dogfood/hydra-abc", URL: "u1"},
-		{Number: 11, Title: "t2", HeadRefName: "feature/other"}, // non-dogfood, skipped
-		{Number: 12, Title: "t3", HeadRefName: "dogfood/hydra-xyz"},
+	pulls := []restPull{
+		{Number: 10, Title: "t1", HTMLURL: "u1", MergeableState: "dirty", Head: struct {
+			Ref string `json:"ref"`
+		}{"dogfood/hydra-abc"}},
+		{Number: 11, Title: "t2", Head: struct {
+			Ref string `json:"ref"`
+		}{"feature/other"}},
+		{Number: 12, Title: "t3", Head: struct {
+			Ref string `json:"ref"`
+		}{"dogfood/hydra-xyz"}},
 	}
-	prs, err := CollectOpenDogfoodPRs(context.Background(), fakeRunner(list, map[int][]string{
+	prs, err := CollectOpenDogfoodPRs(context.Background(), restRunner(t, "o/r", pulls, map[int][]string{
 		10: {"a.go"},
 		12: {"a.go"},
 	}, nil), "/repo")
@@ -122,15 +148,22 @@ func TestCollectOpenDogfoodPRs(t *testing.T) {
 	if prs[0].Number != 10 || prs[1].Number != 12 {
 		t.Fatalf("wrong PRs: %+v", prs)
 	}
+	if prs[0].MergeableState != "dirty" {
+		t.Fatalf("mergeable_state not carried: %+v", prs[0])
+	}
 }
 
 func TestCollectOpenDogfoodPRsFailOpenPerPR(t *testing.T) {
-	list := []ghPRListEntry{
-		{Number: 10, HeadRefName: "dogfood/x"},
-		{Number: 12, HeadRefName: "dogfood/y"},
+	pulls := []restPull{
+		{Number: 10, Head: struct {
+			Ref string `json:"ref"`
+		}{"dogfood/x"}},
+		{Number: 12, Head: struct {
+			Ref string `json:"ref"`
+		}{"dogfood/y"}},
 	}
 	// #10 file list fails → dropped, #12 survives.
-	prs, err := CollectOpenDogfoodPRs(context.Background(), fakeRunner(list, map[int][]string{
+	prs, err := CollectOpenDogfoodPRs(context.Background(), restRunner(t, "o/r", pulls, map[int][]string{
 		12: {"a.go"},
 	}, map[int]bool{10: true}), "/repo")
 	if err != nil {
@@ -143,11 +176,11 @@ func TestCollectOpenDogfoodPRsFailOpenPerPR(t *testing.T) {
 
 func TestJudgePromptAndParse(t *testing.T) {
 	g := Group{Files: []string{"a.go"}, PRs: []PR{
-		{Number: 1, Title: "one", Branch: "dogfood/a", Files: []string{"a.go"}},
-		{Number: 2, Title: "two", Branch: "dogfood/b", Files: []string{"a.go"}},
+		{Number: 1, Title: "one", Branch: "dogfood/a", MergeableState: "clean", Files: []string{"a.go"}},
+		{Number: 2, Title: "two", Branch: "dogfood/b", MergeableState: "dirty", Files: []string{"a.go"}},
 	}}
 	prompt := JudgePrompt(g)
-	for _, want := range []string{"PR #1", "merge_order", "duplicates", "a.go", "dogfood/a"} {
+	for _, want := range []string{"PR #1", "merge_order", "duplicates", "a.go", "dogfood/a", "dirty", "failure"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q", want)
 		}
@@ -169,13 +202,20 @@ func TestJudgePromptAndParse(t *testing.T) {
 }
 
 func TestCommentBodyAdviceOnly(t *testing.T) {
-	g := Group{Files: []string{"a.go"}, PRs: []PR{{Number: 1}, {Number: 2}}}
+	g := Group{Files: []string{"a.go"}, PRs: []PR{
+		{Number: 1, MergeableState: "clean"},
+		{Number: 2, MergeableState: "dirty"},
+	}}
 	body := CommentBody(g, Recommendation{MergeOrder: []int{1, 2},
 		Duplicates: []DuplicateFlag{{PR: 2, Of: 1, Reason: "same"}}, Reasoning: "r"})
-	for _, want := range []string{"no action taken", "#1 →", "duplicate of #1", "Never auto-merged"} {
+	for _, want := range []string{"no action taken", "#1 →", "duplicate of #1", "Never auto-merged", "`dirty`"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("comment missing %q", want)
 		}
+	}
+	// "clean" state must not be listed as an outlier.
+	if strings.Contains(body, "`clean`") {
+		t.Error("clean state should not be flagged as outlier")
 	}
 }
 
@@ -183,23 +223,31 @@ func TestRunOnceGroupsCommentsAndRateLimits(t *testing.T) {
 	dir := t.TempDir()
 	state := filepath.Join(dir, "state.json")
 	var comments []string
+	pulls := []restPull{
+		{Number: 1, Head: struct {
+			Ref string `json:"ref"`
+		}{"dogfood/a"}},
+		{Number: 2, Head: struct {
+			Ref string `json:"ref"`
+		}{"dogfood/b"}},
+	}
 	svc := New(time.Hour, JudgeConfig{}, func() []Project {
 		return []Project{{Name: "p", Path: "/repo"}}
 	}, state)
 	svc.SetRunner(func(ctx context.Context, dir string, args ...string) ([]byte, error) {
+		rest := strings.Join(args, " ")
 		switch {
-		case args[1] == "list":
-			return mustJSON(t, []ghPRListEntry{
-				{Number: 1, HeadRefName: "dogfood/a"},
-				{Number: 2, HeadRefName: "dogfood/b"},
-			}), nil
-		case args[1] == "view":
-			return mustJSON(t, ghPRListEntry{Files: []ghPRFile{{Path: "a.go"}}}), nil
-		case args[1] == "comment":
-			comments = append(comments, strings.Join(args, " "))
+		case args[0] == "git":
+			return []byte("https://github.com/o/r.git"), nil
+		case strings.Contains(rest, "pulls?state=open"):
+			return mustJSON(t, pulls), nil
+		case strings.Contains(rest, "/pulls/1/files"), strings.Contains(rest, "/pulls/2/files"):
+			return mustJSON(t, []restPullFile{{Filename: "a.go"}}), nil
+		case strings.Contains(rest, "gh pr comment"):
+			comments = append(comments, rest)
 			return []byte("ok"), nil
-		case args[1] == "edit":
-			return []byte("ok"), nil
+		case strings.Contains(rest, "/labels"):
+			return []byte("[]"), nil
 		}
 		return nil, fmt.Errorf("unexpected %v", args)
 	})
@@ -228,12 +276,17 @@ func TestRunOnceNoOverlapNoComment(t *testing.T) {
 		return []Project{{Name: "p", Path: "/repo"}}
 	}, filepath.Join(t.TempDir(), "state.json"))
 	svc.SetRunner(func(ctx context.Context, dir string, args ...string) ([]byte, error) {
+		rest := strings.Join(args, " ")
 		switch {
-		case args[1] == "list":
-			return mustJSON(t, []ghPRListEntry{{Number: 1, HeadRefName: "dogfood/a"}}), nil
-		case args[1] == "view":
-			return mustJSON(t, ghPRListEntry{Files: []ghPRFile{{Path: "a.go"}}}), nil
-		case args[1] == "comment":
+		case args[0] == "git":
+			return []byte("https://github.com/o/r.git"), nil
+		case strings.Contains(rest, "pulls?state=open"):
+			return mustJSON(t, []restPull{{Number: 1, Head: struct {
+				Ref string `json:"ref"`
+			}{"dogfood/a"}}}), nil
+		case strings.Contains(rest, "/pulls/1/files"):
+			return mustJSON(t, []restPullFile{{Filename: "a.go"}}), nil
+		case strings.Contains(rest, "gh pr comment"):
 			comments = append(comments, "x")
 			return []byte("ok"), nil
 		}

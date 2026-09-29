@@ -66,8 +66,11 @@ type Service struct {
 	pi       PiRunner
 	stateMu  chan struct{} // serializes state file access
 	statePath string
-	stopChan chan struct{}
+	stopChan  chan struct{}
 	isRunning bool
+	// DryRun collects, groups, judges and logs the recommendation but posts
+	// nothing — the operator's preview door before real comments go out.
+	DryRun bool
 }
 
 // Project is one repo to scan.
@@ -182,6 +185,10 @@ func (s *Service) triageGroup(ctx context.Context, p Project, g Group) {
 		return
 	}
 	body := CommentBody(g, rec)
+	if s.DryRun {
+		log.Printf("[Triage] DRY-RUN %s group starting #%d — would comment:\n%s", p.Name, g.PRs[0].Number, body)
+		return
+	}
 	for _, pr := range g.PRs {
 		if err := PostComment(ctx, s.run, p.Path, pr.Number, body); err != nil {
 			log.Printf("[Triage] %s #%d: comment failed: %v", p.Name, pr.Number, err)

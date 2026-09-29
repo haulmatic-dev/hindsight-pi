@@ -37,6 +37,13 @@ For the group decide:
 3. needs_human: PRs where the decision genuinely needs human judgment, each with a one-line reason.
 4. reasoning: one short paragraph of rationale.
 
+Each PR also carries a GitHub mergeable_state ("clean" = no conflict,
+"dirty" = merge conflict with base, "blocked" = failing required checks or
+missing reviews, "unstable" = non-required checks failing). Use this failure
+context: prefer merging PRs that are "clean" or "blocked" on trivial grounds
+over ones that are "dirty"; a "dirty" PR whose changes duplicate a "clean"
+PR is a strong duplicate candidate.
+
 Respond with STRICT JSON only, no prose outside the JSON:
 {"merge_order":[<numbers>],"duplicates":[{"pr":<n>,"of":<n>,"reason":"..."}],"needs_human":[{"pr":<n>,"reason":"..."}],"reasoning":"..."}
 
@@ -45,8 +52,8 @@ Never recommend auto-merging or auto-closing in reasoning: output is posted as a
 `)
 	b.WriteString(fmt.Sprintf("Shared files: %s\n\n", strings.Join(g.Files, ", ")))
 	for _, p := range g.PRs {
-		b.WriteString(fmt.Sprintf("PR #%d: %s\n  branch: %s\n  files: %s\n\n",
-			p.Number, p.Title, p.Branch, strings.Join(p.Files, ", ")))
+		b.WriteString(fmt.Sprintf("PR #%d: %s\n  branch: %s\n  mergeable_state: %s\n  files: %s\n\n",
+			p.Number, p.Title, p.Branch, p.MergeableState, strings.Join(p.Files, ", ")))
 	}
 	return b.String()
 }

@@ -21,7 +21,10 @@ type PR struct {
 	Title  string `json:"title"`
 	Branch string `json:"branch"` // headRefName
 	URL    string `json:"url"`
-	Files  []string `json:"files"` // target file paths
+	// MergeableState is GitHub's failure context: "clean", "dirty" (merge
+	// conflict), "blocked" (required reviews/CI), "unstable", "unknown".
+	MergeableState string `json:"mergeable_state,omitempty"`
+	Files          []string `json:"files"` // target file paths
 }
 
 // Key identifies the PR for rate limiting ("#12" within one repo scan).
@@ -140,6 +143,16 @@ func CommentBody(g Group, r Recommendation) string {
 	b.WriteString("🤖 **PR triage (automated recommendation — no action taken)**\n\n")
 	b.WriteString(fmt.Sprintf("Overlap group on %d shared file(s): %s\n\n",
 		len(g.Files), strings.Join(g.Files, ", ")))
+	// Failure context: surface merge-state outliers so the human sees them
+	// without opening each PR.
+	for _, p := range g.PRs {
+		if p.MergeableState != "" && p.MergeableState != "clean" && p.MergeableState != "unknown" {
+			b.WriteString(fmt.Sprintf("- #%d merge state: `%s`\n", p.Number, p.MergeableState))
+		}
+	}
+	if len(g.PRs) > 0 {
+		b.WriteString("\n")
+	}
 	if len(r.MergeOrder) > 0 {
 		b.WriteString("**Suggested merge order:**")
 		for _, n := range r.MergeOrder {
