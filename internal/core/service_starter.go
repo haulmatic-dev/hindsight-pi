@@ -618,6 +618,15 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 		log.Println("🏛️  Epic scanner started")
 	}
 
+	// Start the periodic LLM PR-triage pass (hydra-muvh, FR-030). Advice
+	// only: overlapping dogfood/* PRs get a recommendation comment + advisory
+	// labels; merges and closes stay human. Fail-open: disabled or failing,
+	// the daemon runs exactly as before.
+	if o.triageSvc != nil {
+		o.triageSvc.Start()
+		log.Println("🧭 PR-triage pass started")
+	}
+
 	return nil
 }
 
@@ -643,6 +652,11 @@ func (s *ServiceStarter) Stop() {
 	if o.epicScanner != nil {
 		o.epicScanner.Stop()
 		log.Println("🏛️  Epic scanner stopped")
+	}
+
+	if o.triageSvc != nil {
+		o.triageSvc.Stop()
+		log.Println("🧭 PR-triage pass stopped")
 	}
 }
 
