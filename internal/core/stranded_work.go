@@ -13,6 +13,16 @@ import (
 
 const strandedWorkLabel = "stranded-work"
 
+// Labels applied by IntegrateStrandedRepair that mark a bead as no longer
+// resumable by a worker even though it is not terminal: a quarantined merge
+// conflict, or a post-merge verification failure. The stranded detector must
+// accept open beads carrying them (FR-021) — otherwise the worktree branch
+// stays ahead forever and is never re-surfaced.
+const (
+	strandedConflictLabel      = "stranded-conflict"
+	integrationUnverifiedLabel = "integration-unverified"
+)
+
 // strandedWorktreeManager is the narrow surface IntegrateStrandedRepair needs
 // from WorktreeManager. Production passes *WorktreeManager; tests can inject
 // fakes for failure modes that are hard to stage in real git.
@@ -95,7 +105,9 @@ func DetectStrandedWork(m *WorktreeManager, projectPath string, activeKeys map[s
 				labels = b.Labels
 			}
 		}
-		if found && !status.IsTerminal() {
+		if found && !status.IsTerminal() &&
+			!hasLabel(labels, strandedConflictLabel) &&
+			!hasLabel(labels, integrationUnverifiedLabel) {
 			continue // still live / resumable
 		}
 		if hasLabel(labels, strandedWorkLabel) {
@@ -217,7 +229,7 @@ func IntegrateStrandedRepair(projectPath, key string, wm strandedWorktreeManager
 
 	if strings.Contains(err.Error(), "merge verification failed") {
 		if beadsClient != nil {
-			if lerr := beadsClient.UpdateBeadLabels(projectPath, id.Repo(), id, []string{"integration-unverified"}); lerr != nil {
+			if lerr := beadsClient.UpdateBeadLabels(projectPath, id.Repo(), id, []string{integrationUnverifiedLabel}); lerr != nil {
 				log.Printf("[PanRepair] integrate-stranded: label integration-unverified for %s: %v", key, lerr)
 			}
 		}
@@ -240,7 +252,7 @@ func IntegrateStrandedRepair(projectPath, key string, wm strandedWorktreeManager
 		return fmt.Errorf("integrate-stranded: quarantine %s after conflict: %w", branch, qerr)
 	}
 	if beadsClient != nil {
-		if lerr := beadsClient.UpdateBeadLabels(projectPath, id.Repo(), id, []string{"stranded-conflict"}); lerr != nil {
+		if lerr := beadsClient.UpdateBeadLabels(projectPath, id.Repo(), id, []string{strandedConflictLabel}); lerr != nil {
 			log.Printf("[PanRepair] integrate-stranded: label stranded-conflict for %s: %v", key, lerr)
 		}
 	}

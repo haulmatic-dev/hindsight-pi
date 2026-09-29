@@ -138,23 +138,12 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 								if b.Status.IsTerminal() {
 									continue
 								}
-								for _, lbl := range b.Labels {
-									switch lbl {
-									case worktreeUnavailableLabel, integrationExhaustedLabel:
-										blocked = append(blocked, pan.BlockedBead{
-											BeadID: b.ID.String(),
-											Reason: fmt.Sprintf("hard-parked by label %s (durable; scheduler never retries — clear only when the cause is fixed)", lbl),
-											Since:  b.UpdatedAt,
-										})
-									case escalatedLabel:
-										if time.Since(b.UpdatedAt) > 24*time.Hour {
-											blocked = append(blocked, pan.BlockedBead{
-												BeadID: b.ID.String(),
-												Reason: "escalated to a human over 24h ago — stale escalation or genuinely waiting?",
-												Since:  b.UpdatedAt,
-											})
-										}
-									}
+								if reason, ok := panBlockedReason(b, time.Now()); ok {
+									blocked = append(blocked, pan.BlockedBead{
+										BeadID: b.ID.String(),
+										Reason: reason,
+										Since:  b.UpdatedAt,
+									})
 								}
 							}
 						}
@@ -592,4 +581,27 @@ func (s *ServiceStarter) Stop() {
 		o.epicScanner.Stop()
 		log.Println("🏛️  Epic scanner stopped")
 	}
+}
+
+// panBlockedReason maps a non-terminal bead's durable labels to a Pan blocked
+// candidacy reason. Returns ok=false when no label warrants a candidate.
+// Extracted from the BlockedBeads sweep so label→candidate policy is
+// unit-testable; the sweep itself only aggregates per project store.
+func panBlockedReason(b types.Bead, now time.Time) (string, bool) {
+	if b.Status.IsTerminal() {
+		return "", false
+	}
+	for _, lbl := range b.Labels {
+		switch lbl {
+		case worktreeUnavailableLabel, integrationExhaustedLabel:
+			return fmt.Sprintf("hard-parked by label %s (durable; scheduler never retries — clear only when the cause is fixed)", lbl), true
+		case escalatedLabel:
+			if now.Sub(b.UpdatedAt) > 24*time.Hour {
+				return "escalated to a human over 24h ago — stale escalation or genuinely waiting?", true
+			}
+		case strandedConflictLabel:
+			return "quarantined by integrate-stranded (merge conflict) — human review or re-attempt needed", true
+		}
+	}
+	return "", false
 }
