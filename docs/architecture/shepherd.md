@@ -431,6 +431,14 @@ Pan's LLM: the tier-2 judgment budget follows the anomaly rate. Workers
 younger than 10 minutes are skipped (mid-first-turn grace). Fail-open: a
 missing/unreadable session disables the class for that bead.
 
+**Shared integration wedge anomaly.** The health digest counts non-terminal
+beads labelled `integration-exhausted` per project (`intexh=` field in the
+digest text) and emits one anomaly at ≥3 open parks — "shared integration
+wedge" — so Pan/human triage the single project-level cause (poisoned bead
+store, stale integration base, protected branch) instead of the scheduler
+accumulating durable per-bead parks. Advisory telemetry like degradations:
+it never creates beads by itself.
+
 **Per-candidate judgment dedup.** Pan judges at most once per candidate
 state: `freshCandidates` (`internal/pan/pan.go`) keys a cache by candidate
 state hash (bead ID + state + normalized reason — volatile fields like ages
