@@ -42,6 +42,7 @@ type BeadCloser struct {
 	chainKeyFn         func(types.Bead) string // maps a bead to its chain's worktree key
 	isChainMember      func(types.BeadID) bool // reports whether a bead belongs to a registered multi-bead chain
 	retainer           *VerdictRetainer        // nil-safe; Hindsight verdict retention (Shepherd D3)
+	breaker            *IntegrationBreaker     // nil-safe; fleet-wide integration-exhausted circuit breaker (FR-034)
 	gateRunner         *GateRunner             // nil until SetGateRunner; daemon_owned projects fail closed without it
 	retryManager       *RetryManager           // clears retry residue on verified close
 	workerSpawner      *WorkerSpawner          // clears spawn-failure residue on verified close
@@ -74,6 +75,10 @@ func NewBeadCloser(beadsClient BeadsClient, intelligenceHub *IntelligenceHub, pr
 
 // SetEventSink attaches the structured event stream. Nil stays a no-op.
 func (c *BeadCloser) SetEventSink(s *EventSink) { c.events = s }
+
+// SetIntegrationBreaker attaches the fleet-wide integration-exhausted circuit
+// breaker (FR-034). Nil stays a no-op.
+func (c *BeadCloser) SetIntegrationBreaker(b *IntegrationBreaker) { c.breaker = b }
 
 // SetVerdictRetainer attaches Hindsight verdict retention (Shepherd D3).
 // Nil stays a no-op.
@@ -1088,6 +1093,9 @@ func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, st
 				Detail: fmt.Sprintf("%d consecutive integration failures (last at %s: %s) — hard-parked", failures, stage, detail),
 				Fields: evtFields})
 			AppendActivity(projectPath, beadID, "integration-exhausted: hard-parked")
+			// FR-034: feed the fleet-wide breaker — one wedge event per project
+			// per window instead of 11 silent per-bead parks (srv-telematics).
+			c.breaker.RecordExhaustion(repoName, beadID, stage, detail)
 			log.Printf("[Integrate] %s hit %d consecutive integration failures — labeled %s (hard-park; clear only when the cause is fixed) conflict_paths=%v",
 				beadID, failures, integrationExhaustedLabel, conflictPaths)
 		}

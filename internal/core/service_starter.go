@@ -50,6 +50,13 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	} else {
 		o.registryStore = regStore
 		log.Printf("[Registry] Initialized")
+		// FR-034: the integration breaker's optional project park goes through
+		// the same registry store the scheduler's ProjectParkInfo gate reads.
+		if o.beadCloser != nil && o.beadCloser.breaker != nil {
+			o.beadCloser.breaker.setParkProject(func(project, reason string) error {
+				return regStore.SetProjectPark(project, true, "integration-wedge: "+reason)
+			})
+		}
 		if o.workerSpawner != nil {
 			o.workerSpawner.SetRegistryStore(regStore)
 		}

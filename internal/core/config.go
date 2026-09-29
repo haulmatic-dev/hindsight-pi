@@ -658,6 +658,15 @@ type OverseerConfig struct {
 	// its work on verified-close, integrating back to the working branch on
 	// chain completion. Off by default (opt-in).
 	WorktreeIsolation bool `yaml:"worktree_isolation"`
+	// IntegrationBreaker is the fleet-wide circuit breaker for
+	// integration-exhausted hard-parks (FR-034): when a project accumulates
+	// Threshold exhausted hard-parks inside Window, one typed
+	// `integration-wedge` event names the shared cause instead of the wedge
+	// surfacing only as per-bead parks (2026-09-29 srv-telematics: 11 beads
+	// parked in one window). park_project additionally stops new spawns into
+	// the wedge. Zero value = disabled; DefaultConfig enables
+	// observability-only breaking.
+	IntegrationBreaker IntegrationBreakerConfig `yaml:"integration_breaker"`
 }
 
 type ChainDetectionConfig struct {
@@ -739,15 +748,15 @@ type ResourceMonitoringConfig struct {
 
 // ProjectConfig represents a project configuration
 type ProjectConfig struct {
-	Name  string       `yaml:"name"`
-	Path  string       `yaml:"path"`
-	Type  string       `yaml:"type"` // "single" or "multi"
+	Name string `yaml:"name"`
+	Path string `yaml:"path"`
+	Type string `yaml:"type"` // "single" or "multi"
 	// IntegrationBranch pins the integration base for PR creation and
 	// merge-base checks. Optional: when unset, the origin default branch is
 	// used. The main checkout's current branch is NEVER used as a base.
 	IntegrationBranch string       `yaml:"integration_branch,omitempty"`
-	Repos []RepoConfig `yaml:"repos,omitempty"`
-	Gates *GateSet     `yaml:"gates,omitempty"` // daemon-owned deterministic gates (FR-002); nil = legacy
+	Repos             []RepoConfig `yaml:"repos,omitempty"`
+	Gates             *GateSet     `yaml:"gates,omitempty"` // daemon-owned deterministic gates (FR-002); nil = legacy
 }
 
 // RepoConfig represents a repository within a multi-repo project
@@ -786,7 +795,12 @@ func DefaultConfig() *Config {
 			MaxWorkers:            2,
 			DefaultRetries:        3,
 			EscalationTTL:         72 * time.Hour,
-			WorkerTimeout:         30 * time.Minute,
+			IntegrationBreaker: IntegrationBreakerConfig{
+				Enabled:   true,
+				Threshold: 5,
+				Window:    30 * time.Minute,
+			},
+			WorkerTimeout: 30 * time.Minute,
 			ChainDetection: ChainDetectionConfig{
 				Enabled:  true,
 				Interval: 10 * time.Second,
