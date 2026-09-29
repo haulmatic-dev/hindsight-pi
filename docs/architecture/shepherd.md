@@ -61,7 +61,6 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `spawn-suppressed-closed` | a queued retry spawn is aborted because the bead became terminal while in the retry queue | `status` |
 | `integration-failed` | singleton integrate/push failed verification (merge not contained in HEAD, or push rejected / remote ref did not advance) — bead reopened with `integration-failed` label, worktree preserved. Non-fast-forward rejections get one fetch + merge + retry (`PushBranchWithNonFFRecovery`) before this fires | `stage` (`integrate`/`push`), `error` (exact remote stderr) |
 | `integration_retest` | integration-retest stage (Tier A, opt-in via `integration_retest.enabled`) rechecked an `integration-failed`/`integration-exhausted` bead: `merge-tree --write-tree origin/<base> hydra/wt-\*` proved the conflict state, gates ran in a scratch worktree off `origin/<base>` (never the user's main checkout), and the bead either landed via the dogfood PR path (`result: landed`, bead closed, labels stripped), stayed parked (`result: conflict` / `gates-failed`), or hit the attempt cap | `result` (`landed`/`conflict`/`gates-failed`), `pr` (landed only) |
-| `integration-wedge` | FR-034 fleet-wide circuit breaker: a project crossed `overseer.integration_breaker.threshold` integration-exhausted hard-parks inside the window — one event names the shared cause instead of the wedge surfacing only as per-bead parks (2026-09-29 srv-telematics: 11 beads in one window). Pure observability by default; with `park_project: true` the breaker also parks the project until an operator unparks it. One signal per project per window | `beads` (hard-parked in window), `threshold`, `window` |
 | `close-accepted-already-integrated` | verified-close accepted a bead whose worktree HEAD is a strict ancestor of the main checkout HEAD — the singleton integrate landed locally but the push was rejected (hydra-7k1 2026-09-16: non-FF push failure → reopened bead → empty-diff loop). Emitted once per accepted close; the publisher ticker remains responsible for landing the working branch on origin | `reason` (`worktree_head_ancestor_of_main`) |
 | `worktree-preserved-unintegrated` | janitorial GC refused to remove a stale worktree: its branch carries commits not yet in the working branch, it has uncommitted tracked changes, or files under it were modified after creation and within the staleness window (merge-resolution edits, untracked output — hydra-q3p mid-merge reap, 2026-09-12) — reconciler integrates on its next sweep | `worktree`, `branch`, `cause` (`unintegrated_work`/`recent_activity`) |
 | `bead_store_suspect` | a project's open-bead count collapsed to 0 or >80% in one discovery tick (or `br list` failed after a healthy baseline) — store presumed corrupt, project excluded from scheduling | `project_path`, `previous`, `current`, `list_error` |
@@ -194,19 +193,6 @@ startup) demotes non-terminal beads whose `escalated` label has aged past the
 TTL: label swapped for `escalation-expired`, typed `escalation_expired` event,
 bead returns to the ready queue. `in_progress` beads are skipped so a live
 worker finishing under the stay is never raced. Default 72h; 0 disables.
-
-**Integration wedge breaker (`overseer.integration_breaker`, 2026-09-29,
-FR-034).** A shared integration wedge parks bead after bead with no signal
-above the per-bead noise (srv-telematics 2026-09-29: 11 beads hard-parked
-integration-exhausted in one window). The breaker (`IntegrationBreaker`,
-internal/core/integration_breaker.go) watches the exhaustion stream inside
-failIntegration: when a project accumulates `threshold` (default 5)
-hard-parks within `window` (default 30m) it emits ONE `integration-wedge`
-event listing every bead parked in the window and logs an
-`[IntegrationBreaker]` line. Fail-open by contract — it never blocks the
-close path, and the per-bead durable parks stand. `park_project: true`
-additionally parks the project via the registry store (scheduler stops
-spawning into the wedge); default false. Zero-value config disables.
 
 **Worktree-unavailable hard-park (2026-09-13).** The same durability rule now
 covers the spawn path: when `EnsureWorktree` fails (dubious-ownership,
@@ -490,6 +476,15 @@ outcome, and emits a `[PanRepair]` JSON audit event (`bead_id`, `action`,
 | `prune-worktree-registration` | `git worktree prune` on the bead's project | project-scoped: rate-limited per project (30m), not per bead — one repair clears a fleet-wide registered-but-missing wedge (13 webapp beads from one stale registration, 2026-09-13) |
 | `re-push-integration` | reruns the publisher (`PublishRepo`) for a `<project>-push-pending` pseudo-bead | fail-closed: errors unless the stranded push actually cleared; project-scoped rate limit |
 | `integrate-stranded` | merges a stranded `hydra/wt-<key>` branch into the working branch and removes the worktree; on conflict quarantines to `hydra/quarantine/<key>` and labels `stranded-conflict`; on verification failure labels `integration-unverified` | only when the bead is terminal/unknown or carries a quarantine label (`stranded-conflict`/`integration-unverified`) and no live worker or active chain exists; idempotent via the `stranded-work` label; open `stranded-conflict` beads surface as Pan BLOCKED candidates via `panBlockedReason` |
+| `retry-quarantine` | merge-trees the bead's `hydra/quarantine/<key>` branch against the current base (origin preferred, local fallback); if clean, restores `hydra/wt-<key>` at the quarantine tip, deletes the quarantine branch, removes `stranded-conflict`, reopens the bead, resets retries, emits `quarantine_reattempt{result:requeued}` | fail-closed: refuses (bead stays quarantined) when no quarantine branch exists, the merge-tree errors, or the branch still conflicts — re-queue goes through the ordinary gated/verified integration paths, never a direct merge |
+
+**Per-repo integration gate (2026-09-29).** The close path's integrate/PR step
+and the worktree reconciler's stranded-branch merges run under
+`integrationGate` (`internal/core/integration_gate.go`): one bead per repo
+integrates at a time, and after a gated failure sibling beads wait a 30s
+repo cooldown before starting (success clears it immediately). The gate
+protects the exhaustion cap from a shared wedge, not from the bead's own
+work; the per-bead backoff in `failIntegration` still applies on top.
 
 **Bead-store integrity guard (2026-09-11).** `BeadStoreGuard`
 (`internal/core/bead_store_guard.go`) detects a corrupted `.beads` store that
