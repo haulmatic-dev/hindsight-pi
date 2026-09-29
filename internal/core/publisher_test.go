@@ -658,12 +658,12 @@ func TestDefaultPRMergeGitPush_RedactsToken(t *testing.T) {
 	}
 }
 
-// TestPublishViaPR_FallsBackToDaemonToken proves an empty caller token (the
-// periodic publish path only carries the project owner's PAT, absent for
-// daemon-owned repos) resolves the daemon credential instead of invoking gh
+// TestPublishViaPR_IdentityResolver proves an empty caller token (the
+// periodic publish path only carries the project owner's PAT) resolves the
+// owner identity via the publish-identity resolver instead of invoking gh
 // unauthenticated (2026-09-28: publish tick looped on gh pr create exit
 // status 4 for the hydra repo).
-func TestPublishViaPR_FallsBackToDaemonToken(t *testing.T) {
+func TestPublishViaPR_IdentityResolver(t *testing.T) {
 	fake := &autoPRFakeExec{ghURL: "https://github.com/x/y/pull/9"}
 	restore := installPRMergeFake(fake)
 	defer restore()
@@ -673,9 +673,11 @@ func TestPublishViaPR_FallsBackToDaemonToken(t *testing.T) {
 		return fake.ghURL, fake.ghErr
 	}
 	defer func() { autoPRGhCreate = origCreate }()
-	origResolve := prMergeResolveToken
-	prMergeResolveToken = func() string { return "FALLBACK_TOK" }
-	defer func() { prMergeResolveToken = origResolve }()
+	origResolve := publishIdentityResolver
+	publishIdentityResolver = func(string) (PublishIdentity, error) {
+		return PublishIdentity{Owner: "t", Token: "FALLBACK_TOK", Source: "test"}, nil
+	}
+	defer func() { publishIdentityResolver = origResolve }()
 
 	url, err := PublishViaPR("/tmp/x", "main", "dogfood/publish-x", "t", "")
 	if err != nil {
