@@ -7,6 +7,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Documentation
+- Escalation-hygiene triage for the shared stale-escalation wedge (2026-09-29): six open beads (hydra-wdp/1ly/mt8/cip/gvh/ol7) carried `escalated` 98–298h with no human response; all are duplicates of open originals. Stale `escalated`/`needs-human`/`verified-close-escalated` labels removed for one fair scheduler retry; the daemon-side TTL scanner + Pan `clear-escalation` verb (already landed) prevent recurrence. Findings: `docs/discovery/escalation-hygiene-triage-bmtb.md`.
 ### Fixed
 - Park no longer blocks Charon orphan recovery (live incident 2026-09-29 10:20 UTC): recoverOrphanInProgressBeads skipped all orphan handling for parked projects, so their dead workers' `running` tracker rows were never reaped — the daemon tracked 6/6 phantom worker slots with 0 live processes and the whole fleet stalled ("All worker slots filled (6/6), skipping bead discovery") until restart. Park's contract is stop-NEW-spawns; the scheduler already consults ProjectParkInfo on every spawn path, so recovery (stale-row reap + orphan reopen) now runs for parked projects too. Test: `TestRecoverOrphanInProgressBeads_ParkedCampaignStillRecovers`.
 ### Documentation
