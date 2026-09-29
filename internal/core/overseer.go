@@ -133,6 +133,9 @@ type Overseer struct {
 	// Orphan process janitor for cleaning up orphaned worker processes
 	orphanJanitor *Charon // Cleans up orphaned worker processes
 
+	// Stale-escalation ager (nil when escalation_ttl <= 0)
+	escalationTTL *EscalationTTLScanner
+
 	// Worker registry (daemon-owned SQLite truth) and Pan, the shepherd that
 	// decides the ambiguous tail of worker states. Both fail-open: a registry
 	// open failure or a disabled Pan leaves deterministic rules in force.
@@ -365,6 +368,9 @@ func NewOverseer(config *Config) *Overseer {
 	o.orphanJanitor.SetMaxBeadTokens(config.Overseer.MaxBeadTokens)
 	o.orphanJanitor.SetRetryManager(o.retryManager)
 	o.orphanJanitor.SetProjectsProvider(o.GetProjects)
+	if config.Overseer.EscalationTTL > 0 {
+		o.escalationTTL = NewEscalationTTLScanner(o.beadsClient, o.GetProjects, config.Overseer.EscalationTTL, o.eventSink)
+	}
 	// Inject access to the in-memory activeWorkers map so Charon can clean up
 	// stale placeholder entries (PID 0) that would otherwise block new spawns
 	// for the same bead. The snapshot is taken under the worker mutex by the

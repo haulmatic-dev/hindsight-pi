@@ -26,6 +26,13 @@ overseer:
   # landed at 9-12M). Suggested: 5000000.
   max_bead_tokens: 0
 
+  # Age a human escalation before demoting it. A bead carrying the durable
+  # `escalated` label older than this is returned to the ready queue (label
+  # swapped for `escalation-expired`, event `escalation_expired` emitted).
+  # Without this, escalations no human ever answered wedge their scheduler
+  # slot forever. 0 disables the scanner. Suggested: 72h.
+  escalation_ttl: 72h
+
   worker_timeout: 10m
 
   # How long to wait for a worker to accept a handoff

@@ -34,6 +34,11 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 		log.Println("🧹 Orphan janitor started")
 	}
 
+	// Start stale-escalation ager (no-op when disabled)
+	if o.escalationTTL != nil {
+		o.escalationTTL.Start()
+	}
+
 	// Open the worker registry (daemon-owned SQLite truth; PRD
 	// worker-park-and-resume Part 4) and construct Pan, the shepherd.
 	// Done here rather than in NewOverseer so tests constructing an Overseer
@@ -585,6 +590,9 @@ func (s *ServiceStarter) Stop() {
 
 	if o.orphanJanitor != nil {
 		o.orphanJanitor.Stop()
+	}
+	if o.escalationTTL != nil {
+		o.escalationTTL.Stop()
 	}
 	if o.settledStateSvc != nil {
 		if err := o.settledStateSvc.Stop(); err != nil {

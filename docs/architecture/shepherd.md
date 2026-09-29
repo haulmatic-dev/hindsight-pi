@@ -185,6 +185,15 @@ can never return an escalated bead as ready-to-run. Without the label, bare
 respawns into the same death the escalation stopped (2026-09-06 empty-diff
 churn loop: c01hq/65xy7/48bdq).
 
+**Escalation aging (`overseer.escalation_ttl`, 2026-09-29).** The label is
+durable but not immortal: escalations were never adjudicated, so a bead whose
+human never answered wedged its scheduler slot indefinitely (measured
+91h–290h). A periodic scanner (`EscalationTTLScanner`, 1h cadence + once at
+startup) demotes non-terminal beads whose `escalated` label has aged past the
+TTL: label swapped for `escalation-expired`, typed `escalation_expired` event,
+bead returns to the ready queue. `in_progress` beads are skipped so a live
+worker finishing under the stay is never raced. Default 72h; 0 disables.
+
 **Worktree-unavailable hard-park (2026-09-13).** The same durability rule now
 covers the spawn path: when `EnsureWorktree` fails (dubious-ownership,
 foreign-repo path, unresolvable base), `SpawnInternal` fails the spawn
