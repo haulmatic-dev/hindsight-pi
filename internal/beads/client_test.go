@@ -1148,3 +1148,92 @@ func TestUpdateBeadLabels_OneCallPerLabel(t *testing.T) {
 		t.Errorf("calls = %q, want [%q %q]", joined, want0, want1)
 	}
 }
+
+// TestCloseBead_NonZeroExitSkip_ForceRetries verifies the 2026-09-29
+// close-not-sticking fix: a br close that exits NONZERO with a skip (exit 3,
+// "already closed or skipped") must NOT be treated as idempotent success.
+// The old code returned nil there, so Close() completed, the worker was
+// marked completed, and the bead stayed open — an endless respawn loop with
+// no error anywhere. The fix routes nonzero skips through the same --force
+// retry + terminality verification as the success path.
+func TestCloseBead_NonZeroExitSkip_ForceRetries(t *testing.T) {
+	mockExec := NewMockExecutor()
+	client := NewClientWithExecutor(mockExec)
+
+	// First call: br close exits 3 (skipped due to open children), no
+	// "already closed" wording — ambiguous output, must force-retry.
+	skippedOutput := []byte("Warning: Skipped test-bead-ex3: parent issue has 1/1 open children (use --force to close anyway)\n")
+	mockExec.AddResponse("br", []string{"close", "test-bead-ex3", "-r", "completed"}, skippedOutput, &CLIError{
+		Command: "br",
+		Args:    []string{"close", "test-bead-ex3", "-r", "completed"},
+		Stdout:  string(skippedOutput),
+		Err:     &exec.ExitError{},
+	})
+
+	// Second call (force retry): succeeds.
+	closedBeadJSON := []byte(`[{"id":"test-bead-ex3","status":"closed","title":"Test"}]`)
+	mockExec.AddResponse("br", []string{"close", "test-bead-ex3", "-r", "completed", "--force"}, []byte("✓ Closed test-bead-ex3\n"), nil)
+	mockExec.AddResponse("br", []string{"show", "test-bead-ex3", "--json"}, closedBeadJSON, nil)
+
+	if err := client.CloseBead("hydra", "", "test-bead-ex3", "completed"); err != nil {
+		t.Fatalf("expected nil after force retry on nonzero-exit skip, got: %v", err)
+	}
+
+	calls := mockExec.GetCalls()
+	foundForce := false
+	for _, call := range calls {
+		for _, arg := range call.Args {
+			if arg == "--force" {
+				foundForce = true
+			}
+		}
+	}
+	if !foundForce {
+		t.Error("expected --force retry after nonzero-exit skip")
+	}
+}
+
+// TestCloseBead_NonZeroExitNoWording_FailsLoud verifies that a nonzero close
+// with no skip/already-closed wording still propagates as an error (fail
+// closed), rather than silently reporting success while the bead stays open.
+func TestCloseBead_NonZeroExitNoWording_FailsLoud(t *testing.T) {
+	mockExec := NewMockExecutor()
+	client := NewClientWithExecutor(mockExec)
+
+	mockExec.AddResponse("br", []string{"close", "test-bead-err", "-r", "completed"}, []byte("br: store write failed\n"),
+		&CLIError{Command: "br", Args: []string{"close", "test-bead-err", "-r", "completed"},
+			Stderr: "store write failed", Err: &exec.ExitError{}})
+
+	err := client.CloseBead("hydra", "", "test-bead-err", "completed")
+	if err == nil {
+		t.Fatal("expected loud error for nonzero close with no skip wording, got nil")
+	}
+	if !strings.Contains(err.Error(), "close failed for bead test-bead-err") {
+		t.Errorf("expected close-failed error, got: %v", err)
+	}
+}
+
+// TestCloseBead_AlreadyClosedWording_IdempotentSuccess verifies that the
+// explicit "already closed" wording is still treated as idempotent success
+// (no force retry) even on a nonzero exit.
+func TestCloseBead_AlreadyClosedWording_IdempotentSuccess(t *testing.T) {
+	mockExec := NewMockExecutor()
+	client := NewClientWithExecutor(mockExec)
+
+	mockExec.AddResponse("br", []string{"close", "test-bead-ac", "-r", "completed"},
+		[]byte("test-bead-ac is already closed\n"),
+		&CLIError{Command: "br", Args: []string{"close", "test-bead-ac", "-r", "completed"},
+			Stdout: "test-bead-ac is already closed", Err: &exec.ExitError{}})
+
+	if err := client.CloseBead("hydra", "", "test-bead-ac", "completed"); err != nil {
+		t.Fatalf("expected nil for already-closed wording, got: %v", err)
+	}
+
+	for _, call := range mockExec.GetCalls() {
+		for _, arg := range call.Args {
+			if arg == "--force" {
+				t.Error("already-closed wording must not trigger a force retry")
+			}
+		}
+	}
+}

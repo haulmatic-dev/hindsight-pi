@@ -208,7 +208,10 @@ func (c *Client) execInDir(dir string, cmd string, args ...string) ([]byte, erro
 		}
 		lastErr = err
 		if !isTransientError(err) {
-			return nil, err
+			// Preserve output on error: closeBeadOnce classifies skip vs
+			// already-closed from stdout, which only arrives with nonzero
+			// exits when the CLIError carries it.
+			return out, err
 		}
 		time.Sleep(time.Duration(1<<uint(attempt-1)) * 150 * time.Millisecond)
 	}
@@ -223,9 +226,10 @@ func (c *Client) execInDirOnce(dir string, cmd string, args ...string) ([]byte, 
 	}); ok {
 		output, err := execWithDir.ExecuteInDir(dir, cmd, args...)
 		if err != nil {
-			return nil, &CLIError{
+			return output, &CLIError{
 				Command: cmd,
 				Args:    args,
+				Stdout:  string(output),
 				Err:     err,
 			}
 		}
@@ -359,26 +363,42 @@ func (c *Client) closeBeadOnce(projectPath, repoName string, beadID types.BeadID
 	output, err := c.execInDir(repoCwd(projectPath, repoName), "br", "close", beadID.String(), "-r", reason)
 	outputStr := string(output)
 
-	// Exit 3 means "already closed" or "skipped" — treat as idempotent success
+	// Classify the close outcome. A skip (open children) can arrive as a
+	// zero-exit warning OR as a nonzero exit (br daemon exit 3, "already
+	// closed or skipped") — both must reach the --force retry below.
+	// Regression 2026-09-29 (srv-telematics u8z7/kher/qj74/5gq): a nonzero
+	// skip returned nil as "idempotent success", so Close() completed, the
+	// worker was marked completed, and the bead stayed open — an endless
+	// respawn loop with no error anywhere. Silence is the bug.
+	skipped := strings.Contains(outputStr, "Warning: Skipped") || strings.Contains(outputStr, "blocked by")
 	if err != nil {
+		if strings.Contains(outputStr, "already closed") {
+			// Explicit already-closed wording: genuinely idempotent success.
+			return nil
+		}
+		exitCode := -1
 		if cliErr, ok := err.(*CLIError); ok {
-			if strings.Contains(outputStr, "already closed") || strings.Contains(outputStr, "skipped") {
-				return nil
-			}
-			// Check if exit code indicates already-closed state
-			if exitErr, ok := cliErr.Err.(*exec.ExitError); ok && exitErr.ExitCode() == 3 {
-				return nil
+			if exitErr, ok2 := cliErr.Err.(*exec.ExitError); ok2 {
+				exitCode = exitErr.ExitCode()
 			}
 		}
-		// Non-skipped CLI error — propagate (will be checked for transience)
-		return fmt.Errorf("close failed for bead %s: %w", beadID.String(), err)
+		if exitCode == 3 {
+			// Exit 3 is ambiguous ("already closed or skipped") with no
+			// distinguishing wording. Never assume "already closed": force
+			// close is a harmless no-op when already terminal, and the
+			// terminality verification below fails loud if it is not.
+			skipped = true
+		} else if !skipped {
+			// Non-skipped CLI error — propagate (will be checked for transience)
+			return fmt.Errorf("close failed for bead %s: %w", beadID.String(), err)
+		}
 	}
 
 	// Check if close was skipped due to open children / dependencies.
 	// In that case, retry with --force to allow closing failed/abandoned beads
 	// without blocking downstream work. Without --force, a failed worker that
 	// leaves a bead stuck in_progress with open children would never be recovered.
-	if strings.Contains(outputStr, "Warning: Skipped") || strings.Contains(outputStr, "blocked by") {
+	if skipped {
 		log.Printf("[CloseBead] Bead %s has open children; retrying close with --force (reason: %s)", beadID.String(), reason)
 		forceOutput, forceErr := c.execInDir(repoCwd(projectPath, repoName), "br", "close", beadID.String(), "-r", reason, "--force")
 		if forceErr != nil {
