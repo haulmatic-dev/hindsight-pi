@@ -289,11 +289,23 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 				log.Printf("[Worktree] close %s: key=%s chainMember=false — singleton, integrating now", bead.ID, key)
 			}
 			if !member {
-				if iErr := c.worktreeManager.Integrate(projectPath, key); iErr != nil {
-					return c.failIntegration(bead, projectPath, repoName, "integrate", iErr)
-				}
-				if pErr := c.publishAfterIntegrate(projectPath, bead); pErr != nil {
-					return c.failIntegration(bead, projectPath, repoName, "push", pErr)
+				// FR-010 PR-first close contract: when the project has a remote,
+				// the singleton's worktree branch is pushed to origin and landed
+				// via PR — no local merge into the working branch. The daemon
+				// gates already ran above, so the PR merge happens gates-green.
+				if hasGitRemote(projectPath) {
+					if iErr := c.publishSingletonViaPR(projectPath, bead, key); iErr != nil {
+						return c.failIntegration(bead, projectPath, repoName, "integrate", iErr)
+					}
+				} else {
+					// No-remote fallback: legacy local --no-ff merge, then the
+					// ordinary push path (a no-op when push is disabled).
+					if iErr := c.worktreeManager.Integrate(projectPath, key); iErr != nil {
+						return c.failIntegration(bead, projectPath, repoName, "integrate", iErr)
+					}
+					if pErr := c.publishAfterIntegrate(projectPath, bead); pErr != nil {
+						return c.failIntegration(bead, projectPath, repoName, "push", pErr)
+					}
 				}
 				c.resetIntegrationFailures(string(bead.ID))
 				c.worktreeManager.Remove(projectPath, key)
@@ -831,6 +843,54 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 		}
 	}
 	return fmt.Errorf("push %s to %s/%s: %s", bead.ID, remote, branch, reason)
+}
+
+// hasGitRemote reports whether projectPath has any git remote configured.
+// FR-010: a configured remote selects the PR-first close contract; its
+// absence selects the legacy local-merge fallback.
+func hasGitRemote(projectPath string) bool {
+	out, err := gitOut(projectPath, "remote")
+	return err == nil && strings.TrimSpace(out) != ""
+}
+
+// publishSingletonViaPR implements the FR-010 PR-first close contract for
+// singleton beads: push the worktree branch to origin and land it via PR
+// (gh pr create into the working branch + gh pr merge --admin, verified
+// MERGED). No local merge into the working branch happens here — the local
+// `git merge --no-ff` is demoted to the no-remote fallback in Close. The
+// daemon gates already ran before this point, so the PR merge lands
+// gates-green. Duplicate-landing races (tipMergedProbe pre-check + "No
+// commits between" from gh pr create) are treated as landed, matching
+// publishAfterIntegrate.
+func (c *BeadCloser) publishSingletonViaPR(projectPath string, bead *types.Bead, key string) error {
+	base, err := c.worktreeManager.WorkingBranch(projectPath)
+	if err != nil || base == "" {
+		return fmt.Errorf("pr-first close %s: no working branch: %v", bead.ID, err)
+	}
+	// Duplicate-landing pre-check on the WORKTREE BRANCH tip (not the
+	// checkout HEAD): a racing close may have already landed this branch via
+	// PR. Fail-open on any git fault so the normal PR path proceeds.
+	if tip, err := gitOut(projectPath, "rev-parse", "--verify", "--quiet", c.worktreeManager.BranchName(key)); err == nil {
+		if _, ferr := gitOut(projectPath, "fetch", "--quiet", "origin", base); ferr == nil && isAncestorOf(projectPath, strings.TrimSpace(tip), "origin/"+base) {
+			log.Printf("[Output] %s branch tip already merged into %s — duplicate PR-first close, no-op", bead.ID, base)
+			AppendActivity(projectPath, string(bead.ID), "already landed (duplicate integrate no-op)")
+			return nil
+		}
+	}
+	head := "dogfood/" + string(bead.ID)
+	url, err := PublishBranchViaPR(projectPath, base, c.worktreeManager.BranchName(key), head, bead.Title, autoPRResolveToken())
+	if err != nil {
+		if isPRNoCommitsBetween(err) {
+			log.Printf("[Output] %s already merged into %s (gh pr create reported no commits between) — duplicate PR-first close treated as landed", bead.ID, base)
+			AppendActivity(projectPath, string(bead.ID), "already landed (duplicate integrate no-op)")
+			return nil
+		}
+		AppendActivity(projectPath, string(bead.ID), "PR-first close failed: "+err.Error())
+		return fmt.Errorf("pr-first close %s via %s → %s: %w", bead.ID, head, base, err)
+	}
+	log.Printf("[Output] PR-first close landed %s via PR %s (%s → %s)", bead.ID, url, head, base)
+	AppendActivity(projectPath, string(bead.ID), "landed via PR")
+	return nil
 }
 
 // resetIntegrationFailures clears a bead's consecutive-failure counter after
