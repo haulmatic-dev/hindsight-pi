@@ -323,6 +323,11 @@ type OutputConfig struct {
 	Remote  string `yaml:"remote"`
 	AutoPR  bool   `yaml:"auto_pr"`
 	PRMerge bool   `yaml:"pr_merge"`
+	// WritableBranchPrefixes lists extra branch prefixes that count as
+	// hydra-owned for the publish-path ownership gate (in addition to the
+	// built-in hydra/ and dogfood/). Branches outside these namespaces
+	// never silently count as published.
+	WritableBranchPrefixes []string `yaml:"writable_branch_prefixes"`
 }
 
 // WorktreeConfig controls git-worktree behaviour used by the daemon.
@@ -429,6 +434,16 @@ func (c *Config) AutoPREnabled() bool {
 		return false
 	}
 	return c.Output.AutoPR
+}
+
+// WritableBranchPrefixes returns the extra branch prefixes (beyond the
+// built-in hydra/ and dogfood/) that count as hydra-owned for the
+// publish-path ownership gate.
+func (c *Config) WritableBranchPrefixes() []string {
+	if c == nil {
+		return nil
+	}
+	return c.Output.WritableBranchPrefixes
 }
 
 // PRMergeEnabled reports whether integrates must land via PR + gh pr merge

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -891,6 +892,12 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 			return nil
 		}
 	}
+	cls := ClassifyPushFailure(reason)
+	action := ResolvePublishPath(cls, IsHydraOwnedBranch(branch, c.config.WritableBranchPrefixes()), true)
+	publishEvents.EmitRepo(projectPath, Event{Type: "publish_path_classified", Project: filepath.Base(projectPath), Reason: string(cls),
+		Detail: "push failure classified " + string(cls) + " -> " + string(action) + " for " + branch + ": " + reason,
+		Fields: map[string]any{"bead": string(bead.ID), "branch": branch, "class": string(cls), "action": string(action), "reason": reason, "project_path": projectPath}})
+	log.Printf("[Output] push failure for %s classified %s -> %s: %s", bead.ID, cls, action, reason)
 	return fmt.Errorf("push %s to %s/%s: %s", bead.ID, remote, branch, reason)
 }
 
