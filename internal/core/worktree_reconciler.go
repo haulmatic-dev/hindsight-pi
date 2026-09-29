@@ -71,12 +71,7 @@ func ReconcileOrphanedWorktrees(m *WorktreeManager, projectPath string, activeKe
 			continue
 		}
 
-		// Per-repo integration gate: same serialization as the close path —
-		// the reconciler sweep merging several stale branches back-to-back is
-		// itself a competitor for the base branch.
-		if err := integrationGate(projectPath, func() error {
-			return m.IntegrateBranchAndRemove(projectPath, key, branch)
-		}); err != nil {
+		if err := m.IntegrateBranchAndRemove(projectPath, key, branch); err != nil {
 			// Terminal + conflict: preserve the work on a quarantine branch
 			// and consume the wt branch — the alternative is retrying the
 			// same failing merge every sweep forever.

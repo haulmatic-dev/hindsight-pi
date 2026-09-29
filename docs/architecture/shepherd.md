@@ -445,14 +445,6 @@ Pan's LLM: the tier-2 judgment budget follows the anomaly rate. Workers
 younger than 10 minutes are skipped (mid-first-turn grace). Fail-open: a
 missing/unreadable session disables the class for that bead.
 
-**Shared integration wedge anomaly.** The health digest counts non-terminal
-beads labelled `integration-exhausted` per project (`intexh=` field in the
-digest text) and emits one anomaly at ≥3 open parks — "shared integration
-wedge" — so Pan/human triage the single project-level cause (poisoned bead
-store, stale integration base, protected branch) instead of the scheduler
-accumulating durable per-bead parks. Advisory telemetry like degradations:
-it never creates beads by itself.
-
 **Per-candidate judgment dedup.** Pan judges at most once per candidate
 state: `freshCandidates` (`internal/pan/pan.go`) keys a cache by candidate
 state hash (bead ID + state + normalized reason — volatile fields like ages
@@ -498,15 +490,6 @@ outcome, and emits a `[PanRepair]` JSON audit event (`bead_id`, `action`,
 | `prune-worktree-registration` | `git worktree prune` on the bead's project | project-scoped: rate-limited per project (30m), not per bead — one repair clears a fleet-wide registered-but-missing wedge (13 webapp beads from one stale registration, 2026-09-13) |
 | `re-push-integration` | reruns the publisher (`PublishRepo`) for a `<project>-push-pending` pseudo-bead | fail-closed: errors unless the stranded push actually cleared; project-scoped rate limit |
 | `integrate-stranded` | merges a stranded `hydra/wt-<key>` branch into the working branch and removes the worktree; on conflict quarantines to `hydra/quarantine/<key>` and labels `stranded-conflict`; on verification failure labels `integration-unverified` | only when the bead is terminal/unknown or carries a quarantine label (`stranded-conflict`/`integration-unverified`) and no live worker or active chain exists; idempotent via the `stranded-work` label; open `stranded-conflict` beads surface as Pan BLOCKED candidates via `panBlockedReason` |
-| `retry-quarantine` | merge-trees the bead's `hydra/quarantine/<key>` branch against the current base (origin preferred, local fallback); if clean, restores `hydra/wt-<key>` at the quarantine tip, deletes the quarantine branch, removes `stranded-conflict`, reopens the bead, resets retries, emits `quarantine_reattempt{result:requeued}` | fail-closed: refuses (bead stays quarantined) when no quarantine branch exists, the merge-tree errors, or the branch still conflicts — re-queue goes through the ordinary gated/verified integration paths, never a direct merge |
-
-**Per-repo integration gate (2026-09-29).** The close path's integrate/PR step
-and the worktree reconciler's stranded-branch merges run under
-`integrationGate` (`internal/core/integration_gate.go`): one bead per repo
-integrates at a time, and after a gated failure sibling beads wait a 30s
-repo cooldown before starting (success clears it immediately). The gate
-protects the exhaustion cap from a shared wedge, not from the bead's own
-work; the per-bead backoff in `failIntegration` still applies on top.
 
 **Bead-store integrity guard (2026-09-11).** `BeadStoreGuard`
 (`internal/core/bead_store_guard.go`) detects a corrupted `.beads` store that

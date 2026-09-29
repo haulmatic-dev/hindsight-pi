@@ -314,32 +314,20 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 				// the singleton's worktree branch is pushed to origin and landed
 				// via PR — no local merge into the working branch. The daemon
 				// gates already ran above, so the PR merge happens gates-green.
-				// Per-repo integration gate: serialize sibling closes so only
-				// one bead at a time merges into the same base branch, and wait
-				// out a short repo cooldown after a sibling's failure (shared
-				// wedge must not burn every bead's exhaustion cap).
-				integErr := integrationGate(projectPath, func() error {
-					if hasGitRemote(projectPath) {
-						if iErr := c.publishSingletonViaPR(projectPath, bead, key); iErr != nil {
-							return errStage{"integrate", iErr}
-						}
-					} else {
-						// No-remote fallback: legacy local --no-ff merge, then the
-						// ordinary push path (a no-op when push is disabled).
-						if iErr := c.worktreeManager.Integrate(projectPath, key); iErr != nil {
-							return errStage{"integrate", iErr}
-						}
-						if pErr := c.publishAfterIntegrate(projectPath, bead); pErr != nil {
-							return errStage{"push", pErr}
-						}
+				if hasGitRemote(projectPath) {
+					if iErr := c.publishSingletonViaPR(projectPath, bead, key); iErr != nil {
+						return c.failIntegration(bead, projectPath, repoName, "integrate", iErr)
 					}
-					return nil
-				})
-				if integErr != nil {
-					es := integErr.(errStage)
-					return c.failIntegration(bead, projectPath, repoName, es.stage, es.err)
+				} else {
+					// No-remote fallback: legacy local --no-ff merge, then the
+					// ordinary push path (a no-op when push is disabled).
+					if iErr := c.worktreeManager.Integrate(projectPath, key); iErr != nil {
+						return c.failIntegration(bead, projectPath, repoName, "integrate", iErr)
+					}
+					if pErr := c.publishAfterIntegrate(projectPath, bead); pErr != nil {
+						return c.failIntegration(bead, projectPath, repoName, "push", pErr)
+					}
 				}
-				resetIntegrationCooldown(projectPath)
 				c.resetIntegrationFailures(string(bead.ID))
 				c.worktreeManager.Remove(projectPath, key)
 				log.Printf("[Worktree] integrated singleton %s", bead.ID)
@@ -895,17 +883,6 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 			if isPRNoCommitsBetween(err) {
 				log.Printf("[Output] %s already merged into %s (gh pr create reported no commits between) — duplicate integrate treated as landed", bead.ID, branch)
 				AppendActivity(projectPath, string(bead.ID), "already landed (duplicate integrate no-op)")
-				return nil
-			}
-			// Benign duplicate-PR race: a PR for this dogfood head already
-			// exists (created by an earlier close or integration-retest). The
-			// PR is the landing vehicle — PublishViaPR already merged it; only
-			// surface an error when the merge itself failed (fleet wedge
-			// 2026-09-29: qj74/otae/0po4/242b/ycmu hard-parked
-			// integration-exhausted on this error with an open PR waiting).
-			if isPRAlreadyExists(err) {
-				log.Printf("[Output] %s: existing PR for %s → %s reused and merged", bead.ID, head, prBase)
-				AppendActivity(projectPath, string(bead.ID), "landed via existing PR")
 				return nil
 			}
 			log.Printf("[Output] PR merge failed for %s: %s", bead.ID, err)
