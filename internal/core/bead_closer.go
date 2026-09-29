@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -9,6 +10,18 @@ import (
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
+
+// getSemanticClusterer lazily builds the embedding-based clustering pass on
+// first use (an API key may only be set at close time, and building it
+// eagerly would log for every daemon without the pass enabled). Nil when
+// disabled or unconfigured: callers treat nil as "string clustering only".
+func (c *BeadCloser) getSemanticClusterer() *semanticClusterer {
+	if c.config == nil || !c.config.Validation.SemanticClustering.Enabled {
+		return nil
+	}
+	c.semanticOnce.Do(func() { c.semanticClusterer = newSemanticClusterer(c.config.Validation.SemanticClustering) })
+	return c.semanticClusterer
+}
 
 // BeadCloser closes beads via beadsClient based on worker completion status.
 type BeadCloser struct {
@@ -32,6 +45,8 @@ type BeadCloser struct {
 	retryManager       *RetryManager           // clears retry residue on verified close
 	workerSpawner      *WorkerSpawner          // clears spawn-failure residue on verified close
 	sessionResumePilot *SessionResumePilot     // session-file resume quality metrics
+	semanticClusterer  *semanticClusterer      // nil-safe; FR-020 semantic (embedding) clustering pass
+	semanticOnce       sync.Once
 }
 
 // SetWorktreeManager enables commit-on-close and singleton integrate-on-close
@@ -589,7 +604,41 @@ func (c *BeadCloser) createFixBeadForFailedCloseWithExitCode(bead *types.Bead, p
 			}
 			return nil
 		}
-		// No open meta bead with this signature: the fix bead we are about to
+		// No open meta bead with this signature. FR-020 follow-up (bead
+		// hydra-n5qt): before filing a new meta bead, run the semantic
+		// (embedding) pass — exact string equality split one root cause
+		// into 4 clusters during the 2026-09-29 telematics drain. Any
+		// embedding failure fails open: none of this blocks filing.
+		if sc := c.getSemanticClusterer(); sc != nil {
+			semCtx, semCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer semCancel()
+			openMeta := c.openMetaFixBeads(projectPath, repoName)
+			if len(openMeta) > 0 {
+				cands := make([]semanticCandidate, 0, len(openMeta))
+				for _, m := range openMeta {
+					mSig := firstFixSigLabel(m.Labels)
+					cands = append(cands, semanticCandidate{
+						id:    m.ID,
+						sig:   mSig,
+						cause: causeFromFixDescription(m.Description),
+					})
+				}
+				if dup := sc.findSemanticDuplicate(semCtx, sigLabel, cause, cands); dup != "" {
+					log.Printf("[BeadCloser] Parking %s against meta fix bead %s (semantic match) instead of creating a new per-bead fix bead", priorityBeadID, dup)
+					if c.beadsClient != nil {
+						if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{fixClusteredLabel, sigLabel}); err != nil {
+							log.Printf("[BeadCloser] Failed to label %s with %s: %v", bead.ID, fixClusteredLabel, err)
+						}
+						AppendActivity(projectPath, string(bead.ID), fmt.Sprintf("parked: open meta fix bead %s tracks this failure (semantic cluster match)", dup))
+						c.events.EmitRepo(projectPath, Event{Type: "fix_semantic_clustered", Project: repoName,
+							Bead: priorityBeadID, Reason: "semantic_duplicate",
+							Fields: map[string]any{"meta_fix": dup, "signature": sigLabel}})
+					}
+					return nil
+				}
+			}
+		}
+		// Still no cluster: the fix bead we are about to
 		// create becomes the cluster's meta bead and carries the signature label.
 		fixSigLabel = sigLabel
 	}
