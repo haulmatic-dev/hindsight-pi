@@ -75,7 +75,9 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 			Fields: map[string]any{"branch": branch, "feature_branch": feature, "project_path": projectPath}})
 		log.Printf("[Publish] PublishViaPR invoked for %s/%s via %s", projectPath, branch, feature)
 		url, err := publishWithRebaseRetry(
-			func() (string, error) { return PublishViaPR(projectPath, branch, feature, "Hydra publish: "+branch, token) },
+			func() (string, error) {
+				return PublishViaPR(projectPath, branch, feature, "Hydra publish: "+branch, token)
+			},
 			func() error { return rebaseCheckoutOntoBase(projectPath, branch) },
 			projectPath, branch)
 		if err != nil {
@@ -250,8 +252,8 @@ func SetPublishEventSink(s *EventSink) { publishEvents = s }
 
 // PR-merge exec-layer hooks. Overridden in tests to avoid real git/gh calls.
 var (
-	prMergeGitPush   = defaultPRMergeGitPush
-	autoPRGhMerge    = defaultAutoPRGhMerge
+	prMergeGitPush    = defaultPRMergeGitPush
+	autoPRGhMerge     = defaultAutoPRGhMerge
 	prMergeBranchPush = defaultPRMergeBranchPush
 )
 
@@ -325,7 +327,7 @@ func PublishViaPR(projectPath, base, featureBranch, title, token string) (string
 	if title == "" {
 		title = "Hydra dogfood PR"
 	}
-	url, err := autoPRGhCreate(projectPath, base, featureBranch, title, "Authored by a Hydra dogfood run.", token)
+	url, err := resolveOrCreatePR(projectPath, base, featureBranch, title, "Authored by a Hydra dogfood run.", token)
 	if err != nil {
 		if !isPRAlreadyExists(fmt.Errorf("pr merge: create PR: %w", err)) {
 			return "", fmt.Errorf("pr merge: create PR: %w", err)
@@ -389,7 +391,9 @@ func defaultPRMergeBranchPush(repoPath, localRef, ref, token string) error {
 // the cap (or a failed rebase) the error explicitly requests human review.
 func PublishBranchViaPR(projectPath, base, localBranch, featureBranch, title, token string) (string, error) {
 	return publishWithRebaseRetry(
-		func() (string, error) { return publishBranchViaPROnce(projectPath, base, localBranch, featureBranch, title, token) },
+		func() (string, error) {
+			return publishBranchViaPROnce(projectPath, base, localBranch, featureBranch, title, token)
+		},
 		func() error { return rebaseBranchOntoBase(projectPath, localBranch, base) },
 		projectPath, base)
 }
@@ -421,7 +425,7 @@ func publishBranchViaPRCreate(projectPath, base, localBranch, featureBranch, tit
 	if title == "" {
 		title = "Hydra dogfood PR"
 	}
-	url, err := autoPRGhCreate(projectPath, base, featureBranch, title, "Authored by a Hydra dogfood run.", token)
+	url, err := resolveOrCreatePR(projectPath, base, featureBranch, title, "Authored by a Hydra dogfood run.", token)
 	if err != nil {
 		if !isPRAlreadyExists(fmt.Errorf("pr merge: create PR: %w", err)) {
 			return "", fmt.Errorf("pr merge: create PR: %w", err)
@@ -444,19 +448,37 @@ func defaultAutoPRGhMerge(repoPath, head, token string) error {
 	merge.Dir = repoPath
 	merge.Env = env
 	if out, err := merge.CombinedOutput(); err != nil {
+		// Benign race: the PR reached MERGED between create/resolve and this
+		// merge call (duplicate integration). Verify state before failing.
+		state, viewErr := ghPRState(repoPath, head, env)
+		if viewErr == nil && state == "MERGED" {
+			return nil
+		}
 		return fmt.Errorf("gh pr merge: %w\n%s", err, strings.TrimSpace(string(out)))
 	}
+	state, err := ghPRState(repoPath, head, env)
+	if err != nil {
+		return err
+	}
+	if state != "MERGED" {
+		return fmt.Errorf("gh pr view: state=%q, want MERGED", state)
+	}
+	return nil
+}
+
+// ghPRState reads a PR's state via gh pr view. env carries GH_TOKEN when set.
+// Overridden in tests.
+var ghPRState = defaultGhPRState
+
+func defaultGhPRState(repoPath, head string, env []string) (string, error) {
 	view := exec.Command("gh", "pr", "view", head, "--json", "state", "--jq", ".state")
 	view.Dir = repoPath
 	view.Env = env
 	out, err := view.Output()
 	if err != nil {
-		return fmt.Errorf("gh pr view: %w", err)
+		return "", fmt.Errorf("gh pr view: %w", err)
 	}
-	if state := strings.TrimSpace(string(out)); state != "MERGED" {
-		return fmt.Errorf("gh pr view: state=%q, want MERGED", state)
-	}
-	return nil
+	return strings.TrimSpace(string(out)), nil
 }
 
 // prSafeName reduces a project directory name to a branch-safe token.
@@ -618,6 +640,70 @@ func defaultAutoPRGitPush(repoPath, ref, token string) error {
 
 func defaultAutoPRLsRemote(repoPath, remote, ref string) (string, error) {
 	return gitOut(repoPath, "ls-remote", remote, ref)
+}
+
+// resolveExistingPR looks up the open-or-merged PR already tracking head.
+// Used when gh pr create fails with "a pull request for branch ... already
+// exists": the wedge that hard-parked seven srv-telematics beads in a row
+// (2026-09-29) — the pre-existing PR was never resolved or merged, so every
+// retry failed identically until the consecutive-failure cap fired.
+// ghPRView looks up an existing PR for head, returning "<url> <state>".
+// Overridden in tests.
+var ghPRView = defaultGhPRView
+
+func defaultGhPRView(repoPath, head, token string) (string, error) {
+	cmd := exec.Command("gh", "pr", "view", head, "--json", "url,state", "--jq", ".url + \" \" + .state")
+	cmd.Dir = repoPath
+	if token != "" {
+		cmd.Env = append(os.Environ(), "GH_TOKEN="+token)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gh pr view %s: %w\n%s", head, err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// isPRAlreadyExists reports the idempotent re-integration case: a PR for
+// this head branch was opened by an earlier integration attempt (the
+// srv-telematics wedge, 2026-09-29 — seven beads hard-parked because the
+// pre-existing PR was never resolved or merged).
+func isPRAlreadyExists(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "already exists")
+}
+
+// resolveOrCreatePR returns autoPRGhCreate's URL, falling back to resolving
+// the pre-existing PR when create reports "already exists".
+func resolveOrCreatePR(repoPath, base, head, title, body, token string) (string, error) {
+	url, err := autoPRGhCreate(repoPath, base, head, title, body, token)
+	if err == nil {
+		return url, nil
+	}
+	if isPRAlreadyExists(err) {
+		if url, rerr := resolveExistingPR(repoPath, head, token); rerr == nil {
+			log.Printf("[Publish] PR for %s already exists — resolving existing PR instead of failing: %s", head, url)
+			return url, nil
+		}
+	}
+	return "", err
+}
+
+func resolveExistingPR(repoPath, head, token string) (string, error) {
+	out, err := ghPRView(repoPath, head, token)
+	if err != nil {
+		return "", err
+	}
+	parts := strings.Fields(out)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("gh pr view %s: unexpected output %q", head, out)
+	}
+	url, state := parts[0], parts[1]
+	switch state {
+	case "OPEN", "MERGED":
+		return url, nil
+	default:
+		return "", fmt.Errorf("gh pr view %s: existing PR state %q not resolvable", head, state)
+	}
 }
 
 func defaultAutoPRGhCreate(repoPath, base, head, title, body, token string) (string, error) {
