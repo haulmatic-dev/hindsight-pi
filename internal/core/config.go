@@ -608,6 +608,12 @@ type OverseerConfig struct {
 	// worker spawns, the adjudicator, and validation — so they stop refusing
 	// each other's calls (Shepherd B3).
 	ProviderPool PoolConfig `yaml:"provider_pool"`
+	// EscalationTTL ages human escalations: a bead carrying the durable
+	// `escalated` label older than this is demoted back to the ready queue
+	// (label swapped for `escalation-expired`) with a structured event.
+	// Escalations were previously never adjudicated, permanently wedging the
+	// scheduler slot they hold. 0 disables the scanner.
+	EscalationTTL time.Duration `yaml:"escalation_ttl"`
 	// MaxBeadTokens is the cumulative per-bead token ceiling enforced by
 	// Charon: a working worker past the ceiling is killed and escalated via
 	// the retry cap (0 = disabled). Non-converging grinders otherwise burn
@@ -728,6 +734,7 @@ func DefaultConfig() *Config {
 			BeadDiscoveryInterval: 5 * time.Second,
 			MaxWorkers:            2,
 			DefaultRetries:        3,
+			EscalationTTL:         72 * time.Hour,
 			WorkerTimeout:         30 * time.Minute,
 			ChainDetection: ChainDetectionConfig{
 				Enabled:  true,
