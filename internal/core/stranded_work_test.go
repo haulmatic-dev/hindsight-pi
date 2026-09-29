@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -249,15 +250,17 @@ func TestIntegrateStrandedRepair_Conflict(t *testing.T) {
 }
 
 type fakeStrandedManager struct {
-	resolve        string
-	integrateErr   error
-	quarantine     string
-	quarantineErr  error
+	resolve       string
+	integrateErr  error
+	quarantine    string
+	quarantineErr error
 }
 
 func (f *fakeStrandedManager) IntegrateBranchAndRemove(_, _, _ string) error { return f.integrateErr }
-func (f *fakeStrandedManager) QuarantineBranchAndRemove(_, _, _ string) (string, error) { return f.quarantine, f.quarantineErr }
-func (f *fakeStrandedManager) ResolveBranch(_, _ string) string              { return f.resolve }
+func (f *fakeStrandedManager) QuarantineBranchAndRemove(_, _, _ string) (string, error) {
+	return f.quarantine, f.quarantineErr
+}
+func (f *fakeStrandedManager) ResolveBranch(_, _ string) string { return f.resolve }
 
 func TestIntegrateStrandedRepair_VerificationFailure(t *testing.T) {
 	projectPath := gitInitRepo(t)
@@ -312,7 +315,7 @@ func TestDetectStrandedWork_AcceptsOpenQuarantineLabeledBead(t *testing.T) {
 	beads := newMockBeadsClient()
 	beads.beads[key] = types.Bead{
 		ID: types.BeadID(key), Status: types.StatusOpen,
-		Labels: []string{strandedConflictLabel},
+		Labels:  []string{strandedConflictLabel},
 		Project: filepath.Base(projectPath),
 	}
 	sink := NewEventSink(t.TempDir())
@@ -341,12 +344,79 @@ func TestDetectStrandedWork_AcceptsOpenIntegrationUnverifiedBead(t *testing.T) {
 	beads := newMockBeadsClient()
 	beads.beads[key] = types.Bead{
 		ID: types.BeadID(key), Status: types.StatusOpen,
-		Labels: []string{integrationUnverifiedLabel},
+		Labels:  []string{integrationUnverifiedLabel},
 		Project: filepath.Base(projectPath),
 	}
 
 	units := DetectStrandedWork(nil, projectPath, nil, nil, beads, nil)
 	if len(units) != 1 {
 		t.Fatalf("open integration-unverified bead must be stranded, got %d units", len(units))
+	}
+}
+
+func TestIntegrateStrandedRepair_ConflictWritesManifest(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	projectPath := gitInitRepo(t)
+	m := NewWorktreeManager()
+	key := "srv-manifest"
+
+	wt, err := m.EnsureWorktree(projectPath, key)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, "shared.txt"), []byte("main content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCmd(t, projectPath, "add", "shared.txt")
+	runGitCmd(t, projectPath, "commit", "-m", "main shared")
+
+	if err := os.WriteFile(filepath.Join(wt, "shared.txt"), []byte("worktree content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Commit(wt, "bead("+key+"): add shared file"); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	beads := newMockBeadsClient()
+	beads.beads[key] = types.Bead{ID: types.BeadID(key), Status: types.StatusCompleted, Project: filepath.Base(projectPath)}
+	sink := NewEventSink(t.TempDir())
+
+	if err := IntegrateStrandedRepair(projectPath, key, m, beads, sink); err != nil {
+		t.Fatalf("conflict repair must return nil, got %v", err)
+	}
+	manifestPath := filepath.Join(projectPath, ".hydra", "conflict-manifests", key+".json")
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("conflict manifest not written: %v", err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("manifest is not valid JSON: %v", err)
+	}
+	if clean, _ := manifest["clean_merge"].(bool); clean {
+		t.Fatal("clean_merge = true, want false for a conflicting merge")
+	}
+	conflicts, _ := manifest["conflicts"].([]any)
+	if len(conflicts) != 1 || conflicts[0] != "shared.txt" {
+		t.Fatalf("conflicts = %v, want [shared.txt]", conflicts)
+	}
+	if adds, _ := manifest["commits_not_in_base"].([]any); len(adds) != 1 {
+		t.Fatalf("commits_not_in_base = %v, want 1 entry", adds)
+	}
+	// The working checkout must be untouched by the manifest dry-run.
+	if branchExists(projectPath, "hydra/quarantine/"+key) != true {
+		t.Fatal("conflicting work should still be quarantined")
+	}
+	if got, _ := os.ReadFile(filepath.Join(projectPath, "shared.txt")); string(got) != "main content\n" {
+		t.Fatalf("working branch shared.txt = %q, want main content", got)
+	}
+	ev := readEventsOfType(t, sink, "stranded_conflict")
+	if len(ev) != 1 {
+		t.Fatal("expected one stranded_conflict event")
+	}
+	if _, ok := ev[0].Fields["conflict_manifest"]; !ok {
+		t.Fatalf("stranded_conflict event missing conflict_manifest field: %+v", ev[0].Fields)
 	}
 }

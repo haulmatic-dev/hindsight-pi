@@ -1,8 +1,10 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -247,6 +249,17 @@ func IntegrateStrandedRepair(projectPath, key string, wm strandedWorktreeManager
 	}
 
 	// Merge conflict: quarantine the branch and escalate to a human.
+	// Persist a conflict manifest first (the --conflicts-dry-run contract):
+	// a no-commit merge in a throwaway detached worktree records the exact
+	// conflicted files, unmerged index states and the duplicate signal
+	// (quarantine commits not reachable from the working branch), so the
+	// human/agent doing triage starts from the file list instead of
+	// re-deriving it (telematics pmgh/5gq, 2026-09-25).
+	manifestPath, merr := writeConflictManifest(projectPath, key, branch)
+	if merr != nil {
+		// Manifest generation is best-effort triage aid — fail open.
+		log.Printf("[PanRepair] integrate-stranded: conflict manifest for %s failed (continuing): %v", key, merr)
+	}
 	qb, qerr := wm.QuarantineBranchAndRemove(projectPath, key, branch)
 	if qerr != nil {
 		return fmt.Errorf("integrate-stranded: quarantine %s after conflict: %w", branch, qerr)
@@ -257,16 +270,114 @@ func IntegrateStrandedRepair(projectPath, key string, wm strandedWorktreeManager
 		}
 	}
 	if events != nil {
+		detail := fmt.Sprintf("stranded branch %s quarantined to %s due to merge conflict", branch, qb)
+		fields := map[string]any{"branch": branch, "quarantine_branch": qb}
+		if merr == nil && manifestPath != "" {
+			detail += fmt.Sprintf("; conflict manifest: %s", manifestPath)
+			fields["conflict_manifest"] = manifestPath
+		}
 		events.EmitRepo(projectPath, Event{
 			Type:    "stranded_conflict",
 			Project: filepath.Base(projectPath),
 			Bead:    key,
 			Reason:  "merge_conflict",
-			Detail:  fmt.Sprintf("stranded branch %s quarantined to %s due to merge conflict", branch, qb),
-			Fields:  map[string]any{"branch": branch, "quarantine_branch": qb},
+			Detail:  detail,
+			Fields:  fields,
 		})
 	}
 	return nil
+}
+
+// writeConflictManifest attempts a no-commit merge of branch into a throwaway
+// detached worktree at the working branch tip (the manifest contract for the
+// --conflicts-dry-run workflow) and, on conflict, writes
+// .hydra/conflict-manifests/<key>.json containing the conflicted files, the
+// unmerged index states and the duplicate signal (quarantine commits not
+// reachable from the working branch tip, via `git cherry`). A clean merge
+// yields a manifest with an empty conflict list. The worktree is always
+// removed; the working checkout's index is never touched.
+func writeConflictManifest(projectPath, key, branch string) (string, error) {
+	if _, err := gitOut(projectPath, "rev-parse", "--git-dir"); err != nil {
+		return "", fmt.Errorf("not a git repo: %w", err)
+	}
+	if !branchExists(projectPath, branch) {
+		return "", fmt.Errorf("branch %s not found", branch)
+	}
+	baseTip, err := gitOut(projectPath, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("rev-parse HEAD: %w", err)
+	}
+	start := strings.TrimSpace(baseTip)
+
+	tmp, err := os.MkdirTemp("", "hydra-conflict-manifest-")
+	if err != nil {
+		return "", fmt.Errorf("temp dir: %w", err)
+	}
+	defer func() {
+		_, _ = gitOut(projectPath, "worktree", "remove", tmp, "--force")
+		_, _ = gitOut(projectPath, "worktree", "prune")
+		_ = os.RemoveAll(tmp)
+	}()
+	if _, err := gitOut(projectPath, "worktree", "add", "--detach", tmp, start); err != nil {
+		return "", fmt.Errorf("scratch worktree: %w", err)
+	}
+
+	cleanMerge := true
+	var conflicts, unmerged, cherryAdds []string
+	if _, merr := gitOut(tmp, "merge", "--no-commit", "--no-ff", branch); merr != nil {
+		cleanMerge = false
+		if out, err := gitOut(tmp, "diff", "--name-only", "--diff-filter=U"); err == nil {
+			conflicts = splitNonEmpty(out)
+		}
+		if out, err := gitOut(tmp, "status", "--porcelain"); err == nil {
+			for _, l := range splitNonEmpty(out) {
+				code := strings.TrimSpace(l[:2])
+				if strings.ContainsAny(code, "UAD") {
+					unmerged = append(unmerged, strings.TrimSpace(l))
+				}
+			}
+		}
+		if out, cerr := gitOut(projectPath, "cherry", start, branch); cerr == nil {
+			for _, l := range splitNonEmpty(out) {
+				if strings.HasPrefix(l, "+") {
+					cherryAdds = append(cherryAdds, strings.TrimSpace(strings.TrimPrefix(l, "+"))[:12])
+				}
+			}
+		}
+	}
+
+	manifest := map[string]any{
+		"key":                 key,
+		"branch":              branch,
+		"base":                strings.TrimSpace(baseTip),
+		"clean_merge":         cleanMerge,
+		"conflicts":           conflicts,
+		"unmerged":            unmerged,
+		"commits_not_in_base": cherryAdds,
+	}
+	b, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal manifest: %w", err)
+	}
+	outDir := filepath.Join(projectPath, ".hydra", "conflict-manifests")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return "", fmt.Errorf("manifest dir: %w", err)
+	}
+	outPath := filepath.Join(outDir, key+".json")
+	if err := os.WriteFile(outPath, append(b, '\n'), 0o644); err != nil {
+		return "", fmt.Errorf("write manifest: %w", err)
+	}
+	return outPath, nil
+}
+
+func splitNonEmpty(s string) []string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			out = append(out, strings.TrimSpace(l))
+		}
+	}
+	return out
 }
 
 func removeStrandedWorkLabel(projectPath string, id types.BeadID, beadsClient BeadsClient) error {
