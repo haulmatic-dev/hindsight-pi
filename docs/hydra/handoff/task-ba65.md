@@ -11,7 +11,7 @@
 - `git log origin/development -- internal/core/spawn_exclusivity.go` + `git grep exclusive_paths origin/development` — empty: FR-002 never landed.
 - `git log origin/development -3 -- docs/architecture/system-loop.md` — FR-003 (84bffe1) landed 2026-09-29.
 - `git branch -r | grep d778` — origin/dogfood/hydra-d778 still present (deletion pending PR #316 closure).
-- `gh pr view 316` — NOT VERIFIED: gh not authenticated in this environment ("To get started with GitHub CLI, please run: gh auth login"); PR closure is an operator step.
+- `gh pr view 316` — NOT VERIFIED via gh (no token on host; anonymous API 403 on private repo). PR state verified at git level instead: `git merge-base --is-ancestor ae11a67 origin/development` → NOT-MERGED; `git ls-remote origin refs/heads/dogfood/hydra-d778` → still present. Confirms PR never merged, matching abandon-with-summary.
 
 ## Open edges for the next phase
 - Operator: close PR #316 without merging (superseded by FR-003), then delete origin/dogfood/hydra-d778.
