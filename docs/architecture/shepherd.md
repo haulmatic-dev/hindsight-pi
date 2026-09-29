@@ -327,7 +327,14 @@ without it the worker never reports and behaves exactly as before (fail-open).
 The store opens in the service starter, not in `NewOverseer`, so tests never
 touch the filesystem. On startup it reaps terminal rows and rows whose last
 heartbeat is older than 24 h (`Store.ReapStale`), plus their queued commands,
-so Pan and the scheduler never act on zombie state from prior runs. Route
+so Pan and the scheduler never act on zombie state from prior runs. Operator
+actions on the same store go through the FR-033 operator API instead of direct
+sqlite manipulation: `POST /api/v1/projects/:name/park` / `.../unpark`
+(optionally `{"reason": ...}`), `GET /api/v1/quarantine` (lists
+`hydra/quarantine/*` branches and quarantine-labeled beads per project), and
+`POST /api/v1/quarantine/:bead/clear` (`{"project": ..., "labels": [...]}` —
+only quarantine labels can be removed). Each mutation emits a typed audit
+event (`project_parked` / `project_unparked` / `quarantine_cleared`). Route
 handlers resolve the store **per request** — a store captured at
 route-registration time is nil because the store opens later; that bug shipped
 and returned 503s until fixed.

@@ -1691,3 +1691,19 @@ func (o *Overseer) buildWorkerEnvironmentWithContext(bead types.Bead) []string {
 func (o *Overseer) runPiSetup() error {
 	return o.piSetupManager.RunSetup()
 }
+
+// --- Operator API accessors (FR-033) ---
+
+// RegistryStore exposes the worker registry store for the operator API. May be
+// nil until the service starter opens the registry.
+func (o *Overseer) RegistryStore() *registry.Store { return o.registryStore }
+
+// EventSink exposes the shared structured event sink for operator-API audit
+// events. Never nil after NewOverseer.
+func (o *Overseer) EventSink() *EventSink { return o.eventSink }
+
+// BeadsClient exposes the beads client for operator quarantine queries.
+func (o *Overseer) BeadsClient() BeadsClient { return o.beadsClient }
+
+// Projects exposes the configured project list for operator API scoping.
+func (o *Overseer) Projects() []types.Project { return o.projects }
