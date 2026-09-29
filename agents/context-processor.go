@@ -70,7 +70,12 @@ func DefaultContextProcessorConfig() ContextProcessorConfig {
 	return ContextProcessorConfig{
 		Enabled:         true,
 		CacheTTL:        5 * time.Minute,
-		MaxQueryLatency: 500 * time.Millisecond,
+		// Measured 2026-09-28: server-side recall p50 is ~4.6s (with
+		// HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING=true). 500ms cancelled
+		// EVERY daemon-side recall, silently emptying pre-injection fleet-wide.
+		// 15s gives headroom; recall is fail-open, worst case a slow backend
+		// delays prompt build slightly.
+		MaxQueryLatency: 15 * time.Second,
 	}
 }
 
