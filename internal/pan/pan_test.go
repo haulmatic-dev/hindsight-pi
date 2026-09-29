@@ -354,7 +354,7 @@ func TestTickDeduplicatesPendingCommands(t *testing.T) {
 
 func TestBuildPromptListsRepairWhitelist(t *testing.T) {
 	prompt := BuildPrompt(nil)
-	for _, name := range []string{"repair-worktree", "reap-placeholder", "reset-retries", "repair-bead-store", "clear-hard-park"} {
+	for _, name := range []string{"repair-worktree", "reap-placeholder", "reset-retries", "repair-bead-store", "clear-hard-park", "clear-escalation"} {
 		if !strings.Contains(prompt, name) {
 			t.Errorf("prompt missing whitelisted repair name %q", name)
 		}
@@ -647,5 +647,14 @@ func TestTickStalePendingAbandonRefusedWithLiveWorker(t *testing.T) {
 	}
 	if len(store.enqueued) != 0 {
 		t.Errorf("stale pending abandon enqueued a duplicate: %+v", store.enqueued)
+	}
+}
+
+func TestBuildPromptEscalationRecipe(t *testing.T) {
+	prompt := BuildPrompt(nil)
+	for _, want := range []string{"repair:clear-escalation", "escalated to a human"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing stale-escalation guidance %q", want)
+		}
 	}
 }
