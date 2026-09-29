@@ -30,10 +30,12 @@
   - Net: **85% used, 68G free** — at the 85% watermark, no longer exceeding.
 - Not doable as uid `hydra` (no sudo, verified `sudo -n true` → password
   required):
-  - `journalctl --vacuum-size` — "No journal files were opened due to
-    insufficient permissions" (`/var/log` 1.7G, `/var/backups` 1.6G).
-  - Cache caps: journald `SystemMaxUse`, npm cache purge
-    (`/home/ajantha/.npm` 560M, permission denied).
+  - `journalctl --vacuum-size` / `journalctl --user --vacuum-size` — both
+    "No journal files were opened due to insufficient permissions"
+    (`/var/log` 1.7G, `/var/backups` 1.6G).
+  - Cache caps: journald `SystemMaxUse`, ajantha npm cache purge
+    (`/home/ajantha/.npm` 560M, permission denied). Hydra's own npm cache
+    was cleaned (8.8M → 5.9M).
 - **Operator follow-up (as root):** journalctl vacuum, set
   `SystemMaxUse=500M` in `/etc/systemd/journald.conf`, `npm cache clean
   --force` as ajantha. Optionally add a tmpfiles rule / cron for
