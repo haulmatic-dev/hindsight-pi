@@ -7,6 +7,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+- Integration triage for the hydra-242b hard-park (`integration-exhausted`, shared wedge): branch `hydra/wt-hydra-242b` is a superseded iteration — its escalation auto-expiry feature landed independently as the escalation_ttl scanner (2ee7449), and rebasing would delete 3,497 lines of newer landed work (internal/triage/*, internal/degrade/*). Disposition: `abandon-with-summary`, NOT rebase, NOT cherry-pick, NOT `clear-hard-park`; and do NOT add a configurable integrate-stranded retry budget — the durable park + human triage flow worked as designed (all three inspected stranded branches were superseded iterations). Findings + evidence: `docs/discovery/integration-triage-242b.md`.
+
 ### Fixed
 - Park no longer blocks Charon orphan recovery (live incident 2026-09-29 10:20 UTC): recoverOrphanInProgressBeads skipped all orphan handling for parked projects, so their dead workers' `running` tracker rows were never reaped — the daemon tracked 6/6 phantom worker slots with 0 live processes and the whole fleet stalled ("All worker slots filled (6/6), skipping bead discovery") until restart. Park's contract is stop-NEW-spawns; the scheduler already consults ProjectParkInfo on every spawn path, so recovery (stale-row reap + orphan reopen) now runs for parked projects too. Test: `TestRecoverOrphanInProgressBeads_ParkedCampaignStillRecovers`.
 ### Documentation
