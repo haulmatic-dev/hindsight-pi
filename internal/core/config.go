@@ -38,6 +38,9 @@ type Config struct {
 	// ContextPack configures the chain orientation pack (mechanical build +
 	// agentic scout fallback). See docs/architecture/context-pack.md.
 	ContextPack ContextPackConfig `yaml:"context_pack"`
+	// Deploy configures the FR-031 tier-1 auto-merge gate and canary deploy
+	// with automatic rollback. Disabled by default (NFR-004).
+	Deploy DeployConfig `yaml:"deploy"`
 }
 
 // ContextPackConfig configures the chain context pack.

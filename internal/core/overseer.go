@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -223,6 +224,9 @@ type Overseer struct {
 	// BeadCloser closes beads based on worker completion
 	beadCloser      *BeadCloser
 	worktreeManager *WorktreeManager // per-chain git isolation; nil = disabled
+
+	// FR-031: tier-1 canary deploy orchestrator; nil when deploy.enabled=false
+	tier1Deployer *Tier1Deployer
 }
 
 // NewOverseer creates a new overseer instance
@@ -254,6 +258,19 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize config manager
 	o.configManager = NewConfigManager(o)
+
+	// FR-031: tier-1 canary deploy with rollback (opt-in via deploy.enabled).
+	if config.Deploy.Enabled {
+		o.tier1Deployer = NewTier1Deployer(config.Deploy, o.eventSink,
+			func() int { return o.GetActiveWorkerCount() },
+			func(n int) {
+				if n < 0 {
+					n = config.Overseer.MaxWorkers
+				}
+				o.stateController.SetMaxWorkers(n)
+			})
+		log.Printf("[Deploy] tier-1 canary deploy enabled (repo=%s)", config.Deploy.RepoPath)
+	}
 
 	// Initialize DAG builder
 	o.dagBuilder = NewDAGBuilder(o.errorLogger)
@@ -832,6 +849,10 @@ func (o *Overseer) publishOneProject(project types.Project, active map[string]bo
 		token = uc.Token
 	}
 	pushed, reason := PublishRepo(o.worktreeManager, project.Path, token, o.config.PRMergeEnabled(), active, o.terminalBeadChecker(project.Path))
+	if pushed && o.tier1Deployer != nil && o.tier1Deployer.cfg.Enabled &&
+		o.tier1Deployer.cfg.RepoPath != "" && project.Path == o.tier1Deployer.cfg.RepoPath {
+		go o.tier1Deployer.RunAfterMerge(filepath.Base(project.Path))
+	}
 	if pushed || benignPublishReasons[reason] {
 		o.clearPushPending(project.Path)
 	} else {
