@@ -329,12 +329,10 @@ func PublishViaPR(projectPath, base, featureBranch, title, token string) (string
 	}
 	url, err := resolveOrCreatePR(projectPath, base, featureBranch, title, "Authored by a Hydra dogfood run.", token)
 	if err != nil {
-		if !isPRAlreadyExists(fmt.Errorf("pr merge: create PR: %w", err)) {
-			return "", fmt.Errorf("pr merge: create PR: %w", err)
-		}
-		// A PR for this feature branch already exists — reuse it (same
-		// duplicate-PR race as publishBranchViaPROnce); the merge below
-		// lands it instead of failing the publish (fleet wedge 2026-09-29).
+		// resolveOrCreatePR already resolved-and-returned an existing open/merged
+		// PR; anything surfacing here (no PR found, CLOSED PR, real create error)
+		// is a genuine failure — fail-closed, do not proceed to merge.
+		return "", fmt.Errorf("pr merge: create PR: %w", err)
 	}
 	if err := autoPRGhMerge(projectPath, featureBranch, token); err != nil {
 		return url, fmt.Errorf("pr merge: merge %s: %w", url, err)
@@ -400,16 +398,7 @@ func PublishBranchViaPR(projectPath, base, localBranch, featureBranch, title, to
 
 // publishBranchViaPROnce is one unguarded PublishBranchViaPR attempt.
 func publishBranchViaPROnce(projectPath, base, localBranch, featureBranch, title, token string) (string, error) {
-	url, err := publishBranchViaPRCreate(projectPath, base, localBranch, featureBranch, title, token)
-	if isPRAlreadyExists(err) {
-		// An open PR for this head already exists — reuse it. Resolve its URL
-		// from the error text so the merge step can proceed; fail-open (return
-		// a URL-less success is not possible here, so surface a descriptive
-		// nil-error marker URL) — mergeWithVerify uses gh pr merge on the
-		// head branch, not the URL.
-		return "already-exists", nil
-	}
-	return url, err
+	return publishBranchViaPRCreate(projectPath, base, localBranch, featureBranch, title, token)
 }
 
 func publishBranchViaPRCreate(projectPath, base, localBranch, featureBranch, title, token string) (string, error) {
@@ -427,11 +416,10 @@ func publishBranchViaPRCreate(projectPath, base, localBranch, featureBranch, tit
 	}
 	url, err := resolveOrCreatePR(projectPath, base, featureBranch, title, "Authored by a Hydra dogfood run.", token)
 	if err != nil {
-		if !isPRAlreadyExists(fmt.Errorf("pr merge: create PR: %w", err)) {
-			return "", fmt.Errorf("pr merge: create PR: %w", err)
-		}
-		// A PR for this feature branch already exists — reuse it (same
-		// duplicate-PR race as publishBranchViaPROnce); the merge below lands it.
+		// resolveOrCreatePR already resolved-and-returned an existing open/merged
+		// PR; anything surfacing here (no PR found, CLOSED PR, real create error)
+		// is a genuine failure — fail-closed, do not proceed to merge.
+		return "", fmt.Errorf("pr merge: create PR: %w", err)
 	}
 	if err := autoPRGhMerge(projectPath, featureBranch, token); err != nil {
 		return url, fmt.Errorf("pr merge: merge %s: %w", url, err)
@@ -662,14 +650,6 @@ func defaultGhPRView(repoPath, head, token string) (string, error) {
 		return "", fmt.Errorf("gh pr view %s: %w\n%s", head, err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-// isPRAlreadyExists reports the idempotent re-integration case: a PR for
-// this head branch was opened by an earlier integration attempt (the
-// srv-telematics wedge, 2026-09-29 — seven beads hard-parked because the
-// pre-existing PR was never resolved or merged).
-func isPRAlreadyExists(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "already exists")
 }
 
 // resolveOrCreatePR returns autoPRGhCreate's URL, falling back to resolving

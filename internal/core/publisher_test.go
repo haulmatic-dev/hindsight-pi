@@ -735,8 +735,16 @@ a pull request for branch "dogfood/bead-11" into branch "main" already exists:
 https://github.com/x/y/pull/42`)}
 	restore := installAutoPRFake(fake)
 	restoreMerge := installPRMergeFake(fake)
+	// The resolver looks the existing PR up via gh pr view — stub it so the
+	// resolveOrCreatePR path (not an env-dependent real gh call) resolves the
+	// existing PR for the merge step.
+	origView := ghPRView
+	ghPRView = func(repoPath, head, token string) (string, error) {
+		return "https://github.com/x/y/pull/42 OPEN", nil
+	}
 	defer restore()
 	defer restoreMerge()
+	defer func() { ghPRView = origView }()
 
 	closer := NewBeadCloser(&autoPRFakeBeadsClient{}, nil, nil, nil,
 		&Config{Output: OutputConfig{Push: true, PRMerge: true}})
