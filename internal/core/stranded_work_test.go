@@ -297,3 +297,56 @@ func makeStrandedBranch(t *testing.T, projectPath, key string) {
 // Ensure the test compiles even if no other file uses the production WorktreeManager parameter.
 var _ = NewWorktreeManager
 var _ = time.Now
+
+// FR-021: an open bead quarantined by integrate-stranded (or marked
+// integration-unverified) is no longer resumable by a worker — the detector
+// must accept it instead of skipping the "still live / resumable" check.
+func TestDetectStrandedWork_AcceptsOpenQuarantineLabeledBead(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	projectPath := gitInitRepo(t)
+	key := "srv-quarantined"
+	makeStrandedBranch(t, projectPath, key)
+
+	beads := newMockBeadsClient()
+	beads.beads[key] = types.Bead{
+		ID: types.BeadID(key), Status: types.StatusOpen,
+		Labels: []string{strandedConflictLabel},
+		Project: filepath.Base(projectPath),
+	}
+	sink := NewEventSink(t.TempDir())
+
+	units := DetectStrandedWork(nil, projectPath, nil, nil, beads, sink)
+	if len(units) != 1 {
+		t.Fatalf("open quarantine-labeled bead must be stranded, got %d units", len(units))
+	}
+	if !hasLabel(beads.beads[key].Labels, strandedWorkLabel) {
+		t.Fatalf("bead labels %v missing %q", beads.beads[key].Labels, strandedWorkLabel)
+	}
+	// Dedup: second sweep must not re-report.
+	if again := DetectStrandedWork(nil, projectPath, nil, nil, beads, sink); len(again) != 0 {
+		t.Fatalf("second sweep re-reported %d units", len(again))
+	}
+}
+
+func TestDetectStrandedWork_AcceptsOpenIntegrationUnverifiedBead(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	projectPath := gitInitRepo(t)
+	key := "srv-unverified"
+	makeStrandedBranch(t, projectPath, key)
+
+	beads := newMockBeadsClient()
+	beads.beads[key] = types.Bead{
+		ID: types.BeadID(key), Status: types.StatusOpen,
+		Labels: []string{integrationUnverifiedLabel},
+		Project: filepath.Base(projectPath),
+	}
+
+	units := DetectStrandedWork(nil, projectPath, nil, nil, beads, nil)
+	if len(units) != 1 {
+		t.Fatalf("open integration-unverified bead must be stranded, got %d units", len(units))
+	}
+}
