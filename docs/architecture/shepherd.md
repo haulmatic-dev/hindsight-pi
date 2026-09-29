@@ -559,6 +559,16 @@ emit `integration_retest{result:gates-failed}`. Beads also carrying
 are skipped. Everything fails open: gh/network/registry errors skip the bead
 for the tick. Human resume is still required for anything not provably clean.
 
+**Fast-path absorption (2026-09-29).** When a gated integration on a repo
+SUCCEEDS (close-path singleton PR landing or worktree-reconciler merge — the
+per-repo integration gate's success path), the retest stage is notified
+immediately: it opens a 5-minute fast-path window for that repo and runs an
+extra sweep in the background, during which the per-bead `retry_interval`
+is bypassed (the `max_attempts` cap still applies). This drains a backlog of
+integration-parked siblings right after the path opens, instead of absorbing
+them one per hour — the "five beads parked within minutes, converged back
+one-per-hour" pattern of the 2026-09-29 integration-exhausted spike.
+
 **Push-pending visibility (2026-09-13).** `publishProjects` previously
 discarded `PublishRepo`'s `(pushed, reason)` result, so a push rejected by
 branch protection or a failing pre-push hook retried silently forever — the

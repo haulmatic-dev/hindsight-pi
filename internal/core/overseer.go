@@ -579,6 +579,12 @@ func NewOverseer(config *Config) *Overseer {
 			log.Printf("[IntegrationRetest] stage armed (max_attempts=%d retry_interval=%s)",
 				o.integrationRetest.cfg.MaxAttempts, o.integrationRetest.cfg.RetryInterval)
 		}
+		// Fast-path absorption: when a gated integration succeeds, parked
+		// siblings on the same repo retest immediately (interval bypass inside
+		// a short window) instead of waiting out the hourly RetryInterval.
+		SetIntegrationOpenNotifier(func(projectPath string) {
+			o.integrationRetest.NotifyRepoOpen(projectPath, o.projects)
+		})
 	}
 	retainer := NewVerdictRetainer(o.hindsightClient)
 	o.beadCloser.SetVerdictRetainer(retainer)

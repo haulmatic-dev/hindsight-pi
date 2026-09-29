@@ -33,7 +33,25 @@ var (
 	integrationRepoLocksMu sync.Mutex
 	integrationRepoLocks   = map[string]*sync.Mutex{}
 	integrationRepoLast    sync.Map // repoPath -> time.Time of last gated failure
+
+	// integrationOpenNotifier, when set, is invoked whenever a repo's
+	// integration path opens (successful gated integration). The retest
+	// stage registers itself here so parked siblings are absorbed fast
+	// while the window is open instead of waiting out their hourly
+	// retry interval (2026-09-29 spike: five beads parked within minutes,
+	// then converged back only one-per-hour via the regular retest tick).
+	integrationOpenNotifierMu sync.Mutex
+	integrationOpenNotifier   func(projectPath string)
 )
+
+// SetIntegrationOpenNotifier registers a callback fired (async-safe, in a
+// goroutine owned by the notifier) after each successful repo integration.
+// Nil clears. Fail-open: the close path never depends on the callback.
+func SetIntegrationOpenNotifier(fn func(projectPath string)) {
+	integrationOpenNotifierMu.Lock()
+	integrationOpenNotifier = fn
+	integrationOpenNotifierMu.Unlock()
+}
 
 // integrationRepoCooldown: after a gated integration fails, sibling beads on
 // the same repo wait this long before starting their own attempt. Matches
@@ -80,6 +98,12 @@ func integrationGate(repoPath string, fn func() error) error {
 // integration so a later failure starts from a clean slate.
 func resetIntegrationCooldown(repoPath string) {
 	integrationRepoLast.Delete(repoPath)
+	integrationOpenNotifierMu.Lock()
+	fn := integrationOpenNotifier
+	integrationOpenNotifierMu.Unlock()
+	if fn != nil {
+		fn(repoPath)
+	}
 }
 
 // errStage preserves the failing stage (commit/integrate/push) through the
