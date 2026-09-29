@@ -113,7 +113,7 @@ func TestFileBeadAllowedAction(t *testing.T) {
 }
 
 func TestRepairWhitelistShrunkToHygieneSet(t *testing.T) {
-	for _, name := range []string{"repair-worktree", "reap-placeholder", "reset-retries", "repair-bead-store", "clear-hard-park"} {
+	for _, name := range []string{"repair-worktree", "reap-placeholder", "reset-retries", "repair-bead-store", "clear-hard-park", "clear-escalation"} {
 		if !repairWhitelist[name] {
 			t.Errorf("hygiene verb %q missing from whitelist", name)
 		}
