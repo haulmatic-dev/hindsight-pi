@@ -2285,11 +2285,15 @@ When you cannot complete it:
 HYDRA_VERDICT: {"done": false, "summary": "what was done and what remains"}
 A turn ending without this block is treated as unfinished and you will be re-prompted.`)
 
-	// Chain handoff: the next phase of a TDD chain reads this phase's outcome
-	// from docs/hydra/handoff/<phase>.md instead of re-deriving it. Facts,
-	// not narration — the reader acts on this verbatim.
+	// Chain handoff: the next phase of the chain reads this bead's outcome
+	// from docs/hydra/handoff/<phase>-<bead-id>.md instead of re-deriving it.
+	// FR-001 (autonomous-resolution-layer): the fragment is per-bead, not
+	// per-phase — parallel beads of the same phase (e.g. every discovery FR
+	// writing discovery.md) used to collide on one file and produce hundreds
+	// of integrate conflicts. Facts, not narration — the reader acts on this
+	// verbatim.
 	promptParts = append(promptParts,
-		"CHAIN HANDOFF: if your bead is a TDD-chain phase (test/red, green, refactor) and you changed files, also write docs/hydra/handoff/<phase>.md before finishing — <phase> is your bead type lowercased (e.g. red.md, green.md). Fixed template: # <PHASE> handoff / ## What changed (files + one line each) / ## Verification (commands run + pass/fail) / ## Open edges for the next phase. Later phases read these files; record verified facts only, no narration.")
+		"CHAIN HANDOFF: if you changed files, also write "+chainHandoffFragmentName(bead)+" before finishing — <phase> is your bead type lowercased (e.g. red, green, discovery), <bead-id> the numeric suffix of your bead id (e.g. hydra-5xvh → 5xvh). Fixed template: # <PHASE> handoff / ## What changed (files + one line each) / ## Verification (commands run + pass/fail) / ## Open edges for the next phase. Later phases read these files; record verified facts only, no narration.")
 
 	// Attempt-boundary injection for resumed sessions (Self-heal recovery A):
 	// the transcript is present, but the model must treat its claims as leads.

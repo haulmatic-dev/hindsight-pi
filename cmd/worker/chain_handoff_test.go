@@ -89,3 +89,59 @@ func TestLoadChainContext(t *testing.T) {
 	}
 	var _ = sort.Strings
 }
+
+// FR-001 (autonomous-resolution-layer): handoff fragments are per-bead
+// (<phase>-<bead-id>.md), not per-phase, so parallel beads of the same
+// phase never collide on one file at integrate time (discovery.md was the
+// top conflict file: 568 conflicts / 570 integrate failures).
+func TestChainHandoffFragmentName(t *testing.T) {
+	tests := []struct {
+		id, btype, want string
+	}{
+		{"hydra-5xvh", "discovery", filepath.Join("docs", "hydra", "handoff", "discovery-5xvh.md")},
+		{"hydra-dogfood-w5ac", "green", filepath.Join("docs", "hydra", "handoff", "green-w5ac.md")},
+		{"myproject-abc123", "implement", filepath.Join("docs", "hydra", "handoff", "implement-abc123.md")},
+		{"x-1", "RED", filepath.Join("docs", "hydra", "handoff", "red-1.md")},   // phase lowercased
+		{"x-2", "Weird Type!", filepath.Join("docs", "hydra", "handoff", "weirdtype-2.md")}, // sanitized
+		{"x-3", "", filepath.Join("docs", "hydra", "handoff", "unknown-3.md")},  // no type
+		{"bare", "test", filepath.Join("docs", "hydra", "handoff", "test-bare.md")}, // no suffix
+	}
+	for _, tc := range tests {
+		got := chainHandoffFragmentName(types.Bead{ID: types.BeadID(tc.id), Type: tc.btype})
+		if got != tc.want {
+			t.Errorf("chainHandoffFragmentName(%q,%q) = %q, want %q", tc.id, tc.btype, got, tc.want)
+		}
+	}
+}
+
+// Fragment files rank with their phase, so green-5xvh.md follows red-abc.md
+// in the embedded chain context regardless of alphabet.
+func TestHandoffPhaseRankFragments(t *testing.T) {
+	if handoffPhaseRank("green-5xvh.md") != 1 {
+		t.Error("green-5xvh.md should rank as green (1)")
+	}
+	if handoffPhaseRank("red-abc.md") != 0 {
+		t.Error("red-abc.md should rank as red (0)")
+	}
+	if handoffPhaseRank("discovery-5xvh.md") != 3 {
+		t.Error("unknown-phase fragment should rank last (3)")
+	}
+	if handoffPhaseRank("greenhouse.md") != 3 {
+		t.Error("greenhouse.md must not rank as green prefix")
+	}
+}
+
+// loadChainContext orders per-bead fragments by phase then filename.
+func TestLoadChainContextFragmentOrder(t *testing.T) {
+	dir := t.TempDir()
+	hd := filepath.Join(dir, "docs", "hydra", "handoff")
+	if err := os.MkdirAll(hd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(hd, "green-5xvh.md"), []byte("green frag"), 0o644)
+	os.WriteFile(filepath.Join(hd, "red-abc.md"), []byte("red frag"), 0o644)
+	got := loadChainContext(dir)
+	if len(got) != 2 || got[0] != "red frag" || got[1] != "green frag" {
+		t.Errorf("fragment order = %v, want [red-abc green-5xvh]", got)
+	}
+}
