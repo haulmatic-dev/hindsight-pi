@@ -190,27 +190,38 @@ var allowedActions = map[registry.CommandKind]bool{
 	registry.CmdCloseSatisfied:     true,
 }
 
-// repairWhitelist is the only set of daemon-side repair actions Pan may propose.
+// repairWhitelist is the only set of daemon-side repair actions Pan may
+// propose — the hygiene set: per-bead scheduler hygiene only. Campaign
+// containment (park/unpark-campaign), push/integration and pruning verbs were
+// removed (FR-022): they mutate fleet state and are now surfaced as filed
+// improvement beads (file-bead) for human review instead.
 // The prompt lists these names explicitly; the parser rejects anything else so
 // the model cannot invent action names and burn MiniMax calls.
 var repairWhitelist = map[string]bool{
-	"repair-worktree":             true,
-	"reap-placeholder":            true,
-	"reset-retries":               true,
-	"repair-bead-store":           true,
-	"clear-hard-park":             true,
-	"prune-worktree-registration": true,
-	"re-push-integration":         true,
-	"park-campaign":               true,
-	"unpark-campaign":             true,
-	"log-improvement":             true,
-	"integrate-stranded":          true,
+	"repair-worktree":   true,
+	"reap-placeholder":  true,
+	"reset-retries":     true,
+	"repair-bead-store": true,
+	"clear-hard-park":   true,
 }
 
 // pseudoBeadSuffix marks synthetic project-level candidates (e.g.
 // "<project>-push-pending") that are not real beads: close/abandon/worker
 // commands can never succeed for them — only repair:<name> applies.
 const pseudoBeadSuffix = "-push-pending"
+
+// ActFileBead is the FR-022 bead-filing actuator: Pan files an improvement
+// bead for human triage instead of mutating fleet state directly.
+const ActFileBead = "file-bead"
+
+// MaxOpenFiledBeadsPerProject caps how many open Pan-filed beads may exist
+// per project at once (FR-022): a repeating observation cannot flood the
+// backlog.
+const MaxOpenFiledBeadsPerProject = 2
+
+// panFiledLabel marks beads filed by Pan via the file-bead actuator; the cap
+// counts only beads carrying it.
+const FiledLabel = "pan-filed"
 
 // reJudgeInterval is the valve that re-judges an unchanged candidate set
 // anyway: a permanently stuck candidate must never become permanently blind,
@@ -228,9 +239,13 @@ var projectScopedRepairs = map[string]bool{
 	"log-improvement":             true,
 }
 
-// isAllowedAction returns true for known worker command kinds and for
-// whitelisted "repair:<name>" daemon-side actions.
+// isAllowedAction returns true for known worker command kinds, for
+// whitelisted "repair:<name>" daemon-side actions, and for the file-bead
+// actuator (FR-022).
 func isAllowedAction(action string) bool {
+	if action == ActFileBead {
+		return true
+	}
 	if allowedActions[registry.CommandKind(action)] {
 		return true
 	}
@@ -490,6 +505,11 @@ type Shepherd struct {
 	// LogImprovement persists repair:log-improvement verdicts as improvement
 	// proposals for human review (beadID, decision reason). Optional.
 	LogImprovement func(beadID, text string) error
+	// BeadFiler files an improvement bead for human triage (file-bead
+	// actuator, FR-022): (source bead ID, title, description). Signature
+	// dedupe and the per-project open-filed cap are enforced around it.
+	// Optional; nil means file-bead decisions are rejected.
+	BeadFiler func(beadID, title, description string) error
 	// OnRepairEvent is called after a repair handler runs. If nil, Pan logs
 	// the event with log.Printf. Optional; used by tests to capture events.
 	OnRepairEvent func(beadID, action, result, detail string)
@@ -533,6 +553,9 @@ type Shepherd struct {
 
 	rejectedMu      sync.Mutex
 	rejectedActions map[string]bool // beadID + "/" + action; unknown repair actions remembered per session
+
+	filedMu       sync.Mutex
+	filedSigs     map[string]bool // project-scope + normalized title; one bead per signature per session (FR-022)
 
 	pseudoMu   sync.Mutex
 	pseudoSeen map[string]pseudoSeenEntry // pseudo-bead → last presented reason
@@ -628,6 +651,12 @@ func (s *Shepherd) SetOnAbandonWithSummary(fn func(beadID string) error) {
 // verdicts. Nil sink → the verdict is rejected with an audit event.
 func (s *Shepherd) SetLogImprovement(fn func(beadID, text string) error) {
 	s.LogImprovement = fn
+}
+
+// SetBeadFiler injects the improvement-bead filer for the file-bead
+// actuator (FR-022).
+func (s *Shepherd) SetBeadFiler(fn func(beadID, title, description string) error) {
+	s.BeadFiler = fn
 }
 
 // SetRepairHandlers injects the repair handler map. The map is copied so the
@@ -757,6 +786,7 @@ func (s *Shepherd) Tick(ctx context.Context) {
 
 	enqueued := 0
 	repaired := 0
+	filed := 0
 	for _, d := range decisions {
 		if !isAllowedAction(d.Action) {
 			if strings.HasPrefix(d.Action, "repair:") {
@@ -787,6 +817,14 @@ func (s *Shepherd) Tick(ctx context.Context) {
 		if name, ok := parseRepairName(d.Action); ok {
 			s.handleRepair(d.BeadID, name, d.Message)
 			repaired++
+			continue
+		}
+
+		// FR-022 bead-filing actuator: daemon-side, valid for pseudo-beads
+		// too (a campaign-anomaly finding becomes an improvement bead).
+		if d.Action == ActFileBead {
+			s.handleFileBead(d.BeadID, d.Message)
+			filed++
 			continue
 		}
 
@@ -917,6 +955,9 @@ func (s *Shepherd) Tick(ctx context.Context) {
 	if repaired > 0 {
 		log.Printf("[Pan] ran %d repair(s)", repaired)
 	}
+	if filed > 0 {
+		log.Printf("[Pan] processed %d file-bead decision(s)", filed)
+	}
 }
 
 // handleRepair executes a whitelisted repair handler for a blocked bead.
@@ -999,6 +1040,73 @@ func (s *Shepherd) handleLogImprovement(beadID, text string) {
 	s.recordRepair(beadID, "log-improvement", nil)
 	s.emitRepairEvent(beadID, "log-improvement", "ok", "")
 	log.Printf("[Pan] improvement logged for %s", beadID)
+}
+
+// handleFileBead implements the FR-022 bead-filing actuator: Pan files an
+// improvement bead for human triage instead of mutating fleet state.
+// Guards: rate limit (shared repair limiter), signature dedupe (one filed
+// bead per project + normalized title per session), and the filer's own
+// per-project open-filed cap.
+func (s *Shepherd) handleFileBead(beadID, payload string) {
+	if s.BeadFiler == nil {
+		s.emitRepairEvent(beadID, ActFileBead, "error", "no bead filer configured")
+		return
+	}
+	payload = strings.TrimSpace(payload)
+	if payload == "" {
+		s.emitRepairEvent(beadID, ActFileBead, "error", "empty file-bead payload")
+		return
+	}
+	title, description := payload, ""
+	if idx := strings.IndexByte(payload, '\n'); idx >= 0 {
+		title = strings.TrimSpace(payload[:idx])
+		description = strings.TrimSpace(payload[idx+1:])
+	}
+	// Signature dedupe: one filed bead per (project, normalized title) per
+	// session. Fail-open on scope resolution: fall back to the bead ID.
+	scope := s.fileScope(beadID)
+	sig := scope + "|" + normalizeReason(title)
+	s.filedMu.Lock()
+	if s.filedSigs == nil {
+		s.filedSigs = make(map[string]bool)
+	}
+	dup := s.filedSigs[sig]
+	if !dup {
+		s.filedSigs[sig] = true
+	}
+	s.filedMu.Unlock()
+	if dup {
+		s.emitRepairEvent(beadID, ActFileBead, "skipped", "duplicate signature")
+		log.Printf("[Pan] file-bead for %s skipped: duplicate signature in %s", beadID, scope)
+		return
+	}
+	if err := s.BeadFiler(beadID, title, description); err != nil {
+		// Filer failure (cap, store error) forgets the signature so a later
+		// attempt can retry once the cap frees up.
+		s.filedMu.Lock()
+		delete(s.filedSigs, sig)
+		s.filedMu.Unlock()
+		s.recordRepair(beadID, ActFileBead, err)
+		s.emitRepairEvent(beadID, ActFileBead, "error", err.Error())
+		log.Printf("[Pan] file-bead for %s failed: %v", beadID, err)
+		return
+	}
+	s.recordRepair(beadID, ActFileBead, nil)
+	s.emitRepairEvent(beadID, ActFileBead, "ok", "")
+	log.Printf("[Pan] filed bead for %s: %s", beadID, truncate(title, 120))
+}
+
+// fileScope resolves the dedupe scope for a file-bead decision: the
+// project path when resolvable (pseudo-beads included). No scope → "":
+// signature dedupe then keys on the normalized title alone, so the same
+// finding surfacing from two beads still files one bead.
+func (s *Shepherd) fileScope(beadID string) string {
+	if s.ProjectScope != nil {
+		if scope := s.ProjectScope(beadID); scope != "" {
+			return scope
+		}
+	}
+	return ""
 }
 
 // repairEfficacyKey builds the (action, scope, normalized reason) identity
@@ -1297,7 +1405,8 @@ needs a judgment call. For EVERY worker decide exactly one action:
 - "compact-and-continue": session context is exhausted; compact then continue
 - "abandon-with-summary": give up gracefully (payload: what was done and what remains)
 - "close_satisfied": the bead's acceptance criteria are already met on the working branch and the worker found nothing to do; close it without a worker. For FIX-AUDIT candidates this closes the redundant fix bead after the satisfied gate re-proves acceptance daemon-side.
-- "repair:<name>": execute a whitelisted daemon-side repair (payload: for log-improvement, the improvement text; ignored otherwise). Only for BLOCKED beads with no live worker row. The only valid repair names are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park, prune-worktree-registration, re-push-integration, park-campaign, log-improvement, integrate-stranded. No other repair:<name> strings exist; if none fit, choose continue or abandon-with-summary.
+- "file-bead": file an improvement bead for a human to triage (payload: first line = the bead title, remaining lines = the problem description). Use for fleet-level or product-level findings no repair verb covers: shared wedges, push/branch-protection problems, campaign anomalies. Deduplicated per project by signature and capped at 2 open pan-filed beads per project; duplicates are silently skipped.
+- "repair:<name>": execute a whitelisted daemon-side repair (payload ignored). Only for BLOCKED beads with no live worker row. The only valid repair names — the hygiene set — are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park. No other repair:<name> strings exist; if none fit, choose continue, abandon-with-summary, or file-bead.
 
 Rescue recipes (hard-won; prefer the repair matching the cause):
 - FIX-AUDIT candidates are OPEN auto-fix beads whose original bead closed as failed; each reason carries the close reason, any recorded verdict, and a re-verification status of the original evidence in the inherited worktree. Judge whether a worker still needs to redo the work:
@@ -1306,12 +1415,11 @@ Rescue recipes (hard-won; prefer the repair matching the cause):
   - Re-verification "unknown" → "continue" (keep the fix) unless the fix-bead description clearly shows acceptance already met.
   - Never abandon-with-summary or repair: a FIX-AUDIT candidate.
 - Hard-park labels (worktree-unavailable, integration-exhausted) are durable by design — the scheduler never retries them. Use repair:clear-hard-park when the named cause is plausibly fixed or transient (worktree directory exists, store parses clean, push path repaired). Do not clear a park whose cause is still present.
-- Many BLOCKED beads with the same reason = a shared wedge. Prefer one repair:prune-worktree-registration (project-scoped) over per-bead repairs.
+- Many BLOCKED beads with the same reason = a shared wedge. Repairs are per-bead hygiene only now: fix one bead, and file-bead a proposal describing the shared wedge so a human can address the cause.
 - repair:reset-retries clears the retry counter after the underlying cause is fixed; useless while the cause persists.
 - repair:repair-bead-store restores a corrupted issues.jsonl from the newest clean backup; pick it when the reason mentions conflict markers or parse errors.
-- PUSH-PENDING candidates mean commits exist locally but not on origin. Prefer repair:re-push-integration once; if the reason is branch protection or permissions and a retry already failed, that is a human problem — say so in reasoning instead of looping repairs.
-- Candidates ending in -push-pending are project-level pseudo-beads, not beads: never abandon-with-summary or close_satisfied them — only repair:re-push-integration applies. If the reason is divergence or permissions, it is a human problem; say so in reasoning and move on.
-- Candidates ending in -campaign-anomaly are fleet-level findings from the health digest (their reason carries the anomaly and a compact fleet snapshot). Three verbs apply: repair:park-campaign to freeze that project's campaign (the scheduler skips all spawns for the project; reversible; the default for chain-discipline violations), repair:unpark-campaign to release the campaign once the anomaly is understood, and repair:log-improvement to record a hydra improvement proposal for human review (payload = the proposal). Never abandon or close them. Prefer log-improvement when the right fix is a hydra code change rather than a containment. A publisher-wedge anomaly whose reason indicates branch protection, required approvals, or permissions (GH013 rule violations, approval-required, review-team gates) is a HUMAN problem, not a chain-discipline violation: do NOT repair:park-campaign for it — operators must then unpark by hand for a cause they alone can fix. Choose repair:log-improvement instead, payload naming the human action (approve the PR / adjust the branch rule) and the rules URL when the reason carries one.
+- Candidates ending in -campaign-anomaly are fleet-level findings from the health digest (their reason carries the anomaly and a compact fleet snapshot). Never abandon or close them — file-bead the finding for human review (payload = title line + proposal). When the right fix is a hydra code change, the proposal should say so. A publisher-wedge anomaly whose reason indicates branch protection, required approvals, or permissions (GH013 rule violations, approval-required, review-team gates) is a HUMAN problem: the proposal must name the human action (approve the PR / adjust the branch rule) and the rules URL when the reason carries one — do not propose automating it.
+- PUSH-PENDING candidates mean commits exist locally but not on origin. Pushing is a human/pipeline action now: if the cause is branch protection, required approvals, or permissions, say so in reasoning and file-bead the proposal naming the human action. Otherwise choose the best judgment you can; never abandon-with-summary or close_satisfied them.
 - Candidates whose reason starts with TRAJECTORY were flagged by mechanical
   tier-1 pre-filters (turn-count outliers vs their bead-class baseline,
   repeated commands, edits without test runs, test-fix-test loops, no new

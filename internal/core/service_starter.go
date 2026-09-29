@@ -405,6 +405,27 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 		})
 		o.panShepherd.SetLogImprovement(o.logImprovementRepair)
 
+		// FR-022 bead-filing actuator: Pan files improvement beads for human
+		// triage. The filer resolves the project (real beads via provenance,
+		// pseudo-beads by stripping the suffix) and enforces the per-project
+		// open-filed cap.
+		o.panShepherd.SetBeadFiler(func(beadID, title, description string) error {
+			id := types.BeadID(beadID)
+			projectPath := projectPathForID(id)
+			if projectPath == "" {
+				// Pseudo-beads (push-pending / campaign-anomaly) resolve by
+				// stripping the suffix.
+				trimmed := strings.TrimSuffix(strings.TrimSuffix(beadID, "-push-pending"), "-campaign-anomaly")
+				if trimmed != beadID {
+					projectPath = projectPathForID(types.BeadID(trimmed))
+				}
+			}
+			if projectPath == "" {
+				return fmt.Errorf("file-bead: project path unresolved for %s", beadID)
+			}
+			return o.filePanBead(projectPath, beadID, title, description)
+		})
+
 		// Project-scoped repairs (prune, re-push) rate-limit per project path;
 		// the pseudo-bead form "<project>-push-pending" resolves by name.
 		o.panShepherd.SetProjectScope(func(beadID string) string {

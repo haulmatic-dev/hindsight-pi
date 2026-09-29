@@ -354,7 +354,7 @@ func TestTickDeduplicatesPendingCommands(t *testing.T) {
 
 func TestBuildPromptListsRepairWhitelist(t *testing.T) {
 	prompt := BuildPrompt(nil)
-	for _, name := range []string{"repair-worktree", "reap-placeholder", "reset-retries", "integrate-stranded"} {
+	for _, name := range []string{"repair-worktree", "reap-placeholder", "reset-retries", "repair-bead-store", "clear-hard-park"} {
 		if !strings.Contains(prompt, name) {
 			t.Errorf("prompt missing whitelisted repair name %q", name)
 		}
@@ -369,8 +369,8 @@ func TestBuildPromptPublisherWedgeIsHumanProblem(t *testing.T) {
 	prompt := BuildPrompt(nil)
 	for _, want := range []string{
 		"branch protection, required approvals, or permissions",
-		"do NOT repair:park-campaign",
-		"repair:log-improvement",
+		"file-bead",
+		"the human action (approve the PR / adjust the branch rule)",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing publisher-wedge human-problem guidance %q", want)
