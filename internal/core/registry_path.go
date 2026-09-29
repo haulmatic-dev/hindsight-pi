@@ -28,3 +28,20 @@ func registryPath() string {
 func RegistryPath() string {
 	return registryPath()
 }
+
+// triageStatePath resolves the PR-triage rate-limit state file (one triage
+// comment per PR per 24h; survives daemon restarts). Same runtime-state
+// discipline as registryPath: HYDRA_HOME/.hydra, never inside a checkout.
+func triageStatePath() string {
+	base := os.Getenv("HYDRA_HOME")
+	if base == "" {
+		base = "."
+	}
+	return filepath.Join(base, ".hydra", "pr-triage-state.json")
+}
+
+// TriageStatePath returns the resolved PR-triage rate-limit state file path.
+// Exported mirror of triageStatePath for subcommands.
+func TriageStatePath() string {
+	return triageStatePath()
+}

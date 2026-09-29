@@ -29,3 +29,9 @@ func resolveRepoPath(project types.Project, repo types.Repo) string {
 	}
 	return filepath.Join(project.Path, segment)
 }
+
+// ResolveRepoPath resolves a multi-project repo's absolute path. Exported
+// mirror of resolveRepoPath for subcommands outside the package.
+func ResolveRepoPath(project types.Project, repo types.Repo) string {
+	return resolveRepoPath(project, repo)
+}
