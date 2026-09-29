@@ -787,6 +787,17 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 		return fmt.Errorf("push %s: no working branch", bead.ID)
 	}
 	remote := c.config.OutputPushRemote()
+	// PR target is the deterministic integration base, not the checkout's
+	// current branch (telematics 2026-09-29). The push still goes to the
+	// checkout branch's namesake on the remote; only the PR base changes.
+	prBase, prBaseSource, prBaseErr := ResolveIntegrationBase(c.config, projectPath)
+	if prBaseErr != nil {
+		return fmt.Errorf("push %s: %w", bead.ID, prBaseErr)
+	}
+	if prBase == "" {
+		return fmt.Errorf("push %s: no integration base for %s", bead.ID, projectPath)
+	}
+	logIntegrationBaseMismatch(projectPath, prBase, prBaseSource)
 	if c.config.PRMergeEnabled() {
 		head := "dogfood/" + string(bead.ID)
 		// Duplicate-landing dedup: a racing close attempt may have already
@@ -798,7 +809,7 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 			AppendActivity(projectPath, string(bead.ID), "already landed (duplicate integrate no-op)")
 			return nil
 		}
-		url, err := PublishViaPR(projectPath, branch, head, bead.Title, autoPRResolveToken())
+		url, err := PublishViaPR(projectPath, prBase, head, bead.Title, autoPRResolveToken())
 		if err != nil {
 			// Benign race loser: the winning close's PR merge landed the same
 			// tip between our pre-check and gh pr create, so GitHub reports
@@ -811,11 +822,11 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 			}
 			log.Printf("[Output] PR merge failed for %s: %s", bead.ID, err)
 			AppendActivity(projectPath, string(bead.ID), "PR merge failed: "+err.Error())
-			return fmt.Errorf("push %s via PR to %s/%s: %w", bead.ID, remote, branch, err)
+			return fmt.Errorf("push %s via PR to %s/%s: %w", bead.ID, remote, prBase, err)
 		}
 		// Logged only after gh pr view confirmed the PR reached MERGED state —
 		// never on gh exit alone.
-		log.Printf("[Output] landed via PR for %s: %s (%s → %s)", bead.ID, url, head, branch)
+		log.Printf("[Output] landed via PR for %s: %s (%s → %s)", bead.ID, url, head, prBase)
 		AppendActivity(projectPath, string(bead.ID), "landed via PR")
 		return nil
 	}
@@ -863,10 +874,14 @@ func hasGitRemote(projectPath string) bool {
 // commits between" from gh pr create) are treated as landed, matching
 // publishAfterIntegrate.
 func (c *BeadCloser) publishSingletonViaPR(projectPath string, bead *types.Bead, key string) error {
-	base, err := c.worktreeManager.WorkingBranch(projectPath)
-	if err != nil || base == "" {
-		return fmt.Errorf("pr-first close %s: no working branch: %v", bead.ID, err)
+	base, baseSource, err := ResolveIntegrationBase(c.config, projectPath)
+	if err != nil {
+		return fmt.Errorf("pr-first close %s: %w", bead.ID, err)
 	}
+	if base == "" {
+		return fmt.Errorf("pr-first close %s: no integration base for %s", bead.ID, projectPath)
+	}
+	logIntegrationBaseMismatch(projectPath, base, baseSource)
 	// Duplicate-landing pre-check on the WORKTREE BRANCH tip (not the
 	// checkout HEAD): a racing close may have already landed this branch via
 	// PR. Fail-open on any git fault so the normal PR path proceeds.
@@ -1036,11 +1051,18 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 		}
 	}
 
-	// Base for committed-work detection: the main checkout's current branch
-	// is what the chain worktree diverged from. Empty in main-checkout mode.
+	// Base for committed-work detection: the deterministic integration base
+	// (config knob or origin default) — NEVER the main checkout's current
+	// branch, which is incidental operator state (telematics 2026-09-29).
+	// Empty in main-checkout mode.
 	base := ""
 	if repoPath != projectPath {
-		base = currentBranch(projectPath)
+		b, source, err := ResolveIntegrationBase(c.config, projectPath)
+		if err != nil {
+			return fmt.Errorf("committed-work detection for %s: %w", bead.ID, err)
+		}
+		logIntegrationBaseMismatch(projectPath, b, source)
+		base = b
 	}
 
 	targets := beadTargetFiles(bead)
@@ -1113,9 +1135,11 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 		// integrations.
 		alreadyIntegrated := false
 		if switchedToWorktree {
-			baseBranch := currentBranch(projectPath)
-			chainBranch := currentBranch(repoPath)
-			if baseBranch != "" && chainBranch != "" {
+			baseBranch, baseSource, berr := ResolveIntegrationBase(c.config, projectPath)
+			if berr != nil {
+				log.Printf("[VerifiedClose] %s integration base unresolved, skipping already-integrated heuristic: %v", bead.ID, berr)
+			} else if chainBranch := currentBranch(repoPath); chainBranch != "" {
+				logIntegrationBaseMismatch(projectPath, baseBranch, baseSource)
 				if isAncestor, err := branchIsAncestorOfMain(projectPath, chainBranch); err != nil {
 					log.Printf("[VerifiedClose] ancestry check failed for %s (not blocking): %v", bead.ID, err)
 				} else if isAncestor {
