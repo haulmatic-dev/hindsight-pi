@@ -2474,12 +2474,14 @@ func queryHindsightForContext(
 	log.Printf("🔍 Querying Hindsight for context (bead: %s)...", bead.ID)
 	streamLog(mcpClient, "info", "Querying Hindsight for relevant context")
 
-	// Create Hindsight client with config
+	// Create Hindsight client with config. Budget=low bounds candidates
+	// server-side, cutting rerank latency for this pre-execution query.
 	hindsightClient := hindsight.NewClient(
 		hindsight.WithBaseURL(config.HindsightClient.BaseURL),
 		hindsight.WithTimeout(config.HindsightClient.Timeout),
 		hindsight.WithDefaultLimit(config.HindsightClient.Limit),
 		hindsight.WithMaxTokens(config.HindsightClient.MaxTokens),
+		hindsight.WithBudget("low"),
 		hindsight.WithEnabled(true),
 	)
 

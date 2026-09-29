@@ -21,8 +21,8 @@ func TestDefaultContextProcessorConfig(t *testing.T) {
 		t.Errorf("Default CacheTTL = %v, want 5m", config.CacheTTL)
 	}
 
-	if config.MaxQueryLatency != 500*time.Millisecond {
-		t.Errorf("Default MaxQueryLatency = %v, want 500ms", config.MaxQueryLatency)
+	if config.MaxQueryLatency != 15*time.Second {
+		t.Errorf("Default MaxQueryLatency = %v, want 15s", config.MaxQueryLatency)
 	}
 }
 

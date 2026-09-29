@@ -67,6 +67,11 @@ type SearchRequest struct {
 	// supported way to limit results; a count-based limit is not.
 	MaxTokens int `json:"max_tokens,omitempty"`
 
+	// Budget controls recall depth server-side ("low"/"medium"/"high").
+	// Valid per the recall API schema; "low" bounds candidates and cuts
+	// rerank latency. Empty means the API default.
+	Budget string `json:"budget,omitempty"`
+
 	// Types optionally narrows which memory kinds are recalled (API field
 	// name is plural "types", not "type").
 	//
@@ -176,6 +181,7 @@ type Client struct {
 	timeout           time.Duration
 	defaultLimit      int
 	maxTokens         int
+	budget            string
 	enabled           bool
 	lastHealthCheck   time.Time
 	healthCheckResult bool
@@ -197,6 +203,15 @@ func WithTimeout(timeout time.Duration) ClientOption {
 	return func(c *Client) {
 		c.timeout = timeout
 		c.httpClient.Timeout = timeout
+	}
+}
+
+// WithBudget sets the recall budget ("low"/"medium"/"high") sent in the
+// recall request body. Empty means the API default. "low" bounds candidates
+// server-side, cutting rerank latency for daemon pre-queries.
+func WithBudget(budget string) ClientOption {
+	return func(c *Client) {
+		c.budget = budget
 	}
 }
 
@@ -300,6 +315,7 @@ func (c *Client) Search(query, beadType string, limit int) (*SearchResponse, err
 	reqBody := SearchRequest{
 		Query:     query,
 		MaxTokens: c.maxTokens,
+		Budget:    c.budget,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
