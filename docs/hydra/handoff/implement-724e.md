@@ -22,3 +22,9 @@
 - LIVE VERIFICATION NOT DONE: telematics close → PR author login == ajantha; commit author == ajantha; zero service-token API calls. Requires the owner PAT files provisioned (`/home/ajantha/.hydra/.github-token`) — currently absent on this host → first user-owned publish will fail closed with `publish_identity_missing` (by design). Provision before deploy.
 - `getUserContextForProject` matches project path exactly; projects whose stored path differs (trailing slash) resolve to daemon owner — acceptable (hydra-owned fallback), but worth watching.
 - Beads filed by user A on user B's project publish under B (project owner), not A (bead filer) — operator rule keyed on project owner.
+
+## Live verification addendum (2026-09-29, run as hydra user)
+- `/home/ajantha/.hydra/.github-token` exists, mode 640, ACL `user:hydra:r--` → daemon-readable. VERIFIED.
+- `ResolvePublishIdentity("/home/ajantha/projects/srv-telematics", LoadUserConfig("/home/ajantha"))` → owner=ajantha, source=owner-pat-file, git_author="Bili <ajantha@swyftflo.ai>". VERIFIED (live probe via go run).
+- Owner PAT is DEAD: `GH_TOKEN=$(cat /home/ajantha/.hydra/.github-token) gh api user` → `401 Bad credentials` (twice). Control: daemon service token → `buddhiDsilva` (200). Any publish by ajantha will now fail closed at the GitHub call until the owner provisions a fresh PAT.
+- Live AC (telematics close → PR author == ajantha) BLOCKED on operator credential renewal — environmental, not code. nipuna.j also has NO .github-token (will fail closed with publish_identity_missing when their beads publish).
