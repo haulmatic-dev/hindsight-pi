@@ -123,14 +123,19 @@ func TestCandidatesEmitCampaignAnomalyFromDigest(t *testing.T) {
 }
 
 func TestCampaignAnomalyWhitelistAndGuards(t *testing.T) {
-	if !isAllowedAction("repair:park-campaign") {
-		t.Error("repair:park-campaign must be whitelisted")
+	// FR-022: campaign verbs shrank out of Pan's proposal surface; the
+	// daemon-side handlers remain (unreachable via Pan verdicts).
+	if isAllowedAction("repair:park-campaign") {
+		t.Error("repair:park-campaign must not be whitelisted (hygiene set only)")
 	}
-	if !isAllowedAction("repair:log-improvement") {
-		t.Error("repair:log-improvement must be whitelisted")
+	if isAllowedAction("repair:log-improvement") {
+		t.Error("repair:log-improvement must not be whitelisted (superseded by file-bead)")
+	}
+	if !isAllowedAction(ActFileBead) {
+		t.Error("file-bead must be whitelisted")
 	}
 	if !projectScopedRepairs["park-campaign"] {
-		t.Error("park-campaign must be project-scoped for rate limiting")
+		t.Error("park-campaign must remain project-scoped for rate limiting")
 	}
 }
 

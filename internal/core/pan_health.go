@@ -310,6 +310,56 @@ func (o *Overseer) scanTargetByKey(key string) (string, bool) {
 	return "", false
 }
 
+// filePanBead implements the FR-022 bead-filing actuator daemon-side: it
+// enforces the per-project cap of MaxOpenFiledBeadsPerProject open
+// "pan-filed" beads, then creates the improvement bead.
+func (o *Overseer) filePanBead(projectPath, beadID, title, description string) error {
+	if o.beadsClient == nil {
+		return fmt.Errorf("file-bead %s: beads client unavailable", beadID)
+	}
+	beads, err := o.beadsClient.ListBeads(projectPath, "")
+	if err != nil {
+		return fmt.Errorf("file-bead %s: list beads: %w", beadID, err)
+	}
+	openFiled := 0
+	for _, b := range beads {
+		if b.Status != types.StatusOpen {
+			continue
+		}
+		for _, lbl := range b.Labels {
+			if lbl == pan.FiledLabel {
+				openFiled++
+				break
+			}
+		}
+	}
+	if openFiled >= pan.MaxOpenFiledBeadsPerProject {
+		return fmt.Errorf("file-bead %s: cap reached (%d open pan-filed beads in project)", beadID, openFiled)
+	}
+	req := types.CreateBeadRequest{
+		Title:       title,
+		Description: description,
+		Type:        "task",
+		Priority:    2,
+		Labels:      []string{pan.FiledLabel},
+	}
+	newID, err := o.beadsClient.CreateBead(projectPath, req)
+	if err != nil {
+		return fmt.Errorf("file-bead %s: %w", beadID, err)
+	}
+	if o.eventSink != nil {
+		o.eventSink.EmitRepo(projectPath, Event{
+			Type:   "pan_bead_filed",
+			Project: filepath.Base(projectPath),
+			Bead:   string(newID),
+			Reason: "pan_filed",
+			Fields: map[string]any{"source": beadID},
+		})
+	}
+	log.Printf("[PanRepair] file-bead %s: filed %s in %s", beadID, newID, projectPath)
+	return nil
+}
+
 // logImprovementRepair appends a Pan observation to the improvements log.
 // Proposals, never self-modification: a human reviews the file and decides
 // what becomes a bead.
