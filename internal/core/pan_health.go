@@ -333,15 +333,27 @@ func (o *Overseer) filePanBead(projectPath, beadID, title, description string) e
 		return fmt.Errorf("file-bead %s: list beads: %w", beadID, err)
 	}
 	openFiled := 0
+	normTitle := pan.NormalizeReason(strings.TrimSpace(title))
 	for _, b := range beads {
 		if b.Status != types.StatusOpen {
 			continue
 		}
+		isFiled := false
 		for _, lbl := range b.Labels {
 			if lbl == pan.FiledLabel {
-				openFiled++
+				isFiled = true
 				break
 			}
+		}
+		if !isFiled {
+			continue
+		}
+		openFiled++
+		// Persistent dedupe: an open pan-filed bead with the same normalized
+		// title already tracks this finding — skip instead of filing a twin
+		// (session-level filedSigs dedupe is lost on daemon restart).
+		if pan.NormalizeReason(strings.TrimSpace(b.Title)) == normTitle {
+			return fmt.Errorf("file-bead %s: %w (%s)", beadID, pan.ErrFileBeadDuplicate, b.ID)
 		}
 	}
 	if openFiled >= pan.MaxOpenFiledBeadsPerProject {

@@ -1,16 +1,19 @@
-# task handoff
+# GREEN handoff
 
 ## What changed (files + one line each)
-- docs/hydra/handoff/task-jcj6.md: this handoff (dedupe-skip bead; no code change).
-- CHANGELOG.md: Documentation entry under Unreleased.
+- internal/pan/pan.go: new exported `ErrFileBeadDuplicate` sentinel + `NormalizeReason` wrapper; `handleFileBead` now treats a filer `ErrFileBeadDuplicate` as a benign skip ("skipped"/"duplicate signature" event, signature retained) instead of a filer error.
+- internal/core/pan_health.go: `filePanBead` dedupes against open pan-filed beads by normalized title before create — persistent cross-session dedupe (the session-level `filedSigs` map is lost on daemon restart, which is how `hydra-jcj6` "(dedupe skip)" got filed as a twin of `hydra-mhk2`'s finding).
+- internal/core/pan_filer_test.go: `TestFilePanBead_DuplicateOpenTitleSkipped` — volatile-title variant returns ErrFileBeadDuplicate, different title still files.
+- internal/pan/file_bead_test.go: `TestFileBeadDuplicateFilerResultSkips` — sentinel → one filer call, repeat skipped via retained signature.
+- CHANGELOG.md: Fixed entry under Unreleased.
 
 ## Verification (commands run + pass/fail)
-- Event `/opt/dev-tools/var/hydra/events/2026-09-29.jsonl`: `pan_bead_filed` for hydra-jcj6 with `fields.source = hydra-mhk2` — jcj6 was Pan-filed from mhk2 but arrived with empty content (title "(dedupe skip)", no description, no comments). PASS.
-- `br show hydra-mhk2` — open, pan-filed, carries the publisher rebase-conflict proposal ("detect pre-existing conflicting docs files on base before rebase"). hydra-isv5 tracks the same publisher wedge. PASS.
-- `br list --json` label scan — 6 open pan-filed beads incl. jcj6, xxq5, 5ob8, isv5, mhk2, 4qcv. PASS.
-- `br close hydra-jcj6 -r "not_planned: duplicate of hydra-mhk2 ..."` — ✓ Closed. `br label remove hydra-jcj6 pan-filed` — ✓. PASS.
-- hindsight_search on dedupe-skip terms — prior dedup precedents (fix_dedup loops, uewg closed as duplicate of qzxv) confirm skip-and-close pattern. PASS.
+- `go build ./...` — PASS.
+- `go vet ./internal/pan/ ./internal/core/` — PASS (clean).
+- `go test ./internal/pan/ -run TestFileBead -count=1` — PASS.
+- `go test ./internal/core/ -run TestFilePanBead -count=1` — PASS.
+- `go test ./internal/pan/ ./internal/core/ -count=1` — PASS (2/2 packages).
 
 ## Open edges for the next phase
-- pan file-bead filing bug: a filed bead can land with placeholder title "(dedupe skip)" and no description — filing pipeline drops the proposal payload on dedupe. Worth a code fix in internal/pan (file_bead) to refuse filing with empty title/proposal.
-- Publisher rebase-conflict proposal remains live on hydra-mhk2 / hydra-isv5; human rebase conflict on origin/development docs (rsyw add/add) still needs resolution.
+- Root artifact: the Pan judgment that produced `hydra-jcj6` emitted a degenerate payload ("(dedupe skip)" as the whole title). Persistent dedupe prevents duplicates of a real finding, but a degenerate/placeholder title like "(dedupe skip)" should ideally be refused at filing time (empty-after-normalize or marker-only title). Not implemented here — needs a decision on the valid-title contract.
+- Live-store disposition: `hydra-jcj6` (pan-filed, no description, title "(dedupe skip)") is a junk artifact of `hydra-mhk2` (event `pan_bead_filed` fields.source=hydra-mhk2) — candidate for close as duplicate once its gate cycle completes; `hydra-mhk2`'s rebase-conflict wedge remains human-only.
