@@ -551,6 +551,17 @@ func (s *Scheduler) Tick() error {
 			break
 		}
 
+		// Target-scope overlap serialization (FR-003), retry path: same rule
+		// as the spawn funnel — never race a live worker on the same files.
+		if holder, conflict := o.targetScopeConflict(&bead); conflict {
+			log.Printf("⏳ Deferring retry of bead %s: target files overlap live worker %s", beadIDStr, holder)
+			o.emitSpawnDeferredOverlap(bead, holder)
+			if poolRelease != nil {
+				poolRelease()
+			}
+			continue
+		}
+
 		if err := o.spawnWorker(bead); err != nil {
 			// The worker never started, so nothing will ever release its slot.
 			if poolRelease != nil {
@@ -730,6 +741,14 @@ func (s *Scheduler) SpawnWorkersForNodes(nodes []*Node, maxSlots int) int {
 			continue
 		}
 		if !s.ShouldSpawnWorker(node) {
+			continue
+		}
+		// Target-scope overlap serialization (FR-003): a bead whose declared
+		// target files overlap a live worker's targets is deferred to a later
+		// tick so two workers never race on the same files. Fail-open.
+		if holder, conflict := o.targetScopeConflict(&node.Bead); conflict {
+			log.Printf("⏳ Deferring bead %s: target files overlap live worker %s", node.Bead.ID, holder)
+			o.emitSpawnDeferredOverlap(node.Bead, holder)
 			continue
 		}
 		if err := o.spawnWorker(node.Bead); err != nil {
