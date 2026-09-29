@@ -74,7 +74,10 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 			Detail: "PublishViaPR invoked for " + branch + " via " + feature,
 			Fields: map[string]any{"branch": branch, "feature_branch": feature, "project_path": projectPath}})
 		log.Printf("[Publish] PublishViaPR invoked for %s/%s via %s", projectPath, branch, feature)
-		url, err := PublishViaPR(projectPath, branch, feature, "Hydra publish: "+branch, token)
+		url, err := publishWithRebaseRetry(
+			func() (string, error) { return PublishViaPR(projectPath, branch, feature, "Hydra publish: "+branch, token) },
+			func() error { return rebaseCheckoutOntoBase(projectPath, branch) },
+			projectPath, branch)
 		if err != nil {
 			publishEvents.EmitRepo(projectPath, Event{Type: "publish_push_rejected", Project: filepath.Base(projectPath), Reason: "pr_merge_failed",
 				Detail: "PR merge failed for " + branch + ": " + err.Error(),
@@ -132,6 +135,112 @@ var (
 var publishEvents *EventSink
 
 // SetPublishEventSink wires the publisher's typed-event sink.
+// --- FR-011: auto rebase on PR conflict (cap 2 attempts, then human) ---
+
+// MaxPRRebaseAttempts bounds how many times a conflicted PR publish may
+// rebase and retry before escalating to a human.
+const MaxPRRebaseAttempts = 2
+
+// prConflictError reports whether a publish error is a PR merge conflict
+// (as opposed to a network, credential, or verification failure). gh phrasing
+// varies ("not mergeable", "has conflicts"), so match on the common stems.
+var prConflictError = func(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "conflict") || strings.Contains(s, "not mergeable") ||
+		strings.Contains(s, "mergeable state")
+}
+
+var (
+	// rebaseCheckoutOntoBase rebases the checked-out working branch (HEAD)
+	// onto origin/<base>. Overridden in tests.
+	rebaseCheckoutOntoBase = defaultRebaseCheckoutOntoBase
+	// rebaseBranchOntoBase rebases an arbitrary local branch onto
+	// origin/<base> inside a scratch worktree and moves the branch ref.
+	// Overridden in tests.
+	rebaseBranchOntoBase = defaultRebaseBranchOntoBase
+)
+
+// defaultRebaseCheckoutOntoBase rebases the checkout's current branch onto
+// origin/<base> so a conflicted PR publish can retry against the advanced
+// base. --autostash preserves uncommitted human WIP; hooks are disabled for
+// the replayed commits (headless daemon, gates already ran).
+func defaultRebaseCheckoutOntoBase(projectPath, base string) error {
+	if _, err := gitOut(projectPath, "fetch", "--quiet", "origin", base); err != nil {
+		return fmt.Errorf("fetch origin/%s: %w", base, err)
+	}
+	out, err := gitOut(projectPath, "-c", "core.hooksPath=/dev/null", "rebase", "--autostash", "origin/"+base)
+	if err != nil {
+		_, _ = gitOut(projectPath, "rebase", "--abort")
+		return fmt.Errorf("rebase onto origin/%s: %s", base, strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// defaultRebaseBranchOntoBase rebases a named local branch onto origin/<base>
+// without touching any checkout: it replays the branch (detached scratch
+// worktree checked out at the branch) onto origin/<base> and moves the branch
+// ref to the replayed tip. A real-code conflict aborts the rebase and fails
+// closed. The branch's own worktree (if any) may
+// end up stale until the caller tears it down or re-checks out — acceptable
+// because FR-011 only rebase-retries daemon-owned branches.
+func defaultRebaseBranchOntoBase(projectPath, branch, base string) error {
+	if _, err := gitOut(projectPath, "fetch", "--quiet", "origin", base); err != nil {
+		return fmt.Errorf("fetch origin/%s: %w", base, err)
+	}
+	scratch, err := os.MkdirTemp("", "hydra-rebase-")
+	if err != nil {
+		return fmt.Errorf("rebase scratch dir: %w", err)
+	}
+	defer func() {
+		_, _ = gitOut(projectPath, "worktree", "remove", scratch, "--force")
+		_, _ = gitOut(projectPath, "worktree", "prune")
+	}()
+	if _, err := gitOut(projectPath, "worktree", "add", "--detach", scratch, branch); err != nil {
+		return fmt.Errorf("rebase scratch worktree: %w", err)
+	}
+	out, err := gitOut(scratch, "-c", "core.hooksPath=/dev/null", "rebase", "origin/"+base)
+	if err != nil {
+		_, _ = gitOut(scratch, "rebase", "--abort")
+		return fmt.Errorf("rebase %s onto origin/%s: %s", branch, base, strings.TrimSpace(out))
+	}
+	tip, err := gitOut(scratch, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("rebase %s: read replayed tip: %w", branch, err)
+	}
+	if _, err := gitOut(projectPath, "update-ref", "refs/heads/"+branch, strings.TrimSpace(tip)); err != nil {
+		return fmt.Errorf("move %s to replayed tip: %w", branch, err)
+	}
+	return nil
+}
+
+// publishWithRebaseRetry wraps one PR publish step with FR-011 conflict
+// recovery: on a PR-conflict failure it rebases (up to MaxPRRebaseAttempts
+// times) and retries; a rebase failure or a still-conflicted PR after the
+// cap fails closed with an explicit human-review-needed error. Callers
+// already treat publish errors as not-landed, so the escalation surfaces in
+// the existing quarantine/Activity channels.
+func publishWithRebaseRetry(publish func() (string, error), rebase func() error, projectPath, base string) (string, error) {
+	url, err := publish()
+	for attempt := 1; err != nil && prConflictError(err) && attempt <= MaxPRRebaseAttempts; attempt++ {
+		log.Printf("[Publish] PR conflict detected — rebase attempt %d/%d onto origin/%s", attempt, MaxPRRebaseAttempts, base)
+		publishEvents.EmitRepo(projectPath, Event{Type: "publish_rebase_attempted",
+			Detail: fmt.Sprintf("PR conflict: rebase attempt %d/%d onto origin/%s", attempt, MaxPRRebaseAttempts, base)})
+		if rerr := rebase(); rerr != nil {
+			return url, fmt.Errorf("pr conflict: rebase attempt %d failed — human review needed: %w", attempt, rerr)
+		}
+		url, err = publish()
+	}
+	if err != nil && prConflictError(err) {
+		publishEvents.EmitRepo(projectPath, Event{Type: "publish_rebase_exhausted",
+			Detail: fmt.Sprintf("PR still conflicted after %d rebase attempts — human review needed", MaxPRRebaseAttempts)})
+		return url, fmt.Errorf("pr still conflicted after %d rebase attempts — human review needed: %w", MaxPRRebaseAttempts, err)
+	}
+	return url, err
+}
+
 func SetPublishEventSink(s *EventSink) { publishEvents = s }
 
 // PR-merge exec-layer hooks. Overridden in tests to avoid real git/gh calls.
@@ -252,7 +361,19 @@ func defaultPRMergeBranchPush(repoPath, localRef, ref, token string) error {
 // singleton worktree branch) rather than the checkout's HEAD, so no local
 // merge into the working branch is needed. Fail-closed: any step error is
 // returned with the URL of a created-but-unmerged PR.
+//
+// FR-011: on a PR merge conflict the local branch is rebased onto
+// origin/<base> and the publish retried, up to MaxPRRebaseAttempts; after
+// the cap (or a failed rebase) the error explicitly requests human review.
 func PublishBranchViaPR(projectPath, base, localBranch, featureBranch, title, token string) (string, error) {
+	return publishWithRebaseRetry(
+		func() (string, error) { return publishBranchViaPROnce(projectPath, base, localBranch, featureBranch, title, token) },
+		func() error { return rebaseBranchOntoBase(projectPath, localBranch, base) },
+		projectPath, base)
+}
+
+// publishBranchViaPROnce is one unguarded PublishBranchViaPR attempt.
+func publishBranchViaPROnce(projectPath, base, localBranch, featureBranch, title, token string) (string, error) {
 	if projectPath == "" || base == "" || localBranch == "" || featureBranch == "" {
 		return "", fmt.Errorf("pr merge: empty project, base, local branch, or feature branch")
 	}
