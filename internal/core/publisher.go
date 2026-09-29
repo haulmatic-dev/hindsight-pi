@@ -136,8 +136,9 @@ func SetPublishEventSink(s *EventSink) { publishEvents = s }
 
 // PR-merge exec-layer hooks. Overridden in tests to avoid real git/gh calls.
 var (
-	prMergeGitPush = defaultPRMergeGitPush
-	autoPRGhMerge  = defaultAutoPRGhMerge
+	prMergeGitPush   = defaultPRMergeGitPush
+	autoPRGhMerge    = defaultAutoPRGhMerge
+	prMergeBranchPush = defaultPRMergeBranchPush
 )
 
 // prMergeResolveToken resolves the daemon's own GitHub credential for PR
@@ -209,6 +210,14 @@ func PublishViaPR(projectPath, base, featureBranch, title, token string) (string
 }
 
 func defaultPRMergeGitPush(repoPath, ref, token string) error {
+	return defaultPRMergeBranchPush(repoPath, "HEAD", ref, token)
+}
+
+// defaultPRMergeBranchPush pushes an explicit local ref (a branch, not
+// necessarily the checkout's HEAD) to the PR head ref. FR-010's PR-first
+// close pushes the singleton's worktree branch straight to origin instead of
+// merging it locally first.
+func defaultPRMergeBranchPush(repoPath, localRef, ref, token string) error {
 	originURL, err := gitOut(repoPath, "remote", "get-url", "origin")
 	if err != nil {
 		return fmt.Errorf("get origin: %w", err)
@@ -224,7 +233,7 @@ func defaultPRMergeGitPush(repoPath, ref, token string) error {
 	// ran its own gates (2026-09-27: 64 telematics commits stranded locally).
 	// redactToken: the authenticated URL embeds the GitHub PAT and gitOut
 	// error strings carry the full command — never let it reach logs.
-	if _, err := gitOut(repoPath, "push", "--force", "--no-verify", target, "HEAD:"+ref); err != nil {
+	if _, err := gitOut(repoPath, "push", "--force", "--no-verify", target, localRef+":"+ref); err != nil {
 		return fmt.Errorf("push HEAD:%s: %s", ref, redactToken(err.Error(), token))
 	}
 	return nil
@@ -235,6 +244,37 @@ func defaultPRMergeGitPush(repoPath, ref, token string) error {
 // is permanent, so review-gated merges would stall every close). Fail-closed:
 // a zero exit alone is not proof the merge landed — only MERGED state from
 // `gh pr view` is.
+// PublishBranchViaPR lands an existing local branch onto a base branch via
+// PR — the FR-010 PR-first close contract. It pushes localBranch to the
+// feature branch, opens a PR into base, merges with `gh pr merge --merge
+// --admin`, and verifies MERGED state before reporting success. Identical
+// contract to PublishViaPR except the pushed ref is a named branch (the
+// singleton worktree branch) rather than the checkout's HEAD, so no local
+// merge into the working branch is needed. Fail-closed: any step error is
+// returned with the URL of a created-but-unmerged PR.
+func PublishBranchViaPR(projectPath, base, localBranch, featureBranch, title, token string) (string, error) {
+	if projectPath == "" || base == "" || localBranch == "" || featureBranch == "" {
+		return "", fmt.Errorf("pr merge: empty project, base, local branch, or feature branch")
+	}
+	if token == "" {
+		token = prMergeResolveToken()
+	}
+	if err := prMergeBranchPush(projectPath, localBranch, "refs/heads/"+featureBranch, token); err != nil {
+		return "", fmt.Errorf("pr merge: push %s: %w", featureBranch, err)
+	}
+	if title == "" {
+		title = "Hydra dogfood PR"
+	}
+	url, err := autoPRGhCreate(projectPath, base, featureBranch, title, "Authored by a Hydra dogfood run.", token)
+	if err != nil {
+		return "", fmt.Errorf("pr merge: create PR: %w", err)
+	}
+	if err := autoPRGhMerge(projectPath, featureBranch, token); err != nil {
+		return url, fmt.Errorf("pr merge: merge %s: %w", url, err)
+	}
+	return url, nil
+}
+
 func defaultAutoPRGhMerge(repoPath, head, token string) error {
 	env := os.Environ()
 	if token != "" {

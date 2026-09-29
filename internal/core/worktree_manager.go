@@ -535,6 +535,11 @@ func (m *WorktreeManager) Integrate(projectPath, key string) error {
 	return m.IntegrateBranch(projectPath, key, m.branchName(key))
 }
 
+// BranchName exposes the worktree branch name for a key so the PR-first
+// close contract (FR-010) can push that branch to origin without a local
+// merge.
+func (m *WorktreeManager) BranchName(key string) string { return m.branchName(key) }
+
 // IntegrateBranch is Integrate with an explicit branch name: the branch to
 // merge is the RECORDED one (possibly a -vN versioned name), while the
 // worktree directory and teardown key stay the caller's key.
