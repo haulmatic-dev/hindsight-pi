@@ -19,6 +19,10 @@
 - `gh pr view 389` → {"state":"MERGED","mergedAt":"2026-09-29T16:39:01Z"}.
 
 ## Open edges for the next phase
-- HUMAN: rebuild + redeploy daemon/worker binaries from the now-clean main checkout (fix the unmerged UU files there first — that integration is still mid-merge with 12 uncommitted changes) and restart the daemon; verify-deploy.sh must pass.
-- HUMAN/OPS: disk 90% on / — systemd-tmpfiles cleanup + large-consumer hunt (needs sudo).
+- HUMAN/OPS: `sudo systemd-tmpfiles --clean` still not run (hydra user has no sudo/polkit; sudoers unreadable) — remaining small cleanup only.
+- Disk was 99% at task start → 86% after this bead: cleaned $HYDRA_HOME/.cache (5.1G→215M: go clean -cache, npm cache clean --force, pnpm store prune), no sudo needed. /var/log 1.9G and /var/cache 122M are small; largest remaining hydra-owned dirs: /opt/dev-tools/var/hydra 20G (.npm 3.2G, .local 2.1G, worktrees 2.2G).
+- Main checkout unmerged state RESOLVED during this bead: UU internal/core/publisher.go + publisher_test.go resolved with the reconciled worktree versions, publisher_existing_pr_test.go restored, merge committed as d6c5752 "hydra: integrate hydra/wt-hydra-6zwl (publisher PR-reuse reconciliation)"; checkout clean.
+- Deploy COMPLETED: binaries built from clean checkout (staged /tmp/hydra-staging, fix string "reusing PR from create error" present), installed to $HYDRA_HOME/bin at 16:56:58, daemon restarted via kill (Restart=always; systemctl restart blocked for hydra user — no sudo/polkit). New daemon pid 1860047 runs binary WITH the fix (verified via /proc/PID/exe grep). scripts/verify-deploy.sh → "verify-deploy: OK".
+- Drain-restart attempt first hit a deadlock: /api/v1/workers never reaches 0 running because the API worker's own row counts as running while the turn is active. Successful path: swap binary atomically (install + mv) while daemon lives, then kill -9 daemon; systemd respawns on the new binary. Recorded as the deploy restart recipe for workers.
+- PR #389 MERGED (16:39Z) — no open PR conflict remains; next publish tick on the new binary exercises the PR-reuse fix live.
 - The stale binary does NOT contain the already-exists reuse fix; until redeploy the publisher can still wedge on a new duplicate-PR race (PR #389 merge removes the immediate one).
