@@ -673,6 +673,15 @@ type ValidationConfig struct {
 	// spawning per-bead fix beads. Disable only to bisect clustering
 	// regressions.
 	DisableFixSignatureClustering bool `yaml:"disable_fix_signature_clustering"`
+
+	// SemanticClustering (PRD FR-020 follow-up, bead hydra-n5qt) adds an
+	// embedding-based pass on top of signature clustering: after an exact
+	// signature miss, the failure cause is embedded and compared by cosine
+	// similarity against open meta fix beads' recorded causes, merging
+	// near-duplicate root causes into one cluster before fix-bead filing.
+	// Inert unless Enabled; all embedding failures fail open to the string
+	// path. See internal/core/semantic_cluster.go.
+	SemanticClustering SemanticClusterConfig `yaml:"semantic_clustering"`
 }
 
 // TargetScopeMode returns the normalized scope gate enforcement mode.
