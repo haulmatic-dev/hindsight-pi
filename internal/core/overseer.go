@@ -19,6 +19,7 @@ import (
 	"github.com/haulmatic-dev/hydra/internal/pi"
 	"github.com/haulmatic-dev/hydra/internal/registry"
 	"github.com/haulmatic-dev/hydra/internal/services"
+	"github.com/haulmatic-dev/hydra/internal/triage"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -173,6 +174,11 @@ type Overseer struct {
 
 	// Epic scanner for periodic epic auto-close
 	epicScanner *EpicScanner // Scans and closes epics when all tasks complete
+
+	// Periodic LLM PR-triage pass (advice only: merge order / duplicate /
+	// needs-human recommendations on overlapping dogfood/* PRs). Nil when
+	// disabled.
+	triageSvc *triage.Service
 
 	// Closed-loop compliance cycle manager
 	complianceCycle *ComplianceCycleManager
@@ -600,6 +606,35 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize epic scanner (5 minute interval)
 	o.epicScanner = NewEpicScanner(5*time.Minute, o.beadsClient)
+	// Periodic LLM PR-triage pass (advice only; hydra-muvh FR-030). Nil when
+	// disabled — ServiceStarter starts it only if non-nil.
+	if config.Triage.Enabled {
+		interval := time.Duration(config.Triage.IntervalSeconds) * time.Second
+		if interval <= 0 {
+			interval = time.Hour
+		}
+		o.triageSvc = triage.New(interval, triage.JudgeConfig{
+			Provider:   config.Triage.Provider,
+			Model:      config.Triage.Model,
+			Thinking:   config.Triage.Thinking,
+			APIKeyName: config.Triage.APIKeyName,
+		}, func() []triage.Project {
+			// Read live at tick time: multi-user discovery appends projects
+			// after NewOverseer returns.
+			projects := make([]triage.Project, 0, len(o.projects))
+			for _, p := range o.projects {
+				if p.Type == "multi" {
+					for _, r := range p.Repos {
+						projects = append(projects, triage.Project{Name: p.Name + "/" + r.Name, Path: resolveRepoPath(p, r)})
+					}
+					continue
+				}
+				projects = append(projects, triage.Project{Name: p.Name, Path: p.Path})
+			}
+			return projects
+		}, triageStatePath())
+		log.Printf("[Triage] Initialized (interval %v, model %s/%s)", interval, config.Triage.Provider, config.Triage.Model)
+	}
 	// Initialize closed-loop compliance cycle manager
 	o.complianceCycle = NewComplianceCycleManager(o, config.ComplianceCycle)
 	if config.ComplianceCycle.Enabled {

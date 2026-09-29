@@ -150,6 +150,14 @@ func main() {
 		return
 	}
 
+	// Subcommand fast path: `hydra triage` runs one PR-triage pass over all
+	// configured projects (group overlapping dogfood/* PRs, post advisory
+	// comments) and exits — the operator's verification door for FR-030.
+	if pos := flag.Args(); len(pos) > 0 && pos[0] == "triage" {
+		runTriageSubcommand(*configPath)
+		return
+	}
+
 	// Configure leveled logging (HYDRA_LOG_LEVEL: debug|info|warn|error).
 	logx.Init()
 	if *debug {
