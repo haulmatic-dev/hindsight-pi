@@ -104,11 +104,16 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 		publishEvents.EmitRepo(projectPath, Event{Type: "publish_push_rejected", Project: filepath.Base(projectPath), Reason: "direct_push_failed",
 			Detail: "push rejected/skipped for " + branch + ": " + reason,
 			Fields: map[string]any{"branch": branch, "reason": reason, "project_path": projectPath}})
-		log.Printf("[Publish] push rejected for %s/%s: %s", projectPath, branch, reason)
+		cls := ClassifyPushFailure(reason)
+		action := ResolvePublishPath(cls, IsHydraOwnedBranch(branch, nil), true)
+		publishEvents.EmitRepo(projectPath, Event{Type: "publish_path_classified", Project: filepath.Base(projectPath), Reason: string(cls),
+			Detail: "push failure classified " + string(cls) + " -> " + string(action) + " for " + branch + ": " + reason,
+			Fields: map[string]any{"branch": branch, "class": string(cls), "action": string(action), "reason": reason, "project_path": projectPath}})
+		log.Printf("[Publish] push rejected for %s/%s: %s (class=%s action=%s)", projectPath, branch, reason, cls, action)
 		if strings.HasPrefix(reason, "remote at") {
 			log.Printf("[Publish] push verification FAILED for %s/%s: %s", projectPath, branch, reason)
 		}
-		if IsProtectedBranchRejection(reason) {
+		if cls == ClassProtected {
 			log.Printf("[Publish] push rejected by branch protection for %s/%s: %s", projectPath, branch, reason)
 		}
 		AppendActivity(projectPath, "publish", "push skipped: "+reason)
