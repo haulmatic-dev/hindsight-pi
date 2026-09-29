@@ -47,7 +47,6 @@ type ProjectHealth struct {
 	ChainedParallel      int // live-worker pairs whose beads are dep-related
 	StrandedWorktrees    int // worktree dirs whose bead is terminal
 	UnintegratedBranches int // hydra/wt-* branch count (informational)
-	IntegrationExhausted int // non-terminal beads parked integration-exhausted
 	Anomalies            []string
 }
 
@@ -67,11 +66,6 @@ type HealthDigest struct {
 	// br I/O error 28 blocked bead creation fleet-wide).
 	HostAnomalies []string
 	DiskUsedPct   int
-	// IntegrationExhausted counts non-terminal beads hard-parked with the
-	// integration-exhausted label. Advisory telemetry — rendered in Text() —
-	// so a shared integration wedge (many beads parked within minutes) shows
-	// up as one project-level signal instead of silent per-bead accumulation.
-	IntegrationExhausted int
 	// Degradations are FR-032 fail-open degradation counters at 0% success
 	// within the window (internal/degrade): "name 0/N" fragments. Advisory
 	// telemetry like HostAnomalies — never pseudo-candidates.
@@ -97,9 +91,9 @@ func (d HealthDigest) Text() string {
 	sort.Slice(projs, func(i, j int) bool { return projs[i].Key < projs[j].Key })
 	var b strings.Builder
 	for _, p := range projs {
-		fmt.Fprintf(&b, "%s: open=%d inprog=%d depblocked=%d workers=%d chainedpairs=%d strandedwt=%d wtbranches=%d intexh=%d",
+		fmt.Fprintf(&b, "%s: open=%d inprog=%d depblocked=%d workers=%d chainedpairs=%d strandedwt=%d wtbranches=%d",
 			p.Key, p.Open, p.InProgress, p.DepBlocked, p.LiveWorkers,
-			p.ChainedParallel, p.StrandedWorktrees, p.UnintegratedBranches, p.IntegrationExhausted)
+			p.ChainedParallel, p.StrandedWorktrees, p.UnintegratedBranches)
 		if len(p.Anomalies) > 0 {
 			fmt.Fprintf(&b, " ANOMALIES=[%s]", strings.Join(p.Anomalies, "; "))
 		}

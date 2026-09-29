@@ -38,12 +38,6 @@ import (
 // before the health digest flags a publisher wedge (Pan-detectable).
 const unpublishedWedgeAge = 15 * time.Minute
 
-// sharedWedgeThreshold is the integration-exhausted park count at which the
-// health digest flags a project-level wedge (2026-09-29 srv-telematics: 9+
-// beads parked within minutes on one poisoned bead store).
-
-const sharedWedgeThreshold = 3
-
 func projectKey(path string) string {
 	parts := strings.Split(filepath.Clean(path), string(filepath.Separator))
 	for i := 0; i+2 < len(parts); i++ {
@@ -139,26 +133,6 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 
 			ph.StrandedWorktrees = countStrandedWorktrees(target, statusByID)
 			ph.UnintegratedBranches = countWTBranches(target)
-
-			// Integration-exhausted hard-parks: count and flag shared wedges.
-			// Many beads parked within minutes of each other is one project-level
-			// wedge (stale integration base, poisoned bead store, protected
-			// branch), not per-bead failures — surface it as a single anomaly so
-			// Pan/human triages the cause instead of accumulating parks.
-			for _, b := range beads {
-				if b.Status.IsTerminal() {
-					continue
-				}
-				for _, l := range b.Labels {
-					if l == integrationExhaustedLabel {
-						ph.IntegrationExhausted++
-					}
-				}
-			}
-			if ph.IntegrationExhausted >= sharedWedgeThreshold {
-				ph.Anomalies = append(ph.Anomalies, fmt.Sprintf(
-					"%d beads hard-parked integration-exhausted — shared integration wedge (one cause, not per-bead failures); triage the integration path, do not clear parks individually", ph.IntegrationExhausted))
-			}
 
 			if ph.ChainedParallel > 0 {
 				ph.Anomalies = append(ph.Anomalies, fmt.Sprintf(
