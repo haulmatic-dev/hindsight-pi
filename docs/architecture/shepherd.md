@@ -481,8 +481,14 @@ outcome, and emits a `[PanRepair]` JSON audit event (`bead_id`, `action`,
 **Per-repo integration gate (2026-09-29).** The close path's integrate/PR step
 and the worktree reconciler's stranded-branch merges run under
 `integrationGate` (`internal/core/integration_gate.go`): one bead per repo
-integrates at a time, and after a gated failure sibling beads wait a 30s
-repo cooldown before starting (success clears it immediately). The gate
+integrates at a time, and after a gated failure sibling beads wait a repo
+cooldown before starting (success clears it immediately). The cooldown is
+adaptive (2026-09-30): consecutive gated failures on a repo double the
+next sibling's wait — 30s→1m→2m→4m→8m (capped at `integrationBackoffMax`),
+reset to the base 30s by any success — so a burst of beads exhausting on
+the same base (hydra-mhk2/xxq5/5ob8: three hard-parks within six minutes)
+is staggered increasingly far apart instead of each re-racing after the
+same fixed window. The gate
 protects the exhaustion cap from a shared wedge, not from the bead's own
 work; the per-bead backoff in `failIntegration` still applies on top.
 
