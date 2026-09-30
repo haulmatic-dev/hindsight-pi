@@ -171,6 +171,51 @@ var (
 	rebaseBranchOntoBase = defaultRebaseBranchOntoBase
 )
 
+// mergeTreeConflicts previews a merge between head and onto with
+// `git merge-tree --write-tree --name-only` and returns the conflicting
+// file paths (nil = clean merge). The caller decides fail-open vs
+// fail-closed: a merge-tree execution error (not a conflict exit) is
+// returned so the precheck can never silently block a healthy publish.
+func mergeTreeConflicts(projectPath, head, onto string) ([]string, error) {
+	out, err := gitOut(projectPath, "merge-tree", "--write-tree", "--name-only", head, onto)
+	if err == nil {
+		return nil, nil
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil, fmt.Errorf("merge-tree %s %s: %w", head, onto, err)
+	}
+	// Conflict exit: output is the written tree OID on line 1, then one
+	// conflicted path per line (--name-only).
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	var files []string
+	for _, l := range lines[1:] {
+		if l = strings.TrimSpace(l); l != "" {
+			files = append(files, l)
+		}
+	}
+	return files, nil
+}
+
+// precheckRebaseConflicts previews whether replaying head onto origin/base
+// would conflict. Fail-open: if the preview itself cannot run, log and let
+// the rebase proceed (the precheck is an optimization, not a gate). A
+// predicted conflict fails closed BEFORE any rebase starts — the observed
+// wedge (add/add conflicts in handoff/discovery docs) left a rebase
+// in-progress in the daemon's own checkout, blocking all later publishing.
+func precheckRebaseConflicts(projectPath, head, base string) error {
+	files, err := mergeTreeConflicts(projectPath, head, "origin/"+base)
+	if err != nil {
+		log.Printf("[Publish] rebase precheck unavailable (%v) — proceeding", err)
+		return nil
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	publishEvents.EmitRepo(projectPath, Event{Type: "publish_rebase_precheck_conflict",
+		Detail: fmt.Sprintf("rebase onto origin/%s would conflict in %s — not started, human review needed", base, strings.Join(files, ", "))})
+	return fmt.Errorf("rebase onto origin/%s would conflict in %s — rebase not started, human review needed (resolve manually or abandon the branch)", base, strings.Join(files, ", "))
+}
+
 // defaultRebaseCheckoutOntoBase rebases the checkout's current branch onto
 // origin/<base> so a conflicted PR publish can retry against the advanced
 // base. --autostash preserves uncommitted human WIP; hooks are disabled for
@@ -178,6 +223,9 @@ var (
 func defaultRebaseCheckoutOntoBase(projectPath, base string) error {
 	if _, err := gitOut(projectPath, "fetch", "--quiet", "origin", base); err != nil {
 		return fmt.Errorf("fetch origin/%s: %w", base, err)
+	}
+	if err := precheckRebaseConflicts(projectPath, "HEAD", base); err != nil {
+		return err
 	}
 	out, err := gitOut(projectPath, "-c", "core.hooksPath=/dev/null", "rebase", "--autostash", "origin/"+base)
 	if err != nil {
@@ -208,6 +256,9 @@ func defaultRebaseBranchOntoBase(projectPath, branch, base string) error {
 	}()
 	if _, err := gitOut(projectPath, "worktree", "add", "--detach", scratch, branch); err != nil {
 		return fmt.Errorf("rebase scratch worktree: %w", err)
+	}
+	if err := precheckRebaseConflicts(projectPath, branch, base); err != nil {
+		return err
 	}
 	out, err := gitOut(scratch, "-c", "core.hooksPath=/dev/null", "rebase", "origin/"+base)
 	if err != nil {

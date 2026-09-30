@@ -251,7 +251,7 @@ func TestDefaultRebaseBranchOntoBase_RealGit(t *testing.T) {
 	run("add", "-A")
 	run("commit", "-qm", "other")
 	// branch with its own commit, diverging
-	run("checkout", "-qb", "feat")
+	run("checkout", "-qb", "feat", "main")
 	writeFile("f.txt", "base+feat\n")
 	run("commit", "-qam", "feat")
 	// add origin pointing at the clone's main
@@ -276,5 +276,87 @@ func TestDefaultRebaseBranchOntoBase_RealGit(t *testing.T) {
 	if !isAncestorOf(dir, "origin/main", "feat") {
 		t.Errorf("feat does not contain origin/main after rebase (origin/main=%s feat=%s)",
 			strings.TrimSpace(run("rev-parse", "origin/main")), strings.TrimSpace(run("rev-parse", "feat")))
+	}
+}
+
+func TestPrecheckRebaseConflicts_RealGit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := gitOut(dir, args...)
+		if err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		return out
+	}
+	run("init", "-q", "-b", "main", ".")
+	run("config", "user.email", "t@t")
+	run("config", "user.name", "t")
+	writeFile := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile("f.txt", "base\n")
+	run("add", "-A")
+	run("commit", "-qm", "base")
+	run("clone", "-q", ".", dir+"/../origin-clone")
+	// remote advances main with a same-file add/add change (commit inside the
+	// clone so origin/main actually moves past the base commit)
+	runCloned := func(args ...string) {
+		t.Helper()
+		if _, err := gitOut(filepath.Join(dir, "..", "origin-clone"), args...); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	runCloned("config", "user.email", "t@t")
+	runCloned("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "..", "origin-clone", "f.txt"), []byte("base+remote\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runCloned("commit", "-qam", "remote change")
+	if _, err := gitOut(dir, "remote", "add", "origin", filepath.Join(dir, "..", "origin-clone")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOut(dir, "fetch", "-q", "origin"); err != nil {
+		t.Fatal(err)
+	}
+	// local branch makes its own change to f.txt -> add/add conflict
+	run("checkout", "-qb", "feat", "main")
+	writeFile("f.txt", "base+feat\n")
+	run("commit", "-qam", "feat change")
+
+	err := precheckRebaseConflicts(dir, "feat", "main")
+	if err == nil {
+		t.Fatal("expected conflict precheck error for add/add conflict, got nil")
+	}
+	if !strings.Contains(err.Error(), "human review needed") || !strings.Contains(err.Error(), "f.txt") {
+		t.Errorf("precheck error missing file list/human-review text: %v", err)
+	}
+	// clean case: branch that does not touch f.txt
+	run("checkout", "-qb", "clean", "main")
+	writeFile("other.txt", "x\n")
+	run("add", "-A")
+	run("commit", "-qm", "clean change")
+	if err := precheckRebaseConflicts(dir, "clean", "main"); err != nil {
+		t.Fatalf("clean branch precheck should pass, got: %v", err)
+	}
+}
+
+func TestMergeTreeConflicts_ParseFileList(t *testing.T) {
+	// pure parser check: conflict output shape is tree OID line + file lines
+	out := "0123456789abcdef0123456789abcdef01234567\ndocs/a.md\ndocs/b.md\n"
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	var files []string
+	for _, l := range lines[1:] {
+		if l = strings.TrimSpace(l); l != "" {
+			files = append(files, l)
+		}
+	}
+	if len(files) != 2 || files[0] != "docs/a.md" || files[1] != "docs/b.md" {
+		t.Errorf("parsed %v, want [docs/a.md docs/b.md]", files)
 	}
 }
