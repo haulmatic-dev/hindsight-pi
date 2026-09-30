@@ -130,3 +130,22 @@ var errTestFilerDown = &filerError{"filer down"}
 type filerError struct{ msg string }
 
 func (e *filerError) Error() string { return e.msg }
+
+func TestFileBeadDuplicateFilerResultSkips(t *testing.T) {
+	store := &fakeStore{}
+	s := New(Config{Enabled: true}, store, nil)
+	var calls int
+	s.SetBeadFiler(func(beadID, title, description string) error {
+		calls++
+		return ErrFileBeadDuplicate
+	})
+	s.handleFileBead("bead-dup", "Some finding\nbody")
+	if calls != 1 {
+		t.Fatalf("filer calls = %d, want 1", calls)
+	}
+	// Benign skip: signature retained, so a repeat is skipped in-session too.
+	s.handleFileBead("bead-dup", "Some finding\nbody")
+	if calls != 1 {
+		t.Fatalf("repeat should have hit signature dedupe; filer calls = %d", calls)
+	}
+}

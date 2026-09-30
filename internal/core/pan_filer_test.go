@@ -1,8 +1,9 @@
 package core
 
 import (
-	"strings"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/haulmatic-dev/hydra/internal/pan"
@@ -43,3 +44,19 @@ func TestFilePanBeadCapAndLabel(t *testing.T) {
 	}
 }
 
+func TestFilePanBead_DuplicateOpenTitleSkipped(t *testing.T) {
+	o := &Overseer{beadsClient: newMockBeadsClient()}
+	path := t.TempDir()
+	if err := o.filePanBead(path, "bead-src", "Publisher wedge (1h stale)", "details"); err != nil {
+		t.Fatalf("first filing failed: %v", err)
+	}
+	// Same normalized title (volatile age differs) → ErrFileBeadDuplicate.
+	err := o.filePanBead(path, "bead-src-2", "Publisher wedge (2h stale)", "details")
+	if !errors.Is(err, pan.ErrFileBeadDuplicate) {
+		t.Fatalf("want ErrFileBeadDuplicate, got %v", err)
+	}
+	// Different title still files (cap is 2).
+	if err := o.filePanBead(path, "bead-src-3", "Different finding", "details"); err != nil {
+		t.Fatalf("different title should file: %v", err)
+	}
+}

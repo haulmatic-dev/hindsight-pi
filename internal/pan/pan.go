@@ -225,6 +225,16 @@ const MaxOpenFiledBeadsPerProject = 2
 // counts only beads carrying it.
 const FiledLabel = "pan-filed"
 
+// ErrFileBeadDuplicate signals that the filer refused to create the bead
+// because an open pan-filed bead with the same normalized title already
+// exists (persistent cross-session dedupe). The caller must treat this as a
+// benign skip, not a filer failure.
+var ErrFileBeadDuplicate = errors.New("file-bead duplicate: open pan-filed bead with the same normalized title already exists")
+
+// NormalizeReason is the exported form of normalizeReason for filers that
+// need to compare titles under the same volatile-stripping rules.
+func NormalizeReason(reason string) string { return normalizeReason(reason) }
+
 // reJudgeInterval is the valve that re-judges an unchanged candidate set
 // anyway: a permanently stuck candidate must never become permanently blind,
 // and verdict memory (ContinuedRecently etc.) decays on this horizon.
@@ -1083,6 +1093,13 @@ func (s *Shepherd) handleFileBead(beadID, payload string) {
 		return
 	}
 	if err := s.BeadFiler(beadID, title, description); err != nil {
+		if errors.Is(err, ErrFileBeadDuplicate) {
+			// Persistent dedupe (filer-side, survives restarts): benign skip,
+			// keep the signature so this session stops retrying too.
+			s.emitRepairEvent(beadID, ActFileBead, "skipped", "duplicate signature")
+			log.Printf("[Pan] file-bead for %s skipped: %v", beadID, err)
+			return
+		}
 		// Filer failure (cap, store error) forgets the signature so a later
 		// attempt can retry once the cap frees up.
 		s.filedMu.Lock()
