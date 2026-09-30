@@ -675,6 +675,14 @@ type OverseerConfig struct {
 	// Escalations were previously never adjudicated, permanently wedging the
 	// scheduler slot they hold. 0 disables the scanner.
 	EscalationTTL time.Duration `yaml:"escalation_ttl"`
+	// IntegrationExhaustedSweep ages integration-exhausted hard-parks: a
+	// non-terminal bead carrying the durable `integration-exhausted` label
+	// older than this gets `needs-human` added plus a typed
+	// integration_exhausted_stale event, so abandoned integration attempts
+	// surface for manual intervention or Pan retry-quarantine instead of
+	// staying hidden forever. The hard-park itself is never cleared. 0
+	// disables the sweeper.
+	IntegrationExhaustedSweep time.Duration `yaml:"integration_exhausted_sweep"`
 	// MaxBeadTokens is the cumulative per-bead token ceiling enforced by
 	// Charon: a working worker past the ceiling is killed and escalated via
 	// the retry cap (0 = disabled). Non-converging grinders otherwise burn
@@ -765,15 +773,15 @@ type ResourceMonitoringConfig struct {
 
 // ProjectConfig represents a project configuration
 type ProjectConfig struct {
-	Name  string       `yaml:"name"`
-	Path  string       `yaml:"path"`
-	Type  string       `yaml:"type"` // "single" or "multi"
+	Name string `yaml:"name"`
+	Path string `yaml:"path"`
+	Type string `yaml:"type"` // "single" or "multi"
 	// IntegrationBranch pins the integration base for PR creation and
 	// merge-base checks. Optional: when unset, the origin default branch is
 	// used. The main checkout's current branch is NEVER used as a base.
 	IntegrationBranch string       `yaml:"integration_branch,omitempty"`
-	Repos []RepoConfig `yaml:"repos,omitempty"`
-	Gates *GateSet     `yaml:"gates,omitempty"` // daemon-owned deterministic gates (FR-002); nil = legacy
+	Repos             []RepoConfig `yaml:"repos,omitempty"`
+	Gates             *GateSet     `yaml:"gates,omitempty"` // daemon-owned deterministic gates (FR-002); nil = legacy
 }
 
 // RepoConfig represents a repository within a multi-repo project
@@ -808,11 +816,12 @@ func DefaultConfig() *Config {
 	return &Config{
 		MultiUserDiscovery: true,
 		Overseer: OverseerConfig{
-			BeadDiscoveryInterval: 5 * time.Second,
-			MaxWorkers:            2,
-			DefaultRetries:        3,
-			EscalationTTL:         72 * time.Hour,
-			WorkerTimeout:         30 * time.Minute,
+			BeadDiscoveryInterval:     5 * time.Second,
+			MaxWorkers:                2,
+			DefaultRetries:            3,
+			EscalationTTL:             72 * time.Hour,
+			IntegrationExhaustedSweep: 48 * time.Hour,
+			WorkerTimeout:             30 * time.Minute,
 			ChainDetection: ChainDetectionConfig{
 				Enabled:  true,
 				Interval: 10 * time.Second,

@@ -46,6 +46,9 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	if o.escalationTTL != nil {
 		o.escalationTTL.Start()
 	}
+	if o.integrationSweep != nil {
+		o.integrationSweep.Start()
+	}
 
 	// Open the worker registry (daemon-owned SQLite truth; PRD
 	// worker-park-and-resume Part 4) and construct Pan, the shepherd.
@@ -676,6 +679,9 @@ func (s *ServiceStarter) Stop() {
 	}
 	if o.escalationTTL != nil {
 		o.escalationTTL.Stop()
+	}
+	if o.integrationSweep != nil {
+		o.integrationSweep.Stop()
 	}
 	if o.settledStateSvc != nil {
 		if err := o.settledStateSvc.Stop(); err != nil {

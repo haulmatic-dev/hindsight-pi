@@ -138,6 +138,9 @@ type Overseer struct {
 	// Stale-escalation ager (nil when escalation_ttl <= 0)
 	escalationTTL *EscalationTTLScanner
 
+	// Stale integration-exhausted park sweeper (nil when disabled)
+	integrationSweep *IntegrationExhaustedSweeper
+
 	// Worker registry (daemon-owned SQLite truth) and Pan, the shepherd that
 	// decides the ambiguous tail of worker states. Both fail-open: a registry
 	// open failure or a disabled Pan leaves deterministic rules in force.
@@ -393,6 +396,9 @@ func NewOverseer(config *Config) *Overseer {
 	o.orphanJanitor.SetProjectsProvider(o.GetProjects)
 	if config.Overseer.EscalationTTL > 0 {
 		o.escalationTTL = NewEscalationTTLScanner(o.beadsClient, o.GetProjects, config.Overseer.EscalationTTL, o.eventSink)
+	}
+	if config.Overseer.IntegrationExhaustedSweep > 0 {
+		o.integrationSweep = NewIntegrationExhaustedSweeper(o.beadsClient, o.GetProjects, config.Overseer.IntegrationExhaustedSweep, o.eventSink)
 	}
 	// Inject access to the in-memory activeWorkers map so Charon can clean up
 	// stale placeholder entries (PID 0) that would otherwise block new spawns

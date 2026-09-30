@@ -194,6 +194,16 @@ TTL: label swapped for `escalation-expired`, typed `escalation_expired` event,
 bead returns to the ready queue. `in_progress` beads are skipped so a live
 worker finishing under the stay is never raced. Default 72h; 0 disables.
 
+**Integration-exhausted park sweeping (`overseer.integration_exhausted_sweep`,
+2026-09-30).** The `integration-exhausted` hard-park stays durable by design,
+but it must not stay invisible: an `IntegrationExhaustedSweeper` (1h cadence +
+once at startup) flags every non-terminal bead carrying the label whose
+`UpdatedAt` has aged past the threshold with `needs-human` plus a typed
+`integration_exhausted_stale` event, so abandoned integration attempts surface
+for manual intervention or the Pan retry-quarantine repair. The park itself is
+never cleared, `in_progress` beads are skipped, and beads already carrying
+`needs-human` are left alone (idempotent). Default 48h; 0 disables.
+
 **Worktree-unavailable hard-park (2026-09-13).** The same durability rule now
 covers the spawn path: when `EnsureWorktree` fails (dubious-ownership,
 foreign-repo path, unresolvable base), `SpawnInternal` fails the spawn
