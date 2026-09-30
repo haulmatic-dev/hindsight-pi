@@ -173,6 +173,10 @@ func (s *IntegrationRetestStage) runProject(project types.Project, activeKeys ma
 	if s.beadsClient == nil || project.Path == "" {
 		return
 	}
+	if project.Type == types.RepoTypeMulti && len(project.Repos) > 0 {
+		s.runProjectRepos(project, activeKeys)
+		return
+	}
 	beads, err := s.beadsClient.ListBeads(project.Path, "")
 	if err != nil {
 		log.Printf("[IntegrationRetest] list beads for %s: %v (skip tick)", project.Name, err)
@@ -183,7 +187,32 @@ func (s *IntegrationRetestStage) runProject(project types.Project, activeKeys ma
 		if !s.selectBead(project.Path, bead, activeKeys) {
 			continue
 		}
-		s.runBead(project, bead)
+		s.runBead(project, project.Path, bead)
+	}
+}
+
+// runProjectRepos rechecks a multi-repo project's parked beads per repo: the
+// parent directory has no .beads store (br fails with exit status 2) and no
+// git repo (worktree/git plumbing would all fail), so every operation must
+// run against the per-repo directory (nipuna.j fms incident, 2026-09-30).
+func (s *IntegrationRetestStage) runProjectRepos(project types.Project, activeKeys map[string]bool) {
+	for _, repo := range project.Repos {
+		repoPath := resolveRepoPath(project, repo)
+		if repoPath == "" {
+			continue
+		}
+		beads, err := s.beadsClient.ListBeads(repoPath, "")
+		if err != nil {
+			log.Printf("[IntegrationRetest] list beads for %s/%s: %v (skip repo tick)", project.Name, repo.Name, err)
+			continue
+		}
+		for i := range beads {
+			bead := &beads[i]
+			if !s.selectBead(repoPath, bead, activeKeys) {
+				continue
+			}
+			s.runBead(project, repoPath, bead)
+		}
 	}
 }
 
@@ -339,13 +368,12 @@ func (s *IntegrationRetestStage) findBranch(projectPath string, bead *types.Bead
 
 // runBead executes the full retest pipeline for one bead. Every step fails
 // open: an error logs, emits nothing fatal, and leaves the bead parked.
-func (s *IntegrationRetestStage) runBead(project types.Project, bead *types.Bead) {
+func (s *IntegrationRetestStage) runBead(project types.Project, projectPath string, bead *types.Bead) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[IntegrationRetest] PANIC on %s: %v (bead stays parked)", bead.ID, r)
 		}
 	}()
-	projectPath := project.Path
 	beadID := string(bead.ID)
 	branch := s.findBranch(projectPath, bead)
 	if branch == "" {

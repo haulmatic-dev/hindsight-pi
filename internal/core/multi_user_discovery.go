@@ -228,6 +228,32 @@ func projectRepoDirs(project types.Project) []string {
 	return dirs
 }
 
+// repoDirForBead resolves the per-repo directory of a multi-project that
+// owns beadID. Single projects return project.Path directly. Multi projects
+// scan their repos' bead stores for the exact ID (the parent dir has no
+// .beads store, so closing there fails with exit status 2).
+func repoDirForBead(project types.Project, beadID string, beadsClient BeadsClient) string {
+	if project.Type != types.RepoTypeMulti || len(project.Repos) == 0 {
+		return project.Path
+	}
+	for _, repo := range project.Repos {
+		dir := resolveRepoPath(project, repo)
+		if dir == "" || beadsClient == nil {
+			continue
+		}
+		beads, err := beadsClient.ListBeads(dir, "")
+		if err != nil {
+			continue
+		}
+		for _, b := range beads {
+			if string(b.ID) == beadID {
+				return dir
+			}
+		}
+	}
+	return ""
+}
+
 // isExcluded reports whether a project name or path matches the exclusion list.
 // Entries may be bare directory names or full paths.
 func (d *MultiUserDiscovery) isExcluded(name string) bool {

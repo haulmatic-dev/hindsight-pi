@@ -914,6 +914,62 @@ var benignPublishReasons = map[string]bool{
 // fail-closed via ResolvePublishIdentity; daemon-owned repos use the service
 // account's own credential).
 func (o *Overseer) publishOneProject(project types.Project, active map[string]bool) (bool, string) {
+	if project.Type == types.RepoTypeMulti && len(project.Repos) > 0 {
+		return o.publishOneProjectRepos(project, active)
+	}
+	return o.publishOneRepo(project, project.Path, active)
+}
+
+// publishOneProjectRepos publishes every repo of a multi-repo project: the
+// parent directory is not a git repository (git rev-parse fatal: not a git
+// repository), so publishing must run per repo (nipuna.j fms incident,
+// 2026-09-30). Identity resolves once on the parent project path (where the
+// user config matches); push-pending state is aggregated on the parent.
+func (o *Overseer) publishOneProjectRepos(project types.Project, active map[string]bool) (bool, string) {
+	id, err := ResolvePublishIdentity(project.Path, o.getUserContextForProject(project.Path))
+	token := ""
+	if err != nil {
+		log.Printf("[Publish] %s: %v (publish blocked, fail-closed)", project.Path, err)
+		if o.eventSink != nil {
+			o.eventSink.Emit(Event{Type: "publish_identity_missing", Project: project.Name, Reason: "owner_pat_unresolved", Detail: err.Error()})
+		}
+	} else {
+		token = id.Token
+		if o.eventSink != nil {
+			o.eventSink.Emit(Event{Type: "publish_identity_resolved", Project: project.Name, Fields: map[string]any{"owner": id.Owner, "token_source": id.Source}})
+		}
+	}
+	pushedAny := false
+	lastReason := ""
+	allBenign := true
+	for _, repo := range project.Repos {
+		repoPath := resolveRepoPath(project, repo)
+		if repoPath == "" {
+			continue
+		}
+		pushed, reason := PublishRepo(o.worktreeManager, repoPath, token, o.config.PRMergeEnabled(), active, o.terminalBeadChecker(repoPath))
+		if pushed {
+			pushedAny = true
+		}
+		if !benignPublishReasons[reason] {
+			allBenign = false
+			lastReason = reason
+		}
+	}
+	if len(project.Repos) == 0 || pushedAny || (allBenign && lastReason == "") {
+		o.clearPushPending(project.Path)
+	} else {
+		o.notePushPending(project, lastReason)
+	}
+	return pushedAny, lastReason
+}
+
+// publishOneRepo runs PublishRepo for one repo path and tracks the push-
+// pending state. Returns PublishRepo's result verbatim. Push
+// authenticates with the bead owner's PAT (owner-identity publish,
+// fail-closed via ResolvePublishIdentity; daemon-owned repos use the service
+// account's own credential).
+func (o *Overseer) publishOneRepo(project types.Project, projectPath string, active map[string]bool) (bool, string) {
 	id, err := ResolvePublishIdentity(project.Path, o.getUserContextForProject(project.Path))
 	token := ""
 	if err != nil {
@@ -1060,7 +1116,27 @@ func (o *Overseer) persistClosedEpics(beadIDs []string) {
 func (o *Overseer) findProjectPathForBead(beadID string) (string, types.BeadID) {
 	for _, project := range o.GetProjects() {
 		if len(beadID) > len(project.Name) && beadID[:len(project.Name)+1] == project.Name+"-" {
+			if project.Type == types.RepoTypeMulti && len(project.Repos) > 0 {
+				// Multi-repo: the parent dir has no .beads store, so a close
+				// there fails ("Could not find project path for epic"). Find
+				// the repo whose bead store contains the exact ID
+				// (nipuna.j fms incident, 2026-09-30).
+				if dir := repoDirForBead(project, beadID, o.beadsClient); dir != "" {
+					return dir, types.BeadID(beadID)
+				}
+			}
 			return project.Path, types.BeadID(beadID)
+		}
+	}
+	// Fallback: multi-discovered bead IDs carry the repo store's prefix
+	// ("fmsfe-b9o" from repo fms-frontend), which matches no project name
+	// ("fms"). Scan multi projects' repo stores for the exact ID.
+	for _, project := range o.GetProjects() {
+		if project.Type != types.RepoTypeMulti || len(project.Repos) == 0 {
+			continue
+		}
+		if dir := repoDirForBead(project, beadID, o.beadsClient); dir != "" {
+			return dir, types.BeadID(beadID)
 		}
 	}
 	return "", types.BeadID(beadID)
