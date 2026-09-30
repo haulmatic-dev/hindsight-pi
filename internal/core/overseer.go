@@ -103,6 +103,7 @@ type Overseer struct {
 	diskStatPath     string                       // statfs path ("" = "/")
 	dag              *DAG
 	dagMu            sync.RWMutex
+	epicCloseGuard   epicCloseGuard // store-verification refusals for epic auto-close
 	dagNavigator     *DAGNavigator
 	completed        map[string]bool  // Track completed beads for this session
 	retryManager     *RetryManager    // Retry and validation-retry tracking
@@ -1092,12 +1093,36 @@ func (o *Overseer) buildDAG() error {
 
 // persistClosedEpics writes the auto-close decision for organizational epics
 // back to the beads store. Runs in a goroutine to avoid holding the DAG lock
-// during the br CLI call.
+// during the br CLI call; it re-acquires dagMu for its own mutations.
+//
+// Store-verification gate (regression 2026-09-30, fmsfe incident): the DAG
+// build can miss open children (their repo's ListBeads fails and is skipped,
+// or they are otherwise filtered from the build), so CloseReadyEpics sees a
+// vacuously-empty child set and closes the epic over open work. Before
+// closing, every project's bead stores are scanned for non-terminal
+// dependents of the epic; any open dependent, or any listing error, refuses
+// the close (fail-closed).
 func (o *Overseer) persistClosedEpics(beadIDs []string) {
+	o.dagMu.Lock()
+	defer o.dagMu.Unlock()
 	for _, id := range beadIDs {
+		if o.epicCloseGuard.recentlyRefused(id, time.Now()) {
+			continue
+		}
+		if o.epicHasOpenDependent(id) {
+			log.Printf("[DAG] Epic %s has open dependents in the beads store; refusing auto-close (DAG view incomplete)", id)
+			o.epicCloseGuard.markRefused(id, time.Now())
+			if o.eventSink != nil {
+				o.eventSink.Emit(Event{Type: "epic_close_refused", Bead: id,
+					Reason: "open_dependents",
+					Detail: "CloseReadyEpics proposed closing this epic but a bead-store scan found non-terminal dependents; close refused (fail-closed)."})
+			}
+			continue
+		}
 		projectPath, _ := o.findProjectPathForBead(id)
 		if projectPath == "" {
 			log.Printf("[DAG] Could not find project path for epic %s; skipping persistence", id)
+			o.epicCloseGuard.markRefused(id, time.Now())
 			continue
 		}
 		reason := "epic auto-close: all dependencies and children closed"
