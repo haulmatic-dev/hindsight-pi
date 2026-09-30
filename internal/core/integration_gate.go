@@ -34,6 +34,14 @@ var (
 	integrationRepoLocks   = map[string]*sync.Mutex{}
 	integrationRepoLast    sync.Map // repoPath -> time.Time of last gated failure
 
+	// integrationRepoFailStreak counts consecutive gated integration
+	// failures per repo. Each failure doubles the next sibling's cooldown
+	// (AIMD-style: reset on success), so a burst of beads exhausting on the
+	// same base — hydra-mhk2/xxq5/5ob8, three hard-parks within six minutes
+	// (2026-09-29) — is staggered increasingly far apart instead of each
+	// re-racing after the same fixed 30s window.
+	integrationRepoFailStreak sync.Map // repoPath -> int
+
 	// integrationOpenNotifier, when set, is invoked whenever a repo's
 	// integration path opens (successful gated integration). The retest
 	// stage registers itself here so parked siblings are absorbed fast
@@ -56,7 +64,8 @@ func SetIntegrationOpenNotifier(fn func(projectPath string)) {
 // integrationRepoCooldown: after a gated integration fails, sibling beads on
 // the same repo wait this long before starting their own attempt. Matches
 // integrationBackoffBase so the first sibling wait mirrors the failing
-// bead's own first backoff.
+// bead's own first backoff. Consecutive failures escalate the effective
+// cooldown exponentially (see integrationRepoFailStreak).
 var integrationRepoCooldown = 30 * time.Second
 
 func integrationRepoMutex(repoPath string) *sync.Mutex {
@@ -77,12 +86,28 @@ func integrationGate(repoPath string, fn func() error) error {
 	mu := integrationRepoMutex(repoPath)
 	mu.Lock()
 	defer mu.Unlock()
+	var streak int
+	if v, ok := integrationRepoFailStreak.Load(repoPath); ok {
+		streak, _ = v.(int)
+	}
 	if v, ok := integrationRepoLast.Load(repoPath); ok {
 		if last, ok := v.(time.Time); ok {
-			if elapsed := time.Since(last); elapsed < integrationRepoCooldown {
-				wait := integrationRepoCooldown - elapsed
-				log.Printf("[Integrate] %s: waiting %v (repo cooldown after sibling integration failure)",
-					filepath.Base(repoPath), wait.Round(time.Second))
+			// Adaptive stagger: each consecutive failure doubles the wait
+			// (30s→1m→2m→4m→8m capped) so concurrent exhausting beads queue
+			// behind an increasingly long backoff instead of re-racing the
+			// same base branch. First failure keeps the base cooldown.
+			mult := 0
+			if streak > 1 {
+				mult = min(streak-1, 4)
+			}
+			cooldown := integrationRepoCooldown << uint(mult)
+			if cooldown > integrationBackoffMax {
+				cooldown = integrationBackoffMax
+			}
+			if elapsed := time.Since(last); elapsed < cooldown {
+				wait := cooldown - elapsed
+				log.Printf("[Integrate] %s: waiting %v (repo cooldown after %d consecutive sibling integration failure(s))",
+					filepath.Base(repoPath), wait.Round(time.Second), streak)
 				time.Sleep(wait)
 			}
 		}
@@ -90,6 +115,12 @@ func integrationGate(repoPath string, fn func() error) error {
 	err := fn()
 	if err != nil {
 		integrationRepoLast.Store(repoPath, time.Now())
+		integrationRepoFailStreak.Store(repoPath, streak+1)
+	} else {
+		// In-gate success clears the streak so the next failure starts from
+		// the base cooldown. The close path's resetIntegrationCooldown already
+		// handles the full reset + notifier; this is the belt to that suspenders.
+		integrationRepoFailStreak.Delete(repoPath)
 	}
 	return err
 }
@@ -98,6 +129,7 @@ func integrationGate(repoPath string, fn func() error) error {
 // integration so a later failure starts from a clean slate.
 func resetIntegrationCooldown(repoPath string) {
 	integrationRepoLast.Delete(repoPath)
+	integrationRepoFailStreak.Delete(repoPath)
 	integrationOpenNotifierMu.Lock()
 	fn := integrationOpenNotifier
 	integrationOpenNotifierMu.Unlock()

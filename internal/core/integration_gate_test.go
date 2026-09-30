@@ -97,6 +97,56 @@ func TestIntegrationGate_CooldownAfterFailure(t *testing.T) {
 	}
 }
 
+func TestIntegrationGate_EscalatingCooldown(t *testing.T) {
+	withRepoCooldown(t, 40*time.Millisecond)
+	resetIntegrationCooldown("repo-e")
+	boom := errors.New("boom")
+	if err := integrationGate("repo-e", func() error { return boom }); !errors.Is(err, boom) {
+		t.Fatalf("fail 1 err = %v", err)
+	}
+	start := time.Now()
+	_ = integrationGate("repo-e", func() error { return boom })
+	if w := time.Since(start); w < 40*time.Millisecond {
+		t.Fatalf("after 1 failure gate waited %v, want >= base 40ms", w)
+	}
+	start = time.Now()
+	_ = integrationGate("repo-e", func() error { return boom })
+	if w := time.Since(start); w < 80*time.Millisecond {
+		t.Fatalf("after 2 failures gate waited %v, want >= 2x base 80ms", w)
+	}
+	start = time.Now()
+	_ = integrationGate("repo-e", func() error { return boom })
+	if w := time.Since(start); w < 160*time.Millisecond {
+		t.Fatalf("after 3 failures gate waited %v, want >= 4x base 160ms", w)
+	}
+	// Streak must not leak across repos: repo-e is at streak 3 (next
+	// cooldown 160ms); repo-f's next wait after one failure is only base 40ms.
+	resetIntegrationCooldown("repo-f")
+	_ = integrationGate("repo-f", func() error { return boom })
+	start = time.Now()
+	_ = integrationGate("repo-f", func() error { return nil })
+	if w := time.Since(start); w >= 160*time.Millisecond {
+		t.Fatalf("fresh repo waited %v after one failure, want < escalated 160ms (other repo's streak not shared)", w)
+	}
+}
+
+func TestIntegrationGate_SuccessResetsStreak(t *testing.T) {
+	withRepoCooldown(t, 40*time.Millisecond)
+	resetIntegrationCooldown("repo-g")
+	boom := errors.New("boom")
+	_ = integrationGate("repo-g", func() error { return boom })
+	_ = integrationGate("repo-g", func() error { return boom })
+	_ = integrationGate("repo-g", func() error { return nil })
+	start := time.Now()
+	_ = integrationGate("repo-g", func() error { return boom })
+	if w := time.Since(start); w > 20*time.Millisecond {
+		t.Fatalf("first gate after success waited %v, want immediate", w)
+	}
+	if v, ok := integrationRepoFailStreak.Load("repo-g"); !ok || v.(int) != 1 {
+		t.Fatalf("streak after success+failure = %v, want 1", v)
+	}
+}
+
 func TestIntegrationGate_SuccessClearsCooldown(t *testing.T) {
 	withRepoCooldown(t, 80*time.Millisecond)
 	resetIntegrationCooldown("repo-d")
