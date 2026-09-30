@@ -33,6 +33,14 @@ overseer:
   # slot forever. 0 disables the scanner. Suggested: 72h.
   escalation_ttl: 72h
 
+  # Age threshold for integration-exhausted hard-parks: a non-terminal bead
+  # carrying the durable `integration-exhausted` label older than this gets
+  # `needs-human` added plus a typed `integration_exhausted_stale` event so
+  # abandoned integration attempts surface for manual intervention or Pan
+  # retry-quarantine instead of staying hidden forever. The hard-park itself
+  # is never cleared. 0 disables the sweeper. Suggested: 48h.
+  integration_exhausted_sweep: 48h
+
   worker_timeout: 10m
 
   # How long to wait for a worker to accept a handoff
