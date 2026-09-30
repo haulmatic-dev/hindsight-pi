@@ -14,13 +14,10 @@ package core
 import (
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
-
-	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // ErrPublishIdentityMissing is returned when a publish identity cannot be
@@ -80,50 +77,6 @@ func ResolvePublishIdentity(projectPath string, uc *UserContext) (PublishIdentit
 		return PublishIdentity{Owner: uc.Username, Token: tok, Source: "owner-pat-file"}, nil
 	}
 	return ResolveDaemonPublishIdentity()
-}
-
-// spawnPreflightPublishIdentity is the spawn-funnel publish-identity
-// preflight: before a worker is spawned for a bead, verify the bead owner's
-// publish identity (owner PAT) resolves. An unresolved identity blocks the
-// spawn THIS tick with a typed spawn_blocked_identity_missing event and the
-// bead is re-checked on the next tick — auto-resume when the PAT lands.
-// This moves the fail-closed check from close time (where it churned
-// integration retries per bead, the 5gq/pmgh pathology) to spawn time so a
-// doomed worker never burns provider tokens.
-//
-// Fail-open: without a resolver (unit tests, standalone tools) or on a
-// non-identity error the preflight never gates; only ErrPublishIdentityMissing
-// blocks.
-func (o *Overseer) spawnPreflightPublishIdentity(bead *types.Bead, projectPath string) error {
-	if publishIdentityResolver == nil || bead == nil {
-		return nil
-	}
-	if projectPath == "" && o.beadAnalyzer != nil {
-		projectPath = o.beadAnalyzer.FindProjectPath(bead)
-	}
-	if projectPath == "" {
-		return nil
-	}
-	_, err := publishIdentityResolver(projectPath)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, ErrPublishIdentityMissing) {
-		return nil // fail-open: transient resolver errors must not gate spawns
-	}
-	ev := Event{
-		Type:    "spawn_blocked_identity_missing",
-		Reason:  "owner_pat_unresolved",
-		Project: string(bead.Project),
-		Bead:    bead.ID.String(),
-		Detail:  fmt.Sprintf("Spawn blocked for %s: %v (re-checks next tick; auto-resumes when the owner PAT lands)", bead.ID, err),
-	}
-	if o.beadCloser != nil && o.beadCloser.events != nil {
-		o.beadCloser.events.EmitRepo(projectPath, ev)
-	} else {
-		log.Printf("[Spawn] %s", ev.Detail)
-	}
-	return err
 }
 
 // ResolveDaemonPublishIdentity resolves the daemon service account's own

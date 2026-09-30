@@ -36,6 +36,10 @@ projects:
     type: single
 `
 	os.WriteFile(filepath.Join(aliceHydra, "config.yaml"), []byte(configYAML), 0644)
+	// Spawn-funnel identity preflight (fmsfe-a2u, fail-closed): a non-daemon
+	// owner without a readable PAT must not spawn. Alice's publish identity
+	// must therefore resolve in this fixture.
+	os.WriteFile(filepath.Join(aliceHydra, ".github-token"), []byte("ghp_alice_secret"), 0600)
 
 	// ── Create tiny-api project ──────────────────────────────
 	projectDir := filepath.Join(aliceHome, "projects", "tiny-api")

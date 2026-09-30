@@ -562,17 +562,6 @@ func (s *Scheduler) Tick() error {
 			continue
 		}
 
-		// Spawn-funnel publish-identity preflight: an owner whose PAT is
-		// unresolved fails at close-time publish anyway (fail-closed); refuse
-		// the spawn here instead of burning a full worker turn. Re-checked
-		// next tick — auto-resume when the PAT lands.
-		if err := o.spawnPreflightPublishIdentity(&bead, ""); err != nil {
-			if poolRelease != nil {
-				poolRelease()
-			}
-			continue
-		}
-
 		if err := o.spawnWorker(bead); err != nil {
 			// The worker never started, so nothing will ever release its slot.
 			if poolRelease != nil {
@@ -760,11 +749,6 @@ func (s *Scheduler) SpawnWorkersForNodes(nodes []*Node, maxSlots int) int {
 		if holder, conflict := o.targetScopeConflict(&node.Bead); conflict {
 			log.Printf("⏳ Deferring bead %s: target files overlap live worker %s", node.Bead.ID, holder)
 			o.emitSpawnDeferredOverlap(node.Bead, holder)
-			continue
-		}
-		// Spawn-funnel publish-identity preflight (see Tick retry path):
-		// refuse to spawn a worker whose owner PAT is unresolved.
-		if err := o.spawnPreflightPublishIdentity(&node.Bead, ""); err != nil {
 			continue
 		}
 		if err := o.spawnWorker(node.Bead); err != nil {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -1229,14 +1230,37 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 	// while it sat in the retry queue must not be resurrected (e2lqf, 2026-09-02).
 	if projectPath != "" && o.beadsClient != nil {
 		current, err := o.beadsClient.GetBead(projectPath, "", bead.ID)
-		if err != nil {
+		switch {
+		case err != nil:
 			log.Printf("[Spawn] %s store status read failed: %v", beadIDStr, err)
-		} else if current != nil && current.Status.IsTerminal() {
+		case current != nil && current.Status.IsTerminal():
 			// Drop the stale retry entry so the scheduler stops offering it.
 			o.retryManager.ClearRetry(beadIDStr)
 			o.emitSpawnSuppressedClosed(bead, projectPath, string(current.Status))
 			return &SpawnSuppressedError{BeadID: beadIDStr, Status: current.Status}
+		case current != nil:
+			// fmsfe-a2u (2026-09-30): post-restart reconstructed beads can carry
+			// an empty Type/Project, silently no-opping every scheduler type
+			// filter. Re-read the metadata from store truth immediately before
+			// spawning so the preflight below sees the real type.
+			if strings.TrimSpace(bead.Type) == "" {
+				bead.Type = current.Type
+			}
+			if bead.Project == "" {
+				bead.Project = current.Project
+			}
 		}
+	}
+
+	// Fail-closed preflight (fmsfe-a2u, 2026-09-30): a bead whose Type cannot
+	// be verified, or whose store Type is a human gate/container, must never
+	// reach a worker. Also blocks the spawn funnel on an unresolved owner
+	// publish identity (auto-resumes when the PAT lands).
+	if err := o.spawnPreflightBead(bead, projectPath); err != nil {
+		return err
+	}
+	if err := o.spawnPreflightPublishIdentity(bead, projectPath); err != nil {
+		return err
 	}
 
 	// Pre-spawn gate probe: a bead whose scoped gates already pass on main
