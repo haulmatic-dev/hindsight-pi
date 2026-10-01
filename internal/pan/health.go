@@ -46,6 +46,7 @@ type ProjectHealth struct {
 	LiveWorkers          int
 	ChainedParallel      int // live-worker pairs whose beads are dep-related
 	StrandedWorktrees    int // worktree dirs whose bead is terminal
+	OrphanClaims         int // in_progress beads with no live registry worker
 	UnintegratedBranches int // hydra/wt-* branch count (informational)
 	Anomalies            []string
 }
@@ -91,8 +92,8 @@ func (d HealthDigest) Text() string {
 	sort.Slice(projs, func(i, j int) bool { return projs[i].Key < projs[j].Key })
 	var b strings.Builder
 	for _, p := range projs {
-		fmt.Fprintf(&b, "%s: open=%d inprog=%d depblocked=%d workers=%d chainedpairs=%d strandedwt=%d wtbranches=%d",
-			p.Key, p.Open, p.InProgress, p.DepBlocked, p.LiveWorkers,
+		fmt.Fprintf(&b, "%s: open=%d inprog=%d depblocked=%d workers=%d orphanclaims=%d chainedpairs=%d strandedwt=%d wtbranches=%d",
+			p.Key, p.Open, p.InProgress, p.DepBlocked, p.LiveWorkers, p.OrphanClaims,
 			p.ChainedParallel, p.StrandedWorktrees, p.UnintegratedBranches)
 		if len(p.Anomalies) > 0 {
 			fmt.Fprintf(&b, " ANOMALIES=[%s]", strings.Join(p.Anomalies, "; "))

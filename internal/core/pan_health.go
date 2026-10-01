@@ -120,6 +120,32 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 			}
 			ph.LiveWorkers = len(live)
 
+			// P0 campaign anomaly: in_progress beads with no live registry
+			// worker (fms 2026-10-01: 6 orphaned claims wedged a 17-bead DAG
+			// ladder for 1h+ with zero live workers and zero progress — same
+			// class as the tb3j fleet-stall rule). Charon's orphan recovery is
+			// the mechanical fix; this anomaly makes the state visible to Pan
+			// so a judgment fires instead of the campaign sitting silent.
+			for id, st := range statusByID {
+				if st != types.StatusInProgress {
+					continue
+				}
+				orphaned := true
+				for _, w := range live {
+					if w.BeadID == id {
+						orphaned = false
+						break
+					}
+				}
+				if orphaned {
+					ph.OrphanClaims++
+				}
+			}
+			if ph.OrphanClaims > 0 {
+				ph.Anomalies = append(ph.Anomalies, fmt.Sprintf(
+					"P0 campaign anomaly: %d in_progress bead(s) with no live registry worker (orphaned claims wedging the DAG ladder)", ph.OrphanClaims))
+			}
+
 			// Chained-parallel: live-worker pairs whose beads are dep-related
 			// (either direction). The c36 blast signature.
 			for i := 0; i < len(live); i++ {

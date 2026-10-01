@@ -181,6 +181,19 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 					delete(readyMap, beadID)
 					readyBeads = removeBeadByID(readyBeads, beadID)
 				}
+				continue
+			}
+			// Orphaned-claim reconciliation: a bead whose worker claimed it
+			// (in_progress) and then exhausted retries (or died) without ever
+			// closing is invisible to the DAG scheduler (not ready) AND blocks
+			// all dependents (not closed) — the fms campaign wedged 6 repair
+			// beads this way for 1h+ (2026-10-01). When the retry budget is
+			// exhausted, the bead is not actively worked, has no live registry
+			// worker, and carries no hard-park label, the claim is stale:
+			// reset it to open and clear the retry entry so the scheduler gets
+			// one fair retry instead of a permanent DAG wedge.
+			if count, _, _, _ := o.retryManager.RetryInfo(beadID); count >= maxRetries {
+				s.reconcileOrphanClaim(beadID, count)
 			}
 			continue
 		}
@@ -269,6 +282,74 @@ func (s *Scheduler) emitRetryExhausted(bead types.Bead, attempts int) {
 		o.beadCloser.events.EmitRepo(projectPath, ev)
 	} else {
 		log.Printf("[Retry] %s", ev.Detail)
+	}
+}
+
+// reconcileOrphanClaim resets an orphaned in_progress claim on a retry-exhausted
+// bead: the worker that claimed it gave up (or died) without ever closing, so
+// the bead is invisible to the scheduler (not ready) AND blocks all dependents
+// (not closed). Requires: retry budget exhausted, no in-memory active worker,
+// no live registry worker, and no hard-park label. The bead is reset to open
+// and its retry entry cleared (one fair retry), and a typed `orphan_claim_reset`
+// event is emitted. All failures fail open (log + leave the bead as-is).
+func (s *Scheduler) reconcileOrphanClaim(beadID string, attempts int) {
+	o := s.overseer
+	if o.workerSpawner.HasLiveRegistryWorker(beadID) {
+		return
+	}
+	bead, err := s.getBeadFromDAG(beadID)
+	if err != nil {
+		return // not in DAG (terminal or removed) — nothing to reconcile
+	}
+	if bead.Status != types.StatusInProgress {
+		return
+	}
+	for _, label := range []string{escalatedLabel, worktreeUnavailableLabel, integrationExhaustedLabel} {
+		if hasBeadLabel(bead.Labels, label) {
+			return // hard-parked by design; Pan repair or a human clears it
+		}
+	}
+	projectPath := ""
+	if o.beadAnalyzer != nil {
+		projectPath = o.beadAnalyzer.FindProjectPath(&bead)
+	}
+	if projectPath == "" {
+		log.Printf("[OrphanClaim] no project path for %s; cannot reconcile", beadID)
+		return
+	}
+	if err := o.beadsClient.UpdateBeadStatus(projectPath, bead.ID, types.StatusOpen); err != nil {
+		log.Printf("[OrphanClaim] failed to reset orphaned in_progress bead %s to open: %v", beadID, err)
+		return
+	}
+	o.retryManager.ClearRetry(beadID)
+	log.Printf("[OrphanClaim] reset orphaned in_progress bead %s to open after %d exhausted attempts (no live worker)", beadID, attempts)
+	s.emitOrphanClaimReset(bead, attempts, projectPath)
+}
+
+// emitOrphanClaimReset writes a single structured event when an orphaned
+// in_progress claim is reset to open. Emitted once per bead per exhaustion.
+func (s *Scheduler) emitOrphanClaimReset(bead types.Bead, attempts int, projectPath string) {
+	beadID := string(bead.ID)
+	o := s.overseer
+	lastWorker := "unknown"
+	if o.workerSpawner != nil {
+		if w, ok := o.workerSpawner.LastWorkerForBead(beadID); ok && w != "" {
+			lastWorker = w
+		}
+	}
+	ev := Event{
+		Type:    "orphan_claim_reset",
+		Reason:  "orphan_claim_reset",
+		Project: string(bead.Project),
+		Bead:    beadID,
+		Detail: fmt.Sprintf("Bead %s sat in_progress with no live worker after %d exhausted attempts; reset to open for a fair retry (last worker: %s)",
+			beadID, attempts, lastWorker),
+		Fields: map[string]any{"bead": beadID, "last_worker": lastWorker, "attempts": attempts},
+	}
+	if o.beadCloser != nil && o.beadCloser.events != nil {
+		o.beadCloser.events.EmitRepo(projectPath, ev)
+	} else {
+		log.Printf("[OrphanClaim] %s", ev.Detail)
 	}
 }
 
