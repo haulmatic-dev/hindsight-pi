@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -103,6 +104,7 @@ type Overseer struct {
 	diskStatPath     string                       // statfs path ("" = "/")
 	dag              *DAG
 	dagMu            sync.RWMutex
+	epicCloseGuard   epicCloseGuard // store-verification refusals for epic auto-close
 	dagNavigator     *DAGNavigator
 	completed        map[string]bool  // Track completed beads for this session
 	retryManager     *RetryManager    // Retry and validation-retry tracking
@@ -1092,12 +1094,36 @@ func (o *Overseer) buildDAG() error {
 
 // persistClosedEpics writes the auto-close decision for organizational epics
 // back to the beads store. Runs in a goroutine to avoid holding the DAG lock
-// during the br CLI call.
+// during the br CLI call; it re-acquires dagMu for its own mutations.
+//
+// Store-verification gate (regression 2026-09-30, fmsfe incident): the DAG
+// build can miss open children (their repo's ListBeads fails and is skipped,
+// or they are otherwise filtered from the build), so CloseReadyEpics sees a
+// vacuously-empty child set and closes the epic over open work. Before
+// closing, every project's bead stores are scanned for non-terminal
+// dependents of the epic; any open dependent, or any listing error, refuses
+// the close (fail-closed).
 func (o *Overseer) persistClosedEpics(beadIDs []string) {
+	o.dagMu.Lock()
+	defer o.dagMu.Unlock()
 	for _, id := range beadIDs {
+		if o.epicCloseGuard.recentlyRefused(id, time.Now()) {
+			continue
+		}
+		if o.epicHasOpenDependent(id) {
+			log.Printf("[DAG] Epic %s has open dependents in the beads store; refusing auto-close (DAG view incomplete)", id)
+			o.epicCloseGuard.markRefused(id, time.Now())
+			if o.eventSink != nil {
+				o.eventSink.Emit(Event{Type: "epic_close_refused", Bead: id,
+					Reason: "open_dependents",
+					Detail: "CloseReadyEpics proposed closing this epic but a bead-store scan found non-terminal dependents; close refused (fail-closed)."})
+			}
+			continue
+		}
 		projectPath, _ := o.findProjectPathForBead(id)
 		if projectPath == "" {
 			log.Printf("[DAG] Could not find project path for epic %s; skipping persistence", id)
+			o.epicCloseGuard.markRefused(id, time.Now())
 			continue
 		}
 		reason := "epic auto-close: all dependencies and children closed"
@@ -1204,14 +1230,37 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 	// while it sat in the retry queue must not be resurrected (e2lqf, 2026-09-02).
 	if projectPath != "" && o.beadsClient != nil {
 		current, err := o.beadsClient.GetBead(projectPath, "", bead.ID)
-		if err != nil {
+		switch {
+		case err != nil:
 			log.Printf("[Spawn] %s store status read failed: %v", beadIDStr, err)
-		} else if current != nil && current.Status.IsTerminal() {
+		case current != nil && current.Status.IsTerminal():
 			// Drop the stale retry entry so the scheduler stops offering it.
 			o.retryManager.ClearRetry(beadIDStr)
 			o.emitSpawnSuppressedClosed(bead, projectPath, string(current.Status))
 			return &SpawnSuppressedError{BeadID: beadIDStr, Status: current.Status}
+		case current != nil:
+			// fmsfe-a2u (2026-09-30): post-restart reconstructed beads can carry
+			// an empty Type/Project, silently no-opping every scheduler type
+			// filter. Re-read the metadata from store truth immediately before
+			// spawning so the preflight below sees the real type.
+			if strings.TrimSpace(bead.Type) == "" {
+				bead.Type = current.Type
+			}
+			if bead.Project == "" {
+				bead.Project = current.Project
+			}
 		}
+	}
+
+	// Fail-closed preflight (fmsfe-a2u, 2026-09-30): a bead whose Type cannot
+	// be verified, or whose store Type is a human gate/container, must never
+	// reach a worker. Also blocks the spawn funnel on an unresolved owner
+	// publish identity (auto-resumes when the PAT lands).
+	if err := o.spawnPreflightBead(bead, projectPath); err != nil {
+		return err
+	}
+	if err := o.spawnPreflightPublishIdentity(bead, projectPath); err != nil {
+		return err
 	}
 
 	// Pre-spawn gate probe: a bead whose scoped gates already pass on main
