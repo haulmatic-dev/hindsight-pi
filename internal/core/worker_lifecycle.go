@@ -376,7 +376,12 @@ func isInfrastructureExitCode(code int) bool {
 	// spawn a fix bead.
 	// 7 = transient provider overload: same reasoning, and deliberately NOT fed
 	// to the circuit breaker (see HandleFailure).
-	return code == 2 || code == 3 || code == 4 || code == 6 || code == 7
+	// 8 = closure miss (fmsfe-b8h, 2026-10-01): the session exhausted the
+	// verdict-nudge cap without a valid HYDRA_VERDICT. The fms cohort
+	// (fmsfe-r3x/vjt/d1b/1z4/b67) burned 3 bead faults each on this shape
+	// while the underlying turn failures were provider instability. Closure
+	// misses are not code defects — they retry via the infra path.
+	return code == 2 || code == 3 || code == 4 || code == 6 || code == 7 || code == 8
 }
 
 func (wl *WorkerLifecycle) scheduleAfterCompletion(worker *types.Worker, success bool, newlyReady []string) {
