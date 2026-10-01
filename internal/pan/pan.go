@@ -756,6 +756,21 @@ func (s *Shepherd) Tick(ctx context.Context) {
 	if len(cands) == 0 {
 		return
 	}
+	// Fleet-automation prune sweep: deterministic, zero-token batch prune of
+	// stale worktree-registration wedge cohorts. Runs before LLM judgment so
+	// shared wedges clear without burning judgment rounds or hitting the
+	// repair-efficacy refusal ("retry exhausted after N attempts").
+	// Fail-open: report is logged only.
+	report := s.PrunableWedgeSweep(cands)
+	if len(report.Successes) > 0 || len(report.Residuals) > 0 {
+		log.Printf("[PruneSweep] done: %d cohort(s) pruned, %d residual(s)", len(report.Successes), len(report.Residuals))
+		if len(report.Successes) > 0 {
+			log.Printf("[PruneSweep] successes: %v", report.Successes)
+		}
+		for key, detail := range report.Residuals {
+			log.Printf("[PruneSweep] residual: %s — %s", key, detail)
+		}
+	}
 	log.Printf("[Pan] %d candidate(s) need judgment", len(cands))
 
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
@@ -977,25 +992,35 @@ func (s *Shepherd) Tick(ctx context.Context) {
 // reason carries the decision's justification; log-improvement persists it
 // as the improvement text, other handlers ignore it.
 func (s *Shepherd) handleRepair(beadID, name, reason string) {
+	s.runRepair(beadID, name, reason)
+}
+
+// runRepair executes a whitelisted repair handler for a blocked bead and
+// returns the outcome status: "ok", "refused", "rate limited", or "error".
+// It is fail-open: errors are logged and emitted as audit events only.
+// reason carries the decision's justification; log-improvement persists it
+// as the improvement text, other handlers ignore it. Shared by the verdict
+// path (handleRepair) and the deterministic prune sweep (PrunableWedgeSweep).
+func (s *Shepherd) runRepair(beadID, name, reason string) string {
 	// log-improvement is a pure observation sink: no live-worker refusal
 	// (the whole point is reporting on live situations) and no handler map —
 	// the shepherd writes the improvement line itself.
 	if name == "log-improvement" {
 		s.handleLogImprovement(beadID, reason)
-		return
+		return "ok"
 	}
 	// Safety gate: never repair a bead that still has a live worker row.
 	if s.hasLiveWorker(beadID) {
 		s.emitRepairEvent(beadID, name, "error", "refused: bead has a live worker row")
 		log.Printf("[Pan] repair %s for %s refused: live worker row exists", name, beadID)
-		return
+		return "refused"
 	}
 	// Rate limit: per-bead hourly; project-scoped repairs share a project key.
 	if ok, remaining := s.canRepair(beadID, name); !ok {
 		detail := fmt.Sprintf("rate limited: %v until next repair", remaining)
 		s.emitRepairEvent(beadID, name, "error", detail)
 		log.Printf("[Pan] repair %s for %s rate limited (%v remaining)", name, beadID, remaining)
-		return
+		return "rate limited"
 	}
 	// Efficacy gate: refuse after maxConsecutiveRepairs attempts on the same
 	// (action, scope, normalized reason). The wedge that spams repairs never
@@ -1004,25 +1029,26 @@ func (s *Shepherd) handleRepair(beadID, name, reason string) {
 		detail := "ineffective: same repair attempted " + itoa(maxConsecutiveRepairs) + "+ times without the condition changing; human-only"
 		s.emitRepairEvent(beadID, name, "refused", detail)
 		log.Printf("[Pan] repair %s for %s refused (ineffective — condition unchanged across %d attempts)", name, beadID, maxConsecutiveRepairs)
-		return
+		return "refused"
 	}
 
 	handler, ok := s.RepairHandlers[name]
 	if !ok || handler == nil {
 		s.emitRepairEvent(beadID, name, "error", "unknown repair handler")
 		log.Printf("[Pan] repair %s for %s rejected: no handler configured", name, beadID)
-		return
+		return "error"
 	}
 
 	if err := handler(beadID); err != nil {
 		s.recordRepair(beadID, name, err)
 		s.emitRepairEvent(beadID, name, "error", err.Error())
 		log.Printf("[Pan] repair %s for %s failed: %v", name, beadID, err)
-		return
+		return "error"
 	}
 	s.recordRepair(beadID, name, nil)
 	s.emitRepairEvent(beadID, name, "ok", "")
 	log.Printf("[Pan] repair %s for %s succeeded", name, beadID)
+	return "ok"
 }
 
 // handleLogImprovement persists a Pan observation as an improvement

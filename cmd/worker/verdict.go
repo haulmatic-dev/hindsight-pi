@@ -199,6 +199,12 @@ func parseVerdict(text string) *Verdict {
 // nudge the live session again, or let the turn close. A done verdict with
 // no unmet ACs and an abandon verdict are both valid closures — only they
 // end the turn cleanly.
+//
+// When the nudge cap is exhausted and the turn still has no valid closure,
+// the returned reason describes the closure miss (fmsfe-b8h, 2026-10-01):
+// the caller tags the session as a closure miss so it exits with code 8
+// instead of 1, routing the failure to the infra retry path (paced, no bead
+// fault) instead of burning the bead's retry budget.
 func decideTurnEnd(v *Verdict, nudges, cap int) (nudge bool, reason string) {
 	if v != nil && v.HollowGreen {
 		return true, "hollow-green verdict: verification output shows suites that failed to load (import errors), which is not a written test passing or expected-failing — fix the suites or mark the task not done"
@@ -207,7 +213,7 @@ func decideTurnEnd(v *Verdict, nudges, cap int) (nudge bool, reason string) {
 		return false, ""
 	}
 	if nudges >= cap {
-		return false, ""
+		return false, closureMissReason(v)
 	}
 	if v == nil {
 		return true, "verdict missing — emit HYDRA_VERDICT or continue working"
@@ -218,6 +224,19 @@ func decideTurnEnd(v *Verdict, nudges, cap int) (nudge bool, reason string) {
 	}
 	// done=false without a summary is no closure either.
 	return true, "verdict incomplete — if the task is not done, say what remains in summary"
+}
+
+// closureMissReason describes why a nudge-capped session never reached a
+// valid closure. Non-empty for every unclosed shape; used to tag the session
+// as a closure miss and drive the exit-8 classification.
+func closureMissReason(v *Verdict) string {
+	if v == nil {
+		return "verdict missing after nudge cap"
+	}
+	if v.Done && len(v.ACUnmet) > 0 {
+		return "verdict claims done but acceptance criteria unmet after nudge cap"
+	}
+	return "verdict incomplete after nudge cap"
 }
 
 // buildNudgePrompt renders the re-prompt sent into the live session.
