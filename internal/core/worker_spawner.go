@@ -75,9 +75,15 @@ type spawnFailureInfo struct {
 type SpawnSuppressedError struct {
 	BeadID string
 	Status types.BeadStatus
+	// Reason, when set, describes a non-terminal preflight block (e.g. empty
+	// Type, human gate, unresolved publish identity). Status is empty then.
+	Reason string
 }
 
 func (e *SpawnSuppressedError) Error() string {
+	if e.Reason != "" {
+		return fmt.Sprintf("spawn suppressed: bead %s: %s", e.BeadID, e.Reason)
+	}
 	return fmt.Sprintf("spawn suppressed: bead %s is already terminal (%s)", e.BeadID, e.Status)
 }
 
