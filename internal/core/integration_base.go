@@ -1,18 +1,21 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // ResolveIntegrationBase returns the deterministic integration base branch for
 // a project, plus a source label ("config" | "origin-default") for logs.
 // Precedence:
 //  1. the per-project integration_branch config knob, when set;
-//  2. the origin default branch (git symbolic-ref refs/remotes/origin/HEAD,
-//     falling back to refs/remotes/origin/development then main);
+//  2. the origin default branch (remote truth via `git ls-remote --symref
+//     origin HEAD`, falling back to the local refs/remotes/origin/HEAD
+//     symref, then refs/remotes/origin/development then main);
 //  3. for repos with NO git remote (local-only mode, no-remote local-merge
 //     fallback), the checkout's current branch — with a remote present that
 //     state is incidental operator state (telematics incident 2026-09-29: a
@@ -61,7 +64,19 @@ func integrationBranchFor(cfg *Config, projectPath string) string {
 
 // originDefaultBranch resolves the origin default branch, or "" when it
 // cannot be determined.
+//
+// Remote truth first: `git ls-remote --symref origin HEAD` asks the remote
+// which branch it advertises as default. The local symref
+// refs/remotes/origin/HEAD goes stale when the remote's default branch
+// changes after the clone (fms incident 2026-09-30: clone recorded main,
+// GitHub default had moved to development — PRs targeted the dead branch).
+// ls-remote is read-only (no set-head mutation) and must never gate: any
+// failure (offline, auth, hung remote) falls back to the local symref and
+// then the development/main candidates.
 func originDefaultBranch(projectPath string) string {
+	if b := remoteSymrefDefault(projectPath); b != "" {
+		return b
+	}
 	out, err := exec.Command("git", "-C", projectPath, "symbolic-ref", "refs/remotes/origin/HEAD").Output()
 	if err == nil {
 		ref := strings.TrimSpace(string(out))
@@ -73,6 +88,48 @@ func originDefaultBranch(projectPath string) string {
 	for _, candidate := range []string{"development", "main"} {
 		if err := exec.Command("git", "-C", projectPath, "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+candidate).Run(); err == nil {
 			return candidate
+		}
+	}
+	return ""
+}
+
+// remoteSymrefDefault resolves the default branch via `git ls-remote --symref
+// origin HEAD` and returns its bare branch name, or "" on any failure
+// (fail-open: caller falls back to local state).
+func remoteSymrefDefault(projectPath string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", projectPath, "ls-remote", "--symref", "origin", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		log.Printf("[IntegrationBase] ls-remote --symref origin HEAD failed in %s (%v) — falling back to local refs/remotes/origin/HEAD", projectPath, err)
+		return ""
+	}
+	// First line: "ref: refs/heads/<default>\tHEAD"
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "ref: ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		ref := strings.TrimPrefix(fields[1], "refs/heads/")
+		if ref != "" {
+			// Opportunistic self-heal: reconcile the local symref with the
+			// remote's answer so the stale state does not persist. Best-effort
+			// only — resolution already succeeded without it.
+			if out, err := exec.Command("git", "-C", projectPath, "symbolic-ref", "refs/remotes/origin/HEAD").Output(); err == nil {
+				if local := strings.TrimSpace(string(out)); local != "refs/remotes/origin/"+ref {
+					if out2, err2 := exec.Command("git", "-C", projectPath, "remote", "set-head", "origin", ref).CombinedOutput(); err2 != nil {
+						log.Printf("[IntegrationBase] could not reconcile stale refs/remotes/origin/HEAD in %s: %v: %s", projectPath, err2, out2)
+					} else {
+						log.Printf("[IntegrationBase] reconciled stale refs/remotes/origin/HEAD in %s: %s -> %s", projectPath, local, ref)
+					}
+				}
+			}
+			return ref
 		}
 	}
 	return ""
