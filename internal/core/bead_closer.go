@@ -296,7 +296,7 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			// Readable, conventional-commit message derived from the bead
 			// (type/title/description/PRD) instead of the bare "bead(id): title".
 			msg := BuildCommitMessage(*bead)
-			if committed, cErr := c.worktreeManager.Commit(wt, msg); cErr != nil {
+			if committed, cErr := c.worktreeManager.CommitBead(wt, msg, string(bead.ID)); cErr != nil {
 				return c.failIntegration(bead, projectPath, repoName, "commit", cErr)
 			} else if committed {
 				log.Printf("[Worktree] committed %s", bead.ID)

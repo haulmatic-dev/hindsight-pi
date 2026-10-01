@@ -2290,6 +2290,12 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 	promptParts = append(promptParts,
 		"WORKSPACE: your cwd is your git worktree. NEVER write files outside it — never cd to the main checkout, never use absolute paths into it. All edits belong in cwd.")
 
+	// Repo hygiene (fmsfe-b8h wedge): agents scaffolded embedded git repos
+	// (git init / go mod init) inside worktree subdirs, killing the close-time
+	// commit with exit 128 AFTER the full worker turn succeeded.
+	promptParts = append(promptParts,
+		"REPO HYGIENE: NEVER run `git init`, `git clone`, or `go mod init` inside a subdirectory of your workspace — the workspace root is already a git repo. If you need to bootstrap a new project, ask for a new bead/repo instead.")
+
 	// Turn economy (session forensics 2026-08-17): every turn re-bills the
 	// full transcript (16K -> 244K over one bead = 25M tokens, 24.8M cache
 	// reads). The model defaults to one tool call per turn (measured 1.00

@@ -503,11 +503,74 @@ func stagedConflictMarkerFiles(dir string) []string {
 	return files
 }
 
+// embeddedGitRepos returns directories below root (excluding .beads) that
+// contain their own .git directory — i.e. an embedded/foreign git repo. The
+// heavy dependency dirs are pruned: they can be enormous and never host agent
+// scaffolding worth rescuing.
+func embeddedGitRepos(root string) []string {
+	var found []string
+	skip := map[string]bool{"node_modules": true, "vendor": true, "dist": true, "build": true, "target": true, ".venv": true, "__pycache__": true}
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // unreadable paths fail open
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		base := d.Name()
+		if base == ".git" || base == ".beads" || skip[base] {
+			return fs.SkipDir
+		}
+		if _, err := os.Stat(filepath.Join(path, ".git")); err == nil && !pathsEqual(path, root) {
+			found = append(found, path)
+			return fs.SkipDir // don't descend into embedded repos
+		}
+		return nil
+	})
+	return found
+}
+
+// guardEmbeddedRepos strips embedded git repo metadata (.git dirs of nested
+// repos) before staging so `git add -A` does not die with exit 128 "does not
+// have a commit checked out" — which killed closes AFTER a full worker turn
+// burned (fmsfe-b8h wedge: internal/core/.git scaffolded inside an Angular
+// repo). Files inside the embedded repo survive as plain untracked content
+// and are committed like any other worktree change. Emits a typed
+// embedded_repo_detected event per repo so Pan sees the pattern. Fail-open:
+// removal errors are logged, staging proceeds and reports its own error.
+func (m *WorktreeManager) guardEmbeddedRepos(dir, beadID string) {
+	for _, repo := range embeddedGitRepos(dir) {
+		log.Printf("[Worktree] embedded repo detected in %s: %s — removing .git metadata (bead: %s)", dir, repo, beadID)
+		err := os.RemoveAll(filepath.Join(repo, ".git"))
+		m.eventSink.Emit(Event{
+			Type:   "embedded_repo_detected",
+			Bead:   beadID,
+			Reason: map[bool]string{true: "removed", false: "remove_failed"}[err == nil],
+			Detail: "embedded git repo scaffolded inside worktree by agent — .git metadata removed so the close commit can stage the files",
+			Fields: map[string]any{"path": repo},
+		})
+		if err != nil {
+			log.Printf("[Worktree] embedded repo cleanup failed for %s: %v", repo, err)
+		}
+	}
+}
+
 // Commit stages everything in the worktree and commits it. Returns
 // (false, nil) when there is nothing to commit (no work was done).
 func (m *WorktreeManager) Commit(worktreePath, message string) (bool, error) {
+	return m.commitLocked(worktreePath, message, "")
+}
+
+// CommitBead is Commit with the bead identity attached for typed events.
+func (m *WorktreeManager) CommitBead(worktreePath, message, beadID string) (bool, error) {
+	return m.commitLocked(worktreePath, message, beadID)
+}
+
+func (m *WorktreeManager) commitLocked(worktreePath, message, beadID string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	m.guardEmbeddedRepos(worktreePath, beadID)
 
 	// .beads is daemon machinery state (status flips, DB mirror) — never
 	// product content. Union-merging id-keyed JSONL produced duplicate rows
