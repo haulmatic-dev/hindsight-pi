@@ -15,7 +15,8 @@
 - `br comments add` on both beads — ✓. PASS.
 
 ## Open edges for the next phase
-- Human-only: restore/relocate `haulmatic-dev/hydra` (repo deleted/renamed/moved between 22:24 UTC 09-30 and 00:46 UTC 10-01), then unpark; IntegrationRetest (max_attempts=5, 1h) + fast-path notifier will retry automatically.
-- On remote return: cherry-pick `ace73e5` + `75e4f3a` onto origin/development — do NOT merge hydra/wt-hydra-gh7j wholesale (branch carries stale-integration deletions mirroring the already-resolved ad20 semantic conflict; integration must keep landed spawn_preflight.go/epic_close_guard.go).
-- Sibling beads fmsfe-d1b/q70/53g/d68/hd7/4co/49s + hydra-y1g5 share this cause — do not triage as independent wedges. NOTE: fms-frontend remote is alive, so those fmsfe failures at 04:17 UTC may have been transient overlap with the same outage window or a second infra issue; re-verify each before closing.
-- Push of THIS worktree's triage commit is blocked by the same 404 remote — work is committed locally on `hydra/wt-hydra-37d9` and must ride the next successful integration.
+- RESOLVED while this bead was open: the hydra remote was recreated as `haulmatic-devteams/hydra` (repo had been deleted/renamed away from haulmatic-dev between 22:24 UTC 09-30 and 00:46 UTC 10-01). Recovery actions, all verified: repo created via API (201), full history mirrored (`git push --mirror`, 608 refs, old tip `a36ee76` confirmed ancestor of new origin/development), `default_branch` patched to `development`, project remote re-pointed.
+- gh7j integration ALREADY LANDED: commit `ec26493` "hydra: integrate hydra/wt-hydra-gh7j" (07:06 UTC) on origin/development — the rebase-retention concern about stale-integration deletions was moot (integrated via merge keeping landed spawn_preflight code; verified `git show --stat ec26493` = +205/−2 feature-only).
+- This worktree's deliverables landed via PR #1 on the new remote (squash 0465046): triage doc + handoff + CHANGELOG entry verified present on origin/development (`git cat-file -e` both files).
+- fmsfe sibling beads (d1b/q70/53g/d68/hd7/4co/49s): outage overlap confirmed (fms-frontend remote alive), likely collateral of the same window or daemon credential identity resolution; re-verify individually before closing.
+- Original human-only guidance (pre-resolution): ~~restore/relocate the repo~~ DONE; unpark and let IntegrationRetest retry.
