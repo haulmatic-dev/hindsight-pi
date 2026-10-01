@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -748,5 +749,58 @@ https://github.com/x/y/pull/42`)}
 	}
 	if len(fake.ghMerge) == 0 {
 		t.Fatal("existing PR must be merged, but gh pr merge was never invoked")
+	}
+}
+
+// TestPublishRepo_PRMergeNotFound_ClassifiedCredential: a PR-route publish
+// whose push dies with "remote: Repository not found" (org rename / PAT
+// without visibility, hydra-m372) must be classified NOT_FOUND via a
+// publish_path_classified event and surfaced as a credential-class failure
+// in the returned reason, not buried as a generic merge failure.
+func TestPublishRepo_PRMergeNotFound_ClassifiedCredential(t *testing.T) {
+	repo, _ := setupReachableRemote(t)
+	commitFile(t, repo, "f.txt", "a")
+	git(t, repo, "push", "-u", "origin", "main")
+	commitFile(t, repo, "f2.txt", "b")
+	fake := &autoPRFakeExec{ghErr: errors.New("pr merge: push dogfood/publish-z: exit status 128: remote: Repository not found.\nfatal: repository 'https://github.com/x/y.git/' not found")}
+	restore := installAutoPRFake(fake)
+	restoreMerge := installPRMergeFake(fake)
+	defer restore()
+	defer restoreMerge()
+
+	origSink := publishEvents
+	publishEvents = NewEventSink("")
+	defer func() { publishEvents = origSink }()
+
+	pushed, reason := PublishRepo(NewWorktreeManager(), repo, "", true, nil, func(string) bool { return true })
+	if pushed {
+		t.Fatal("expected failed publish")
+	}
+	if !strings.Contains(reason, "credential-class failure") {
+		t.Fatalf("expected credential-class surfacing in reason, got %q", reason)
+	}
+	mirror, err := os.ReadFile(filepath.Join(repo, ".hydra", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("expected mirrored events: %v", err)
+	}
+	var foundClassified, foundRejected bool
+	for _, line := range strings.Split(string(mirror), "\n") {
+		var ev Event
+		if json.Unmarshal([]byte(line), &ev) != nil {
+			continue
+		}
+		switch ev.Type {
+		case "publish_path_classified":
+			if ev.Fields["class"] == string(ClassNotFound) {
+				foundClassified = true
+			}
+		case "publish_push_rejected":
+			if ev.Reason == "pr_merge_failed" && strings.Contains(ev.Detail, "credential-class failure") {
+				foundRejected = true
+			}
+		}
+	}
+	if !foundClassified || !foundRejected {
+		t.Fatalf("expected NOT_FOUND classification + credential-class rejection event, got classified=%v rejected=%v", foundClassified, foundRejected)
 	}
 }

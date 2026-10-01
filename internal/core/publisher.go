@@ -82,12 +82,26 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 			func() error { return rebaseCheckoutOntoBase(projectPath, branch) },
 			projectPath, branch)
 		if err != nil {
+			mergeErr := err.Error()
+			cls := ClassifyPushFailure(err.Error())
+			// NOT_FOUND is credential-class (org rename / missing PAT
+			// scope): retrying against the same URL can never succeed.
+			// Surface it loud instead of burying it as a generic merge
+			// failure (hydra-m372: 91 not-found push events in one day
+			// because the owner PAT predates the org rename).
+			if cls == ClassNotFound {
+				mergeErr += " — credential-class failure (repository not found with the publish token; org rename or missing PAT visibility/scope): human must fix the remote URL or the publish credential; retrying cannot succeed"
+				log.Printf("[Publish] CREDENTIAL-CLASS publish failure for %s/%s: %v", projectPath, branch, err)
+			}
 			publishEvents.EmitRepo(projectPath, Event{Type: "publish_push_rejected", Project: filepath.Base(projectPath), Reason: "pr_merge_failed",
-				Detail: "PR merge failed for " + branch + ": " + err.Error(),
+				Detail: "PR merge failed for " + branch + ": " + mergeErr,
 				Fields: map[string]any{"branch": branch, "feature_branch": feature, "project_path": projectPath}})
-			log.Printf("[Publish] PR merge failed for %s/%s: %v", projectPath, branch, err)
+			publishEvents.EmitRepo(projectPath, Event{Type: "publish_path_classified", Project: filepath.Base(projectPath), Reason: string(cls),
+				Detail: "pr-merge push failure classified " + string(cls) + " for " + branch + ": " + err.Error(),
+				Fields: map[string]any{"branch": branch, "class": string(cls), "reason": err.Error(), "project_path": projectPath}})
+			log.Printf("[Publish] PR merge failed for %s/%s: %v (class=%s)", projectPath, branch, err, cls)
 			AppendActivity(projectPath, "publish", "PR merge failed: "+err.Error())
-			return false, "pr merge failed: " + err.Error()
+			return false, "pr merge failed: " + mergeErr
 		}
 		publishEvents.EmitRepo(projectPath, Event{Type: "publish_pr_opened", Project: filepath.Base(projectPath),
 			Detail: "landed via PR " + url,
