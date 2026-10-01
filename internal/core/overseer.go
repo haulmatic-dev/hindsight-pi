@@ -557,6 +557,15 @@ func NewOverseer(config *Config) *Overseer {
 		return "", "", false // resolveGitAuthorFor falls back to the service account
 	})
 
+	// Single-source daemon credential (2026-10-01 drift incident): when
+	// output.github_token_owner_user is set, the daemon's GitHub identity
+	// comes from that user's ~/.hydra/.github-token — never the private
+	// ~/.git-credentials copy.
+	if config.Output.GithubTokenOwnerUser != "" {
+		SetDaemonTokenOwnerUser(config.Output.GithubTokenOwnerUser)
+		log.Printf("[PublishIdentity] daemon GitHub token owner user: %s (per-user PAT file is the single source of truth)", config.Output.GithubTokenOwnerUser)
+	}
+
 	// Daemon gate runner (FR-002): attach to the close path and recover any
 	// artifacts the previous daemon incarnation died inside (running + dead
 	// PID -> interrupted, never trusted). Fail-open: recovery errors are

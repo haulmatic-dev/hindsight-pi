@@ -79,14 +79,43 @@ func ResolvePublishIdentity(projectPath string, uc *UserContext) (PublishIdentit
 	return ResolveDaemonPublishIdentity()
 }
 
+// data, err := os.ReadFile(filepath.Join(home, ".hydra", ".github-token"))
+//
+// daemonTokenOwnerUser (output.github_token_owner_user) names the human whose
+// PAT file the daemon borrows — 2026-10-01: the daemon's private
+// ~/.git-credentials held a STALE token while the working PAT sat in the
+// owning user's file, grounding the fleet 7h. When set, resolution reads that
+// file and STOPS: no GH_TOKEN, no daemon ~/.git-credentials (one source of
+// truth, fail-closed).
+var daemonTokenOwnerUser string
+
+// SetDaemonTokenOwnerUser installs the token-owner username for daemon
+// credential resolution. Called by the overseer from output.github_token_owner_user.
+func SetDaemonTokenOwnerUser(username string) { daemonTokenOwnerUser = username }
+
+// DaemonTokenOwnerUser returns the configured token owner ("" if unset).
+func DaemonTokenOwnerUser() string { return daemonTokenOwnerUser }
+
 // ResolveDaemonPublishIdentity resolves the daemon service account's own
-// credential: the hydra user's PAT file first, then GH_TOKEN, then the
-// daemon ~/.git-credentials store. Failing all three is fail-closed.
+// credential. With a token owner configured: the daemon's own PAT file,
+// then the token-owner user's PAT file — failing both is fail-closed (the
+// private ~/.git-credentials copy is deliberately NOT consulted). Without
+// one: legacy fallback daemon PAT file -> GH_TOKEN -> ~/.git-credentials.
 func ResolveDaemonPublishIdentity() (PublishIdentity, error) {
 	if u, err := user.Lookup(daemonOwnerName); err == nil {
 		if tok := readOwnerPATFile(u.HomeDir); tok != "" {
 			return PublishIdentity{Owner: daemonOwnerName, Token: tok, Source: "owner-pat-file"}, nil
 		}
+	}
+	if owner := daemonTokenOwnerUser; owner != "" {
+		if u, err := user.Lookup(owner); err == nil {
+			if tok := readOwnerPATFile(u.HomeDir); tok != "" {
+				return PublishIdentity{Owner: owner, Token: tok, Source: "owner-pat-file"}, nil
+			}
+		}
+		return PublishIdentity{Owner: owner}, fmt.Errorf(
+			"%w: token owner %q has no readable PAT at ~%s/.hydra/.github-token (fail-closed: output.github_token_owner_user is set, no GH_TOKEN or ~/.git-credentials fallback)",
+			ErrPublishIdentityMissing, owner, owner)
 	}
 	if tok := os.Getenv("GH_TOKEN"); tok != "" {
 		return PublishIdentity{Owner: daemonOwnerName, Token: tok, Source: "gh-token-env"}, nil

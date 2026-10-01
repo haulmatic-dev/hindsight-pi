@@ -308,7 +308,13 @@ output:
   # close completes as waiting-on-human-merge, not an integration failure.
   pr_auto_merge_repos: []
 
-
+  # Single-source daemon GitHub credential (2026-10-01 drift incident): when
+  # set, the daemon service account's GitHub identity comes from this user's
+  # ~/.hydra/.github-token — never the daemon's private ~/.git-credentials
+  # copy (skipped entirely: no GH_TOKEN, no credential-store fallback;
+  # fail-closed when the file is missing). Empty keeps the legacy fallback
+  # chain (daemon PAT file -> GH_TOKEN -> ~/.git-credentials).
+  # github_token_owner_user: buddhi
 
 # Self-healing: session-file resume pilot (opt-in).
 # Resume a dead worker's Pi session on orphan respawn only when the death was
