@@ -335,6 +335,13 @@ type OutputConfig struct {
 	// and the close is treated as waiting-on-human-merge, NOT an integration
 	// failure. deploy.repo_path is implicitly on the list.
 	PRAutoMergeRepos []string `yaml:"pr_auto_merge_repos"`
+	// GithubTokenOwnerUser names the human user whose ~/.hydra/.github-token
+	// is the daemon service account's GitHub credential (single source of
+	// truth; 2026-10-01: a stale private ~/.git-credentials token grounded the
+	// fleet for 7h). When set, daemon identity resolution reads that user's
+	// PAT file and SKIPS the GH_TOKEN env and the daemon ~/.git-credentials
+	// store entirely (fail-closed). Empty keeps the legacy fallback chain.
+	GithubTokenOwnerUser string `yaml:"github_token_owner_user"`
 }
 
 // WorktreeConfig controls git-worktree behaviour used by the daemon.

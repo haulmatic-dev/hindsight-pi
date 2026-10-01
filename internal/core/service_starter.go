@@ -50,6 +50,12 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 		o.integrationSweep.Start()
 	}
 
+	// Credential preflight (2026-10-01 drift incident): probe each project
+	// repo's origin with the resolved publish identity; stale/revoked ->
+	// typed event + auto-park, instead of silent publish failures. Run in a
+	// background goroutine so a slow remote never blocks startup; fail-open.
+	go o.RunCredentialPreflight()
+
 	// Open the worker registry (daemon-owned SQLite truth; PRD
 	// worker-park-and-resume Part 4) and construct Pan, the shepherd.
 	// Done here rather than in NewOverseer so tests constructing an Overseer

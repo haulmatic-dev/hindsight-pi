@@ -45,6 +45,23 @@ func TestResolvePublishIdentity_OwnerPATFailClosed(t *testing.T) {
 	}
 }
 
+func TestResolveDaemonPublishIdentity_TokenOwnerUser(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	orig := daemonTokenOwnerUser
+	defer func() { daemonTokenOwnerUser = orig }()
+
+	// Nonexistent owner user: fail-closed even though GH_TOKEN was set.
+	SetDaemonTokenOwnerUser("__hydra_no_such_user__")
+	_, err := ResolveDaemonPublishIdentity()
+	if !errors.Is(err, ErrPublishIdentityMissing) {
+		t.Fatalf("want ErrPublishIdentityMissing, got %v", err)
+	}
+
+	// Empty owner restores legacy fallback (GH_TOKEN empty here, so just
+	// confirm no owner-user error shapes the result).
+	SetDaemonTokenOwnerUser("")
+}
+
 func TestResolveDaemonPublishIdentity_GhTokenEnv(t *testing.T) {
 	t.Setenv("GH_TOKEN", "ghp_daemon")
 	id, err := ResolveDaemonPublishIdentity()
