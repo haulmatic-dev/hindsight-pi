@@ -52,6 +52,27 @@ This bead did NOT touch the main checkout remote (outside worktree scope).
    is silently dropped by force pushes.
 3. Repoint main checkout + worker worktree remotes to the canonical URL once.
 
+## Reconciliation — COMPLETED (2026-10-01 16:19 UTC)
+
+During this bead the parallel remediation (hydra-37d9/xvgw) settled the canonical
+choice: **haulmatic-devteams/hydra** with a rotated daemon token (verified:
+`.git-credentials` no longer equals buddhi's PAT; new token has admin+push on
+devteams; main-checkout origin repointed to haulmatic-devteams/hydra.git).
+This bead completed the reconciliation on the canonical repo:
+
+- Built union merge `4a0a5a1` (merge-tree clean, tree `9684ec9`, parents
+  a36ee76 + a5e45cc) via git plumbing, pushed as `dogfood/reconcile-dev-4yuw`.
+- PR #462 (haulmatic-dev/hydra): merged 14:51:45 → old-copy dev = `8f08116` superset.
+- PR #22 (haulmatic-devteams/hydra, canonical): merged 16:19:31 → dev tip `37e5680`.
+- VERIFIED: both diverged lineages (a36ee76, a5e45cc) are ancestors of `37e5680`;
+  PR #461's mergeCommit fca0721 is already in the a5e45cc lineage (no content lost).
+- Publish path VERIFIED live: `git push --dry-run` of `dogfood/publish-hydra` to
+  canonical devteams → "Everything up-to-date" (auth + push healthy).
+
+Remaining human action (optional cleanup): retire the stale haulmatic-dev/hydra
+mirror (it is a superset too, so no content risk; decide which survives to avoid
+future flap) and re-scope/rotate buddhi's PAT if the old org is being dropped.
+
 ## Code change shipped here
 `ClassifyPushFailure` gains `NOT_FOUND` (phrases: "repository not found",
 "fatal: repository", "does not appear to be a git repository", "not a git
