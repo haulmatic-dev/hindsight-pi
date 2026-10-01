@@ -2169,6 +2169,25 @@ func sessionHasFiles(dir string) bool {
 }
 
 // buildPiPrompt builds the prompt message for Pi agent
+// fixPreImplGuidance is the mandatory pre-implementation cross-verification
+// for fix/bug beads (thok-class false closure, 2026-10-01 audit): a fix must
+// first prove the defect exists on the current integration base and that the
+// fix does not already exist elsewhere, before any code is written.
+const fixPreImplGuidance = "PRE-IMPLEMENTATION CROSS-VERIFICATION (before writing any code):\n" +
+	"A1. Confirm the defect EXISTS on the current integration base: reproduce it on a clean checkout/worktree of origin/<base>. Quote the failing evidence in your notes.\n" +
+	"A2. Not reproducible? STOP — do not implement. Verify-first close citing the reproduction output (the defect may be already fixed, mis-diagnosed, or environment-specific).\n" +
+	"A3. Check the fix does not already exist elsewhere: grep the tree for the mechanism you are about to add (function names, error strings, config keys). Duplicated machinery is worse than none (the #458 duplicate-method class).\n"
+
+// preCloseGuidance is the mandatory pre-close cross-verification before a
+// done verdict: re-prove the original defect, inspect the actual diff, and
+// map every acceptance criterion to an executed check. Applies to fix/bug
+// beads AND feature beads (a claim not in the diff is a lie even when tests
+// pass — the #85 silent-no-op class).
+const preCloseGuidance = "PRE-CLOSE CROSS-VERIFICATION (before HYDRA_VERDICT done):\n" +
+	"B1. Re-run the ORIGINAL reproduction against your final worktree — it must now pass; quote the before/after.\n" +
+	"B2. Inspect your own diff (git diff origin/<base>...HEAD --stat, spot-read the hunks): every change your verdict/summary claims must be literally IN the diff. A claim not in the diff is a lie even when tests pass.\n" +
+	"B3. Map each acceptance criterion to at least one executed check (test run, command output); list any AC you could NOT verify as NOT VERIFIED.\n"
+
 // phaseGuidance returns phase-specific working doctrine for a bead, keyed on
 // the TDD-phase title prefix task-breakdown emits (RED:/GREEN:/REFACTOR:) and
 // on fix-type beads. Empty for phases with no special discipline.
@@ -2191,15 +2210,21 @@ func phaseGuidance(bead types.Bead) string {
 			"- Behavior must not change. Run the tests BEFORE and AFTER your change; quote both outputs.\n" +
 			"- Improve names, structure, and duplication only.\n" +
 			"- If you find a real bug, do NOT fix it here: record it with `cm add` and finish the refactor unchanged."
-	case strings.HasPrefix(title, "FIX:") || strings.EqualFold(bead.Type, "fix"):
-		return "FIX discipline — verify first, then root-cause; follow strictly:\n" +
+	case strings.HasPrefix(title, "FIX:") || strings.EqualFold(bead.Type, "fix") || strings.EqualFold(bead.Type, "bug"):
+		return fixPreImplGuidance +
+			"FIX discipline — verify first, then root-cause; follow strictly:\n" +
 			"0. VERIFY-FIRST (before ANY redo): re-run the original task's verification commands against the worktree you inherited. If they all pass, the work was already done — close immediately citing that evidence in your HYDRA_VERDICT and do NOT modify files. Only redo what verification proves broken. The original attempt may have recorded a done verdict (see the original-verdict block in this prompt, if present) — an exit-code failure does not mean the work is bad.\n" +
 			"1. REPRODUCE: run the failing command/test first; capture the exact error text.\n" +
 			"2. ISOLATE: form ONE hypothesis; design the smallest experiment that can disprove it (a single command, a tiny probe). Do not fix anything yet.\n" +
 			"3. VERIFY the hypothesis with that experiment. Wrong? Form the next hypothesis from the new evidence — never stack two unverified guesses.\n" +
 			"4. FIX the proven root cause, not the symptom. Silencing an error, skipping a test, or widening a timeout is a symptom fix — reject it unless the evidence shows it IS the root cause.\n" +
 			"5. PROVE: re-run the originally failing command and quote its passing output.\n" +
-			"Any prior-failure text in this prompt is evidence for step 1 — read it first."
+			"Any prior-failure text in this prompt is evidence for step 1 — read it first.\n" +
+			preCloseGuidance
+	case strings.HasPrefix(title, "FEATURE:") || strings.EqualFold(bead.Type, "feature") || strings.EqualFold(bead.Type, "fr"):
+		return "FEATURE discipline:\n" +
+			"- Check the mechanism does not already exist before adding it: grep the tree for function names, error strings, config keys (the #458 duplicate-method class — two PRs adding the same method).\n" +
+			preCloseGuidance
 	}
 	return ""
 }

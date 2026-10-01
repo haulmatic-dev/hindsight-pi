@@ -1327,6 +1327,7 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 			// superseded). Empty + no reason => reject as before: reopen with
 			// prior context, never spawn a fix bead.
 			if !c.tryAcceptEmptyClose(bead, repoName, repoPath, changed) {
+				c.emitEmptyDiffCompleted(bead, repoName, repoPath, changed, targets)
 				return c.rejectClose(bead, projectPath, repoName, "empty-diff")
 			}
 			// Docs-only changes sit outside code targets by definition, so the
@@ -1339,6 +1340,7 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 	if needScope {
 		mode := c.config.Validation.TargetScopeMode()
 		if err := c.checkTargetScope(bead, projectPath, repoName, changed, targets, mode); err != nil {
+			c.emitEmptyDiffCompleted(bead, repoName, repoPath, changed, targets)
 			return err
 		}
 	}

@@ -17,8 +17,14 @@ func TestPhaseGuidance(t *testing.T) {
 		{"RED: Write tests for X", "task", "fails for the RIGHT reason"},
 		{"GREEN: Implement X", "task", "MINIMUM that makes the failing tests pass"},
 		{"REFACTOR: Optimize X", "task", "Behavior must not change"},
-		{"Fix: COMPLIANCE GATE", "fix", "VERIFY-FIRST"},
-		{"anything", "fix", "VERIFY-FIRST"},
+		{"Fix: COMPLIANCE GATE", "fix", "PRE-IMPLEMENTATION CROSS-VERIFICATION"},
+		{"anything", "fix", "PRE-IMPLEMENTATION CROSS-VERIFICATION"},
+		{"anything", "bug", "PRE-IMPLEMENTATION CROSS-VERIFICATION"},
+		{"Fix: COMPLIANCE GATE", "fix", "PRE-CLOSE CROSS-VERIFICATION"},
+		{"anything", "bug", "PRE-CLOSE CROSS-VERIFICATION"},
+		{"anything", "feature", "PRE-CLOSE CROSS-VERIFICATION"},
+		{"FEATURE: Add X", "task", "PRE-CLOSE CROSS-VERIFICATION"},
+		{"anything", "fr", "PRE-CLOSE CROSS-VERIFICATION"},
 		{"Discovery: X", "task", ""},
 		{"SYNTAX: Check X", "task", ""},
 		{"EPIC: X", "epic", ""},
@@ -41,8 +47,12 @@ func TestPhaseGuidance(t *testing.T) {
 // final prompt.
 func TestBuildPiPrompt_IncludesPhaseGuidance(t *testing.T) {
 	p := buildPiPrompt(types.Bead{Type: "fix", Title: "Fix: broken gate", Description: "d"}, nil, promptExtras{})
-	if !strings.Contains(p, "REPRODUCE") || !strings.Contains(p, "VERIFY-FIRST") || !strings.Contains(p, "do NOT modify files") {
-		t.Error("fix-bead prompt must carry the verify-first directive and root-cause protocol")
+	if !strings.Contains(p, "PRE-IMPLEMENTATION CROSS-VERIFICATION") || !strings.Contains(p, "reproduce it on a clean checkout") || !strings.Contains(p, "PRE-CLOSE CROSS-VERIFICATION") {
+		t.Error("fix-bead prompt must carry pre-implementation + pre-close cross-verification")
+	}
+	pf := buildPiPrompt(types.Bead{Type: "fr", Title: "FR-900: add X", Description: "d"}, nil, promptExtras{})
+	if strings.Contains(pf, "PRE-IMPLEMENTATION") || !strings.Contains(pf, "PRE-CLOSE CROSS-VERIFICATION") {
+		t.Error("feature beads get pre-close half only")
 	}
 	p2 := buildPiPrompt(types.Bead{Type: "task", Title: "Discovery: X", Description: "d"}, nil, promptExtras{})
 	if strings.Contains(p2, "root-cause protocol") {
