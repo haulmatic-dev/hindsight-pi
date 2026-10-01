@@ -5,6 +5,8 @@
 - internal/core/integration_base_test.go: 2 new tests — remote truth beats stale local symref (remote HEAD repointed to main while clone symref stale at development → base=main); unreachable remote falls back to local symref (fail-open). `TestResolveIntegrationBase_SymbolicRefHead` updated to also repoint the remote's HEAD to trunk (remote advertisement now wins).
 - CHANGELOG.md: Fixed entry under Unreleased.
 
+- Plus: a successful ls-remote opportunistically heals the stale local symref (`git remote set-head origin <branch>`, best-effort) — the set-head --auto alternative from the bead is covered as a lazy self-heal, not a discovery-time hook. Test `TestResolveIntegrationBase_ReconcilesStaleLocalSymref`.
+
 ## Verification (commands run + pass/fail)
 - `go build ./internal/core/` — PASS.
 - `go vet ./internal/core/` — PASS.

@@ -117,6 +117,18 @@ func remoteSymrefDefault(projectPath string) string {
 		}
 		ref := strings.TrimPrefix(fields[1], "refs/heads/")
 		if ref != "" {
+			// Opportunistic self-heal: reconcile the local symref with the
+			// remote's answer so the stale state does not persist. Best-effort
+			// only — resolution already succeeded without it.
+			if out, err := exec.Command("git", "-C", projectPath, "symbolic-ref", "refs/remotes/origin/HEAD").Output(); err == nil {
+				if local := strings.TrimSpace(string(out)); local != "refs/remotes/origin/"+ref {
+					if out2, err2 := exec.Command("git", "-C", projectPath, "remote", "set-head", "origin", ref).CombinedOutput(); err2 != nil {
+						log.Printf("[IntegrationBase] could not reconcile stale refs/remotes/origin/HEAD in %s: %v: %s", projectPath, err2, out2)
+					} else {
+						log.Printf("[IntegrationBase] reconciled stale refs/remotes/origin/HEAD in %s: %s -> %s", projectPath, local, ref)
+					}
+				}
+			}
 			return ref
 		}
 	}

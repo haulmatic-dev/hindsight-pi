@@ -200,3 +200,42 @@ func TestResolveIntegrationBase_RemoteUnreachableFallsBackToLocalSymref(t *testi
 		t.Fatalf("base = %q, want development via local symref fallback", base)
 	}
 }
+
+// TestResolveIntegrationBase_ReconcilesStaleLocalSymref: when ls-remote
+// reports a default branch different from the stale local
+// refs/remotes/origin/HEAD, the resolver opportunistically runs
+// `git remote set-head origin <branch>` so the local state heals.
+func TestResolveIntegrationBase_ReconcilesStaleLocalSymref(t *testing.T) {
+	clone := setupOriginClone(t)
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", clone}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("push", "origin", "HEAD:refs/heads/main")
+	originURL := func() string {
+		out, err := exec.Command("git", "-C", clone, "remote", "get-url", "origin").Output()
+		if err != nil {
+			t.Fatalf("get-url: %v", err)
+		}
+		return strings.TrimSpace(string(out))
+	}()
+	if out, err := exec.Command("git", "--git-dir", originURL, "symbolic-ref", "HEAD", "refs/heads/main").CombinedOutput(); err != nil {
+		t.Fatalf("set remote HEAD: %v: %s", err, out)
+	}
+	// Force the local symref stale: origin/HEAD -> development while the
+	// remote advertises main.
+	run("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/development")
+	base, _, err := ResolveIntegrationBase(nil, clone)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if base != "main" {
+		t.Fatalf("base = %q, want main", base)
+	}
+	if out, err := exec.Command("git", "-C", clone, "symbolic-ref", "refs/remotes/origin/HEAD").Output(); err != nil || strings.TrimSpace(string(out)) != "refs/remotes/origin/main" {
+		t.Fatalf("local symref not reconciled: %q err=%v", strings.TrimSpace(string(out)), err)
+	}
+}
