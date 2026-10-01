@@ -1604,6 +1604,11 @@ func executeWithPi(
 	// nudge-capped worker in the registry.
 	nudgeCount := 0
 	turnCount := 1
+	// closureMissReason is non-empty when the session ended because the nudge
+	// cap was exhausted without a valid verdict (fmsfe-b8h, 2026-10-01). It
+	// drives the exit-8 closure-miss classification so the daemon paces the
+	// retry as infrastructure instead of counting a bead fault.
+	closureMissReason := ""
 
 	// Park state (rpc mode only): Tier A provider-capacity failures park the
 	// live session instead of killing it (PRD Part 2).
@@ -1665,6 +1670,11 @@ func executeWithPi(
 						turn.reset()
 						continue
 					}
+				} else if reason != "" {
+					// Nudge cap exhausted without a valid closure — the turn
+					// closes and the session is tagged as a closure miss.
+					closureMissReason = reason
+					log.Printf("[Worker:rpc] session ended as closure miss after %d nudges: %s", nudgeCount, reason)
 				}
 				if v != nil && !v.Done && v.Summary != "" {
 					log.Printf("[Worker:rpc] agent abandoned with summary: %s", truncateLog(v.Summary, 200))
@@ -1788,6 +1798,16 @@ monitorLoop:
 			result.TokensCacheRead = int64(s.CacheReadInput)
 			result.TokensCacheCreation = int64(s.CacheCreation)
 			result.TokensOutput = int64(s.Output)
+		}
+		if closureMissReason != "" {
+			// Session ended on the nudge cap without a valid verdict. Surface
+			// the closure-miss reason so classifyFailure routes it to exit 8
+			// (infra-paced retry) instead of exit 1 (bead fault).
+			if result.Error == "" {
+				result.Error = closureMissReason
+			} else {
+				result.Error = result.Error + "; " + closureMissReason
+			}
 		}
 		if n := turn.Notifications(); n != "" {
 			log.Printf("[Worker:rpc] extension UI notifications: %s", n)
@@ -2999,6 +3019,15 @@ func classifyFailure(result *ExecutionResult) int {
 		strings.Contains(err, "todo") ||
 		strings.Contains(err, "fixme"):
 		return 5
+	// Closure miss (fmsfe-b8h, 2026-10-01): the session exhausted the
+	// verdict-nudge cap without a valid HYDRA_VERDICT. Every observed cohort
+	// instance was provider instability (model-call server errors, activity
+	// timeouts) killing turns mid-analysis, not a code defect — so the
+	// failure routes to infra (exit 8, added to isInfrastructureExitCode in
+	// internal/core/worker_lifecycle.go) and the retry is paced by the
+	// RetryManager's infra path instead of consuming the bead's budget.
+	case strings.Contains(err, "after nudge cap"):
+		return 8
 	case strings.Contains(err, "connection refused") ||
 		strings.Contains(err, "connection reset") ||
 		strings.Contains(err, "i/o error") ||

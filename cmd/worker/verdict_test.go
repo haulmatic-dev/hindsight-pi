@@ -89,7 +89,8 @@ func TestDecideTurnEnd(t *testing.T) {
 		{"missing verdict nudges", ``, 0, true, "verdict missing"},
 		{"unmet ACs nudge with list", `{"done": true, "ac_unmet": ["req-003"]}`, 0, true, "req-003"},
 		{"abandon does not nudge", `{"done": false, "summary": "blocked"}`, 0, false, ""},
-		{"cap stops nudging", ``, 3, false, ""},
+		{"cap stops nudging with closure-miss reason", ``, 3, false, "after nudge cap"},
+		{"cap stops nudging incomplete verdict", `{"done": false}`, 3, false, "after nudge cap"},
 		{"hollow-green nudges with reason", `{"done": false, "hollow_green": true, "ac_unmet": ["load errors"], "summary": "downgraded"}`, 0, true, "hollow-green"},
 	}
 	for _, tc := range cases {
