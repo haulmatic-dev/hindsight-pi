@@ -22,6 +22,8 @@ func TestClassifyPushFailure(t *testing.T) {
 		{"timeout", "fatal: unable to access 'https://github.com/o/r.git/': Failed to connect to github.com port 443: Connection timed out", ClassTransient},
 		{"rpc eof", "fatal: the remote end hung up unexpectedly\nerror: RPC failed; HTTP 502 curl 22", ClassTransient},
 		{"garbage", "some totally unrecognized failure text", ClassUnknown},
+		{"repo not found", "remote: Repository not found.\nfatal: repository 'https://github.com/o/r.git/' not found", ClassNotFound},
+		{"not a git repo", "fatal: 'https://github.com/o/r.git/' does not appear to be a git repository", ClassNotFound},
 		// stale beats protected when both markers present: GitHub phrases
 		// non-FF as "remote rejected (non-fast-forward)".
 		{"remote rejected non-ff", "! [remote rejected] dev -> dev (non-fast-forward)", ClassStale},
@@ -62,11 +64,11 @@ func TestIsHydraOwnedBranch(t *testing.T) {
 
 func TestResolvePublishPath(t *testing.T) {
 	cases := []struct {
-		name   string
-		class  PublishPathClass
-		owned  bool
-		tier1  bool
-		want   PublishAction
+		name  string
+		class PublishPathClass
+		owned bool
+		tier1 bool
+		want  PublishAction
 	}{
 		{"accepted owned", ClassAccepted, true, false, ActPushDirect},
 		{"accepted unowned", ClassAccepted, false, false, ActParkLocalLoud},
@@ -75,6 +77,7 @@ func TestResolvePublishPath(t *testing.T) {
 		{"stale", ClassStale, true, false, ActRebaseRetry},
 		{"transient", ClassTransient, true, true, ActParkLocalLoud},
 		{"unknown", ClassUnknown, true, false, ActParkLocalLoud},
+		{"not found", ClassNotFound, true, true, ActParkLocalLoud},
 		{"unexpected class", PublishPathClass("WEIRD"), true, true, ActParkLocalLoud},
 	}
 	for _, tc := range cases {
