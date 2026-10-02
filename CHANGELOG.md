@@ -6,6 +6,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+- PR #82 human-merge bead (hydra-pnf9): verified PR #82 (feat/pi-rpc-wiring → development) already MERGED 2026-07-28, merge commit 3afb14c is an ancestor of origin/development; no active push-pending pseudo-bead in the live store. Bead closed as already-done with verification comment — no code change. *Authored by a Hydra dogfood run.*
 
 ### Fixed
 - Pan health-digest orphan-claim counter now applies Charon's 5-minute claim grace: a bead claimed within the last 5m has no registry worker yet (spawn → status update → registry upsert is not atomic), so the digest's `orphanclaims` counter must not count it as orphaned. Without the grace the counter fired during every spawn wave and created a self-perpetuating filing loop — each campaign-anomaly bead Pan filed became itself a fresh in_progress claim with no worker yet, re-firing the anomaly (hydra 2026-10-02 02:34–02:48: hydra-ctix → hydra-qmf7 → hydra-t2e1 → hydra-yz8z filed in 13 min, every one a false alarm; on recheck all in_progress hydra beads had live registry workers with fresh heartbeats, and real disk usage was 43%, not the claimed 99%). Verified false-alarm triage + grace fix: `docs/discovery/orphanclaim-digest-grace-qmf7.md`. Tests: `TestCollectHealthDigestOrphanClaims_FreshClaimGrace`. *Authored by a Hydra dogfood run.*
