@@ -205,6 +205,10 @@ var repairWhitelist = map[string]bool{
 	"clear-hard-park":   true,
 	"clear-escalation":  true,
 	"retry-quarantine":  true,
+
+	// recover-spawn-cohort is project-scoped but not LLM-invocable yet
+	// (deterministic PrunableWedgeSweep only) — kept out of repairWhitelist
+	// so judgment cannot fire it per-bead (fmsfe-npa 2026-10-02).
 }
 
 // pseudoBeadSuffix marks synthetic project-level candidates (e.g.
@@ -246,6 +250,7 @@ var reJudgeInterval = 15 * time.Minute
 // one stale webapp-xw3 registration wedged 13 beads).
 var projectScopedRepairs = map[string]bool{
 	"prune-worktree-registration": true,
+	"recover-spawn-cohort":        true,
 	"re-push-integration":         true,
 	"park-campaign":               true,
 	"log-improvement":             true,
@@ -1461,7 +1466,7 @@ Rescue recipes (hard-won; prefer the repair matching the cause):
   - Never abandon-with-summary or repair: a FIX-AUDIT candidate.
 - Hard-park labels (worktree-unavailable, integration-exhausted) are durable by design — the scheduler never retries them. Use repair:clear-hard-park when the named cause is plausibly fixed or transient (worktree directory exists, store parses clean, push path repaired). Do not clear a park whose cause is still present.
 - Stale human escalations (BLOCKED, reason mentions "escalated to a human", aging in days, no live worker, no token progress): after roughly two days with no human response the escalation is stale — prefer repair:clear-escalation, which drops the escalated/needs-human labels and re-queues the bead for one scheduler retry (the retry counter is reset, so the bead gets a fair pass; if the same failure recurs, the escalation re-fires and human triage is the next step). If the bead's work is clearly obsolete, abandon-with-summary instead. Escalations younger than ~2 days may still get a human: leave blocked.
-- Many BLOCKED beads with the same reason = a shared wedge. Repairs are per-bead hygiene only now: fix one bead, and file-bead a proposal describing the shared wedge so a human can address the cause.
+- Many BLOCKED beads with the same reason = a shared wedge. The deterministic PrunableWedgeSweep already runs ONE project-scoped batch repair (prune-worktree-registration for worktree cohorts, recover-spawn-cohort for spawn-failed cohorts) per sweep tick — do not attempt per-bead repairs for cohort members; fix one bead only if it diverges, and file-bead a proposal describing the shared wedge so a human can address the cause.
 - repair:reset-retries clears the retry counter after the underlying cause is fixed; useless while the cause persists.
 - Orphaned in_progress claims (the digest's orphanclaims counter / "P0 campaign anomaly: N in_progress bead(s) with no live registry worker") are the same P0 class as a fleet stall: the claims wedge the whole DAG ladder and progress is silent zero. The scheduler's orphan-claim reconciliation and Charon recovery are the mechanical fix; if the anomaly persists across judgments, file-bead it for human review naming the wedged bead IDs.
 - repair:repair-bead-store restores a corrupted issues.jsonl from the newest clean backup; pick it when the reason mentions conflict markers or parse errors.
