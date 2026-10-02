@@ -28,8 +28,12 @@ const PATH_LOOKUP_TIMEOUT_MS = 10_000;
  * Order of resolution:
  *   1. $HYDRA_TOOLS_DIR/prd-lint/prd-lint
  *   2. <cwd>/tools/prd-lint/prd-lint
- *   3. /opt/dev-tools/components/hydra/tools/prd-lint/prd-lint
- *   4. Any executable named `prd-lint` on PATH
+ *   3. Any executable named `prd-lint` on PATH
+ *
+ * There is deliberately NO machine-wide fallback path: a hardcoded host
+ * location makes "prd-lint missing" indistinguishable from "prd-lint
+ * installed elsewhere" and breaks the skip contract (test-preflight #4).
+ * Callers that need a host binary must point HYDRA_TOOLS_DIR at it.
  *
  * @returns {string|null} Absolute path to the binary, or null if not found.
  */
@@ -38,7 +42,6 @@ export function resolvePrdLintBinary() {
     process.env.HYDRA_TOOLS_DIR &&
       path.join(process.env.HYDRA_TOOLS_DIR, 'prd-lint', 'prd-lint'),
     path.join(process.cwd(), 'tools', 'prd-lint', 'prd-lint'),
-    '/opt/dev-tools/components/hydra/tools/prd-lint/prd-lint',
   ].filter(Boolean);
 
   for (const candidate of candidates) {

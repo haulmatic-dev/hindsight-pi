@@ -6,6 +6,12 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+
+- create-prd §3.1a refactored for readability: removed the duplicated inline list of the five System Type enum values (now stated once at level 3 with a cross-reference from level 1) and tightened the classification-precedence prose; wording-only, contract tests 3/3 unchanged-green. *Authored by a Hydra dogfood run.*
+- task-breakdown fixture-suite validation gap resolved without code change: verify-first confirmed test-pattern-routing.mjs + all 8 fixtures exist and pass 8/8 (routing/preflight/crosscutting rc=0); stale "no test files" flag documented in test-6lmz handoff. *Authored by a Hydra dogfood run.*
+- create-prd producer contract pinned in code (internal/prdcontract): new §3.1a in .agents/skills/create-prd/SKILL.md documents the task-pattern classification precedence (explicit Type prefix > target-file shape > System Type enum > tdd_chain fallback) and the five-value System Type enum; 3 contract tests fail on doc drift. RED test file's non-constant `const` + missing-return fixed so it compiles. *Authored by a Hydra dogfood run.*
+- task-breakdown REFACTOR: `routeTaskPattern` type-marker chain made table-driven (`TYPE_MARKER_ROUTES`, precedence preserved) and test-pattern-routing's duplicated FAIL/print/push branches unified into a single `fail()` helper — behavior-identical, 8/8 fixtures + preflight + crosscutting all pass. *Authored by a Hydra dogfood run.*
+- task-breakdown GREEN: `routeTaskPattern` + `TaskRoute` exported from analyzer.mjs (fixture-proven routing precedence: type markers > headers > Target Files scope), all 8 fixtures pass exit 0; preflight `prd-lint` machine-wide fallback path removed so "missing" stays distinguishable from "installed elsewhere" (test-preflight #4); `validateFileOverlap` now accepts cross-cut-serialized shared-file overlap. *Authored by a Hydra dogfood run.*
 - PR #82 human-merge bead (hydra-pnf9): verified PR #82 (feat/pi-rpc-wiring → development) already MERGED 2026-07-28, merge commit 3afb14c is an ancestor of origin/development; no active push-pending pseudo-bead in the live store. Bead closed as already-done with verification comment — no code change. *Authored by a Hydra dogfood run.*
 
 ### Fixed
