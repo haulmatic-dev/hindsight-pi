@@ -601,7 +601,7 @@ export class TaskBreakdownRunner extends EventEmitter {
     }
 
     // Validate taskPattern is one of allowed values
-    const validPatterns = ['tdd_chain', 'verification_gate', 'aggregation_task', 'configuration_task'];
+    const validPatterns = ['tdd_chain', 'verification_gate', 'aggregation_task', 'configuration_task', 'direct_task'];
     if (!validPatterns.includes(req.taskPattern)) {
       errors.push(`Invalid taskPattern: ${req.taskPattern}. Must be one of: ${validPatterns.join(', ')}`);
     }
@@ -858,6 +858,7 @@ export class TaskBreakdownRunner extends EventEmitter {
       const order = {
         'tdd_chain': 0,
         'configuration_task': 1,
+        'direct_task': 1,
         'aggregation_task': 2,
         'verification_gate': 3,
       };
@@ -1117,6 +1118,9 @@ This gate runs after all implementation tasks complete.`,
       } else if (req.taskPattern === 'configuration_task') {
         // Configuration tasks: RED depends on approval gate
         await this.createConfigurationTask(req, baseTask, null, state, ['approvalGate']);
+      } else if (req.taskPattern === 'direct_task') {
+        // Direct tasks: exactly ONE bead, no TDD phase synthesis
+        await this.createDirectTask(req, baseTask, null, state, ['approvalGate']);
       } else {
         // Default: TDD_CHAIN for FRs
         // RED depends on approval gate or explicit Depends On + P0 APPLY tasks
@@ -1177,6 +1181,7 @@ This gate runs after all implementation tasks complete.`,
     const verificationNFRs = requirements.filter(r => r.taskPattern === 'verification_gate');
     const aggregationTasks = requirements.filter(r => r.taskPattern === 'aggregation_task');
     const configTasks = requirements.filter(r => r.taskPattern === 'configuration_task');
+    const directTasks = requirements.filter(r => r.taskPattern === 'direct_task');
 
     // Count fused vs full chains
     const trivialFRs = frs.filter(r => r.estimatedHours < 0.5 && (r.files || []).length <= 1);
@@ -1187,7 +1192,9 @@ This gate runs after all implementation tasks complete.`,
     const fullStackExtraSubtasks = fullStackUSs.length * 6; // backend(3) + frontend(3)
 
     const tddSubtasks = trivialFRs.length * 3 + complexFRs.length * 4 + aggregationTasks.length * 3 + configTasks.length * 2 + fullStackExtraSubtasks;
-    const totalTasks = requirements.length + tddSubtasks;
+    // Direct tasks emit exactly one bead per requirement — no phase synthesis.
+    // Beads per pattern: fr trivial=3, fr complex=4, agg=3, config=2, direct=1, verification=1.
+    const totalTasks = tddSubtasks + directTasks.length + verificationNFRs.length;
 
     console.log(`  ✓ Created all tasks deterministically (type-aware)`);
     if (skipDiscovery) {
@@ -2187,6 +2194,96 @@ Aggregated FRs: ${req.dependsOn.join(', ')}`,
    * Create configuration task (for NFRs like Module System, Setup)
    * These can run in parallel with FRs
    */
+  /**
+   * Map a DIRECT_TASK requirement to its shape-specific acceptance line.
+   * @param {Object} req - Parsed requirement (needs .type, .originalId)
+   * @returns {string} Acceptance line for the deliverable shape
+   */
+  getDirectTaskAcceptanceLine(req) {
+    const t = (req.type || '').toLowerCase();
+    const orig = (req.originalId || '').toUpperCase();
+    if (t.includes('test') || orig.startsWith('TEST-')) {
+      return 'suite exits 0; assertion count > 0; zero skipped/todo tests';
+    }
+    if (t.includes('refactor') || orig.startsWith('REF-')) {
+      return 'existing suite exits 0 unchanged';
+    }
+    if (t.includes('deletion') || orig.startsWith('DEL-')) {
+      return 'suite exits 0; absence grep returns no matches';
+    }
+    if (t.includes('spike') || t.includes('audit') || orig.startsWith('SPIKE-') || orig.startsWith('AUDIT-')) {
+      return 'findings artifact exists, non-vacuous, citations resolve where applicable';
+    }
+    return 'Test Command exits 0';
+  }
+
+  /**
+   * DIRECT_TASK: emit exactly ONE bead per requirement — no RED/GREEN/REFACTOR/SYNTAX
+   * phase synthesis. Used for docs, test-authoring, refactor, spike, deletion, audit
+   * deliverables where TDD ceremony is wrong-shape overhead.
+   */
+  async createDirectTask(req, parentTask, parentId, state, redDeps = []) {
+    const { idMapping } = state;
+    const stepName = 'create-tasks';
+
+    const cleanTitle = this.normalizeTitle(req.title);
+    const acceptanceLine = this.getDirectTaskAcceptanceLine(req);
+    const testCommand = (req.testCommand || '').trim();
+
+    let instructions = `## Direct Task
+
+This is a single-bead deliverable task — no TDD phase synthesis.
+
+Deliverable: ${cleanTitle}.
+
+Acceptance: ${acceptanceLine}.`;
+
+    if (testCommand) {
+      instructions += `\n\nTest Command (must be run exactly as written):\n\n\`${testCommand}\``;
+    }
+
+    const directTask = {
+      localId: parentTask.localId,
+      title: req.title,
+      description: this.formatTrackerDescription({ req, instructions }),
+      level: parentTask.level,
+      dependsOn: redDeps,
+      priority: parentTask.priority,
+      type: 'task',
+      labels: [...new Set([...parentTask.labels, 'direct-task'])],
+      metadata: {
+        prd_requirement_id: req.id,
+        task_pattern: 'direct_task',
+        test_command: req.testCommand || '',
+        build_command: req.buildCommand || '',
+        files: req.files || [],
+        parent_criteria: req.acceptanceCriteria || [],
+        acceptance_line: acceptanceLine,
+      },
+    };
+
+    const blockers = redDeps.map((depLocalId) => {
+      const realId = idMapping[depLocalId];
+      if (!realId)
+        throw new Error(`Direct task dependency ${depLocalId} not found`);
+      return realId;
+    });
+
+    const directId = this.executor.createTask(directTask, blockers);
+    this._emitEvent('task:subtask:created', {
+      step: stepName,
+      parentLocalId: parentTask.localId,
+      localId: directTask.localId,
+      taskId: directId,
+      subtaskType: 'direct',
+      timestamp: Date.now(),
+    });
+    console.log(`        ✓ ${directTask.localId} → ${directId} (direct task)`);
+    idMapping[parentTask.localId] = directId;
+
+    await this.state.update({ idMapping });
+  }
+
   async createConfigurationTask(req, parentTask, parentId, state, redDeps = []) {
     const { idMapping } = state;
     const stepName = 'create-tasks';
