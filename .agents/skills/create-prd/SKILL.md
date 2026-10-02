@@ -108,27 +108,26 @@ generation.
 
 #### 3.1a Task-Pattern Classification (producer contract)
 
-The task-breakdown analyzer classifies every requirement into an execution
-pattern (`taskPattern`). The classification is deterministic and follows this
-precedence order, from strongest to weakest signal:
+The task-breakdown analyzer assigns every requirement an execution pattern
+(`taskPattern`) before scheduling. Classification is deterministic and uses
+four signals in strict precedence — strongest signal wins, weaker signals apply
+only when no stronger one is present:
 
 1. **Explicit Type prefix** — a requirement whose `**Type:**` field names a
-   pattern directly (one of the five System Type values, e.g. `backend-api`,
-   `web-app`, `cli-tool`, `library`, `full-stack`) is honored verbatim.
-2. **target-file shape** — the file extensions/paths listed in
-   `**Target Files:**` infer the pattern (e.g. `.tsx` → web component work,
-   `_test.go` → RED test pattern).
-3. **System Type** — the PRD-level enum `**System Type:** backend-api | web-app
+   pattern directly (any of the five System Type enum values, see level 3) is
+   honored verbatim.
+2. **target-file shape** — the file extensions/paths in `**Target Files:**`
+   infer the pattern (e.g. `.tsx` → web component work, `_test.go` → RED test
+   pattern).
+3. **System Type enum** — the PRD-level `**System Type:** backend-api | web-app
    | cli-tool | library | full-stack` supplies the default pattern for the
-   whole document (backend surfaces vs. frontend surface rules).
-4. **tdd_chain** — when none of the above signals apply, the requirement
-   falls back to the standard TDD chain pattern
-   (RED → GREEN → REFACTOR → SYNTAX).
+   whole document (backend vs. frontend surface rules).
+4. **tdd_chain** — when no stronger signal applies, the requirement falls back
+   to the standard TDD chain (RED → GREEN → REFACTOR → SYNTAX).
 
-> Weakest signal wins last: an author can always override by stating the
-> prefix explicitly. Keep the four levels in this exact order — the analyzer
-> mirrors it, and the pinned contract tests in `internal/prdcontract` fail on
-> documentation drift.
+> Keep the four levels in this exact order: the analyzer mirrors it, and the
+> pinned contract tests in `internal/prdcontract` fail on documentation drift.
+> Level 1 always exists so an author can override any inference explicitly.
 
 ---
 
