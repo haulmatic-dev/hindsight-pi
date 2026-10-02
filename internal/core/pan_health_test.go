@@ -267,6 +267,46 @@ func TestLogImprovementRepair(t *testing.T) {
 // TestCollectHealthDigestOrphanClaims guards the fms P0 anomaly (2026-10-01):
 // in_progress beads with no live registry worker are orphaned claims that
 // wedge the whole DAG ladder while looking silent — Pan must see them.
+func TestCollectHealthDigestFreshHeartbeatCompletedRowNotOrphan(t *testing.T) {
+	// Regression (2026-10-02 hydra-l867): a worker that is still running after
+	// its registry row was prematurely marked completed heartbeats every 30s —
+	// the bead has a live worker, not an orphan claim. The digest previously
+	// listed only working/parked rows, so this state counted as orphaned and
+	// Pan re-filed a twin P0 report bead every judgment round.
+	tw := setupTestOverseer(t)
+	tw.overseer.registryStore = nil
+
+	bead := types.Bead{ID: "test-project-fin", Project: "test-project", Status: types.StatusInProgress, Type: "bug"}
+	tw.mockBeads.beads["test-project-fin"] = bead
+
+	st, err := registry.Open(":memory:")
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	tw.overseer.registryStore = st
+	if err := st.UpsertWorker(registry.WorkerRecord{
+		BeadID: "test-project-fin", PID: 3, Project: "test-project", State: registry.StateCompleted,
+		StartedAt: time.Now().Add(-30 * time.Minute), LastHeartbeat: time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertWorker: %v", err)
+	}
+
+	d := tw.overseer.collectHealthDigest()
+	if len(d.Projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(d.Projects))
+	}
+	ph := d.Projects[0]
+	if ph.OrphanClaims != 0 {
+		t.Errorf("OrphanClaims = %d, want 0 (heartbeat-fresh completed row is live)", ph.OrphanClaims)
+	}
+	for _, a := range ph.Anomalies {
+		if strings.Contains(a, "P0 campaign anomaly") {
+			t.Errorf("unexpected orphan anomaly: %v", ph.Anomalies)
+		}
+	}
+}
+
 func TestCollectHealthDigestOrphanClaims(t *testing.T) {
 	tw := setupTestOverseer(t)
 	o := tw.overseer

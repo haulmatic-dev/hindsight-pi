@@ -59,11 +59,20 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 		return digest
 	}
 
-	// Live worker rows once for the whole scan.
+	// Live worker rows once for the whole scan. A row whose heartbeat is
+	// fresh counts as live regardless of state: a worker finalizing gates
+	// after its row was prematurely marked completed still heartbeats (30s
+	// cadence), and counting that bead as an orphan claim made Pan file a
+	// twin P0 report bead every judgment round (2026-10-02: hydra-l867 row
+	// completed at 02:52:38 while the worker PID ran on until 03:1x). The
+	// threshold mirrors Charon's heartbeatHungAfter (5m).
 	liveByKey := map[string][]registry.WorkerRecord{}
 	if o.registryStore != nil {
-		if workers, err := o.registryStore.ListWorkers(registry.StateWorking, registry.StateParked); err == nil {
+		if workers, err := o.registryStore.ListWorkers(registry.StateWorking, registry.StateParked, registry.StateHung, registry.StateCompleted); err == nil {
 			for _, w := range workers {
+				if w.State == registry.StateCompleted && time.Since(w.LastHeartbeat) >= 5*time.Minute {
+					continue // genuinely finished; not live
+				}
 				// WorkerRecord.Project is the registered project name; match
 				// by name or path basename (multi-user discovery registers
 				// "<user>/<repo>" while workers carry the plain name).
