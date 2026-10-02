@@ -343,6 +343,115 @@ export function analyzePRDDeterministic(prdContent) {
 }
 
 /**
+ * Deliverable-shape routes for pattern-aware task routing.
+ * Exactly 8 members — pinned by test-pattern-routing.mjs.
+ */
+export const TaskRoute = {
+  ANALYSIS: 'analysis',
+  TEST_AUTHORING: 'test_authoring',
+  REFACTOR: 'refactor',
+  SPIKE: 'spike',
+  DELETION: 'deletion',
+  AUDIT: 'audit',
+  LEGACY_NO_SCOPE: 'legacy_no_scope',
+  NORMAL_CODE: 'normal_code',
+};
+
+// `**Type:**` marker value -> TaskRoute value
+const TYPE_MARKER_ROUTES = {
+  analysis: TaskRoute.ANALYSIS,
+  audit: TaskRoute.AUDIT,
+  test: TaskRoute.TEST_AUTHORING,
+  refactor: TaskRoute.REFACTOR,
+  spike: TaskRoute.SPIKE,
+  deletion: TaskRoute.DELETION,
+};
+
+// Requirement header prefixes (TEST-001, REF-1, SPIKE-2, AUDIT-1, DEL-3, ...)
+// that imply a deliverable shape regardless of target files.
+const HEADER_PREFIX_ROUTES = {
+  test: TaskRoute.TEST_AUTHORING,
+  ref: TaskRoute.REFACTOR,
+  refactor: TaskRoute.REFACTOR,
+  spike: TaskRoute.SPIKE,
+  audit: TaskRoute.AUDIT,
+  del: TaskRoute.DELETION,
+  deletion: TaskRoute.DELETION,
+  analysis: TaskRoute.ANALYSIS,
+};
+
+function routeForTypeMarker(value) {
+  return TYPE_MARKER_ROUTES[String(value || '').toLowerCase().trim()] || null;
+}
+
+/**
+ * Route a task/PRD markdown snippet to its deliverable shape.
+ *
+ * Reuses analyzePRDDeterministic's requirement model (files, types, ids) —
+ * this is a routing decision layer, not a second parser. Type markers
+ * (`**Type:** ...`) and shape-bearing header prefixes (TEST-001, SPIKE-2, ...)
+ * take precedence; plain FR requirements fall back to target-file heuristics.
+ *
+ * @param {string} content - Raw task/PRD markdown content
+ * @returns {{route: string, reason: string}} TaskRoute value + human reason
+ */
+export function routeTaskPattern(content) {
+  if (typeof content !== 'string' || content.trim() === '') {
+    return { route: TaskRoute.LEGACY_NO_SCOPE, reason: 'empty content treated as unscoped' };
+  }
+
+  const analysis = analyzePRDDeterministic(content);
+  const reqs = analysis.requirements || [];
+  const reasons = [];
+
+  const addRoute = (route, reason) => {
+    if (route) reasons.push({ route, reason });
+  };
+
+  // 1. Explicit `**Type:**` markers (within parsed requirements and standalone).
+  const markerRe = /^\s*\*{0,2}type:?\*{0,2}\s+([A-Za-z_-]+)/i;
+  for (const line of content.split('\n')) {
+    const m = line.match(markerRe);
+    if (m) addRoute(routeForTypeMarker(m[1]), `type marker '${m[1].toLowerCase()}'`);
+  }
+
+  // 2. Shape-bearing requirement header prefixes (TEST-001, REF-1, ...).
+  const headerRe = /^#{3,4}\s+([A-Za-z]+)-?\d*\s*:/;
+  for (const line of content.split('\n')) {
+    const m = line.match(headerRe);
+    if (m) addRoute(HEADER_PREFIX_ROUTES[m[1].toLowerCase()], `header prefix '${m[1]}'`);
+  }
+
+  // Audit precedence: any audit-shaped requirement routes the whole batch to audit.
+  const auditHit = reasons.find((r) => r.route === TaskRoute.AUDIT);
+  if (auditHit) return auditHit;
+
+  if (reasons.length > 0) return reasons[0];
+
+  // 3. Plain FR requirements: target-file scope heuristics.
+  const frs = reqs.filter(
+    (r) => r.type === 'FR' || r.type === 'NFR' || r.type === 'User Story',
+  );
+  if (frs.length > 0) {
+    if (frs.every((r) => !r.files || r.files.length === 0)) {
+      return {
+        route: TaskRoute.LEGACY_NO_SCOPE,
+        reason: `all ${frs.length} requirement(s) lack explicit target files`,
+      };
+    }
+    return {
+      route: TaskRoute.NORMAL_CODE,
+      reason: `requirement(s) carry explicit target files (${frs.filter((r) => r.files.length > 0).length} scoped)`,
+    };
+  }
+
+  return {
+    route: TaskRoute.LEGACY_NO_SCOPE,
+    reason: 'no requirements, type markers, or shape-bearing headers detected',
+  };
+}
+
+/**
  * Classify requirement with task pattern and dependencies
  * This is the core enhancement for type-aware task generation
  */

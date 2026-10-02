@@ -7,6 +7,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+- GREEN: shape-aware task routing in `.agents/skills/task-breakdown/analyzer.mjs` — new `TaskRoute` enum (8 routes) + `routeTaskPattern(content)` returning `{route, reason}`; reuses `analyzePRDDeterministic` (no second parser). Routing: `**Type:**` markers and shape-bearing header prefixes (TEST-/REF-/SPIKE-/AUDIT-/DEL-/Analysis-) take precedence, audit wins over mixed batches, plain FRs fall back to target-file heuristics (all unscoped → `legacy_no_scope`, scoped → `normal_code`). All 8 pattern-routing fixtures pass; new-code statement coverage 93.3%. *Authored by a Hydra dogfood run.*
+
 - RED-phase fixture suite for task-breakdown pattern routing: `test-pattern-routing.mjs` pins 8 fixture→route assignments (analysis, test_authoring, refactor, spike, deletion, audit, legacy_no_scope, normal_code) via fixtures/*.md, fails with exit 1 + failing fixture names printed until `routeTaskPattern`/`TaskRoute` land in analyzer.mjs. *Authored by a Hydra dogfood run.*
 
 - PR #82 human-merge bead (hydra-pnf9): verified PR #82 (feat/pi-rpc-wiring → development) already MERGED 2026-07-28, merge commit 3afb14c is an ancestor of origin/development; no active push-pending pseudo-bead in the live store. Bead closed as already-done with verification comment — no code change. *Authored by a Hydra dogfood run.*
