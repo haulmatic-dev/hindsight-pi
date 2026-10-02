@@ -7,6 +7,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+- docs: PR #162 published the 8 locally-merged commits stranded after PR #158 was closed unmerged (pf9c/kxso/i6we strands incl. the disk-watermark cleanup guard); verified MERGED 2026-10-02T09:35:07Z, origin/development tip 5ee5ae9, dogfood branch deleted, local checkout fast-forwarded; disk 45% (99% claim stale). *Authored by a Hydra dogfood run.*
 - docs: PR #158 publisher-wedge triage — PR #158 closed unmerged (superseded by merged PR #148 carrying an earlier tip); unlanded disk-cleanup feature + docs strand cherry-picked onto origin/development as dogfood/cherry-158-continue and published; disk-99% claim stale at 45%. *Authored by a Hydra dogfood run.*
 
 - create-prd §3.1a refactored for readability: removed the duplicated inline list of the five System Type enum values (now stated once at level 3 with a cross-reference from level 1) and tightened the classification-precedence prose; wording-only, contract tests 3/3 unchanged-green. *Authored by a Hydra dogfood run.*
