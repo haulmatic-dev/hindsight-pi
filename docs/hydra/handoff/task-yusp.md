@@ -19,6 +19,14 @@
 - `df -h /` — 39%, below 85% watermark. PASS.
 
 ## Open edges for the next phase
+- RESOLVED during this bead: drain-restart EXECUTED 2026-10-02 ~03:44Z —
+  SIGTERM to PID 250496 accepted (hydra.log "Received shutdown signal, stopping
+  Hydra..."), drain-restart-ftah.log running=8→5, systemd Restart=always +
+  RestartSec=10 restarted the daemon as PID 3796744 on the post-PR#70 binary
+  (contains orphan_claim_reset). Post-restart anomaly check: registry rows
+  fresh-heartbeat, orphanclaims=0.
+- hydra-l867 (pan-filed meta, gate-failed verified-close) resolves via its own
+  build fix, not orphan recovery.
 - Operator-only: restart the hydra daemon so the post-PR#70 binary
   (`bin/hydra`, mtime 03:32, contains orphan_claim_reset) goes live — the
   running PID 250496 still runs the 00:47 build that filed the twins. Restart
