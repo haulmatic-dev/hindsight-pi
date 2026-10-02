@@ -242,3 +242,50 @@ func TestLogImprovementRepair(t *testing.T) {
 		t.Errorf("multiline text must be flattened: %q", lines[1])
 	}
 }
+
+// TestCollectHealthDigestOrphanClaims guards the fms P0 anomaly (2026-10-01):
+// in_progress beads with no live registry worker are orphaned claims that
+// wedge the whole DAG ladder while looking silent — Pan must see them.
+func TestCollectHealthDigestOrphanClaims(t *testing.T) {
+	tw := setupTestOverseer(t)
+	o := tw.overseer
+
+	orphan := types.Bead{ID: "test-project-orph", Project: "test-project", Status: types.StatusInProgress, Type: "bug"}
+	worked := types.Bead{ID: "test-project-live", Project: "test-project", Status: types.StatusInProgress, Type: "bug"}
+	tw.mockBeads.beads["test-project-orph"] = orphan
+	tw.mockBeads.beads["test-project-live"] = worked
+
+	st, err := registry.Open(":memory:")
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	o.registryStore = st
+	if err := st.UpsertWorker(registry.WorkerRecord{
+		BeadID: "test-project-live", PID: 2, Project: "test-project", State: registry.StateWorking,
+		StartedAt: time.Now(), LastHeartbeat: time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertWorker: %v", err)
+	}
+
+	d := o.collectHealthDigest()
+	if len(d.Projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(d.Projects))
+	}
+	ph := d.Projects[0]
+	if ph.OrphanClaims != 1 {
+		t.Errorf("OrphanClaims = %d, want 1", ph.OrphanClaims)
+	}
+	found := false
+	for _, a := range ph.Anomalies {
+		if strings.Contains(a, "P0 campaign anomaly") && strings.Contains(a, "no live registry worker") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected P0 orphan-claim anomaly, got %v", ph.Anomalies)
+	}
+	if !strings.Contains(d.Text(), "orphanclaims=1") {
+		t.Errorf("digest text missing orphanclaims field: %q", d.Text())
+	}
+}

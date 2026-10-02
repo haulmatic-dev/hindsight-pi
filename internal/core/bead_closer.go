@@ -296,7 +296,7 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			// Readable, conventional-commit message derived from the bead
 			// (type/title/description/PRD) instead of the bare "bead(id): title".
 			msg := BuildCommitMessage(*bead)
-			if committed, cErr := c.worktreeManager.Commit(wt, msg); cErr != nil {
+			if committed, cErr := c.worktreeManager.CommitBead(wt, msg, string(bead.ID)); cErr != nil {
 				return c.failIntegration(bead, projectPath, repoName, "commit", cErr)
 			} else if committed {
 				log.Printf("[Worktree] committed %s", bead.ID)
@@ -1327,6 +1327,7 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 			// superseded). Empty + no reason => reject as before: reopen with
 			// prior context, never spawn a fix bead.
 			if !c.tryAcceptEmptyClose(bead, repoName, repoPath, changed) {
+				c.emitEmptyDiffCompleted(bead, repoName, repoPath, changed, targets)
 				return c.rejectClose(bead, projectPath, repoName, "empty-diff")
 			}
 			// Docs-only changes sit outside code targets by definition, so the
@@ -1339,6 +1340,7 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 	if needScope {
 		mode := c.config.Validation.TargetScopeMode()
 		if err := c.checkTargetScope(bead, projectPath, repoName, changed, targets, mode); err != nil {
+			c.emitEmptyDiffCompleted(bead, repoName, repoPath, changed, targets)
 			return err
 		}
 	}

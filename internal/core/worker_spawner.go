@@ -235,6 +235,20 @@ func (s *WorkerSpawner) HasLiveRegistryWorker(beadID string) bool {
 	return live
 }
 
+// LastWorkerForBead returns the PID of the most recent registry row for the
+// bead (the worker that last claimed it), if any. Used by the scheduler's
+// orphan-claim reconciliation to attribute the stale claim in typed events.
+func (s *WorkerSpawner) LastWorkerForBead(beadID string) (string, bool) {
+	if s.registryStore == nil {
+		return "", false
+	}
+	rec, ok, err := s.registryStore.GetWorker(beadID)
+	if err != nil || !ok {
+		return "", false
+	}
+	return fmt.Sprintf("pid:%d", rec.PID), true
+}
+
 // isRegistryWorkerLive reports whether a non-terminal worker row exists in
 // the daemon's registry. Parked rows are treated as live workers that block
 // respawn, unless the park is older than parkedRespawnTimeout.
