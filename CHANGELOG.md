@@ -6,6 +6,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+### Added
+- task-breakdown RED: `test-verification-command.mjs` pins the Verification Command contract — every tdd_chain/direct_task/configuration_task/aggregation_task bead carries `metadata.verification_command` + a `**Verification Command:**` fenced description block, equal to the requirement's Test Command byte-for-byte when present, else Build Command + non-vacuity wrapper. 9/9 tests fail pre-implementation (feature absent).
 ### Fixed
 - task-breakdown classifier: explicit `**Type:**` deliverable-shape markers (analysis/audit/test/refactor/spike/deletion) are now parsed into the requirement and override classification in `classifyRequirement` (→ `direct_task`), instead of being visible only to the standalone `routeTaskPattern` API while analysis PRDs compiled to TDD chains; shape-bearing header prefixes (TEST-/REF-/SPIKE-/AUDIT-/DEL-/ANALYSIS-) now also stop description accumulation like other requirement headers.
 
