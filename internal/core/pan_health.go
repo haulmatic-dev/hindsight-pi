@@ -85,9 +85,11 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 			degrade.RecordSuccess("pan-store-scan")
 			statusByID := make(map[string]types.BeadStatus, len(beads))
 			depsByID := make(map[string][]string, len(beads))
+			claimsByID := make(map[string]time.Time, len(beads))
 			for _, b := range beads {
 				id := b.ID.String()
 				statusByID[id] = b.Status
+				claimsByID[id] = b.UpdatedAt
 				if b.Status.IsTerminal() {
 					continue
 				}
@@ -125,10 +127,24 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 			// ladder for 1h+ with zero live workers and zero progress — same
 			// class as the tb3j fleet-stall rule). Charon's orphan recovery is
 			// the mechanical fix; this anomaly makes the state visible to Pan
-			// so a judgment fires instead of the campaign sitting silent.
+			// so a judgment fires instead of the campaign sitting silent — but
+			// the
+			// worker has claimed but not yet registered (spawn → status update →
+			// registry upsert is not atomic). Counting fresh claims turned a
+			// spawn wave into a self-perpetuating filing loop: each campaign-
+			// anomaly bead Pan filed became itself a new in_progress claim with
+			// no worker yet, re-firing the anomaly and re-filing (hydra
+			// 2026-10-02 02:34–02:48: ctix→qmf7→t2e1→yz8z in 13 min, every one
+			// a false alarm — all claims had live workers on recheck). A claim
+			// within orphanClaimDigestGrace is skipped; Charon's recovery already
+			// applies the same 5m grace before any destructive reopen.
+			const orphanClaimDigestGrace = 5 * time.Minute
 			for id, st := range statusByID {
 				if st != types.StatusInProgress {
 					continue
+				}
+				if age := time.Since(claimsByID[id]); age >= 0 && age < orphanClaimDigestGrace {
+					continue // fresh claim: worker may not have registered yet
 				}
 				orphaned := true
 				for _, w := range live {

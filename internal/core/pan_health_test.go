@@ -250,8 +250,8 @@ func TestCollectHealthDigestOrphanClaims(t *testing.T) {
 	tw := setupTestOverseer(t)
 	o := tw.overseer
 
-	orphan := types.Bead{ID: "test-project-orph", Project: "test-project", Status: types.StatusInProgress, Type: "bug"}
-	worked := types.Bead{ID: "test-project-live", Project: "test-project", Status: types.StatusInProgress, Type: "bug"}
+	orphan := types.Bead{ID: "test-project-orph", Project: "test-project", Status: types.StatusInProgress, Type: "bug", UpdatedAt: time.Now().Add(-10 * time.Minute)}
+	worked := types.Bead{ID: "test-project-live", Project: "test-project", Status: types.StatusInProgress, Type: "bug", UpdatedAt: time.Now().Add(-10 * time.Minute)}
 	tw.mockBeads.beads["test-project-orph"] = orphan
 	tw.mockBeads.beads["test-project-live"] = worked
 
@@ -287,5 +287,51 @@ func TestCollectHealthDigestOrphanClaims(t *testing.T) {
 	}
 	if !strings.Contains(d.Text(), "orphanclaims=1") {
 		t.Errorf("digest text missing orphanclaims field: %q", d.Text())
+	}
+}
+
+// TestCollectHealthDigestOrphanClaims_FreshClaimGrace guards the hydra
+// 2026-10-02 filing loop: a bead claimed seconds ago has no registry worker
+// yet (spawn → status update → registry upsert is not atomic), so the digest
+// counted it orphaned and Pan filed a campaign-anomaly bead for it — which
+// itself became a new fresh claim, re-firing the anomaly (4 false filings in
+// 13 min). A claim within the grace window must NOT count as orphaned.
+func TestCollectHealthDigestOrphanClaims_FreshClaimGrace(t *testing.T) {
+	tw := setupTestOverseer(t)
+	o := tw.overseer
+
+	fresh := types.Bead{ID: "test-project-fresh", Project: "test-project", Status: types.StatusInProgress, Type: "bug", UpdatedAt: time.Now()}
+	old := types.Bead{ID: "test-project-old", Project: "test-project", Status: types.StatusInProgress, Type: "bug", UpdatedAt: time.Now().Add(-10 * time.Minute)}
+	tw.mockBeads.beads["test-project-fresh"] = fresh
+	tw.mockBeads.beads["test-project-old"] = old
+
+	st, err := registry.Open(":memory:")
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	o.registryStore = st
+
+	d := o.collectHealthDigest()
+	if len(d.Projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(d.Projects))
+	}
+	ph := d.Projects[0]
+	if ph.OrphanClaims != 1 {
+		t.Errorf("OrphanClaims = %d, want 1 (fresh claim must be skipped, stale must count)", ph.OrphanClaims)
+	}
+	for _, a := range ph.Anomalies {
+		if strings.Contains(a, "1 in_progress") {
+			continue
+		}
+	}
+	found := false
+	for _, a := range ph.Anomalies {
+		if strings.Contains(a, "P0 campaign anomaly") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected P0 orphan-claim anomaly for the stale claim, got %v", ph.Anomalies)
 	}
 }
