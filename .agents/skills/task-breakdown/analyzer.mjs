@@ -16,6 +16,75 @@ export const TaskPattern = {
 };
 
 /**
+ * Task routes proven by the fixture suite (task-breakdown/test-pattern-routing.mjs).
+ * Route = which execution pattern the requirement content signals.
+ */
+export const TaskRoute = {
+  ANALYSIS: 'analysis',
+  TEST_AUTHORING: 'test_authoring',
+  REFACTOR: 'refactor',
+  SPIKE: 'spike',
+  DELETION: 'deletion',
+  AUDIT: 'audit',
+  LEGACY_NO_SCOPE: 'legacy_no_scope',
+  NORMAL_CODE: 'normal_code',
+};
+
+/**
+ * Route a standalone requirement document (fixture-style markdown) to its
+ * task pattern. Detection precedence (first match wins):
+ *  1. analysis / spike / deletion / refactor / test / audit via `**Type:**`
+ *     markers or `### Spike-###` headers
+ *  2. code work: `**Type:** fr` with `**Target Files:**` -> normal_code,
+ *     without Target Files -> legacy_no_scope
+ *
+ * Reuses the same markdown conventions the analyzer's target-file parsing
+ * relies on (backticked paths after "Target Files:"), not a second parser.
+ * @param {string} content - Raw markdown document
+ * @returns {{route: string, reason: string}} Route assignment with evidence
+ */
+export function routeTaskPattern(content) {
+  if (typeof content !== 'string' || content.trim().length === 0) {
+    return { route: TaskRoute.LEGACY_NO_SCOPE, reason: 'empty content: no scope or type markers present' };
+  }
+
+  const typeMatches = [...content.matchAll(/\*\*Type:\*\*\s*([a-z_-]+)/gi)].map((m) => m[1].toLowerCase());
+  const types = new Set(typeMatches);
+
+  // Header-level signals (### Spike-001, "# Analysis: ...")
+  const hasSpikeHeader = /^#{2,4}\s+Spike-[A-Z0-9]/im.test(content);
+  const hasAnalysisTitle = /^#\s+Analysis:/im.test(content);
+
+  if (types.has('analysis') || hasAnalysisTitle) {
+    return { route: TaskRoute.ANALYSIS, reason: 'analysis-type requirement signals investigation/documentation work' };
+  }
+  if (types.has('spike') || hasSpikeHeader) {
+    return { route: TaskRoute.SPIKE, reason: 'spike-type requirement signals time-boxed evaluation' };
+  }
+  if (types.has('deletion')) {
+    return { route: TaskRoute.DELETION, reason: 'deletion-type requirement signals removal-only work' };
+  }
+  if (types.has('refactor')) {
+    return { route: TaskRoute.REFACTOR, reason: 'refactor-type requirement signals behavior-preserving cleanup' };
+  }
+  if (types.has('test')) {
+    return { route: TaskRoute.TEST_AUTHORING, reason: 'test-type requirement signals test-first authoring' };
+  }
+  if (types.has('audit')) {
+    return { route: TaskRoute.AUDIT, reason: 'audit-type requirement signals review-and-report (no fixes)' };
+  }
+
+  // Code work: does any requirement carry explicit Target Files scope?
+  // Backticked paths after "**Target Files:**" are the analyzer's own
+  // target-file convention — no separate parsing scheme.
+  const hasTargetFiles = /\*\*Target Files:\*\*\s*`?[^\n]+/i.test(content);
+  if (hasTargetFiles) {
+    return { route: TaskRoute.NORMAL_CODE, reason: 'code requirement with explicit Target Files scope' };
+  }
+  return { route: TaskRoute.LEGACY_NO_SCOPE, reason: 'code requirement without Target Files — legacy no-scope shape' };
+}
+
+/**
  * Dependency types for semantic relationships
  */
 export const DependencyType = {
@@ -1181,9 +1250,19 @@ function validateFileOverlap(requirements) {
     }
   }
 
-  // Find files claimed by more than one FR
+  // Find files claimed by more than one FR. FRs that share a file are
+  // acceptable when the cross-cutting detector has serialized them: one FR
+  // depends on the other claimants for that file, so no merge conflict can
+  // occur. Only unserialized overlap is an error.
   for (const [file, frIds] of fileToFRs) {
-    if (frIds.length > 1) {
+    if (frIds.length < 2) continue;
+    const byId = new Map(requirements.map((r) => [r.originalId, r]));
+    const serialized = frIds.some((consumerId) => {
+      const req = byId.get(consumerId);
+      const deps = [...(req?.explicitDependsOn || []), ...(req?.dependsOn || [])];
+      return frIds.every((frId) => frId === consumerId || deps.includes(frId));
+    });
+    if (!serialized) {
       errors.push(`  File "${file}" is targeted by multiple FRs: ${frIds.join(', ')}`);
     }
   }
