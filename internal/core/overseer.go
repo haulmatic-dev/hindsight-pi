@@ -99,9 +99,10 @@ type Overseer struct {
 	beadsClient      BeadsClient
 	workerSpawner    *WorkerSpawner
 	pushPendingMu    sync.Mutex
-	pushPending      map[string]*PushPendingEntry // projectPath → stranded-push state
-	diskWatermarkPct int                          // host disk watermark (0 = default 85%)
-	diskStatPath     string                       // statfs path ("" = "/")
+	pushPending      map[string]*PushPendingEntry    // projectPath → stranded-push state
+	publishBackoff   map[string]*publishBackoffEntry // projectPath → failing-publish backoff state (publish tick retry throttle)
+	diskWatermarkPct int                             // host disk watermark (0 = default 85%)
+	diskStatPath     string                          // statfs path ("" = "/")
 	dag              *DAG
 	dagMu            sync.RWMutex
 	epicCloseGuard   epicCloseGuard // store-verification refusals for epic auto-close
@@ -937,6 +938,9 @@ func (o *Overseer) publishOneProject(project types.Project, active map[string]bo
 // 2026-09-30). Identity resolves once on the parent project path (where the
 // user config matches); push-pending state is aggregated on the parent.
 func (o *Overseer) publishOneProjectRepos(project types.Project, active map[string]bool) (bool, string) {
+	if o.publishBackoffActive(project.Path) {
+		return false, "publish backoff"
+	}
 	id, err := ResolvePublishIdentity(project.Path, o.getUserContextForProject(project.Path))
 	token := ""
 	if err != nil {
@@ -969,8 +973,10 @@ func (o *Overseer) publishOneProjectRepos(project types.Project, active map[stri
 	}
 	if len(project.Repos) == 0 || pushedAny || (allBenign && lastReason == "") {
 		o.clearPushPending(project.Path)
+		o.clearPublishBackoff(project.Path)
 	} else {
 		o.notePushPending(project, lastReason)
+		o.notePublishBackoff(project.Path, lastReason)
 	}
 	return pushedAny, lastReason
 }
@@ -981,6 +987,9 @@ func (o *Overseer) publishOneProjectRepos(project types.Project, active map[stri
 // fail-closed via ResolvePublishIdentity; daemon-owned repos use the service
 // account's own credential).
 func (o *Overseer) publishOneRepo(project types.Project, projectPath string, active map[string]bool) (bool, string) {
+	if o.publishBackoffActive(projectPath) {
+		return false, "publish backoff"
+	}
 	id, err := ResolvePublishIdentity(project.Path, o.getUserContextForProject(project.Path))
 	token := ""
 	if err != nil {
@@ -1001,10 +1010,81 @@ func (o *Overseer) publishOneRepo(project types.Project, projectPath string, act
 	}
 	if pushed || benignPublishReasons[reason] {
 		o.clearPushPending(project.Path)
+		o.clearPublishBackoff(projectPath)
 	} else {
 		o.notePushPending(project, reason)
+		o.notePublishBackoff(projectPath, reason)
 	}
 	return pushed, reason
+}
+
+// publishBackoffEntry records the exponential retry cooldown for a
+// project whose PublishRepo keeps failing. Without it, a persistent
+// failure (stale token, PR waiting on human merge, missing remote)
+// re-attempted the full publish every scheduler tick: 2,709 classified
+// failures + 6,721 identity resolutions in 12h across three projects
+// (2026-10-02 fleet digest). Base 2m, doubling, capped 15m; success or a
+// benign result clears it.
+type publishBackoffEntry struct {
+	attempt int
+	next    time.Time
+}
+
+const (
+	publishBackoffBase = 2 * time.Minute
+	publishBackoffMax  = 15 * time.Minute
+)
+
+// publishBackoffActive reports whether the project's publish tick is
+// currently in a failure cooldown. Backoff is per process (in-memory):
+// a daemon restart gives every project one immediate fair retry, which
+// is the desired fail-open behavior.
+func (o *Overseer) publishBackoffActive(projectPath string) bool {
+	if o == nil {
+		return false
+	}
+	o.pushPendingMu.Lock()
+	defer o.pushPendingMu.Unlock()
+	e, ok := o.publishBackoff[projectPath]
+	return ok && time.Now().Before(e.next)
+}
+
+// notePublishBackoff extends the project's publish cooldown exponentially
+// after another non-benign publish failure.
+func (o *Overseer) notePublishBackoff(projectPath, reason string) {
+	if o == nil {
+		return
+	}
+	o.pushPendingMu.Lock()
+	defer o.pushPendingMu.Unlock()
+	if o.publishBackoff == nil {
+		o.publishBackoff = make(map[string]*publishBackoffEntry)
+	}
+	e, ok := o.publishBackoff[projectPath]
+	if !ok {
+		e = &publishBackoffEntry{}
+		o.publishBackoff[projectPath] = e
+	}
+	e.attempt++
+	d := publishBackoffBase << uint(min(e.attempt-1, 20))
+	if d > publishBackoffMax || d <= 0 {
+		d = publishBackoffMax
+	}
+	e.next = time.Now().Add(d)
+	log.Printf("[Publish] backoff %s: attempt %d, next publish eligible in %v (%s)", projectPath, e.attempt, d, reason)
+}
+
+// clearPublishBackoff resets the project's publish cooldown after a
+// successful or benign publish tick.
+func (o *Overseer) clearPublishBackoff(projectPath string) {
+	if o == nil {
+		return
+	}
+	o.pushPendingMu.Lock()
+	defer o.pushPendingMu.Unlock()
+	if _, ok := o.publishBackoff[projectPath]; ok {
+		delete(o.publishBackoff, projectPath)
+	}
 }
 
 func (o *Overseer) notePushPending(project types.Project, reason string) {
