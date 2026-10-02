@@ -163,6 +163,15 @@ export function analyzePRDDeterministic(prdContent) {
         continue;
       }
 
+      // Explicit `**Type:**` deliverable-shape marker (analysis/audit/test/
+      // refactor/spike/deletion) — captured so classifyRequirement can apply
+      // the same routing the shape-bearing header prefixes get.
+      const typeMarkerMatch = trimmedLine.match(/^\*{0,2}type:?\*{0,2}\s+([A-Za-z_-]+)/i);
+      if (typeMarkerMatch) {
+        currentReq.typeMarker = typeMarkerMatch[1].toLowerCase().trim();
+        continue;
+      }
+
       // Parse Test Command and Build Command (stack-agnostic contract fields)
       if (trimmedLine.match(/^\*{0,2}test command:?\*{0,2}/i)) {
         const tcMatch = trimmedLine.match(/^\*{0,2}test command:?\*{0,2}\s+(.+)/i);
@@ -230,7 +239,7 @@ export function analyzePRDDeterministic(prdContent) {
         // Only continue description accumulation for requirement headers
         // Non-requirement headers (like ## 5. Technical Considerations) stop description
         const isReqHeader = trimmedLine.match(
-          /^#{3,4}\s+(FR-?\d+[a-z]?|NFR-?\d+[a-z]?|US-?\d+|Setup-?\d+|Doc-?\d+|QA-?\d+):?/i,
+          /^#{3,4}\s+(FR-?\d+[a-z]?|NFR-[A-Z0-9]+|US-?\d+|US-INT-\d+|Setup-?\d+|Doc-?\d+|QA-?\d+|TEST-?\d+|REF-?\d+|SPIKE-?\d+|AUDIT-?\d+|DEL-?\d+|ANALYSIS-?\d+):?/i,
         );
         inDescription = !!isReqHeader;
       }
@@ -479,6 +488,21 @@ export function routeTaskPattern(content) {
  * Classify requirement with task pattern and dependencies
  * This is the core enhancement for type-aware task generation
  */
+/**
+ * Type-marker routing override for the classifier: an explicit `**Type:**`
+ * deliverable-shape marker (analysis/audit/test/refactor/spike/deletion) pins
+ * the requirement to direct_task, mirroring the shape-bearing header-prefix
+ * behavior in isDirectTaskShape. Unknown markers (e.g. `**Type:** fr`) leave
+ * classification untouched. Type-marker precedence is documented in the
+ * create-prd SKILL §3.1a — strongest signal wins.
+ */
+function applyTypeMarkerRouting(req) {
+  const route = routeForTypeMarker(req.typeMarker);
+  if (!route) return;
+  req.taskPattern = TaskPattern.DIRECT_TASK;
+  req.needsWorktree = true;
+}
+
 function classifyRequirement(req, allRequirements) {
   // Get list of all FR IDs for reference
   const allFRs = allRequirements.filter(r => r.type === 'FR').map(r => r.originalId);
@@ -613,6 +637,10 @@ function classifyRequirement(req, allRequirements) {
       req.dependsOn = ['approvalGate'];
       req.dependencyType = DependencyType.BLOCKS;
   }
+
+  // Explicit `**Type:**` marker wins over the switch above (§3.1a precedence:
+  // explicit type prefix > target-file shape > System Type > tdd fallback).
+  applyTypeMarkerRouting(req);
 }
 
 /**

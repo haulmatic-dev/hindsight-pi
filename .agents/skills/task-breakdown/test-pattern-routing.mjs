@@ -130,6 +130,34 @@ try {
 
 console.log(`\nPattern routing: ${passed}/${Object.keys(expectations).length} fixtures asserted`);
 
+// Classifier wiring: type-marker routing must be applied by
+// classifyRequirement (via analyzePRDDeterministic), not only reachable
+// through the standalone routeTaskPattern API.
+try {
+  const markerRoutes = ['analysis', 'audit', 'test', 'refactor', 'spike', 'deletion'];
+  for (const marker of markerRoutes) {
+    const prd = `# PRD: Marker Wiring Check\n\n### FR-001: Marker Probe\n**Type:** ${marker}\n#### Acceptance Criteria:\n- marker ${marker} routes\n`;
+    const analysis = analyzer.analyzePRDDeterministic(prd);
+    const fr1 = analysis.requirements.find((r) => r.originalId === 'FR-001');
+    if (!fr1 || fr1.taskPattern !== 'direct_task') {
+      console.error(
+        `FAIL: type marker '**Type:** ${marker}' ignored by classifier (taskPattern=${fr1 && fr1.taskPattern})`,
+      );
+      failingFixtures.push(`(marker wiring: ${marker})`);
+    }
+  }
+  const plainPrd = `# PRD: Marker Wiring Check\n\n### FR-001: Marker Probe\n**Type:** fr\n#### Acceptance Criteria:\n- unknown marker keeps tdd_chain\n`;
+  const plain = analyzer.analyzePRDDeterministic(plainPrd);
+  const pfr = plain.requirements.find((r) => r.originalId === 'FR-001');
+  if (!pfr || pfr.taskPattern !== 'tdd_chain') {
+    console.error(`FAIL: unknown marker '**Type:** fr' must leave tdd_chain (got ${pfr && pfr.taskPattern})`);
+    failingFixtures.push('(marker wiring: unknown-marker passthrough)');
+  }
+} catch (err) {
+  console.error(`FAIL: marker wiring check crashed: ${err.message}`);
+  failingFixtures.push('(marker wiring)');
+}
+
 if (failingFixtures.length > 0) {
   console.error(`\nFailing fixtures: ${[...new Set(failingFixtures)].join(', ')}`);
   process.exit(1);

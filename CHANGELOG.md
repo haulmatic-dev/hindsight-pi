@@ -6,6 +6,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+### Fixed
+- task-breakdown classifier: explicit `**Type:**` deliverable-shape markers (analysis/audit/test/refactor/spike/deletion) are now parsed into the requirement and override classification in `classifyRequirement` (→ `direct_task`), instead of being visible only to the standalone `routeTaskPattern` API while analysis PRDs compiled to TDD chains; shape-bearing header prefixes (TEST-/REF-/SPIKE-/AUDIT-/DEL-/ANALYSIS-) now also stop description accumulation like other requirement headers.
 
 - docs: PR #162 published the 8 locally-merged commits stranded after PR #158 was closed unmerged (pf9c/kxso/i6we strands incl. the disk-watermark cleanup guard); verified MERGED 2026-10-02T09:35:07Z, origin/development tip 5ee5ae9, dogfood branch deleted, local checkout fast-forwarded; disk 45% (99% claim stale). *Authored by a Hydra dogfood run.*
 - docs: PR #158 publisher-wedge triage — PR #158 closed unmerged (superseded by merged PR #148 carrying an earlier tip); unlanded disk-cleanup feature + docs strand cherry-picked onto origin/development as dogfood/cherry-158-continue and published; disk-99% claim stale at 45%. *Authored by a Hydra dogfood run.*
