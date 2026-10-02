@@ -7,6 +7,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+- Publisher wedge (hydra-e7q5) resolved without action: PR #148 (dogfood/publish-hydra → development) verified MERGED at 2026-10-02T09:12:30Z (a48c239 is origin/development tip); bead closed, disk-99% claim verified stale (host 44%, below 85% watermark). Documentation handoff in docs/hydra/handoff/task-e7q5.md. *Authored by a Hydra dogfood run.*
 - create-prd §3.1a refactored for readability: removed the duplicated inline list of the five System Type enum values (now stated once at level 3 with a cross-reference from level 1) and tightened the classification-precedence prose; wording-only, contract tests 3/3 unchanged-green. *Authored by a Hydra dogfood run.*
 - task-breakdown fixture-suite validation gap resolved without code change: verify-first confirmed test-pattern-routing.mjs + all 8 fixtures exist and pass 8/8 (routing/preflight/crosscutting rc=0); stale "no test files" flag documented in test-6lmz handoff. *Authored by a Hydra dogfood run.*
 - create-prd producer contract pinned in code (internal/prdcontract): new §3.1a in .agents/skills/create-prd/SKILL.md documents the task-pattern classification precedence (explicit Type prefix > target-file shape > System Type enum > tdd_chain fallback) and the five-value System Type enum; 3 contract tests fail on doc drift. RED test file's non-constant `const` + missing-return fixed so it compiles. *Authored by a Hydra dogfood run.*
