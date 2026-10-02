@@ -6,6 +6,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+### Fixed
+- task-breakdown classifier: explicit `**Type:**` deliverable-shape markers (analysis/audit/test/refactor/spike/deletion) are now parsed into the requirement and override classification in `classifyRequirement` (→ `direct_task`), instead of being visible only to the standalone `routeTaskPattern` API while analysis PRDs compiled to TDD chains; shape-bearing header prefixes (TEST-/REF-/SPIKE-/AUDIT-/DEL-/ANALYSIS-) now also stop description accumulation like other requirement headers.
 
 - docs: PR #185 push-pending wedge resolved — admin-merged 2026-10-02T11:03:22Z (merge commit 5779fbf == origin/development tip), head branch dogfood/publish-hydra deleted; handoff task-iljz. *Authored by a Hydra dogfood run.*
 
