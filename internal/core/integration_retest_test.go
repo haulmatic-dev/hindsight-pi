@@ -285,6 +285,13 @@ func TestIntegrationRetestCleanLands(t *testing.T) {
 	}, &Config{Projects: []ProjectConfig{{Name: "proj", Path: projectPath}}},
 		beads, nil, nil, t.TempDir())
 	s.now = time.Now
+	// CI runners have no daemon credential; stub the publish-identity resolver
+	// so the token resolution doesn't fail closed (2026-10-02, PR #85 CI).
+	origIdentity := publishIdentityResolver
+	publishIdentityResolver = func(string) (PublishIdentity, error) {
+		return PublishIdentity{Owner: "test", Token: "test-token", Source: "test-stub"}, nil
+	}
+	t.Cleanup(func() { publishIdentityResolver = origIdentity })
 	s.landFn = func(projectPath, base, featureBranch, title, token string) (string, error) {
 		// The push must come from the scratch worktree, never the project
 		// clone's main checkout.
