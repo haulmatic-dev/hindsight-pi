@@ -1259,5 +1259,6 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
   integration reliability.
 
 - Disposition note (docs): integration-exhausted hard-parks **hydra-ycmu** (duplicate closure for the identical root cause surfaced under hydra-242b — treat both heads as one manual-integration review) resolved via proven-rules decision tree.
+- Triage report for the deterministic gh pr create no-diff failure on `dogfood/orphan-digest-escalated` → `dogfood/publish-hydra`: `docs/discovery/pr-create-nodiff-triage-rdju.md` — root cause is the publisher mirroring head commits into `dogfood/publish-hydra` before PR creation (head==base); strand ae68584 (recover-spawn-cohort + digest purge) landed via PR #147 (admin merge, 174da6a), remote head refs + local stray branch deleted, pseudo-bead hydra-ybhh closed as landed. *Authored by a Hydra dogfood run.*
 - Triage report for the 2026-09-30 fleet-wide integration-exhausted spike: `docs/discovery/integration-exhausted-spike-triage-34dh.md` — root cause is an operator-API park/unpark toggle loop (~60–90s period) re-triggering deterministic rebase conflicts in `internal/core/publisher.go`, combined with uncapped consecutive-failure counter re-emission and a 30s integration-gate cooldown shorter than the loop period; 4 remediation beads proposed. *Authored by a Hydra dogfood run.*
 �
