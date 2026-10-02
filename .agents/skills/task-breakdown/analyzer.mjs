@@ -10,6 +10,7 @@
  */
 export const TaskPattern = {
   TDD_CHAIN: 'tdd_chain',               // FRs: RED→GREEN→REFACTOR→SYNTAX
+  DIRECT_TASK: 'direct_task',           // Shape-pinned FRs (TEST/REF/SPIKE/AUDIT/DEL headers, markdown/test-only targets)
   VERIFICATION_GATE: 'verification_gate', // NFRs: coverage, quality, perf (no worktree)
   AGGREGATION_TASK: 'aggregation_task',   // USs: integrate FRs
   CONFIGURATION_TASK: 'configuration_task', // Config: module system, setup
@@ -48,6 +49,10 @@ export function analyzePRDDeterministic(prdContent) {
     featureName = titleMatch[1].trim();
   }
 
+  // System type from the §0 Scope Profile (`- **System Type:** cli-tool ...`).
+  const systemTypeMatch = prdContent.match(/^\s*[-*]?\s*\*{0,2}System Type:?\*{0,2}\s+([a-z][a-z-]*)/im);
+  const systemType = systemTypeMatch ? systemTypeMatch[1].toLowerCase() : null;
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmedLine = line.trim();
@@ -55,7 +60,7 @@ export function analyzePRDDeterministic(prdContent) {
     // Match requirement headers: ### FR-*, ### NFR-*, ### US-*, etc.
     // NFR IDs may be numeric (NFR-003) or alphanumeric (NFR-SYS)
     const reqMatch = trimmedLine.match(
-      /^#{3,4}\s+(FR-?\d+[a-z]?|NFR-[A-Z0-9]+|US-?\d+|US-INT-\d+|SETUP-?\d+|Doc-?\d+|QA-?\d+):?\s*(.+)$/i,
+      /^#{3,4}\s+(FR-?\d+[a-z]?|NFR-[A-Z0-9]+|US-?\d+|US-INT-\d+|SETUP-?\d+|Doc-?\d+|QA-?\d+|TEST-?\d+|REF-?\d+|SPIKE-?\d+|AUDIT-?\d+|DEL-?\d+|ANALYSIS-?\d+):?\s*(.+)$/i,
     );
 
     if (reqMatch) {
@@ -333,6 +338,7 @@ export function analyzePRDDeterministic(prdContent) {
 
   return {
     featureName,
+    systemType,
     requirements,
     dependencies,
     semanticGraph,
@@ -480,12 +486,18 @@ function classifyRequirement(req, allRequirements) {
 
   switch (req.type) {
     case 'FR':
-      // Functional requirements get TDD chains
+      // Functional requirements get TDD chains by default
       req.taskPattern = TaskPattern.TDD_CHAIN;
       req.needsWorktree = true;
       req.dependsOn = ['approvalGate'];
       req.dependencyType = DependencyType.BLOCKS;
-      
+
+      // Shape-aware override: deliverable shape pins the task to a direct task
+      // (no RED→GREEN→REFACTOR chain) when the requirement is shape-bearing.
+      if (isDirectTaskShape(req)) {
+        req.taskPattern = TaskPattern.DIRECT_TASK;
+      }
+
       // Check if this FR provides base for other FRs
       const dependentFRs = allRequirements.filter(r => 
         r.type === 'FR' && 
@@ -601,6 +613,30 @@ function classifyRequirement(req, allRequirements) {
       req.dependsOn = ['approvalGate'];
       req.dependencyType = DependencyType.BLOCKS;
   }
+}
+
+/**
+ * Direct-task shape for FRs: a shape-bearing header prefix (TEST-001,
+ * REF-1, SPIKE-2, AUDIT-1, DEL-3, ...) routes to direct_task regardless of
+ * target files; otherwise an FR whose targets are all documentation or all
+ * test files is itself a direct deliverable (no RED→GREEN→REFACTOR chain).
+ * Mixed code+markdown targets keep the default tdd_chain.
+ */
+function isDirectTaskShape(req) {
+  if (/^(TEST|REF|REFACTOR|SPIKE|AUDIT|DEL|DELETION|ANALYSIS)-?\d/i.test(req.originalId)) {
+    return true;
+  }
+  const files = req.files || [];
+  if (files.length === 0) return false;
+  return files.every(isMarkdownTarget) || files.every(isTestTarget);
+}
+
+function isMarkdownTarget(file) {
+  return /\.mdx?$/.test(file);
+}
+
+function isTestTarget(file) {
+  return /(^|[/\\])(tests?|__tests__)[/\\]|\.test\.|\.spec\./i.test(file);
 }
 
 /**
