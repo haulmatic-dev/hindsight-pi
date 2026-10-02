@@ -28,6 +28,22 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { analyzePRDDeterministic } from './analyzer.mjs';
 import { BeadsExecutor } from './executor.mjs';
+
+/**
+ * Wildcard config-task target list: emitted when a configuration_task
+ * requirement declares no concrete files (missing, '*', or 'TBD').
+ * Serves both the task metadata (`files`) and the instruction text.
+ */
+const DEFAULT_CONFIG_TARGET_FILES = [
+  'package.json (root)',
+  'tsconfig.json (root)',
+  'tsconfig.base.json (if tsconfig.json extends it)',
+  'turbo.json',
+  'biome.json',
+  'apps/api/package.json',
+  'apps/web/package.json',
+  'packages/math/package.json',
+];
 import { RollbackManager } from './rollback.mjs';
 import { StateManager } from './state.mjs';
 
@@ -2191,10 +2207,6 @@ Aggregated FRs: ${req.dependsOn.join(', ')}`,
   }
 
   /**
-   * Create configuration task (for NFRs like Module System, Setup)
-   * These can run in parallel with FRs
-   */
-  /**
    * Map a DIRECT_TASK requirement to its shape-specific acceptance line.
    * @param {Object} req - Parsed requirement (needs .type, .originalId)
    * @returns {string} Acceptance line for the deliverable shape
@@ -2270,18 +2282,34 @@ Acceptance: ${acceptanceLine}.`;
     });
 
     const directId = this.executor.createTask(directTask, blockers);
-    this._emitEvent('task:subtask:created', {
+    this._recordSubtaskEmission(directId, {
       step: stepName,
       parentLocalId: parentTask.localId,
-      localId: directTask.localId,
-      taskId: directId,
+      task: directTask,
       subtaskType: 'direct',
-      timestamp: Date.now(),
+      state,
     });
-    console.log(`        ✓ ${directTask.localId} → ${directId} (direct task)`);
     idMapping[parentTask.localId] = directId;
 
     await this.state.update({ idMapping });
+  }
+
+  /**
+   * Record a just-created subtask bead: emit its creation event, log the
+   * mapping, and register the localId → real bead id in the state idMapping.
+   * Shared by every subtask-synthesis path (TDD phases, config, direct).
+   */
+  _recordSubtaskEmission(taskId, { step, parentLocalId, task, subtaskType, state }) {
+    this._emitEvent('task:subtask:created', {
+      step,
+      parentLocalId,
+      localId: task.localId,
+      taskId,
+      subtaskType,
+      timestamp: Date.now(),
+    });
+    console.log(`        ✓ ${task.localId} → ${taskId}${subtaskType === 'direct' ? ' (direct task)' : ''}`);
+    state.idMapping[task.localId] = taskId;
   }
 
   async createConfigurationTask(req, parentTask, parentId, state, redDeps = []) {
@@ -2298,27 +2326,9 @@ Acceptance: ${acceptanceLine}.`;
     // The agent applies config, then SYNTAX validates it.
 
     const isWildcardFiles = !req.files || req.files.length === 0 || req.files.every(f => f === '*' || f === 'TBD');
-    const targetFiles = isWildcardFiles ? [
-      'package.json (root)',
-      'tsconfig.json (root)',
-      'tsconfig.base.json (if tsconfig.json extends it)',
-      'turbo.json',
-      'biome.json',
-      'apps/api/package.json',
-      'apps/web/package.json',
-      'packages/math/package.json',
-    ] : req.files;
+    const targetFiles = isWildcardFiles ? DEFAULT_CONFIG_TARGET_FILES : req.files;
 
-    const targetFilesBlock = isWildcardFiles ? `
-Target files (create ALL of these):
-- package.json (root)
-- tsconfig.json (root)
-- tsconfig.base.json (if tsconfig.json extends it)
-- turbo.json
-- biome.json
-- apps/api/package.json
-- apps/web/package.json
-- packages/math/package.json` : '';
+    const targetFilesBlock = isWildcardFiles ? `\nTarget files (create ALL of these):\n${DEFAULT_CONFIG_TARGET_FILES.map(f => `- ${f}`).join('\n')}` : '';
 
     const applySpecificInstructions = `Apply the configuration for ${cleanTitle}.${targetFilesBlock}
 
@@ -2370,16 +2380,13 @@ This prevents Biome from scanning worktree directories.`;
 
     const applyBlockers = redDeps.map(localId => idMapping[localId]).filter(Boolean);
     const applyId = this.executor.createTask(applyTask, applyBlockers);
-    this._emitEvent('task:subtask:created', {
+    this._recordSubtaskEmission(applyId, {
       step: stepName,
       parentLocalId: baseId,
-      localId: applyTask.localId,
-      taskId: applyId,
+      task: applyTask,
       subtaskType: 'apply',
-      timestamp: Date.now(),
+      state,
     });
-    console.log(`        ✓ ${applyTask.localId} → ${applyId}`);
-    idMapping[applyTask.localId] = applyId;
 
     // SYNTAX: Validate configuration
     const syntaxTask = {
@@ -2405,16 +2412,13 @@ This prevents Biome from scanning worktree directories.`;
     };
 
     const syntaxId = this.executor.createTask(syntaxTask, [applyId]);
-    this._emitEvent('task:subtask:created', {
+    this._recordSubtaskEmission(syntaxId, {
       step: stepName,
       parentLocalId: baseId,
-      localId: syntaxTask.localId,
-      taskId: syntaxId,
+      task: syntaxTask,
       subtaskType: 'syntax',
-      timestamp: Date.now(),
+      state,
     });
-    console.log(`        ✓ ${syntaxTask.localId} → ${syntaxId}`);
-    idMapping[syntaxTask.localId] = syntaxId;
 
     await this.state.update({ idMapping });
   }
