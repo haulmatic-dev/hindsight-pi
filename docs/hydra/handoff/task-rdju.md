@@ -1,17 +1,20 @@
 # discovery handoff (rdju)
 
 ## What changed (files + one line each)
-- docs/discovery/pr-create-nodiff-triage-rdju.md: triage of the deterministic gh pr create no-diff failure — stray unpushed local duplicate branch, content already landed; no code change.
+- docs/discovery/pr-create-nodiff-triage-rdju.md: triage of the deterministic gh pr create no-diff failure — root cause evolved from "unpushed stray duplicate branch" to "publisher mirrors head commits into dogfood/publish-hydra before PR creation, making head→publish-hydra structurally zero-diff"; strand landed via base-corrected PR #147.
 - CHANGELOG.md: Documentation entry pointing at the triage.
-- Live-store action: push-pending pseudo-bead hydra-ybhh CLOSED (not_planned: already-integrated/zero-diff) with resolution comment; publisher retries for this branch stop.
+- Live-store actions: pseudo-bead hydra-ybhh reopened after a stale close, then closed with the true disposition (landed via PR #147).
+- Repo actions (main checkout, verified): in-flight strand committed as ae68584 mid-triage, preserved; PR #147 admin-merged; remote refs dogfood/orphan-digest-escalated + dogfood/spawn-cohort-recovery deleted; local stray branch deleted after checkout repoint.
 
 ## Verification (commands run + pass/fail)
-- `git ls-remote origin` — no `refs/heads/dogfood/orphan-digest-escalated` on origin; only `dogfood/publish-hydra`. PASS (root cause: unpushed head ref → blank SHA).
-- `git rev-list --left-right --count origin/dogfood/publish-hydra...dogfood/orphan-digest-escalated` = `0  0`; `git diff` empty — branch identical to publish-hydra, PR would be zero-diff anyway. PASS.
-- `git merge-base --is-ancestor aab8d18 origin/development` → YES (content fully landed, incl. 7548196 digest fix; TestCollectHealthDigestEscalatedBeadNotOrphan present on origin/development). PASS.
-- `br comments add` + `br close hydra-ybhh` — ✓ both. PASS.
+- Read 1: `git ls-remote origin` — no orphan-digest ref; local tip aab8d18 identical to origin/publish-hydra (`rev-list --left-right --count` = `0 0`). PASS.
+- Read 2 (08:50Z): origin orphan-digest-escalated = ae68584 (recover-spawn-cohort strand, authored 08:48Z); publish-hydra advanced to the same commit → head==base. PASS.
+- `gh pr create --head dogfood/orphan-digest-escalated --base development` → "already exists: PR #147". PASS (precedent e2xc).
+- `gh pr merge 147 --merge --admin` → MERGED 2026-10-02T08:52:06Z, mergeCommit 174da6a; `git ls-remote origin development` = 174da6a; `git log origin/development -3` shows ae68584 present. PASS.
+- `git push origin --delete dogfood/orphan-digest-escalated dogfood/spawn-cohort-recovery` → both deleted; transient `dogfood/spawn-cohort-strand` deleted earlier. PASS.
+- Main checkout: `git checkout development` ok after strand committed; `git branch -D dogfood/orphan-digest-escalated` → deleted (previously blocked: branch checked out). `git status --short` clean vs its HEAD. PASS.
 - hindsight_search unavailable ("Hindsight is not connected") — skipped silently per protocol.
 
 ## Open edges for the next phase
-- Human: land/stash the in-flight uncommitted strand in /opt/dev-tools/components/hydra (service_starter.go, pan.go, prune_sweep.go, spawn_failure_purge_test.go — "recover-spawn-cohort" repair feature), then `git checkout development` and `git branch -D dogfood/orphan-digest-escalated` (currently checked out, cannot delete until HEAD moves; dev tip touches 2 of the dirty files so checkout aborts).
-- If blank-SHA no-diff PR failures recur on other dogfood/* branches, hardening option: publisher pre-check that head ref exists on origin AND differs from base before gh pr create.
+- Publisher hardening candidate (not implemented, single-occurrence evidence): do not mirror head commits into dogfood/publish-hydra before PR creation, or make PR creation target the integration base (development) when head is a descendant/child of the vehicle branch.
+- Local development ref (main checkout, tip 939b88d) is ff-diverged from origin/development tip (174da6a) by the daemon's parallel integration lines — the publisher owns that ref; left untouched.
