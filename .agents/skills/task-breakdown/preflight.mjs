@@ -30,10 +30,9 @@ const PATH_LOOKUP_TIMEOUT_MS = 10_000;
  *   2. <cwd>/tools/prd-lint/prd-lint
  *   3. Any executable named `prd-lint` on PATH
  *
- * There is deliberately NO machine-wide fallback path: a hardcoded host
- * location makes "prd-lint missing" indistinguishable from "prd-lint
- * installed elsewhere" and breaks the skip contract (test-preflight #4).
- * Callers that need a host binary must point HYDRA_TOOLS_DIR at it.
+ * Note: there is deliberately no hardcoded host checkout path — an absolute
+ * fallback breaks hermetic tests (they run in a temp cwd but would still find
+ * the host's binary). $HYDRA_TOOLS_DIR is the sanctioned override.
  *
  * @returns {string|null} Absolute path to the binary, or null if not found.
  */

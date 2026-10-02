@@ -51,37 +51,34 @@ const expectations = {
 const failingFixtures = [];
 let passed = 0;
 
-/** Record one failed assertion: print and queue the fixture for the exit-1 summary. */
-function fail(fixture, message) {
-  console.error(`FAIL: ${fixture} — ${message}`);
-  failingFixtures.push(fixture);
-}
-
 for (const [fixture, expected] of Object.entries(expectations)) {
   const fixturePath = path.join(fixturesDir, fixture);
   if (!fs.existsSync(fixturePath)) {
-    fail(fixture, 'fixture file missing');
+    console.error(`FAIL: ${fixture} — fixture file missing`);
+    failingFixtures.push(fixture);
     continue;
   }
   const content = fs.readFileSync(fixturePath, 'utf8');
   try {
     const result = routeTaskPattern(content);
     if (!result || typeof result !== 'object') {
-      fail(fixture, `routeTaskPattern returned ${JSON.stringify(result)}, expected {route, reason}`);
+      console.error(`FAIL: ${fixture} — routeTaskPattern returned ${JSON.stringify(result)}, expected {route, reason}`);
+      failingFixtures.push(fixture);
       continue;
     }
     if (result.route !== expected) {
-      fail(
-        fixture,
-        `asserted route ${JSON.stringify(expected)} but got ${JSON.stringify(result.route)}` +
+      console.error(
+        `FAIL: ${fixture} — asserted route ${JSON.stringify(expected)} but got ${JSON.stringify(result.route)}` +
           (result.reason ? ` (reason: ${result.reason})` : ''),
       );
+      failingFixtures.push(fixture);
       continue;
     }
     passed += 1;
     console.log(`PASS: ${fixture} routes to ${expected}`);
   } catch (err) {
-    fail(fixture, `routing threw: ${err.message}`);
+    console.error(`FAIL: ${fixture} — routing threw: ${err.message}`);
+    failingFixtures.push(fixture);
   }
 }
 
@@ -91,9 +88,11 @@ const enumValues = Object.values(TaskRoute || {});
 const tableValues = Object.values(expectations);
 const missingFromEnum = tableValues.filter((v) => !enumValues.includes(v));
 if (enumValues.length !== 8) {
-  fail('(TaskRoute enum shape)', `should define exactly 8 routes, has ${enumValues.length}: ${JSON.stringify(enumValues)}`);
+  console.error(`FAIL: TaskRoute should define exactly 8 routes, has ${enumValues.length}: ${JSON.stringify(enumValues)}`);
+  failingFixtures.push('(TaskRoute enum shape)');
 } else if (missingFromEnum.length > 0) {
-  fail('(TaskRoute enum coverage)', `routes not covered by TaskRoute enum: ${missingFromEnum.join(', ')}`);
+  console.error(`FAIL: routes not covered by TaskRoute enum: ${missingFromEnum.join(', ')}`);
+  failingFixtures.push('(TaskRoute enum coverage)');
 }
 
 // No stray fixture files without asserted expectations.
@@ -102,7 +101,7 @@ const onDisk = fs.existsSync(fixturesDir)
   : [];
 const unasserted = onDisk.filter((f) => !(f in expectations));
 if (unasserted.length > 0) {
-  fail('(unasserted fixtures)', `fixture files without asserted pattern assignments: ${unasserted.join(', ')}`);
+  console.error(`FAIL: fixture files without asserted pattern assignments: ${unasserted.join(', ')}`);
   failingFixtures.push(...unasserted);
 }
 
@@ -121,10 +120,12 @@ try {
   const analysis = analyzer.analyzePRDDeterministic(crosscutPRD);
   const fr1 = analysis.requirements.find((r) => r.originalId === 'FR-001');
   if (!fr1 || typeof fr1.taskPattern !== 'string') {
-    fail('(analyzer integration intact)', 'analyzePRDDeterministic no longer exposes taskPattern on requirements');
+    console.error('FAIL: analyzePRDDeterministic no longer exposes taskPattern on requirements');
+    failingFixtures.push('(analyzer integration intact)');
   }
 } catch (err) {
-  fail('(analyzer integration intact)', `analyzer integration broke: ${err.message}`);
+  console.error(`FAIL: analyzer integration broke: ${err.message}`);
+  failingFixtures.push('(analyzer integration intact)');
 }
 
 console.log(`\nPattern routing: ${passed}/${Object.keys(expectations).length} fixtures asserted`);

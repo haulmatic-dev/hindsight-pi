@@ -28,6 +28,22 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { analyzePRDDeterministic } from './analyzer.mjs';
 import { BeadsExecutor } from './executor.mjs';
+
+/**
+ * Wildcard config-task target list: emitted when a configuration_task
+ * requirement declares no concrete files (missing, '*', or 'TBD').
+ * Serves both the task metadata (`files`) and the instruction text.
+ */
+const DEFAULT_CONFIG_TARGET_FILES = [
+  'package.json (root)',
+  'tsconfig.json (root)',
+  'tsconfig.base.json (if tsconfig.json extends it)',
+  'turbo.json',
+  'biome.json',
+  'apps/api/package.json',
+  'apps/web/package.json',
+  'packages/math/package.json',
+];
 import { RollbackManager } from './rollback.mjs';
 import { StateManager } from './state.mjs';
 
@@ -601,7 +617,7 @@ export class TaskBreakdownRunner extends EventEmitter {
     }
 
     // Validate taskPattern is one of allowed values
-    const validPatterns = ['tdd_chain', 'verification_gate', 'aggregation_task', 'configuration_task', 'direct_task'];
+    const validPatterns = ['tdd_chain', 'direct_task', 'verification_gate', 'aggregation_task', 'configuration_task'];
     if (!validPatterns.includes(req.taskPattern)) {
       errors.push(`Invalid taskPattern: ${req.taskPattern}. Must be one of: ${validPatterns.join(', ')}`);
     }
@@ -857,10 +873,10 @@ export class TaskBreakdownRunner extends EventEmitter {
 
       const order = {
         'tdd_chain': 0,
-        'configuration_task': 1,
         'direct_task': 1,
-        'aggregation_task': 2,
-        'verification_gate': 3,
+        'configuration_task': 2,
+        'aggregation_task': 3,
+        'verification_gate': 4,
       };
       const patternDiff = (order[a.taskPattern] || 0) - (order[b.taskPattern] || 0);
       if (patternDiff !== 0) return patternDiff;
@@ -1119,8 +1135,20 @@ This gate runs after all implementation tasks complete.`,
         // Configuration tasks: RED depends on approval gate
         await this.createConfigurationTask(req, baseTask, null, state, ['approvalGate']);
       } else if (req.taskPattern === 'direct_task') {
-        // Direct tasks: exactly ONE bead, no TDD phase synthesis
-        await this.createDirectTask(req, baseTask, null, state, ['approvalGate']);
+        // Direct tasks: single bead, no RED→GREEN→REFACTOR chain; depends on
+        // explicit Depends On (mapped to SYNTAX ids) + P0 APPLY tasks.
+        let directDeps = ['approvalGate'];
+        if (req.explicitDependsOn && req.explicitDependsOn.length > 0) {
+          directDeps = req.explicitDependsOn.map(depId => {
+            const depReq = requirements.find(r => r.originalId === depId);
+            if (depReq) {
+              return `implement-${depReq.id.toLowerCase().replace(/[^a-z0-9]/g, '-')}-syntax`;
+            }
+            return null;
+          }).filter(Boolean);
+        }
+        directDeps = [...new Set([...directDeps, ...p0ApplyIds])];
+        await this.createConfigurationTask(req, baseTask, null, state, directDeps);
       } else {
         // Default: TDD_CHAIN for FRs
         // RED depends on approval gate or explicit Depends On + P0 APPLY tasks
@@ -2191,10 +2219,6 @@ Aggregated FRs: ${req.dependsOn.join(', ')}`,
   }
 
   /**
-   * Create configuration task (for NFRs like Module System, Setup)
-   * These can run in parallel with FRs
-   */
-  /**
    * Map a DIRECT_TASK requirement to its shape-specific acceptance line.
    * @param {Object} req - Parsed requirement (needs .type, .originalId)
    * @returns {string} Acceptance line for the deliverable shape
@@ -2270,18 +2294,34 @@ Acceptance: ${acceptanceLine}.`;
     });
 
     const directId = this.executor.createTask(directTask, blockers);
-    this._emitEvent('task:subtask:created', {
+    this._recordSubtaskEmission(directId, {
       step: stepName,
       parentLocalId: parentTask.localId,
-      localId: directTask.localId,
-      taskId: directId,
+      task: directTask,
       subtaskType: 'direct',
-      timestamp: Date.now(),
+      state,
     });
-    console.log(`        ✓ ${directTask.localId} → ${directId} (direct task)`);
     idMapping[parentTask.localId] = directId;
 
     await this.state.update({ idMapping });
+  }
+
+  /**
+   * Record a just-created subtask bead: emit its creation event, log the
+   * mapping, and register the localId → real bead id in the state idMapping.
+   * Shared by every subtask-synthesis path (TDD phases, config, direct).
+   */
+  _recordSubtaskEmission(taskId, { step, parentLocalId, task, subtaskType, state }) {
+    this._emitEvent('task:subtask:created', {
+      step,
+      parentLocalId,
+      localId: task.localId,
+      taskId,
+      subtaskType,
+      timestamp: Date.now(),
+    });
+    console.log(`        ✓ ${task.localId} → ${taskId}${subtaskType === 'direct' ? ' (direct task)' : ''}`);
+    state.idMapping[task.localId] = taskId;
   }
 
   async createConfigurationTask(req, parentTask, parentId, state, redDeps = []) {
@@ -2298,27 +2338,9 @@ Acceptance: ${acceptanceLine}.`;
     // The agent applies config, then SYNTAX validates it.
 
     const isWildcardFiles = !req.files || req.files.length === 0 || req.files.every(f => f === '*' || f === 'TBD');
-    const targetFiles = isWildcardFiles ? [
-      'package.json (root)',
-      'tsconfig.json (root)',
-      'tsconfig.base.json (if tsconfig.json extends it)',
-      'turbo.json',
-      'biome.json',
-      'apps/api/package.json',
-      'apps/web/package.json',
-      'packages/math/package.json',
-    ] : req.files;
+    const targetFiles = isWildcardFiles ? DEFAULT_CONFIG_TARGET_FILES : req.files;
 
-    const targetFilesBlock = isWildcardFiles ? `
-Target files (create ALL of these):
-- package.json (root)
-- tsconfig.json (root)
-- tsconfig.base.json (if tsconfig.json extends it)
-- turbo.json
-- biome.json
-- apps/api/package.json
-- apps/web/package.json
-- packages/math/package.json` : '';
+    const targetFilesBlock = isWildcardFiles ? `\nTarget files (create ALL of these):\n${DEFAULT_CONFIG_TARGET_FILES.map(f => `- ${f}`).join('\n')}` : '';
 
     const applySpecificInstructions = `Apply the configuration for ${cleanTitle}.${targetFilesBlock}
 
@@ -2370,16 +2392,13 @@ This prevents Biome from scanning worktree directories.`;
 
     const applyBlockers = redDeps.map(localId => idMapping[localId]).filter(Boolean);
     const applyId = this.executor.createTask(applyTask, applyBlockers);
-    this._emitEvent('task:subtask:created', {
+    this._recordSubtaskEmission(applyId, {
       step: stepName,
       parentLocalId: baseId,
-      localId: applyTask.localId,
-      taskId: applyId,
+      task: applyTask,
       subtaskType: 'apply',
-      timestamp: Date.now(),
+      state,
     });
-    console.log(`        ✓ ${applyTask.localId} → ${applyId}`);
-    idMapping[applyTask.localId] = applyId;
 
     // SYNTAX: Validate configuration
     const syntaxTask = {
@@ -2405,16 +2424,13 @@ This prevents Biome from scanning worktree directories.`;
     };
 
     const syntaxId = this.executor.createTask(syntaxTask, [applyId]);
-    this._emitEvent('task:subtask:created', {
+    this._recordSubtaskEmission(syntaxId, {
       step: stepName,
       parentLocalId: baseId,
-      localId: syntaxTask.localId,
-      taskId: syntaxId,
+      task: syntaxTask,
       subtaskType: 'syntax',
-      timestamp: Date.now(),
+      state,
     });
-    console.log(`        ✓ ${syntaxTask.localId} → ${syntaxId}`);
-    idMapping[syntaxTask.localId] = syntaxId;
 
     await this.state.update({ idMapping });
   }
