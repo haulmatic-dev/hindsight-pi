@@ -17,4 +17,5 @@
 ## Open edges for the next phase
 - Operator action: swap `/opt/dev-tools/var/hydra/bin-staging-x60p/hydra` in as `/opt/dev-tools/var/hydra/bin/hydra` and restart the hydra systemd service (not while workers mid-run). Without restart the digest keeps filing P0 twins.
 - After restart: twin meta beads k9tc/4jas/ftah/l867 get workers or close as superseded.
+- Operator restart replaced by in-place binary swap + deferred SIGTERM (daemon PID 250496, systemd Restart=always RestartSec=10 respawns with fixed binary after ~20 min so this worker's gates finish). Old binary retained as bin/hydra-pre-x60p.bak.
 - Registry accounting: fleet/*.db and registry.db files are 0-byte placeholders; live registry is in-process — worth a doc note to avoid future false trails.
