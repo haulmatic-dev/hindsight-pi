@@ -385,6 +385,38 @@ function routeForTypeMarker(value) {
 }
 
 /**
+ * Scan lines for explicit shape signals, in precedence order:
+ * 1. `**Type:**` markers, 2. shape-bearing requirement header prefixes
+ * (TEST-001, REF-1, SPIKE-2, AUDIT-1, DEL-3, ...).
+ *
+ * @param {string[]} lines - Content split into lines
+ * @returns {{route: string, reason: string}[]} Signals, in discovery order
+ */
+function scanShapeSignals(lines) {
+  const typeMarkerRe = /^\s*\*{0,2}type:?\*{0,2}\s+([A-Za-z_-]+)/i;
+  const headerPrefixRe = /^#{3,4}\s+([A-Za-z]+)-?\d*\s*:/;
+  const signals = [];
+
+  const push = (route, reason) => {
+    if (route) signals.push({ route, reason });
+  };
+
+  for (const line of lines) {
+    const typeMarker = line.match(typeMarkerRe);
+    if (typeMarker) {
+      push(routeForTypeMarker(typeMarker[1]), `type marker '${typeMarker[1].toLowerCase()}'`);
+    }
+
+    const headerPrefix = line.match(headerPrefixRe);
+    if (headerPrefix) {
+      push(HEADER_PREFIX_ROUTES[headerPrefix[1].toLowerCase()], `header prefix '${headerPrefix[1]}'`);
+    }
+  }
+
+  return signals;
+}
+
+/**
  * Route a task/PRD markdown snippet to its deliverable shape.
  *
  * Reuses analyzePRDDeterministic's requirement model (files, types, ids) —
@@ -401,47 +433,33 @@ export function routeTaskPattern(content) {
   }
 
   const analysis = analyzePRDDeterministic(content);
-  const reqs = analysis.requirements || [];
-  const reasons = [];
+  const requirements = analysis.requirements || [];
 
-  const addRoute = (route, reason) => {
-    if (route) reasons.push({ route, reason });
-  };
-
-  // 1. Explicit `**Type:**` markers (within parsed requirements and standalone).
-  const markerRe = /^\s*\*{0,2}type:?\*{0,2}\s+([A-Za-z_-]+)/i;
-  for (const line of content.split('\n')) {
-    const m = line.match(markerRe);
-    if (m) addRoute(routeForTypeMarker(m[1]), `type marker '${m[1].toLowerCase()}'`);
-  }
-
-  // 2. Shape-bearing requirement header prefixes (TEST-001, REF-1, ...).
-  const headerRe = /^#{3,4}\s+([A-Za-z]+)-?\d*\s*:/;
-  for (const line of content.split('\n')) {
-    const m = line.match(headerRe);
-    if (m) addRoute(HEADER_PREFIX_ROUTES[m[1].toLowerCase()], `header prefix '${m[1]}'`);
-  }
+  // Explicit shape signals (type markers, header prefixes) take precedence.
+  const signals = scanShapeSignals(content.split('\n'));
 
   // Audit precedence: any audit-shaped requirement routes the whole batch to audit.
-  const auditHit = reasons.find((r) => r.route === TaskRoute.AUDIT);
-  if (auditHit) return auditHit;
+  const auditSignal = signals.find((s) => s.route === TaskRoute.AUDIT);
+  if (auditSignal) return auditSignal;
 
-  if (reasons.length > 0) return reasons[0];
+  if (signals.length > 0) return signals[0];
 
-  // 3. Plain FR requirements: target-file scope heuristics.
-  const frs = reqs.filter(
+  // Plain requirements: target-file scope heuristics.
+  const scopedReqs = requirements.filter(
     (r) => r.type === 'FR' || r.type === 'NFR' || r.type === 'User Story',
   );
-  if (frs.length > 0) {
-    if (frs.every((r) => !r.files || r.files.length === 0)) {
+  if (scopedReqs.length > 0) {
+    const unscoped = scopedReqs.every((r) => !r.files || r.files.length === 0);
+    if (unscoped) {
       return {
         route: TaskRoute.LEGACY_NO_SCOPE,
-        reason: `all ${frs.length} requirement(s) lack explicit target files`,
+        reason: `all ${scopedReqs.length} requirement(s) lack explicit target files`,
       };
     }
+    const scopedCount = scopedReqs.filter((r) => r.files.length > 0).length;
     return {
       route: TaskRoute.NORMAL_CODE,
-      reason: `requirement(s) carry explicit target files (${frs.filter((r) => r.files.length > 0).length} scoped)`,
+      reason: `requirement(s) carry explicit target files (${scopedCount} scoped)`,
     };
   }
 

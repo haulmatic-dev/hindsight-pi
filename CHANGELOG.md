@@ -7,6 +7,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+- REFACTOR: `routeTaskPattern` in `.agents/skills/task-breakdown/analyzer.mjs` — shape-signal scanning (type markers + header prefixes) extracted into a single-pass `scanShapeSignals(lines)` helper, removing the duplicated two-pass line scan and ad-hoc closure; behavior unchanged (all 8 routing fixtures, crosscutting, and preflight suites pass). *Authored by a Hydra dogfood run.*
+
 - GREEN: shape-aware task routing in `.agents/skills/task-breakdown/analyzer.mjs` — new `TaskRoute` enum (8 routes) + `routeTaskPattern(content)` returning `{route, reason}`; reuses `analyzePRDDeterministic` (no second parser). Routing: `**Type:**` markers and shape-bearing header prefixes (TEST-/REF-/SPIKE-/AUDIT-/DEL-/Analysis-) take precedence, audit wins over mixed batches, plain FRs fall back to target-file heuristics (all unscoped → `legacy_no_scope`, scoped → `normal_code`). All 8 pattern-routing fixtures pass; new-code statement coverage 93.3%. *Authored by a Hydra dogfood run.*
 - task-breakdown preflight hermeticity + overlap-guard reconciliation: removed the hardcoded `/opt/dev-tools/components/hydra/tools/prd-lint/prd-lint` resolution fallback (an absolute host path breaks hermetic test runs; `$HYDRA_TOOLS_DIR` is the sanctioned override); `validateFileOverlap` now exempts cross-cutting FRs (validate/check/verify/audit/enforce/guard titles) from the target-overlap error since cross-cutting dependencies serialize their edits — restores `test-crosscutting.mjs` (which also gained an explicit overlap-guard pin) and makes `test-preflight.mjs` pass 10/10. *Authored by a Hydra dogfood run.*
 
