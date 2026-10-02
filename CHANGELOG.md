@@ -7,6 +7,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 ### Added
+- GREEN: sandboxed verification runner (internal/core/verification_runner.go) — argv-only exec (no shell layer), credential env scrubbing, process-group timeout kill with WaitDelay pipe-unblock, vacuous zero-output rejection, provenance capture, verification_passed/verification_failed events. 8/8 RED tests pass; new-code coverage ~85%.
 - RED: behavior tests for the sandboxed verification runner (internal/core/verification_runner_test.go) — pin argv-only execution (injection string never interpreted by a shell), credential env scrubbing, timeout kill, vacuous zero-output rejection, provenance capture, and events on pass/fail paths. Fails against the missing implementation until the GREEN phase lands internal/core/verification_runner.go.
 ### Fixed
 - task-breakdown classifier: explicit `**Type:**` deliverable-shape markers (analysis/audit/test/refactor/spike/deletion) are now parsed into the requirement and override classification in `classifyRequirement` (→ `direct_task`), instead of being visible only to the standalone `routeTaskPattern` API while analysis PRDs compiled to TDD chains; shape-bearing header prefixes (TEST-/REF-/SPIKE-/AUDIT-/DEL-/ANALYSIS-) now also stop description accumulation like other requirement headers.
