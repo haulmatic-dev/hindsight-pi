@@ -38,11 +38,26 @@ export const TaskRoute = {
  *  2. code work: `**Type:** fr` with `**Target Files:**` -> normal_code,
  *     without Target Files -> legacy_no_scope
  *
- * Reuses the same markdown conventions the analyzer's target-file parsing
- * relies on (backticked paths after "Target Files:"), not a second parser.
+ * Reuses the analyzer's own markdown conventions (backticked paths after
+ * "Target Files:", `**Type:**` markers), not a second parser.
  * @param {string} content - Raw markdown document
  * @returns {{route: string, reason: string}} Route assignment with evidence
  */
+
+/**
+ * Type-marker routes, in detection precedence order. Each entry pairs the
+ * `**Type:**` value with the route it signals and the evidence reason.
+ * @type {Array<[string, string, string]>}
+ */
+const TYPE_MARKER_ROUTES = [
+  ['analysis', TaskRoute.ANALYSIS, 'analysis-type requirement signals investigation/documentation work'],
+  ['spike', TaskRoute.SPIKE, 'spike-type requirement signals time-boxed evaluation'],
+  ['deletion', TaskRoute.DELETION, 'deletion-type requirement signals removal-only work'],
+  ['refactor', TaskRoute.REFACTOR, 'refactor-type requirement signals behavior-preserving cleanup'],
+  ['test', TaskRoute.TEST_AUTHORING, 'test-type requirement signals test-first authoring'],
+  ['audit', TaskRoute.AUDIT, 'audit-type requirement signals review-and-report (no fixes)'],
+];
+
 export function routeTaskPattern(content) {
   if (typeof content !== 'string' || content.trim().length === 0) {
     return { route: TaskRoute.LEGACY_NO_SCOPE, reason: 'empty content: no scope or type markers present' };
@@ -55,23 +70,11 @@ export function routeTaskPattern(content) {
   const hasSpikeHeader = /^#{2,4}\s+Spike-[A-Z0-9]/im.test(content);
   const hasAnalysisTitle = /^#\s+Analysis:/im.test(content);
 
-  if (types.has('analysis') || hasAnalysisTitle) {
-    return { route: TaskRoute.ANALYSIS, reason: 'analysis-type requirement signals investigation/documentation work' };
-  }
-  if (types.has('spike') || hasSpikeHeader) {
-    return { route: TaskRoute.SPIKE, reason: 'spike-type requirement signals time-boxed evaluation' };
-  }
-  if (types.has('deletion')) {
-    return { route: TaskRoute.DELETION, reason: 'deletion-type requirement signals removal-only work' };
-  }
-  if (types.has('refactor')) {
-    return { route: TaskRoute.REFACTOR, reason: 'refactor-type requirement signals behavior-preserving cleanup' };
-  }
-  if (types.has('test')) {
-    return { route: TaskRoute.TEST_AUTHORING, reason: 'test-type requirement signals test-first authoring' };
-  }
-  if (types.has('audit')) {
-    return { route: TaskRoute.AUDIT, reason: 'audit-type requirement signals review-and-report (no fixes)' };
+  for (const [type, route, reason] of TYPE_MARKER_ROUTES) {
+    const headerSignals = type === 'analysis' ? hasAnalysisTitle : type === 'spike' ? hasSpikeHeader : false;
+    if (types.has(type) || headerSignals) {
+      return { route, reason };
+    }
   }
 
   // Code work: does any requirement carry explicit Target Files scope?
