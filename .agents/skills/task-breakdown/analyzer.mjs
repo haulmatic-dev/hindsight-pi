@@ -348,6 +348,7 @@ export function analyzePRDDeterministic(prdContent) {
   return {
     featureName,
     systemType,
+    route: computeRoute(prdContent, requirements),
     requirements,
     dependencies,
     semanticGraph,
@@ -459,29 +460,51 @@ export function routeTaskPattern(content) {
 
   if (signals.length > 0) return signals[0];
 
-  // Plain requirements: target-file scope heuristics.
-  const scopedReqs = requirements.filter(
+  const route = computeRoute(content, analysis.requirements || []);
+  const scopedReqs = (analysis.requirements || []).filter(
     (r) => r.type === 'FR' || r.type === 'NFR' || r.type === 'User Story',
   );
   if (scopedReqs.length > 0) {
     const unscoped = scopedReqs.every((r) => !r.files || r.files.length === 0);
     if (unscoped) {
       return {
-        route: TaskRoute.LEGACY_NO_SCOPE,
+        route,
         reason: `all ${scopedReqs.length} requirement(s) lack explicit target files`,
       };
     }
     const scopedCount = scopedReqs.filter((r) => r.files.length > 0).length;
     return {
-      route: TaskRoute.NORMAL_CODE,
+      route,
       reason: `requirement(s) carry explicit target files (${scopedCount} scoped)`,
     };
   }
 
   return {
-    route: TaskRoute.LEGACY_NO_SCOPE,
+    route,
     reason: 'no requirements, type markers, or shape-bearing headers detected',
   };
+}
+
+/**
+ * Core routing decision shared by routeTaskPattern and
+ * analyzePRDDeterministic's top-level `route` field (which must not recurse
+ * through routeTaskPattern — routeTaskPattern re-analyzes via
+ * analyzePRDDeterministic, so the inverse call would loop forever).
+ */
+function computeRoute(content, requirements) {
+  const signals = scanShapeSignals(content.split('\n'));
+  const auditSignal = signals.find((s) => s.route === TaskRoute.AUDIT);
+  if (auditSignal) return auditSignal.route;
+  if (signals.length > 0) return signals[0].route;
+  const scopedReqs = requirements.filter(
+    (r) => r.type === 'FR' || r.type === 'NFR' || r.type === 'User Story',
+  );
+  if (scopedReqs.length > 0) {
+    const unscoped = scopedReqs.every((r) => !r.files || r.files.length === 0);
+    if (unscoped) return TaskRoute.LEGACY_NO_SCOPE;
+    return TaskRoute.NORMAL_CODE;
+  }
+  return TaskRoute.LEGACY_NO_SCOPE;
 }
 
 /**

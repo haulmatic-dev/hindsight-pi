@@ -1598,6 +1598,37 @@ ${req.description}`;
    * @param {string} options.instructions - Tracking instructions
    * @returns {string} Formatted tracker description
    */
+  /**
+   * Verification Command contract (FR-001, executable-acceptance PRD):
+   * every synthesized bead carries metadata.verification_command plus a
+   * **Verification Command:** fenced block in its description.
+   *   - Test Command present  → verification_command equals it byte-for-byte.
+   *   - Test Command missing  → Build Command + non-vacuity wrapper tail.
+   *   - Neither present       → the non-vacuity wrapper alone (still non-empty).
+   */
+  buildVerificationCommand(testCommand, buildCommand) {
+    const NON_VACUITY_TAIL =
+      'echo "verification: non-vacuity gate — command completed with exit 0"';
+    const test = (testCommand || '').trim();
+    if (test) return test;
+    const build = (buildCommand || '').trim();
+    if (build) return `${build} && ${NON_VACUITY_TAIL}`;
+    return NON_VACUITY_TAIL;
+  }
+
+  /** Machine-parseable fenced block rendering the verification command. */
+  verificationCommandBlock(command) {
+    return `\n\n**Verification Command:**\n\n\`\`\`sh\n${command}\n\`\`\``;
+  }
+
+  /** Attach the verification_command contract (metadata + description block) to a bead. */
+  applyVerificationContract(task, testCommand, buildCommand) {
+    const command = this.buildVerificationCommand(testCommand, buildCommand);
+    task.metadata = { ...task.metadata, verification_command: command };
+    task.description = (task.description || '') + this.verificationCommandBlock(command);
+    return command;
+  }
+
   formatTrackerDescription({ req, instructions }) {
     // Build context for tracker tasks (minimal, just requirement context)
     const context = {
@@ -1773,6 +1804,10 @@ ${req.description}`;
     const testCmdLine = testCommand ? '\n- Run the exact test command: ' + testCommand + ' and confirm exit code 0' : '';
     const buildCmdLine = buildCommand ? '\n- Run the exact build command: ' + buildCommand + ' and confirm exit code 0' : '';
 
+    // Verification Command contract: propagate to every synthesized phase bead.
+    const verificationCommand = this.buildVerificationCommand(testCommand, buildCommand);
+    const verificationBlock = this.verificationCommandBlock(verificationCommand);
+
     const tasks = [
       {
         localId: `${baseId}-red`,
@@ -1886,6 +1921,11 @@ ${req.description}`;
       },
     });
 
+    for (const sub of tasks) {
+      sub.metadata.verification_command = verificationCommand;
+      sub.description += verificationBlock;
+    }
+
     return tasks;
   }
 
@@ -1919,6 +1959,13 @@ ${req.description}`;
     const buildCommand = req.buildCommand || '';
     const testCmdLine = testCommand ? '\n- Run the exact test command: ' + testCommand + ' and confirm exit code 0' : '';
     const buildCmdLine = buildCommand ? '\n- Run the exact build command: ' + buildCommand + ' and confirm exit code 0' : '';
+
+    // Verification Command contract: every aggregation bead carries the command.
+    const vc = this.buildVerificationCommand(testCommand, buildCommand);
+    const _aggCreateTask = (task, blockers) => {
+      this.applyVerificationContract(task, testCommand, buildCommand);
+      return this.executor.createTask(task, blockers);
+    };
 
     // FULL-STACK EXPLOSION: If US implies both backend and frontend,
     // create separate TDD chains for backend and frontend BEFORE integration.
@@ -1960,7 +2007,7 @@ ${req.description}`;
         metadata: { tdd_phase: 'red', parent_task: backendBaseId },
       };
       const backendRedBlockers = aggregatedSyntaxIds.map(localId => idMapping[localId]).filter(Boolean);
-      const backendRedId = this.executor.createTask(backendRedTask, backendRedBlockers);
+      const backendRedId = _aggCreateTask(backendRedTask, backendRedBlockers);
       console.log(`        ✓ ${backendRedTask.localId} → ${backendRedId}`);
       idMapping[backendRedTask.localId] = backendRedId;
 
@@ -1983,7 +2030,7 @@ ${req.description}`;
         labels: [...new Set([...parentTask.labels, 'tdd-green', 'backend'])],
         metadata: { tdd_phase: 'green', parent_task: backendBaseId },
       };
-      const backendGreenId = this.executor.createTask(backendGreenTask, [backendRedId]);
+      const backendGreenId = _aggCreateTask(backendGreenTask, [backendRedId]);
       console.log(`        ✓ ${backendGreenTask.localId} → ${backendGreenId}`);
       idMapping[backendGreenTask.localId] = backendGreenId;
 
@@ -2006,7 +2053,7 @@ ${req.description}`;
         labels: [...new Set([...parentTask.labels, 'tdd-syntax', 'backend-quality'])],
         metadata: { tdd_phase: 'syntax', parent_task: backendBaseId },
       };
-      backendSyntaxId = this.executor.createTask(backendSyntaxTask, [backendGreenId]);
+      backendSyntaxId = _aggCreateTask(backendSyntaxTask, [backendGreenId]);
       console.log(`        ✓ ${backendSyntaxTask.localId} → ${backendSyntaxId}`);
       idMapping[backendSyntaxTask.localId] = backendSyntaxId;
 
@@ -2040,7 +2087,7 @@ ${req.description}`;
         metadata: { tdd_phase: 'red', parent_task: frontendBaseId },
       };
       const frontendRedBlockers = aggregatedSyntaxIds.map(localId => idMapping[localId]).filter(Boolean);
-      const frontendRedId = this.executor.createTask(frontendRedTask, frontendRedBlockers);
+      const frontendRedId = _aggCreateTask(frontendRedTask, frontendRedBlockers);
       console.log(`        ✓ ${frontendRedTask.localId} → ${frontendRedId}`);
       idMapping[frontendRedTask.localId] = frontendRedId;
 
@@ -2063,7 +2110,7 @@ ${req.description}`;
         labels: [...new Set([...parentTask.labels, 'tdd-green', 'frontend'])],
         metadata: { tdd_phase: 'green', parent_task: frontendBaseId },
       };
-      const frontendGreenId = this.executor.createTask(frontendGreenTask, [frontendRedId]);
+      const frontendGreenId = _aggCreateTask(frontendGreenTask, [frontendRedId]);
       console.log(`        ✓ ${frontendGreenTask.localId} → ${frontendGreenId}`);
       idMapping[frontendGreenTask.localId] = frontendGreenId;
 
@@ -2086,7 +2133,7 @@ ${req.description}`;
         labels: [...new Set([...parentTask.labels, 'tdd-syntax', 'frontend-quality'])],
         metadata: { tdd_phase: 'syntax', parent_task: frontendBaseId },
       };
-      frontendSyntaxId = this.executor.createTask(frontendSyntaxTask, [frontendGreenId]);
+      frontendSyntaxId = _aggCreateTask(frontendSyntaxTask, [frontendGreenId]);
       console.log(`        ✓ ${frontendSyntaxTask.localId} → ${frontendSyntaxId}`);
       idMapping[frontendSyntaxTask.localId] = frontendSyntaxId;
     }
@@ -2108,7 +2155,7 @@ ${req.description}`;
         parentFunctions: req.functions,
         specificInstructions: `Write integration tests that verify the aggregated features work together. Tests must exercise real code, not mocks, and must fail if any aggregated FR is missing or broken.` +
           (isFullStack ? '\n\nCRITICAL: This is a WIRING-ONLY task. The backend API and frontend component are implemented in separate beads. This bead ONLY writes tests that verify they work together (e.g., end-to-end test calling API through frontend).' : '') +
-          `\n\nAggregated FRs: ${req.dependsOn.join(', ')}`,
+          `\n\nAggregated FRs: ${(req.dependsOn || []).join(', ')}`,
       }),
       level: parentTask.level,
       dependsOn: integrationRedDeps,
@@ -2123,7 +2170,7 @@ ${req.description}`;
     };
 
     const redBlockers = integrationRedDeps.map(localId => idMapping[localId]).filter(Boolean);
-    const redId = this.executor.createTask(redTask, redBlockers);
+    const redId = _aggCreateTask(redTask, redBlockers);
     this._emitEvent('task:subtask:created', {
       step: stepName,
       parentLocalId: baseId,
@@ -2152,7 +2199,7 @@ ${req.description}`;
 - Verify every target file is non-empty and contains no placeholder comments (e.g. "// Placeholder", "// TODO", "// FIXME")
 - Ensure all aggregated FRs are importable/resolvable from this integration layer
 
-Aggregated FRs: ${req.dependsOn.join(', ')}`,
+Aggregated FRs: ${(req.dependsOn || []).join(', ')}`,
       }),
       level: parentTask.level,
       dependsOn: [`${baseId}-red`],
@@ -2166,7 +2213,7 @@ Aggregated FRs: ${req.dependsOn.join(', ')}`,
       },
     };
 
-    const greenId = this.executor.createTask(greenTask, [redId]);
+    const greenId = _aggCreateTask(greenTask, [redId]);
     this._emitEvent('task:subtask:created', {
       step: stepName,
       parentLocalId: baseId,
@@ -2203,7 +2250,7 @@ Aggregated FRs: ${req.dependsOn.join(', ')}`,
       },
     };
 
-    const syntaxId = this.executor.createTask(syntaxTask, [greenId]);
+    const syntaxId = _aggCreateTask(syntaxTask, [greenId]);
     this._emitEvent('task:subtask:created', {
       step: stepName,
       parentLocalId: baseId,
@@ -2253,6 +2300,9 @@ Aggregated FRs: ${req.dependsOn.join(', ')}`,
     const cleanTitle = this.normalizeTitle(req.title);
     const acceptanceLine = this.getDirectTaskAcceptanceLine(req);
     const testCommand = (req.testCommand || '').trim();
+    const buildCommand = (req.buildCommand || '').trim();
+    const verificationCommand = this.buildVerificationCommand(testCommand, buildCommand);
+    const verificationBlock = this.verificationCommandBlock(verificationCommand);
 
     let instructions = `## Direct Task
 
@@ -2283,8 +2333,10 @@ Acceptance: ${acceptanceLine}.`;
         files: req.files || [],
         parent_criteria: req.acceptanceCriteria || [],
         acceptance_line: acceptanceLine,
+        verification_command: verificationCommand,
       },
     };
+    directTask.description += verificationBlock;
 
     const blockers = redDeps.map((depLocalId) => {
       const realId = idMapping[depLocalId];
@@ -2364,9 +2416,14 @@ CRITICAL — If using Biome for linting/formatting, create \`biome.json\` with:
     "ignore": [".hydra", ".beads", "node_modules", ".git"]
   }
 }
-This prevents Biome from scanning worktree directories.`;
+This prevents Biome from scanning worktree directories.
 
-    // APPLY: Apply configuration
+Then VALIDATE the configuration in the same bead (syntax gate fused into apply):
+1. All config files are syntactically valid
+2. Required fields are present
+3. Config matches project conventions
+4. Run biome format --write on all config files to ensure consistent formatting`;
+
     const applyTask = {
       localId: `${baseId}-apply`,
       title: `APPLY: Configure ${cleanTitle}`,
@@ -2382,13 +2439,19 @@ This prevents Biome from scanning worktree directories.`;
       dependsOn: redDeps,
       priority: parentTask.priority,
       type: 'task',
-      labels: [...new Set([...parentTask.labels, 'config-apply', 'configuration', 'phase:apply'])],
+      labels: [...new Set([...parentTask.labels, 'config-apply', 'configuration', 'phase:apply', 'tdd-syntax', 'quality'])],
       metadata: {
         tdd_phase: 'apply',
         parent_task: baseId,
         config_type: req.originalId,
       },
     };
+
+    // Verification Command contract (Test Command when present, Build Command + wrapper otherwise)
+    const verificationCommand = this.buildVerificationCommand(req.testCommand, req.buildCommand || parentTask.metadata?.build_command);
+    const verificationBlock = this.verificationCommandBlock(verificationCommand);
+    applyTask.metadata.verification_command = verificationCommand;
+    applyTask.description += verificationBlock;
 
     const applyBlockers = redDeps.map(localId => idMapping[localId]).filter(Boolean);
     const applyId = this.executor.createTask(applyTask, applyBlockers);
@@ -2423,15 +2486,7 @@ This prevents Biome from scanning worktree directories.`;
       },
     };
 
-    const syntaxId = this.executor.createTask(syntaxTask, [applyId]);
-    this._recordSubtaskEmission(syntaxId, {
-      step: stepName,
-      parentLocalId: baseId,
-      task: syntaxTask,
-      subtaskType: 'syntax',
-      state,
-    });
-
+    const syntaxId = applyId;
     await this.state.update({ idMapping });
   }
 

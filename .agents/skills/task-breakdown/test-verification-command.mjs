@@ -257,7 +257,7 @@ test('aggregation_task: verification_command propagates', async (t) => {
     assert.equal(
       t.metadata?.verification_command,
       TEST_CMD,
-      `${sub.localId} aggregation bead must carry the Test Command byte-for-byte`,
+      `${t.localId} aggregation bead must carry the Test Command byte-for-byte`,
     );
   }
 });
