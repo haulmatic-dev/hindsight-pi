@@ -30,8 +30,8 @@ const testPRD = `# Product Requirements Document: Simple Calculator Module
 | Requirement | Files | Integration Points | Data Models | Depends On | Verifies |
 |-------------|-------|-------------------|-------------|------------|----------|
 | FR-001 | \`src/calculator.ts:add()\` | Barrel export | - | - | - |
-| FR-002 | \`src/calculator.ts:subtract()\` | Barrel export | - | - | - |
-| FR-003 | \`src/calculator.ts\` | Barrel export | - | FR-001, FR-002 | - |
+| FR-002 | \`src/subtraction.ts:subtract()\` | Barrel export | - | - | - |
+| FR-003 | \`src/calculator.ts\`, \`src/subtraction.ts\` | Barrel export | - | FR-001, FR-002 | - |
 `;
 
 console.log('Testing cross-cutting concern detection...\n');
@@ -76,3 +76,36 @@ if (!hasFR002toFR003) {
 console.log('✅ PASS: Cross-cutting detection works correctly');
 console.log(`   FR-003 depends on: ${fr003.dependsOn.join(', ')}`);
 console.log(`   Semantic graph has FR-001 -> FR-003 and FR-002 -> FR-003 edges`);
+
+// --- Target-file overlap validation ----------------------------------------------
+// analyzePRDDeterministic fail-closes when two FRs claim the same target file
+// (worktree merge-conflict guard). The PRD above must now use disjoint
+// targets; pin the guard explicitly here.
+const overlapPRD = `# PRD: Overlap Guard Check
+
+### FR-001: Addition Operation
+**Type:** fr
+**Priority:** P1
+**Target Files:** \`src/calc.ts\`
+**Acceptance Criteria:**
+- \`add(2, 3)\` returns \`5\`
+
+### FR-002: Subtract Operation
+**Type:** fr
+**Priority:** P1
+**Target Files:** \`src/calc.ts\`
+**Acceptance Criteria:**
+- \`subtract(3, 2)\` returns \`1\`
+`;
+
+try {
+  analyzePRDDeterministic(overlapPRD);
+  console.error('FAIL: overlapping FR target files should throw');
+  process.exit(1);
+} catch (err) {
+  if (!err.message.includes('target file overlap detected')) {
+    console.error(`FAIL: overlap throw is wrong error: ${err.message}`);
+    process.exit(1);
+  }
+  console.log('✅ PASS: overlapping FR target files fail closed with named files');
+}

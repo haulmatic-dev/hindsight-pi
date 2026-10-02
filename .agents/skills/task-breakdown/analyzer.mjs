@@ -1182,9 +1182,19 @@ function validateFileOverlap(requirements) {
   }
 
   // Find files claimed by more than one FR
+  // Find files claimed by more than one FR. Cross-cutting FRs (validate/
+  // check/verify/audit/enforce/guard titles) are exempt: they consume the file
+  // AFTER the foundational FRs (detectCrossCuttingConcerns serializes them via
+  // dependency edges), so parallel worktree merge conflicts cannot occur.
+  const isCrossCutting = new Map(
+    requirements
+      .filter((r) => r.type === 'FR')
+      .map((r) => [r.originalId, /validat|check|verify|audit|enforce|guard/i.test(r.title)]),
+  );
   for (const [file, frIds] of fileToFRs) {
-    if (frIds.length > 1) {
-      errors.push(`  File "${file}" is targeted by multiple FRs: ${frIds.join(', ')}`);
+    const foundational = frIds.filter((id) => !isCrossCutting.get(id));
+    if (foundational.length > 1) {
+      errors.push(`  File "${file}" is targeted by multiple FRs: ${foundational.join(', ')}`);
     }
   }
 

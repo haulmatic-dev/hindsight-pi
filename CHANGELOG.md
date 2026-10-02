@@ -7,6 +7,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+- task-breakdown preflight hermeticity + overlap-guard reconciliation: removed the hardcoded `/opt/dev-tools/components/hydra/tools/prd-lint/prd-lint` resolution fallback (an absolute host path breaks hermetic test runs; `$HYDRA_TOOLS_DIR` is the sanctioned override); `validateFileOverlap` now exempts cross-cutting FRs (validate/check/verify/audit/enforce/guard titles) from the target-overlap error since cross-cutting dependencies serialize their edits — restores `test-crosscutting.mjs` (which also gained an explicit overlap-guard pin) and makes `test-preflight.mjs` pass 10/10. *Authored by a Hydra dogfood run.*
+
 - RED-phase fixture suite for task-breakdown pattern routing: `test-pattern-routing.mjs` pins 8 fixture→route assignments (analysis, test_authoring, refactor, spike, deletion, audit, legacy_no_scope, normal_code) via fixtures/*.md, fails with exit 1 + failing fixture names printed until `routeTaskPattern`/`TaskRoute` land in analyzer.mjs. *Authored by a Hydra dogfood run.*
 
 - PR #82 human-merge bead (hydra-pnf9): verified PR #82 (feat/pi-rpc-wiring → development) already MERGED 2026-07-28, merge commit 3afb14c is an ancestor of origin/development; no active push-pending pseudo-bead in the live store. Bead closed as already-done with verification comment — no code change. *Authored by a Hydra dogfood run.*
