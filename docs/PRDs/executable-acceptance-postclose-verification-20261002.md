@@ -194,7 +194,7 @@ Document the `**Verification Command:**` field in the create-prd contract: when 
 
 ### NFR-001: Escape-rate regression budget
 
-**Type:** nfr
+**Type:** nfr-verification
 **Priority:** P1
 
 **Target Files:** `internal/core/postclose_sweep.go`
@@ -219,7 +219,7 @@ Telemetry baseline from 2026-10-02: 192 accepted / 27 rejected / 11 escalated cl
 
 ### NFR-VALID: Validation Gate
 
-**Type:** nfr
+**Type:** nfr-verification
 **Priority:** P1
 
 **Target Files:** `internal/core/bead_closer.go`
