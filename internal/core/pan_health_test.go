@@ -307,6 +307,35 @@ func TestCollectHealthDigestFreshHeartbeatCompletedRowNotOrphan(t *testing.T) {
 	}
 }
 
+func TestCollectHealthDigestEscalatedBeadNotOrphan(t *testing.T) {
+	// Regression (2026-10-02 07:5x): human-escalated beads (verified-close
+	// rejected 3/3 → escalated, left in_progress by design) never get a
+	// worker, so the digest counted them as orphaned claims and re-fired the
+	// P0 anomaly for exactly the beads the escalation gate already owns
+	// (bxzr/1h4v/wiu6/cxpf — tdd-validation-failed escalations, workers had
+	// completed normally). Escalated beads are excluded; escalation_ttl owns
+	// the aging.
+	tw := setupTestOverseer(t)
+	tw.overseer.registryStore = nil
+
+	bead := types.Bead{ID: "test-project-esc", Project: "test-project", Status: types.StatusInProgress, Type: "bug", UpdatedAt: time.Now().Add(-10 * time.Minute), Labels: []string{"escalated", "needs-human"}}
+	tw.mockBeads.beads["test-project-esc"] = bead
+
+	d := tw.overseer.collectHealthDigest()
+	if len(d.Projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(d.Projects))
+	}
+	ph := d.Projects[0]
+	if ph.OrphanClaims != 0 {
+		t.Errorf("OrphanClaims = %d, want 0 (escalated bead is human-gated, not orphaned)", ph.OrphanClaims)
+	}
+	for _, a := range ph.Anomalies {
+		if strings.Contains(a, "P0 campaign anomaly") {
+			t.Errorf("unexpected orphan anomaly: %v", ph.Anomalies)
+		}
+	}
+}
+
 func TestCollectHealthDigestOrphanClaims(t *testing.T) {
 	tw := setupTestOverseer(t)
 	o := tw.overseer
