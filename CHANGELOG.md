@@ -6,6 +6,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+- Orphaned-claims/disk-99 verification bead (hydra-kxso): verified duplicate of hydra-6d01 — the 4 in_progress beads (wiu6/1h4v/bxzr/cxpf) are human-escalated verified-close-reject-tdd-validation-failed beads, not orphaned claims (Charon reopened them and they re-escalated); disk at 44%, watermark clear; no code change. Residual edge: deployed daemon binary (07:44 build) predates the PR #70 chain and the 7548196 escalated-exclusion — fresh `hydra-staged-kxso`/`worker-staged-kxso` binaries built from origin/development tip in the hydra-kxso worktree for operator deploy. Triage: `docs/discovery/orphanclaim-escalated-verify-triage-kxso.md`. *Authored by a Hydra dogfood run.*
 - PR #82 human-merge bead (hydra-pnf9): verified PR #82 (feat/pi-rpc-wiring → development) already MERGED 2026-07-28, merge commit 3afb14c is an ancestor of origin/development; no active push-pending pseudo-bead in the live store. Bead closed as already-done with verification comment — no code change. *Authored by a Hydra dogfood run.*
 
 ### Fixed
