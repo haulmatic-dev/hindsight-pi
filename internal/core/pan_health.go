@@ -96,10 +96,12 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 			statusByID := make(map[string]types.BeadStatus, len(beads))
 			depsByID := make(map[string][]string, len(beads))
 			claimsByID := make(map[string]time.Time, len(beads))
+			labelsByID := make(map[string][]string, len(beads))
 			for _, b := range beads {
 				id := b.ID.String()
 				statusByID[id] = b.Status
 				claimsByID[id] = b.UpdatedAt
+				labelsByID[id] = b.Labels
 				if b.Status.IsTerminal() {
 					continue
 				}
@@ -163,6 +165,17 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 				}
 				if age := time.Since(claimsByID[id]); age >= 0 && age < orphanClaimDigestGrace {
 					continue // fresh claim: worker may not have registered yet
+				}
+				// Human-escalated beads (verified-close rejected 3/3 → escalated
+				// to human, bead left in_progress) never get a worker until a
+				// human or a Pan clear-escalation repair acts. Counting them as
+				// orphaned claims re-fired the P0 anomaly for exactly the beads
+				// the escalation gate already owns (hydra 2026-10-02 07:5x:
+				// bxzr/1h4v/wiu6/cxpf — tdd-validation-failed escalations,
+				// workers had completed normally). Excluded; escalation_ttl
+				// (overseer.escalation_ttl) owns the aging.
+				if slices.Contains(labelsByID[id], "escalated") {
+					continue
 				}
 				orphaned := true
 				for _, w := range live {
