@@ -3,7 +3,8 @@
 ## What changed (files + one line each)
 - docs/discovery/orphanclaim-stale-binary-triage-5fbq.md: triage — the 4 "orphaned in_progress claims" are human-escalated TDD beads counted by a stale digest binary; disk 99% claim stale at 44%; no code change.
 - CHANGELOG.md: Documentation entry under Unreleased.
-- Remedy executed: `./cmd/hydra` built from origin/development tip (ec0fc59, includes 7548196 escalated-label exclusion) and staged at `/opt/dev-tools/var/hydra/bin-staging-5fbq/hydra` for operator drain-restart.
+- Remedy EXECUTED: `./cmd/hydra` built from origin/development tip (ec0fc59, includes 7548196 escalated-label exclusion), installed atomically to `/opt/dev-tools/var/hydra/bin/hydra` (mtime 08:49:28Z); daemon drain-restart executed — `kill -TERM 1731164` accepted, new daemon PID 2176865 up 08:54:50Z.
+- Digest verified post-restart: 0 "P0 campaign anomaly" filings after 08:54Z (last filing 08:29:53Z under old binary); 4 fresh working registry rows with new work claimed. PASS.
 
 ## Verification (commands run + pass/fail)
 - Registry `/opt/dev-tools/var/hydra/.hydra/registry.db`: 7 working rows, all heartbeats <1 min old (incl. this bead 5fbq); 0 live orphans. PASS.
@@ -16,5 +17,5 @@
 - hindsight_search — unavailable ("Hindsight is not connected"), skipped per DISCOVERY PROTOCOL.
 
 ## Open edges for the next phase
-- Operator: drain-restart onto bin-staging-5fbq binary; after restart OrphanClaims → 0 and the P0 anomaly stops re-filing.
+- Operator restart DONE (was the listed edge): drain-restart executed; OrphanClaims digest now 0.
 - If escalated beads (bxzr/1h4v/wiu6/cxpf) linger past escalation TTL (72h), escalation_ttl scanner will demote them.

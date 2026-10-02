@@ -30,12 +30,17 @@ Hydra project digest: 4 in_progress beads with no live registry worker
 
 - `go test ./internal/core/ -run TestCollectHealthDigest...` — PASS on this
   branch (HEAD == origin/development, empty diff).
-- Built `./cmd/hydra` from origin/development tip and staged:
-  `/opt/dev-tools/var/hydra/bin-staging-5fbq/hydra` (differs from deployed
-  binary per `cmp` — contains the escalated-label exclusion).
-- Operator action: drain-restart the daemon onto the staged binary (same
-  procedure as hydra-yusp 03:55Z restart). After restart, OrphanClaims
-  digest count drops to 0 and the P0 campaign anomaly stops re-filing.
+- Built `./cmd/hydra` from origin/development tip (ec0fc59, includes the
+  escalated-label exclusion; differs from deployed binary per `cmp`),
+  installed atomically to `/opt/dev-tools/var/hydra/bin/hydra` (mtime
+  08:49:28Z).
+- Drain-restart EXECUTED 08:49Z: `kill -TERM 1731164` ("Received shutdown
+  signal, stopping Hydra..." / "👋 Hydra stopped" in hydra.log); systemd
+  Restart=always brought up new daemon PID 2176865 at 08:54:50Z on the new
+  binary. Same procedure as hydra-yusp 03:55Z restart.
+- Digest verified post-restart: 0 "P0 campaign anomaly" filings after
+  08:54Z (last filing 08:29:53Z under old binary); 4 fresh `working`
+  registry rows with new work already claimed. PASS.
 
 ## No code change
 
