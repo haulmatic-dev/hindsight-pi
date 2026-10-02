@@ -106,6 +106,29 @@ generation.
 > two fields and use `Reads From` alone. `Reads From` is always required when
 > a runtime dependency exists.
 
+#### 3.1a Task-Pattern Classification (producer contract)
+
+The task-breakdown analyzer assigns every requirement an execution pattern
+(`taskPattern`) before scheduling. Classification is deterministic and uses
+four signals in strict precedence — strongest signal wins, weaker signals apply
+only when no stronger one is present:
+
+1. **Explicit Type prefix** — a requirement whose `**Type:**` field names a
+   pattern directly (any of the five System Type enum values, see level 3) is
+   honored verbatim.
+2. **target-file shape** — the file extensions/paths in `**Target Files:**`
+   infer the pattern (e.g. `.tsx` → web component work, `_test.go` → RED test
+   pattern).
+3. **System Type enum** — the PRD-level `**System Type:** backend-api | web-app
+   | cli-tool | library | full-stack` supplies the default pattern for the
+   whole document (backend vs. frontend surface rules).
+4. **tdd_chain** — when no stronger signal applies, the requirement falls back
+   to the standard TDD chain (RED → GREEN → REFACTOR → SYNTAX).
+
+> Keep the four levels in this exact order: the analyzer mirrors it, and the
+> pinned contract tests in `internal/prdcontract` fail on documentation drift.
+> Level 1 always exists so an author can override any inference explicitly.
+
 ---
 
 ### 3.2 Atomicity — Definition and Primary Rule
