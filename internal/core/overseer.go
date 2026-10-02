@@ -103,6 +103,7 @@ type Overseer struct {
 	publishBackoff   map[string]*publishBackoffEntry // projectPath → failing-publish backoff state (publish tick retry throttle)
 	diskWatermarkPct int                             // host disk watermark (0 = default 85%)
 	diskStatPath     string                          // statfs path ("" = "/")
+	diskCleanup      *diskCleanupGuard               // watermark-breach cleanup (fail-open)
 	dag              *DAG
 	dagMu            sync.RWMutex
 	epicCloseGuard   epicCloseGuard // store-verification refusals for epic auto-close
@@ -587,6 +588,7 @@ func NewOverseer(config *Config) *Overseer {
 	o.beadCloser.SetEventSink(events)
 	o.providerPool.SetEventSink(events)
 	o.orphanJanitor.SetEventSink(events)
+	o.diskCleanup = &diskCleanupGuard{events: events}
 	// Integration-retest stage (Tier A): periodic mechanical recheck of
 	// integration-failed/exhausted beads. Constructed whenever HYDRA_HOME is
 	// available; the stage is inert unless integration_retest.enabled is set.
