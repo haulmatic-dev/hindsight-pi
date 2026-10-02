@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -58,11 +59,20 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 		return digest
 	}
 
-	// Live worker rows once for the whole scan.
+	// Live worker rows once for the whole scan. A row whose heartbeat is
+	// fresh counts as live regardless of state: a worker finalizing gates
+	// after its row was prematurely marked completed still heartbeats (30s
+	// cadence), and counting that bead as an orphan claim made Pan file a
+	// twin P0 report bead every judgment round (2026-10-02: hydra-l867 row
+	// completed at 02:52:38 while the worker PID ran on until 03:1x). The
+	// threshold mirrors Charon's heartbeatHungAfter (5m).
 	liveByKey := map[string][]registry.WorkerRecord{}
 	if o.registryStore != nil {
-		if workers, err := o.registryStore.ListWorkers(registry.StateWorking, registry.StateParked); err == nil {
+		if workers, err := o.registryStore.ListWorkers(registry.StateWorking, registry.StateParked, registry.StateHung, registry.StateCompleted); err == nil {
 			for _, w := range workers {
+				if w.State == registry.StateCompleted && time.Since(w.LastHeartbeat) >= 5*time.Minute {
+					continue // genuinely finished; not live
+				}
 				// WorkerRecord.Project is the registered project name; match
 				// by name or path basename (multi-user discovery registers
 				// "<user>/<repo>" while workers carry the plain name).
@@ -85,9 +95,11 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 			degrade.RecordSuccess("pan-store-scan")
 			statusByID := make(map[string]types.BeadStatus, len(beads))
 			depsByID := make(map[string][]string, len(beads))
+			claimsByID := make(map[string]time.Time, len(beads))
 			for _, b := range beads {
 				id := b.ID.String()
 				statusByID[id] = b.Status
+				claimsByID[id] = b.UpdatedAt
 				if b.Status.IsTerminal() {
 					continue
 				}
@@ -95,7 +107,15 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 				case types.StatusOpen:
 					ph.Open++
 				case types.StatusInProgress:
-					ph.InProgress++
+					// Pan-filed meta beads are filed for human review and never
+					// get a worker; counting them as in_progress inflates
+					// inprog vs workers, which Pan infers as "orphaned claims"
+					// — and each judgment files another pan-filed twin about
+					// the phantom anomaly (self-referential loop, 2026-10-02:
+					// 8 twins on one day). Excluded from the inprog count.
+					if !slices.Contains(b.Labels, pan.FiledLabel) {
+						ph.InProgress++
+					}
 				}
 				for _, d := range b.Dependencies {
 					depsByID[id] = append(depsByID[id], d.String())
@@ -125,10 +145,24 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 			// ladder for 1h+ with zero live workers and zero progress — same
 			// class as the tb3j fleet-stall rule). Charon's orphan recovery is
 			// the mechanical fix; this anomaly makes the state visible to Pan
-			// so a judgment fires instead of the campaign sitting silent.
+			// so a judgment fires instead of the campaign sitting silent — but
+			// the
+			// worker has claimed but not yet registered (spawn → status update →
+			// registry upsert is not atomic). Counting fresh claims turned a
+			// spawn wave into a self-perpetuating filing loop: each campaign-
+			// anomaly bead Pan filed became itself a new in_progress claim with
+			// no worker yet, re-firing the anomaly and re-filing (hydra
+			// 2026-10-02 02:34–02:48: ctix→qmf7→t2e1→yz8z in 13 min, every one
+			// a false alarm — all claims had live workers on recheck). A claim
+			// within orphanClaimDigestGrace is skipped; Charon's recovery already
+			// applies the same 5m grace before any destructive reopen.
+			const orphanClaimDigestGrace = 5 * time.Minute
 			for id, st := range statusByID {
 				if st != types.StatusInProgress {
 					continue
+				}
+				if age := time.Since(claimsByID[id]); age >= 0 && age < orphanClaimDigestGrace {
+					continue // fresh claim: worker may not have registered yet
 				}
 				orphaned := true
 				for _, w := range live {
@@ -398,11 +432,11 @@ func (o *Overseer) filePanBead(projectPath, beadID, title, description string) e
 	}
 	if o.eventSink != nil {
 		o.eventSink.EmitRepo(projectPath, Event{
-			Type:   "pan_bead_filed",
+			Type:    "pan_bead_filed",
 			Project: filepath.Base(projectPath),
-			Bead:   string(newID),
-			Reason: "pan_filed",
-			Fields: map[string]any{"source": beadID},
+			Bead:    string(newID),
+			Reason:  "pan_filed",
+			Fields:  map[string]any{"source": beadID},
 		})
 	}
 	log.Printf("[PanRepair] file-bead %s: filed %s in %s", beadID, newID, projectPath)
