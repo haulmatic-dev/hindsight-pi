@@ -7,14 +7,17 @@
 
 ## Verification (commands run + pass/fail)
 - `node --check .agents/skills/task-breakdown/runner.mjs` — PASS (CHECK-OK).
-- Prototype harness (node --input-type=module) calling `createDirectTask` with fake executor: 1 bead created, title verbatim, test_command copied, description contains Test Command, blockers [GATE-1], event emitted, idMapping updated — PASS.
-- `getDirectTaskAcceptanceLine` all 6 shapes (TEST/REF/DEL/SPIKE/AUDIT/DOC prefixes + types) — PASS ×6.
+- End-to-end harness (node:test, temp file, deleted after run): `createTasksFromAnalysis` invoked with a real `taskPattern='direct_task'` requirement + approval gate — exactly one direct_task bead emitted, title verbatim/no phase prefixes, `metadata.test_command` copied, description carries Test Command verbatim, blocked by approval gate, idMapping points at the direct bead id — 2 tests pass, 0 fail.
+- `node --experimental-test-coverage --test` over that harness: runner.mjs 40.51% line / 53.10% branch overall; NEW code region (lines 2196–2300, `getDirectTaskAcceptanceLine` + `createDirectTask`) has ZERO uncovered lines/ranges — 100% of new implementation lines covered (next uncovered range 2302+ is pre-existing `createConfigurationTask`).
 - `node .agents/skills/task-breakdown/test-preflight.mjs` — 1 pre-existing FAIL ("expected lint:skipped event or line when prd-lint is missing"); verified FAILING on clean HEAD via `git stash` (not introduced by this change; FR-001 strand area).
 - `node .agents/skills/task-breakdown/test-crosscutting.mjs` — pre-existing failure: analyzer target-file overlap validation throws on the test's own fixture; also fails on clean HEAD.
 
 ## Open edges for the next phase
 - FR-001 (analyzer.mjs direct_task classification) not yet in this worktree: without it, no requirement ever gets `taskPattern='direct_task'`, so the new runner branch is dormant until FR-001 lands. The pre-existing test-preflight/test-crosscutting failures likely belong to that strand.
-- FR-004 test-pattern-routing.mjs will exercise this path end-to-end once FR-001 exists.
+- FR-004 test-pattern-routing.mjs will exercise this path end-to-end once FR-001 exists; the `test-pattern-routing.mjs` command in bead metadata is expected to fail until FR-004 lands it.
+
+## Open edges for the next phase
+- None beyond FR-001 dependency above.
 
 ## Open edges for the next phase
 - None beyond FR-001 dependency above.
