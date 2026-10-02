@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Documentation
+- test-6yzo: fixture-suite validation round 1 verify-first close — all 8 shape fixtures route correctly and every task-breakdown suite (routing 8/8, preflight 10/10 ×3, crosscutting, shape-classification) passes rc=0; no code change. First-run failures were a concurrent-merge file-mutation race (30a2ac8 landed mid-run), documented in docs/hydra/handoff/test-6yzo.md. *Authored by a Hydra dogfood run.*
+
 ### Changed
 - runner.mjs (task-breakdown): refactored single-bead DIRECT_TASK synthesis — unified the duplicated subtask-creation emit/log/idMapping triple into `_recordSubtaskEmission`, extracted `DEFAULT_CONFIG_TARGET_FILES` (single source for wildcard config-task files in metadata and instruction text), removed orphan JSDoc. Behavior unchanged; all task-breakdown suites pass.
 - test-direct-task.mjs (task-breakdown): 6 new tests pinning the single-bead DIRECT_TASK synthesis contract (one bead per direct_task requirement, no RED/GREEN prefixes, metadata + blockers). All suites rc=0.
