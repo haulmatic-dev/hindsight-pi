@@ -6,6 +6,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+### Added
+- RED-phase test suite `internal/core/bead_closer_hard_gates_test.go`: pins the three FR-002 close-time hard gates (executable acceptance with verbatim-output rejection, quarantine contradiction, dependency-order warn-only singletons) plus unchanged VerifiedClose round/escalation semantics. All 10 tests fail at RED with `runCloseHardGates undefined` — the GREEN bead implements the gate entry point.
 ### Fixed
 - task-breakdown classifier: explicit `**Type:**` deliverable-shape markers (analysis/audit/test/refactor/spike/deletion) are now parsed into the requirement and override classification in `classifyRequirement` (→ `direct_task`), instead of being visible only to the standalone `routeTaskPattern` API while analysis PRDs compiled to TDD chains; shape-bearing header prefixes (TEST-/REF-/SPIKE-/AUDIT-/DEL-/ANALYSIS-) now also stop description accumulation like other requirement headers.
 
