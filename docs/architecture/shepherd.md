@@ -58,6 +58,7 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `verdict_retained` | a judgment was stored in Hindsight | `kind` (`adjudication`/`failed_close`), verdict or exit code |
 | `satisfied_closed` | Pan closes a bead whose acceptance criteria are already met on the working branch | `tokens` (`0`) |
 | `retry_exhausted` | a bead exhausts `default_retries` and has no live worker or registry row | `attempts` |
+| `disk_cleanup_run` | disk usage ≥ watermark (85% on `/` by default): the guard ran a `systemd-tmpfiles --clean` pass (hourly cooldown, fail-open) | `Detail` carries used%/path/watermark |
 | `spawn-suppressed-closed` | a queued retry spawn is aborted because the bead became terminal while in the retry queue | `status` |
 | `spawn_blocked_type_missing` | fail-closed spawn preflight: the bead's effective `Type` is empty (post-restart reconstruction, fmsfe-a2u 2026-09-30) — an unverifiable type must never reach a worker; the bead stays open and is re-checked next tick | `bead` |
 | `spawn_blocked_human_gate` | fail-closed spawn preflight: store-truth `Type` is a human gate/container (`approval-gate`/`approval`/`epic`/`hold`, or a `hold` label) even though the scheduler's in-memory copy looked executable | `bead` |

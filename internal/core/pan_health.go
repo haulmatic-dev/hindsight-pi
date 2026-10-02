@@ -233,6 +233,20 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 	}
 	sort.Slice(digest.Projects, func(i, j int) bool { return digest.Projects[i].Key < digest.Projects[j].Key })
 	collectDiskWatermark(&digest, o.diskStatPath, o.diskWatermarkPct)
+	if digest.DiskUsedPct > 0 {
+		path := o.diskStatPath
+		if path == "" {
+			path = "/"
+		}
+		wm := o.diskWatermarkPct
+		if wm <= 0 {
+			wm = defaultDiskWatermarkPct
+		}
+		if o.diskCleanup == nil {
+			o.diskCleanup = &diskCleanupGuard{}
+		}
+		o.diskCleanup.maybeCleanup(path, digest.DiskUsedPct, wm)
+	}
 	// FR-032: snapshot fail-open degradation counters; degraded subsystems
 	// (0% success over the window) surface in the digest like host anomalies.
 	for _, st := range degrade.Snapshot() {
