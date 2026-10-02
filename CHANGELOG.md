@@ -7,6 +7,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 ### Fixed
+- stranded-work detector tests: added none-present-path test (clean repo → no units, no events) and pinned the `quarantine_branch` field of the `stranded_conflict` event payload (AC: event payload includes quarantine branch name when present); detector coverage 89.1% / repair 85.3%. Daily count of stranded-work events is queryable from the event stream via `jq -s '[.[] | select(.type=="worktree_stranded")] | length' <events-dir>/$(date -u +%Y-%m-%d).jsonl` (events live at `$HYDRA_HOME/events/YYYY-MM-DD.jsonl`).
 - task-breakdown classifier: explicit `**Type:**` deliverable-shape markers (analysis/audit/test/refactor/spike/deletion) are now parsed into the requirement and override classification in `classifyRequirement` (→ `direct_task`), instead of being visible only to the standalone `routeTaskPattern` API while analysis PRDs compiled to TDD chains; shape-bearing header prefixes (TEST-/REF-/SPIKE-/AUDIT-/DEL-/ANALYSIS-) now also stop description accumulation like other requirement headers.
 
 - docs: PR #185 push-pending wedge resolved — admin-merged 2026-10-02T11:03:22Z (merge commit 5779fbf == origin/development tip), head branch dogfood/publish-hydra deleted; handoff task-iljz. *Authored by a Hydra dogfood run.*
