@@ -138,6 +138,18 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 						continue
 					}
 					if reason, since, ok := o.workerSpawner.LastSpawnFailure(beadID); ok {
+						// Stale-entry purge (fmsfe-npa 2026-10-02): a spawn-failure
+						// entry survives until the bead closes, so the digest kept
+						// re-surfacing a phantom "N beads blocked by spawn failed"
+						// cohort — Pan re-filed wedge beads in a loop while the
+						// store itself showed 0 blocked. Purge entries that can no
+						// longer represent a real blocker: superseded by a live
+						// registry worker, or aged out past the TTL (terminal beads
+						// stop respawning, so TTL eventually covers them too).
+						if staleSpawnFailure(o.workerSpawner, beadID, since) {
+							o.workerSpawner.ClearSpawnFailure(beadID)
+							continue
+						}
 						blocked = append(blocked, pan.BlockedBead{
 							BeadID: beadID,
 							Reason: fmt.Sprintf("spawn failed: %s", reason),
@@ -433,6 +445,40 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 					return fmt.Errorf("prune-worktree-registration: %w", err)
 				}
 				log.Printf("[PanRepair] prune-worktree-registration pruned %s", projectPath)
+				return nil
+			},
+			// recover-spawn-cohort is the one-pass project-scoped repair for the
+			// spawn-failure wedge class (fmsfe-npa 2026-10-02): prune stale
+			// worktree registrations, then clear every recorded spawn failure
+			// belonging to this project together with its retry counter. One
+			// invocation recovers the whole batch; per-bead repairs cannot.
+			"recover-spawn-cohort": func(beadID string) error {
+				id := types.BeadID(beadID)
+				projectPath := projectPathForID(id)
+				if projectPath == "" {
+					return fmt.Errorf("recover-spawn-cohort: project path unresolved for %s", beadID)
+				}
+				if o.workerSpawner == nil {
+					return fmt.Errorf("recover-spawn-cohort: no worker spawner")
+				}
+				if _, err := gitOut(projectPath, "worktree", "prune"); err != nil {
+					log.Printf("[PanRepair] recover-spawn-cohort: worktree prune for %s failed (continuing): %v", projectPath, err)
+				}
+				cleared := 0
+				for _, bid := range o.workerSpawner.ListSpawnFailures() {
+					if projectPathForID(types.BeadID(bid)) != projectPath {
+						continue
+					}
+					o.workerSpawner.ClearSpawnFailure(bid)
+					if o.retryManager != nil {
+						o.retryManager.ResetRetryCount(bid)
+					}
+					cleared++
+				}
+				if cleared == 0 {
+					return fmt.Errorf("recover-spawn-cohort: no spawn failures recorded for %s", projectPath)
+				}
+				log.Printf("[PanRepair] recover-spawn-cohort cleared %d spawn failure(s) in %s", cleared, projectPath)
 				return nil
 			},
 			// re-push-integration reruns the publisher for the project of a
@@ -733,4 +779,23 @@ func panBlockedReason(b types.Bead, now time.Time) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// spawnFailureTTL bounds how long a recorded spawn-failure entry stays
+// visible to Pan after its cause could not have produced a live worker.
+const spawnFailureTTL = 15 * time.Minute
+
+// staleSpawnFailure reports whether a recorded spawn-failure entry can no
+// longer represent a real blocker (fmsfe-npa 2026-10-02): superseded by a
+// live registry worker, or older than the TTL with no live worker (terminal
+// beads never respawn, so the TTL eventually clears their entries too).
+// Fail-open toward keeping the entry visible: only positive evidence purges.
+func staleSpawnFailure(spawner *WorkerSpawner, beadID string, since time.Time) bool {
+	if spawner == nil {
+		return false
+	}
+	if spawner.HasLiveRegistryWorker(beadID) {
+		return true
+	}
+	return !since.IsZero() && time.Since(since) > spawnFailureTTL
 }

@@ -100,7 +100,15 @@ func (s *Shepherd) PrunableWedgeSweep(cands []Candidate) SweepReport {
 		// Cohort representative: any bead resolves the project scope for
 		// project-scoped repairs (see SetProjectScope contract).
 		representative := beads[0]
-		status := s.runRepair(representative, "prune-worktree-registration",
+		// spawn-class cohorts get recover-spawn-cohort (fmsfe-npa 2026-10-02):
+		// the prune alone never cleared the in-memory spawn-failure records,
+		// so the cohort re-appeared in the next digest and Pan re-filed wedge
+		// beads. The cohort verb also resets the members' retry counters.
+		verb := "prune-worktree-registration"
+		if strings.Contains(strings.ToLower(key), "spawn") {
+			verb = "recover-spawn-cohort"
+		}
+		status := s.runRepair(representative, verb,
 			fmt.Sprintf("PRUNE-SWEEP: batch prune for cohort %q covering %d beads", key, len(beads)))
 		switch status {
 		case "ok":
