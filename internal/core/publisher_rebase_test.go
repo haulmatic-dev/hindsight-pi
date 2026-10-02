@@ -196,6 +196,10 @@ func TestPublishBranchViaPR_RebaseExhaustedEscalates(t *testing.T) {
 	origPush := prMergeBranchPush
 	origCreate := autoPRGhCreate
 	origMerge := autoPRGhMerge
+	origIdentity := publishIdentityResolver
+	publishIdentityResolver = func(string) (PublishIdentity, error) {
+		return PublishIdentity{Owner: "t", Token: "T", Source: "test"}, nil
+	}
 	prMergeBranchPush = func(repoPath, localRef, ref, token string) error { return nil }
 	autoPRGhCreate = func(repoPath, base, head, title, body, token string) (string, error) {
 		return "https://example/pr/3", nil
@@ -207,6 +211,7 @@ func TestPublishBranchViaPR_RebaseExhaustedEscalates(t *testing.T) {
 		prMergeBranchPush = origPush
 		autoPRGhCreate = origCreate
 		autoPRGhMerge = origMerge
+		publishIdentityResolver = origIdentity
 	})
 
 	_, err := PublishBranchViaPR("/tmp/proj", "main", "hydra/wt-abc", "dogfood/x", "title", "")

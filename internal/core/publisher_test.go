@@ -177,6 +177,14 @@ func installAutoPRFake(f *autoPRFakeExec) func() {
 	origPrPush := prMergeGitPush
 	origMerge := autoPRGhMerge
 	origList := autoPRGhListOpen
+	// CI runners have no daemon credential; stub the publish-identity
+	// resolver so auto-PR paths don't fail closed on identity resolution
+	// (2026-10-02, PR #85 CI). Tests overriding identity restore via the
+	// returned closure.
+	origIdentity := publishIdentityResolver
+	publishIdentityResolver = func(string) (PublishIdentity, error) {
+		return PublishIdentity{Owner: "test", Token: "test-token", Source: "test-stub"}, nil
+	}
 	autoPRGitPush = func(repoPath, ref, token string) error {
 		f.pushes = append(f.pushes, autoPRPushArgs{repoPath, ref, token})
 		return nil
@@ -214,6 +222,7 @@ func installAutoPRFake(f *autoPRFakeExec) func() {
 		prMergeGitPush = origPrPush
 		autoPRGhMerge = origMerge
 		autoPRGhListOpen = origList
+		publishIdentityResolver = origIdentity
 	}
 }
 
@@ -222,6 +231,15 @@ func installAutoPRFake(f *autoPRFakeExec) func() {
 func installPRMergeFake(f *autoPRFakeExec) func() {
 	origPush := prMergeGitPush
 	origMerge := autoPRGhMerge
+	origList := autoPRGhListOpen
+	// CI runners have no daemon credential; install a stub publish-identity
+	// resolver so PR-merge paths don't fail closed on identity resolution
+	// (2026-10-02, PR #85 CI). Tests overriding identity restore via the
+	// returned closure.
+	origIdentity := publishIdentityResolver
+	publishIdentityResolver = func(string) (PublishIdentity, error) {
+		return PublishIdentity{Owner: "test", Token: "test-token", Source: "test-stub"}, nil
+	}
 	prMergeGitPush = func(repoPath, ref, token string) error {
 		f.prPushes = append(f.prPushes, autoPRPushArgs{repoPath, ref, token})
 		return nil
@@ -233,6 +251,8 @@ func installPRMergeFake(f *autoPRFakeExec) func() {
 	return func() {
 		prMergeGitPush = origPush
 		autoPRGhMerge = origMerge
+		autoPRGhListOpen = origList
+		publishIdentityResolver = origIdentity
 	}
 }
 
