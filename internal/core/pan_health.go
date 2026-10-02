@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -97,7 +98,15 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 				case types.StatusOpen:
 					ph.Open++
 				case types.StatusInProgress:
-					ph.InProgress++
+					// Pan-filed meta beads are filed for human review and never
+					// get a worker; counting them as in_progress inflates
+					// inprog vs workers, which Pan infers as "orphaned claims"
+					// — and each judgment files another pan-filed twin about
+					// the phantom anomaly (self-referential loop, 2026-10-02:
+					// 8 twins on one day). Excluded from the inprog count.
+					if !slices.Contains(b.Labels, pan.FiledLabel) {
+						ph.InProgress++
+					}
 				}
 				for _, d := range b.Dependencies {
 					depsByID[id] = append(depsByID[id], d.String())
@@ -414,11 +423,11 @@ func (o *Overseer) filePanBead(projectPath, beadID, title, description string) e
 	}
 	if o.eventSink != nil {
 		o.eventSink.EmitRepo(projectPath, Event{
-			Type:   "pan_bead_filed",
+			Type:    "pan_bead_filed",
 			Project: filepath.Base(projectPath),
-			Bead:   string(newID),
-			Reason: "pan_filed",
-			Fields: map[string]any{"source": beadID},
+			Bead:    string(newID),
+			Reason:  "pan_filed",
+			Fields:  map[string]any{"source": beadID},
 		})
 	}
 	log.Printf("[PanRepair] file-bead %s: filed %s in %s", beadID, newID, projectPath)

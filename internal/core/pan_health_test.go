@@ -129,6 +129,27 @@ func TestCollectHealthDigestNoWorkersNoAnomaly(t *testing.T) {
 	}
 }
 
+func TestCollectHealthDigestPanFiledNotCountedInProgress(t *testing.T) {
+	tw := setupTestOverseer(t)
+	o := tw.overseer
+	// Pan-filed meta beads sit in_progress forever (no worker ever claims
+	// them); they must not inflate inprog — Pan infers "orphaned claims"
+	// from inprog > workers and files another twin about the phantom.
+	tw.mockBeads.beads["test-project-aaa"] = types.Bead{
+		ID: "test-project-aaa", Project: "test-project", Status: types.StatusInProgress,
+		Type: "task", Labels: []string{pan.FiledLabel}}
+	tw.mockBeads.beads["test-project-bbb"] = types.Bead{
+		ID: "test-project-bbb", Project: "test-project", Status: types.StatusInProgress, Type: "implement"}
+
+	d := o.collectHealthDigest()
+	if len(d.Projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(d.Projects))
+	}
+	if got := d.Projects[0].InProgress; got != 1 {
+		t.Errorf("InProgress = %d, want 1 (pan-filed meta bead excluded)", got)
+	}
+}
+
 func TestParkCampaignRepair(t *testing.T) {
 	tw := setupTestOverseer(t)
 	o := tw.overseer
