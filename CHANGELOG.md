@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Changed
+- runner.mjs (task-breakdown): refactored single-bead DIRECT_TASK synthesis — unified the duplicated subtask-creation emit/log/idMapping triple into `_recordSubtaskEmission`, extracted `DEFAULT_CONFIG_TARGET_FILES` (single source for wildcard config-task files in metadata and instruction text), removed orphan JSDoc. Behavior unchanged; all three task-breakdown suites pass.
+
 - create-prd §3.1a refactored for readability: removed the duplicated inline list of the five System Type enum values (now stated once at level 3 with a cross-reference from level 1) and tightened the classification-precedence prose; wording-only, contract tests 3/3 unchanged-green. *Authored by a Hydra dogfood run.*
 - task-breakdown fixture-suite validation gap resolved without code change: verify-first confirmed test-pattern-routing.mjs + all 8 fixtures exist and pass 8/8 (routing/preflight/crosscutting rc=0); stale "no test files" flag documented in test-6lmz handoff. *Authored by a Hydra dogfood run.*
 - create-prd producer contract pinned in code (internal/prdcontract): new §3.1a in .agents/skills/create-prd/SKILL.md documents the task-pattern classification precedence (explicit Type prefix > target-file shape > System Type enum > tdd_chain fallback) and the five-value System Type enum; 3 contract tests fail on doc drift. RED test file's non-constant `const` + missing-return fixed so it compiles. *Authored by a Hydra dogfood run.*
