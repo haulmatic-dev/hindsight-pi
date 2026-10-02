@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Fixed
+- lint-gate: project-level Biome lint passes clean (5 files, 0 errors, 0 warnings); formatter applied safe fixes to 3 files (biome.json array compacted, trailing-comma/line-wrap fixes in the systematic-debugging TS example and its internal/integration copy). *Authored by a Hydra dogfood run.*
+
 ### Documentation
 - test-6yzo: fixture-suite validation round 1 verify-first close — all 8 shape fixtures route correctly and every task-breakdown suite (routing 8/8, preflight 10/10 ×3, crosscutting, shape-classification) passes rc=0; no code change. First-run failures were a concurrent-merge file-mutation race (30a2ac8 landed mid-run), documented in docs/hydra/handoff/test-6yzo.md. *Authored by a Hydra dogfood run.*
 
