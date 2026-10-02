@@ -12,6 +12,7 @@
 - Escalated-digest exclusion (7548196) already landed via PR #144.
 - Push to origin: `* [new branch] dogfood/orphan-digest-escalated` — VERIFIED.
 - `gh pr create` → https://github.com/haulmatic-devteams/hydra/pull/147 — VERIFIED (daemon token).
+- `gh pr view 147` — state=MERGED, mergedAt=2026-10-02T08:52:06Z, mergeCommit=174da6a; ancestor of origin/development (LANDED_ON_DEV). PASS.
 
 ## Open edges for the next phase
 - PR #147 awaits human/admin merge (established `gh pr merge --admin` precedent). Publishing should also reset its base to development (publish-hydra is not a valid PR base).
