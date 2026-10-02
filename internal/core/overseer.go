@@ -918,6 +918,7 @@ var benignPublishReasons = map[string]bool{
 	"up to date":          true,
 	"no branch":           true,
 	"no worktree manager": true,
+	"already integrated":  true, // branch tip already merged into origin base — no PR to make (hydra-ybhh)
 }
 
 // publishOneProject runs PublishRepo for a single project and tracks the
