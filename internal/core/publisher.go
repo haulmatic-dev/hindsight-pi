@@ -36,6 +36,38 @@ func branchAheadOfRemote(repoPath, branch string) bool {
 	return n > 0
 }
 
+// branchMergedIntoBase reports whether the working branch's tip is already
+// an ancestor of origin/<integration base> — i.e. the branch's work is fully
+// merged upstream. Publishing it again can only produce a no-op PR (gh: "No
+// commits between <base> and <head>") or, once the merged remote branch is
+// pruned, the blank-sha GraphQL failure — the hydra-ybhh publish loop
+// (2026-10-02: working branch dogfood/orphan-digest-escalated tip already
+// merged via PR #144, remote branch deleted, publish retried every tick).
+// Fail-open: resolution or git errors return false so the normal publish
+// path runs.
+func branchMergedIntoBase(projectPath, branch string) bool {
+	if projectPath == "" || branch == "" {
+		return false
+	}
+	base := originDefaultBranch(projectPath)
+	if base == "" || base == branch {
+		return false
+	}
+	// Ensure origin/<base> actually exists before trusting merge-base.
+	if _, err := gitOut(projectPath, "rev-parse", "--verify", "origin/"+base); err != nil {
+		return false
+	}
+	cmd := exec.Command("git", "-C", projectPath, "merge-base", "--is-ancestor", branch, "origin/"+base)
+	if err := cmd.Run(); err != nil {
+		// exit 1 = not an ancestor (expected); anything else is a git error.
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return false
+		}
+		return false
+	}
+	return true
+}
+
 // PublishRepo consolidates a project's completed work onto its working branch
 // and pushes it to origin using the owner's token. It:
 //  1. reconciles orphaned (completed, non-active) worktree branches into the
@@ -64,6 +96,16 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 	if !branchAheadOfRemote(projectPath, branch) {
 		log.Printf("[Publish] %s: branch %s matches origin, nothing to publish", projectPath, branch)
 		return false, "up to date"
+	}
+	// 2b. Skip when the branch tip is already merged into the integration
+	// base — re-publishing can only produce a no-op PR (hydra-ybhh loop).
+	if branchMergedIntoBase(projectPath, branch) {
+		log.Printf("[Publish] %s: branch %s tip already merged into origin base — skipping publish", projectPath, branch)
+		publishEvents.EmitRepo(projectPath, Event{Type: "publish_push_skipped_merged", Project: filepath.Base(projectPath),
+			Detail: "branch " + branch + " tip already merged into origin integration base — no publish needed",
+			Fields: map[string]any{"branch": branch, "project_path": projectPath}})
+		AppendActivity(projectPath, "publish", "skipped publish: branch tip already merged into origin base")
+		return false, "already integrated"
 	}
 	publishEvents.EmitRepo(projectPath, Event{Type: "publish_push_attempted", Project: filepath.Base(projectPath),
 		Detail: "publisher attempting to land " + branch + " on origin",
