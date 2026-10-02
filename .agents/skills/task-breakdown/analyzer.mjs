@@ -10,6 +10,7 @@
  */
 export const TaskPattern = {
   TDD_CHAIN: 'tdd_chain',               // FRs: RED→GREEN→REFACTOR→SYNTAX
+  DIRECT_TASK: 'direct_task',           // Shape-pinned FRs (TEST/REF/SPIKE/AUDIT/DEL headers, markdown/test-only targets)
   VERIFICATION_GATE: 'verification_gate', // NFRs: coverage, quality, perf (no worktree)
   AGGREGATION_TASK: 'aggregation_task',   // USs: integrate FRs
   CONFIGURATION_TASK: 'configuration_task', // Config: module system, setup
@@ -120,6 +121,10 @@ export function analyzePRDDeterministic(prdContent) {
     featureName = titleMatch[1].trim();
   }
 
+  // System type from the §0 Scope Profile (`- **System Type:** cli-tool ...`).
+  const systemTypeMatch = prdContent.match(/^\s*[-*]?\s*\*{0,2}System Type:?\*{0,2}\s+([a-z][a-z-]*)/im);
+  const systemType = systemTypeMatch ? systemTypeMatch[1].toLowerCase() : null;
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmedLine = line.trim();
@@ -127,7 +132,7 @@ export function analyzePRDDeterministic(prdContent) {
     // Match requirement headers: ### FR-*, ### NFR-*, ### US-*, etc.
     // NFR IDs may be numeric (NFR-003) or alphanumeric (NFR-SYS)
     const reqMatch = trimmedLine.match(
-      /^#{3,4}\s+(FR-?\d+[a-z]?|NFR-[A-Z0-9]+|US-?\d+|US-INT-\d+|SETUP-?\d+|Doc-?\d+|QA-?\d+):?\s*(.+)$/i,
+      /^#{3,4}\s+(FR-?\d+[a-z]?|NFR-[A-Z0-9]+|US-?\d+|US-INT-\d+|SETUP-?\d+|Doc-?\d+|QA-?\d+|TEST-?\d+|REF-?\d+|SPIKE-?\d+|AUDIT-?\d+|DEL-?\d+|ANALYSIS-?\d+):?\s*(.+)$/i,
     );
 
     if (reqMatch) {
@@ -405,12 +410,140 @@ export function analyzePRDDeterministic(prdContent) {
 
   return {
     featureName,
+    systemType,
     requirements,
     dependencies,
     semanticGraph,
     hasNFRs: requirements.some((r) => r.type === 'NFR'),
     hasUserStories: requirements.some((r) => r.type === 'User Story'),
     globalContext,
+  };
+}
+
+/**
+ * Deliverable-shape routes for pattern-aware task routing.
+ * Exactly 8 members — pinned by test-pattern-routing.mjs.
+ */
+export const TaskRoute = {
+  ANALYSIS: 'analysis',
+  TEST_AUTHORING: 'test_authoring',
+  REFACTOR: 'refactor',
+  SPIKE: 'spike',
+  DELETION: 'deletion',
+  AUDIT: 'audit',
+  LEGACY_NO_SCOPE: 'legacy_no_scope',
+  NORMAL_CODE: 'normal_code',
+};
+
+// `**Type:**` marker value -> TaskRoute value
+const TYPE_MARKER_ROUTES = {
+  analysis: TaskRoute.ANALYSIS,
+  audit: TaskRoute.AUDIT,
+  test: TaskRoute.TEST_AUTHORING,
+  refactor: TaskRoute.REFACTOR,
+  spike: TaskRoute.SPIKE,
+  deletion: TaskRoute.DELETION,
+};
+
+// Requirement header prefixes (TEST-001, REF-1, SPIKE-2, AUDIT-1, DEL-3, ...)
+// that imply a deliverable shape regardless of target files.
+const HEADER_PREFIX_ROUTES = {
+  test: TaskRoute.TEST_AUTHORING,
+  ref: TaskRoute.REFACTOR,
+  refactor: TaskRoute.REFACTOR,
+  spike: TaskRoute.SPIKE,
+  audit: TaskRoute.AUDIT,
+  del: TaskRoute.DELETION,
+  deletion: TaskRoute.DELETION,
+  analysis: TaskRoute.ANALYSIS,
+};
+
+function routeForTypeMarker(value) {
+  return TYPE_MARKER_ROUTES[String(value || '').toLowerCase().trim()] || null;
+}
+
+/**
+ * Scan lines for explicit shape signals, in precedence order:
+ * 1. `**Type:**` markers, 2. shape-bearing requirement header prefixes
+ * (TEST-001, REF-1, SPIKE-2, AUDIT-1, DEL-3, ...).
+ *
+ * @param {string[]} lines - Content split into lines
+ * @returns {{route: string, reason: string}[]} Signals, in discovery order
+ */
+function scanShapeSignals(lines) {
+  const typeMarkerRe = /^\s*\*{0,2}type:?\*{0,2}\s+([A-Za-z_-]+)/i;
+  const headerPrefixRe = /^#{3,4}\s+([A-Za-z]+)-?\d*\s*:/;
+  const signals = [];
+
+  const push = (route, reason) => {
+    if (route) signals.push({ route, reason });
+  };
+
+  for (const line of lines) {
+    const typeMarker = line.match(typeMarkerRe);
+    if (typeMarker) {
+      push(routeForTypeMarker(typeMarker[1]), `type marker '${typeMarker[1].toLowerCase()}'`);
+    }
+
+    const headerPrefix = line.match(headerPrefixRe);
+    if (headerPrefix) {
+      push(HEADER_PREFIX_ROUTES[headerPrefix[1].toLowerCase()], `header prefix '${headerPrefix[1]}'`);
+    }
+  }
+
+  return signals;
+}
+
+/**
+ * Route a task/PRD markdown snippet to its deliverable shape.
+ *
+ * Reuses analyzePRDDeterministic's requirement model (files, types, ids) —
+ * this is a routing decision layer, not a second parser. Type markers
+ * (`**Type:** ...`) and shape-bearing header prefixes (TEST-001, SPIKE-2, ...)
+ * take precedence; plain FR requirements fall back to target-file heuristics.
+ *
+ * @param {string} content - Raw task/PRD markdown content
+ * @returns {{route: string, reason: string}} TaskRoute value + human reason
+ */
+export function routeTaskPattern(content) {
+  if (typeof content !== 'string' || content.trim() === '') {
+    return { route: TaskRoute.LEGACY_NO_SCOPE, reason: 'empty content treated as unscoped' };
+  }
+
+  const analysis = analyzePRDDeterministic(content);
+  const requirements = analysis.requirements || [];
+
+  // Explicit shape signals (type markers, header prefixes) take precedence.
+  const signals = scanShapeSignals(content.split('\n'));
+
+  // Audit precedence: any audit-shaped requirement routes the whole batch to audit.
+  const auditSignal = signals.find((s) => s.route === TaskRoute.AUDIT);
+  if (auditSignal) return auditSignal;
+
+  if (signals.length > 0) return signals[0];
+
+  // Plain requirements: target-file scope heuristics.
+  const scopedReqs = requirements.filter(
+    (r) => r.type === 'FR' || r.type === 'NFR' || r.type === 'User Story',
+  );
+  if (scopedReqs.length > 0) {
+    const unscoped = scopedReqs.every((r) => !r.files || r.files.length === 0);
+    if (unscoped) {
+      return {
+        route: TaskRoute.LEGACY_NO_SCOPE,
+        reason: `all ${scopedReqs.length} requirement(s) lack explicit target files`,
+      };
+    }
+    const scopedCount = scopedReqs.filter((r) => r.files.length > 0).length;
+    return {
+      route: TaskRoute.NORMAL_CODE,
+      reason: `requirement(s) carry explicit target files (${scopedCount} scoped)`,
+    };
+  }
+
+  return {
+    route: TaskRoute.LEGACY_NO_SCOPE,
+    reason: 'no requirements, type markers, or shape-bearing headers detected',
   };
 }
 
@@ -425,12 +558,18 @@ function classifyRequirement(req, allRequirements) {
 
   switch (req.type) {
     case 'FR':
-      // Functional requirements get TDD chains
+      // Functional requirements get TDD chains by default
       req.taskPattern = TaskPattern.TDD_CHAIN;
       req.needsWorktree = true;
       req.dependsOn = ['approvalGate'];
       req.dependencyType = DependencyType.BLOCKS;
-      
+
+      // Shape-aware override: deliverable shape pins the task to a direct task
+      // (no RED→GREEN→REFACTOR chain) when the requirement is shape-bearing.
+      if (isDirectTaskShape(req)) {
+        req.taskPattern = TaskPattern.DIRECT_TASK;
+      }
+
       // Check if this FR provides base for other FRs
       const dependentFRs = allRequirements.filter(r => 
         r.type === 'FR' && 
@@ -546,6 +685,30 @@ function classifyRequirement(req, allRequirements) {
       req.dependsOn = ['approvalGate'];
       req.dependencyType = DependencyType.BLOCKS;
   }
+}
+
+/**
+ * Direct-task shape for FRs: a shape-bearing header prefix (TEST-001,
+ * REF-1, SPIKE-2, AUDIT-1, DEL-3, ...) routes to direct_task regardless of
+ * target files; otherwise an FR whose targets are all documentation or all
+ * test files is itself a direct deliverable (no RED→GREEN→REFACTOR chain).
+ * Mixed code+markdown targets keep the default tdd_chain.
+ */
+function isDirectTaskShape(req) {
+  if (/^(TEST|REF|REFACTOR|SPIKE|AUDIT|DEL|DELETION|ANALYSIS)-?\d/i.test(req.originalId)) {
+    return true;
+  }
+  const files = req.files || [];
+  if (files.length === 0) return false;
+  return files.every(isMarkdownTarget) || files.every(isTestTarget);
+}
+
+function isMarkdownTarget(file) {
+  return /\.mdx?$/.test(file);
+}
+
+function isTestTarget(file) {
+  return /(^|[/\\])(tests?|__tests__)[/\\]|\.test\.|\.spec\./i.test(file);
 }
 
 /**
@@ -1253,20 +1416,20 @@ function validateFileOverlap(requirements) {
     }
   }
 
-  // Find files claimed by more than one FR. FRs that share a file are
-  // acceptable when the cross-cutting detector has serialized them: one FR
-  // depends on the other claimants for that file, so no merge conflict can
-  // occur. Only unserialized overlap is an error.
+  // Find files claimed by more than one FR
+  // Find files claimed by more than one FR. Cross-cutting FRs (validate/
+  // check/verify/audit/enforce/guard titles) are exempt: they consume the file
+  // AFTER the foundational FRs (detectCrossCuttingConcerns serializes them via
+  // dependency edges), so parallel worktree merge conflicts cannot occur.
+  const isCrossCutting = new Map(
+    requirements
+      .filter((r) => r.type === 'FR')
+      .map((r) => [r.originalId, /validat|check|verify|audit|enforce|guard/i.test(r.title)]),
+  );
   for (const [file, frIds] of fileToFRs) {
-    if (frIds.length < 2) continue;
-    const byId = new Map(requirements.map((r) => [r.originalId, r]));
-    const serialized = frIds.some((consumerId) => {
-      const req = byId.get(consumerId);
-      const deps = [...(req?.explicitDependsOn || []), ...(req?.dependsOn || [])];
-      return frIds.every((frId) => frId === consumerId || deps.includes(frId));
-    });
-    if (!serialized) {
-      errors.push(`  File "${file}" is targeted by multiple FRs: ${frIds.join(', ')}`);
+    const foundational = frIds.filter((id) => !isCrossCutting.get(id));
+    if (foundational.length > 1) {
+      errors.push(`  File "${file}" is targeted by multiple FRs: ${foundational.join(', ')}`);
     }
   }
 

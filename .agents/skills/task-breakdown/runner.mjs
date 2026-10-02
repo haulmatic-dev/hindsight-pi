@@ -617,7 +617,7 @@ export class TaskBreakdownRunner extends EventEmitter {
     }
 
     // Validate taskPattern is one of allowed values
-    const validPatterns = ['tdd_chain', 'verification_gate', 'aggregation_task', 'configuration_task', 'direct_task'];
+    const validPatterns = ['tdd_chain', 'direct_task', 'verification_gate', 'aggregation_task', 'configuration_task'];
     if (!validPatterns.includes(req.taskPattern)) {
       errors.push(`Invalid taskPattern: ${req.taskPattern}. Must be one of: ${validPatterns.join(', ')}`);
     }
@@ -873,10 +873,10 @@ export class TaskBreakdownRunner extends EventEmitter {
 
       const order = {
         'tdd_chain': 0,
-        'configuration_task': 1,
         'direct_task': 1,
-        'aggregation_task': 2,
-        'verification_gate': 3,
+        'configuration_task': 2,
+        'aggregation_task': 3,
+        'verification_gate': 4,
       };
       const patternDiff = (order[a.taskPattern] || 0) - (order[b.taskPattern] || 0);
       if (patternDiff !== 0) return patternDiff;
@@ -1135,8 +1135,20 @@ This gate runs after all implementation tasks complete.`,
         // Configuration tasks: RED depends on approval gate
         await this.createConfigurationTask(req, baseTask, null, state, ['approvalGate']);
       } else if (req.taskPattern === 'direct_task') {
-        // Direct tasks: exactly ONE bead, no TDD phase synthesis
-        await this.createDirectTask(req, baseTask, null, state, ['approvalGate']);
+        // Direct tasks: single bead, no RED→GREEN→REFACTOR chain; depends on
+        // explicit Depends On (mapped to SYNTAX ids) + P0 APPLY tasks.
+        let directDeps = ['approvalGate'];
+        if (req.explicitDependsOn && req.explicitDependsOn.length > 0) {
+          directDeps = req.explicitDependsOn.map(depId => {
+            const depReq = requirements.find(r => r.originalId === depId);
+            if (depReq) {
+              return `implement-${depReq.id.toLowerCase().replace(/[^a-z0-9]/g, '-')}-syntax`;
+            }
+            return null;
+          }).filter(Boolean);
+        }
+        directDeps = [...new Set([...directDeps, ...p0ApplyIds])];
+        await this.createConfigurationTask(req, baseTask, null, state, directDeps);
       } else {
         // Default: TDD_CHAIN for FRs
         // RED depends on approval gate or explicit Depends On + P0 APPLY tasks
