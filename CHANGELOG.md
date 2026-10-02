@@ -7,6 +7,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+- docs: PR #185 push-pending wedge resolved — admin-merged 2026-10-02T11:03:22Z (merge commit 5779fbf == origin/development tip), head branch dogfood/publish-hydra deleted; handoff task-iljz. *Authored by a Hydra dogfood run.*
+
 - docs: PR #178 push-pending wedge resolved — admin-merged 2026-10-02T10:33:34Z (merge commit 1041d93 == origin/development tip), head branch dogfood/publish-hydra deleted, local checkout fast-forwarded; handoff task-50xg landed via PR #179. *Authored by a Hydra dogfood run.*
 - docs: PR #165 publisher-wedge triage — PR #165 already MERGED (2026-10-02T09:44:27Z, merge commit == origin/development tip b13bfd2); work published, no human action needed; disk 45% (99% claim stale), watermark 85% not breached. *Authored by a Hydra dogfood run.*
 - docs: PR #173 publisher wedge triage (hydra-6u6e) — PR #173 already MERGED 2026-10-02T10:27:23Z, merge commit e8b4644 IS the origin/development tip; no human action needed; disk claim stale at 45% (watermark 85%); bead closed not_planned. *Authored by a Hydra dogfood run.*
