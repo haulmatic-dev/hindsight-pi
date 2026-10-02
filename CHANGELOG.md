@@ -6,6 +6,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+- Disk-watermark cleanup guard (hydra-i6we P0 campaign-anomaly proposal, part 2): when the fleet digest detects disk usage at or above the watermark (85% on `/`), the daemon now runs a conservative `systemd-tmpfiles --clean` pass (30s timeout, once per hour cooldown, no `rm` ever) instead of only reporting the anomaly — the previous advice-only behavior let br degrade to I/O error 28 if no operator noticed. Fail-open: cleanup failures log only and never block the digest; typed `disk_cleanup_run` event on each pass. Tests: `TestDiskCleanupGuard_*` (6). *Authored by a Hydra dogfood run.*
 - PR #82 human-merge bead (hydra-pnf9): verified PR #82 (feat/pi-rpc-wiring → development) already MERGED 2026-07-28, merge commit 3afb14c is an ancestor of origin/development; no active push-pending pseudo-bead in the live store. Bead closed as already-done with verification comment — no code change. *Authored by a Hydra dogfood run.*
 
 ### Fixed
