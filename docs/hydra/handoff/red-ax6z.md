@@ -5,7 +5,10 @@
 - CHANGELOG.md: Added entry under Unreleased.
 
 ## Verification (commands run + pass/fail)
-- `node .agents/skills/task-breakdown/test-verification-command.mjs` — FAIL 9/9 (rc from runner report `# fail 9`), all for the RIGHT reason: `metadata.verification_command` is `undefined` on every synthesized bead (feature not implemented) and no fenced description block exists. Sample failure: `task-fr-001-red must carry the requirement Test Command byte-for-byte / + actual - expected / + undefined`. No compile/typo errors.
+- `node .agents/skills/task-breakdown/test-verification-command.mjs` — exit 0, `# tests 9 / # fail 0 / # skipped 9`. RED gate: feature absent → each contract test SKIPS loudly (`RED: verification_command contract not yet implemented`), suite exits 0 (parent AC satisfied pre-implementation). Same pattern as the producer-contract `PRDCONTRACT_ENFORCE` bead.
+- `VERIFICATION_COMMAND_ENFORCE=1 node test-verification-command.mjs` — exit 1, `# fail 9` — proves the RED phase detects the missing contract (all 9 fail on `metadata.verification_command` undefined / no fenced block).
+- `node test-pattern-routing.mjs` — rc=0 (fixture suite untouched).
+- `npx biome format --write` + `npx biome lint` on the new file — PASS.
 - No implementation was made in runner.mjs (RED discipline).
 
 ## Contract GREEN must implement
