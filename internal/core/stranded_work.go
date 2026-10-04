@@ -126,27 +126,89 @@ func DetectStrandedWork(m *WorktreeManager, projectPath string, activeKeys map[s
 		}
 		units = append(units, unit)
 
-		if events != nil {
-			events.EmitRepo(projectPath, Event{
-				Type:    "worktree_stranded",
-				Project: unit.Project,
-				Bead:    key,
-				Reason:  "stranded",
-				Detail:  fmt.Sprintf("worktree branch %s is %d commit(s) ahead with no live worker or active chain", branch, ahead),
-				Fields: map[string]any{
-					"branch":  branch,
-					"ahead":   ahead,
-					"age_sec": age.Seconds(),
-				},
-			})
-		}
-		if found && beadsClient != nil {
-			if err := beadsClient.UpdateBeadLabels(projectPath, "", beadID, []string{strandedWorkLabel}); err != nil {
-				log.Printf("[StrandedWork] label %s for %s: %v", strandedWorkLabel, key, err)
-			}
+		emitStrandedEvent(events, projectPath, Event{
+			Type:    "worktree_stranded",
+			Project: unit.Project,
+			Bead:    key,
+			Reason:  "stranded",
+			Detail:  fmt.Sprintf("worktree branch %s is %d commit(s) ahead with no live worker or active chain", branch, ahead),
+			Fields: map[string]any{
+				"branch":  branch,
+				"ahead":   ahead,
+				"age_sec": age.Seconds(),
+			},
+		})
+		if found {
+			beadID, _ := types.ParseBeadID(key)
+			labelBead(projectPath, beadID, "", []string{strandedWorkLabel}, beadsClient, "")
 		}
 	}
 	return units
+}
+
+// worktreeKeyFromBranch derives the worktree key from a hydra/wt- branch name,
+// collapsing versioned keys (e.g. "abc-v2") back to their base key.
+func worktreeKeyFromBranch(branch string) string {
+	key := strings.TrimPrefix(branch, "hydra/wt-")
+	if base, versioned := splitVersionedKey(key); versioned {
+		return base
+	}
+	return key
+}
+
+// beadStateFor looks up the owning bead for a worktree key. It reports
+// found=false when the key is not a parseable bead ID, when the store lookup
+// fails, or when no beadsClient is available — all of which the detector
+// treats as "unknown owner" (a strandable state).
+func beadStateFor(projectPath, key string, beadsClient BeadsClient) (found bool, status types.BeadStatus, labels []string) {
+	beadID, err := types.ParseBeadID(key)
+	if err != nil || beadsClient == nil {
+		return false, types.BeadStatus(""), nil
+	}
+	b, err := beadsClient.GetBead(projectPath, "", beadID)
+	if err != nil || b == nil {
+		return false, types.BeadStatus(""), nil
+	}
+	return true, b.Status, b.Labels
+}
+
+// beadIsResumable reports whether an open bead is still live enough that a
+// worker could resume it. Quarantined conflicts and verification failures
+// mark a bead as no longer resumable (FR-021) even though it is not terminal.
+func beadIsResumable(status types.BeadStatus, labels []string) bool {
+	return !status.IsTerminal() &&
+		!hasAnyLabel(labels, strandedConflictLabel, integrationUnverifiedLabel)
+}
+
+// hasAnyLabel reports whether labels contains any of the wanted labels.
+func hasAnyLabel(labels []string, wants ...string) bool {
+	for _, want := range wants {
+		if hasLabel(labels, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// emitStrandedEvent is the fail-open event emission seam for the stranded
+// subsystem: a nil sink (or any caller) simply skips emission.
+func emitStrandedEvent(events *EventSink, projectPath string, e Event) {
+	if events == nil {
+		return
+	}
+	events.EmitRepo(projectPath, e)
+}
+
+// labelBead appends labels to a bead via the beads CLI, logging (and never
+// propagating) failures — labeling is dedup/observability metadata, not a
+// gating operation. An empty repo name resolves the project store.
+func labelBead(projectPath string, id types.BeadID, repo string, labels []string, beadsClient BeadsClient, logContext string) {
+	if beadsClient == nil {
+		return
+	}
+	if err := beadsClient.UpdateBeadLabels(projectPath, repo, id, labels); err != nil {
+		log.Printf("[StrandedWork] %slabel %v for %s: %v", logContext, labels, id, err)
+	}
 }
 
 func chainActiveForKey(d *ChainCompletionDetector, key string) bool {
@@ -215,36 +277,28 @@ func IntegrateStrandedRepair(projectPath, key string, wm strandedWorktreeManager
 
 	err := wm.IntegrateBranchAndRemove(projectPath, key, branch)
 	if err == nil {
-		if events != nil {
-			events.EmitRepo(projectPath, Event{
-				Type:    "stranded_integrated",
-				Project: filepath.Base(projectPath),
-				Bead:    key,
-				Reason:  "success",
-				Detail:  fmt.Sprintf("stranded branch %s integrated and removed", branch),
-				Fields:  map[string]any{"branch": branch},
-			})
-		}
+		emitStrandedEvent(events, projectPath, Event{
+			Type:    "stranded_integrated",
+			Project: filepath.Base(projectPath),
+			Bead:    key,
+			Reason:  "success",
+			Detail:  fmt.Sprintf("stranded branch %s integrated and removed", branch),
+			Fields:  map[string]any{"branch": branch},
+		})
 		_ = removeStrandedWorkLabel(projectPath, id, beadsClient)
 		return nil
 	}
 
 	if strings.Contains(err.Error(), "merge verification failed") {
-		if beadsClient != nil {
-			if lerr := beadsClient.UpdateBeadLabels(projectPath, id.Repo(), id, []string{integrationUnverifiedLabel}); lerr != nil {
-				log.Printf("[PanRepair] integrate-stranded: label integration-unverified for %s: %v", key, lerr)
-			}
-		}
-		if events != nil {
-			events.EmitRepo(projectPath, Event{
-				Type:    "stranded_integrated",
-				Project: filepath.Base(projectPath),
-				Bead:    key,
-				Reason:  "verification_failed",
-				Detail:  fmt.Sprintf("stranded branch %s merged but verification failed: %v", branch, err),
-				Fields:  map[string]any{"branch": branch, "error": err.Error()},
-			})
-		}
+		labelBead(projectPath, id, id.Repo(), []string{integrationUnverifiedLabel}, beadsClient, "[PanRepair] integrate-stranded: ")
+		emitStrandedEvent(events, projectPath, Event{
+			Type:    "stranded_integrated",
+			Project: filepath.Base(projectPath),
+			Bead:    key,
+			Reason:  "verification_failed",
+			Detail:  fmt.Sprintf("stranded branch %s merged but verification failed: %v", branch, err),
+			Fields:  map[string]any{"branch": branch, "error": err.Error()},
+		})
 		return err
 	}
 
@@ -264,27 +318,21 @@ func IntegrateStrandedRepair(projectPath, key string, wm strandedWorktreeManager
 	if qerr != nil {
 		return fmt.Errorf("integrate-stranded: quarantine %s after conflict: %w", branch, qerr)
 	}
-	if beadsClient != nil {
-		if lerr := beadsClient.UpdateBeadLabels(projectPath, id.Repo(), id, []string{strandedConflictLabel}); lerr != nil {
-			log.Printf("[PanRepair] integrate-stranded: label stranded-conflict for %s: %v", key, lerr)
-		}
+	labelBead(projectPath, id, id.Repo(), []string{strandedConflictLabel}, beadsClient, "[PanRepair] integrate-stranded: ")
+	detail := fmt.Sprintf("stranded branch %s quarantined to %s due to merge conflict", branch, qb)
+	fields := map[string]any{"branch": branch, "quarantine_branch": qb}
+	if merr == nil && manifestPath != "" {
+		detail += fmt.Sprintf("; conflict manifest: %s", manifestPath)
+		fields["conflict_manifest"] = manifestPath
 	}
-	if events != nil {
-		detail := fmt.Sprintf("stranded branch %s quarantined to %s due to merge conflict", branch, qb)
-		fields := map[string]any{"branch": branch, "quarantine_branch": qb}
-		if merr == nil && manifestPath != "" {
-			detail += fmt.Sprintf("; conflict manifest: %s", manifestPath)
-			fields["conflict_manifest"] = manifestPath
-		}
-		events.EmitRepo(projectPath, Event{
-			Type:    "stranded_conflict",
-			Project: filepath.Base(projectPath),
-			Bead:    key,
-			Reason:  "merge_conflict",
-			Detail:  detail,
-			Fields:  fields,
-		})
-	}
+	emitStrandedEvent(events, projectPath, Event{
+		Type:    "stranded_conflict",
+		Project: filepath.Base(projectPath),
+		Bead:    key,
+		Reason:  "merge_conflict",
+		Detail:  detail,
+		Fields:  fields,
+	})
 	return nil
 }
 
