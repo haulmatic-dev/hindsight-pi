@@ -20,6 +20,10 @@ import (
 // quarantine branch, dependency IDs).
 const closeGateRejectionEvent = "close_gate_rejected"
 
+// closeDepOpenEvent is emitted when a bead is closed while dependencies are
+// open: hard rejection for chain members, warn-only for singletons.
+const closeDepOpenEvent = "close_dep_open"
+
 // runCloseHardGates runs all close-time hard gates. A nil error means every
 // gate passed (or failed open) and the close may proceed.
 func (c *BeadCloser) runCloseHardGates(bead *types.Bead, projectPath, repoName, worktreePath string) error {
@@ -35,16 +39,22 @@ func (c *BeadCloser) runCloseHardGates(bead *types.Bead, projectPath, repoName, 
 	return c.gateDependencyOrder(bead, projectPath, repoName)
 }
 
-// rejectViaGate records the gate evidence, emits the typed rejection event,
-// and runs the shared rejectClose path (reopen / attempt cap / escalate).
-func (c *BeadCloser) rejectViaGate(bead *types.Bead, projectPath, repoName, reason, evidence string) error {
+// emitGateEvent emits a typed close-gate event with the bead/project/repo
+// context filled in.
+func (c *BeadCloser) emitGateEvent(eventType string, bead *types.Bead, projectPath, repoName, reason, detail string) {
 	c.events.EmitRepo(projectPath, Event{
-		Type:    closeGateRejectionEvent,
+		Type:    eventType,
 		Project: repoName,
 		Bead:    string(bead.ID),
 		Reason:  reason,
-		Detail:  evidence,
+		Detail:  detail,
 	})
+}
+
+// rejectViaGate records the gate evidence, emits the typed rejection event,
+// and runs the shared rejectClose path (reopen / attempt cap / escalate).
+func (c *BeadCloser) rejectViaGate(bead *types.Bead, projectPath, repoName, reason, evidence string) error {
+	c.emitGateEvent(closeGateRejectionEvent, bead, projectPath, repoName, reason, evidence)
 	return c.rejectClose(bead, projectPath, repoName, reason)
 }
 
@@ -88,13 +98,8 @@ func extractVerificationCommand(description string) string {
 func (c *BeadCloser) gateExecutableAcceptance(bead *types.Bead, projectPath, repoName, worktreePath string) error {
 	cmdStr := extractVerificationCommand(bead.Description)
 	if cmdStr == "" {
-		c.events.EmitRepo(projectPath, Event{
-			Type:    "verification_command_missing",
-			Project: repoName,
-			Bead:    string(bead.ID),
-			Reason:  "fail-open",
-			Detail:  fmt.Sprintf("bead %s declares no verification command; acceptance gate fails open (legacy bead)", bead.ID),
-		})
+		c.emitGateEvent("verification_command_missing", bead, projectPath, repoName, "fail-open",
+			fmt.Sprintf("bead %s declares no verification command; acceptance gate fails open (legacy bead)", bead.ID))
 		return nil
 	}
 	dir := worktreePath
@@ -169,23 +174,12 @@ func (c *BeadCloser) gateDependencyOrder(bead *types.Bead, projectPath, repoName
 		return nil
 	}
 	evidence := fmt.Sprintf("bead %s has open dependencies: %s", bead.ID, strings.Join(openDeps, ", "))
-	if isChainTitle(bead.Title) {
-		c.events.EmitRepo(projectPath, Event{
-			Type:    "close_dep_open",
-			Project: repoName,
-			Bead:    string(bead.ID),
-			Reason:  "dep-open",
-			Detail:  evidence,
-		})
-		return c.rejectClose(bead, projectPath, repoName, "dep-open")
+	if !isChainTitle(bead.Title) {
+		// Singleton: warn-only.
+		c.emitGateEvent(closeDepOpenEvent, bead, projectPath, repoName, "warn",
+			"warn: "+evidence+" (singleton, closing anyway)")
+		return nil
 	}
-	// Singleton: warn-only.
-	c.events.EmitRepo(projectPath, Event{
-		Type:    "close_dep_open",
-		Project: repoName,
-		Bead:    string(bead.ID),
-		Reason:  "warn",
-		Detail:  "warn: " + evidence + " (singleton, closing anyway)",
-	})
-	return nil
+	c.emitGateEvent(closeDepOpenEvent, bead, projectPath, repoName, "dep-open", evidence)
+	return c.rejectClose(bead, projectPath, repoName, "dep-open")
 }

@@ -7,6 +7,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 ### Changed
+- Refactored `internal/core/bead_closer_hard_gates.go` — three duplicated `events.EmitRepo` blocks unified into a single `emitGateEvent` helper, `close_dep_open` promoted to a named constant, dependency-order gate restructured singleton-first for readability. Behavior unchanged; all hard-gate + close-path tests pass.
 - Integration sprint (human triage): merged the four implemented acceptance-postclose strands from their dogfood worktree branches to development — close-time hard gates FR-002 (b9xf), Verification Command contract (q98z), sandboxed verification runner (mmdx), stranded-work detector (5zcl). Full Go suite green (26 packages, 1308 tests in internal/core). RED-only postclose-sweep suite (ewe3) deliberately excluded until GREEN (rxi6) lands — failing tests do not ship. Stale beads uqrw/tf88/thtm closed as superseded-by-merge; 8 zombie auto-fix Fix: beads cancelled.
 ### Added
 - RED-phase test suite `internal/core/bead_closer_hard_gates_test.go`: pins the three FR-002 close-time hard gates (executable acceptance with verbatim-output rejection, quarantine contradiction, dependency-order warn-only singletons) plus unchanged VerifiedClose round/escalation semantics. All 10 tests fail at RED with `runCloseHardGates undefined` — the GREEN bead implements the gate entry point.
