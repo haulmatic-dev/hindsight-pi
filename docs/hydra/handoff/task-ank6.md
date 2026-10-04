@@ -9,6 +9,7 @@
 - `go test ./internal/core/ -run 'TestCloseGate|TestQuarantineClose|TestCloseDep|TestVerifiedClose_HardGate' -count=1` — PASS (both before and after edits).
 - `go test ./internal/core/ -run 'TestClose|TestBeadCloser|TestVerifiedClose|TestTerminalGuard' -count=1` — PASS (close-path regression set).
 - `gofmt -l internal/core/bead_closer_hard_gates.go` — clean. `go vet ./internal/core/` — clean.
+- Benchmarks (scope-gate close-path benches, only ones existing in package): `go test ./internal/core/ -run XXX -bench 'BenchmarkScopeViolations|BenchmarkTargetlessWarningPaths'` — PASS, BenchmarkScopeViolations 1113 ns/op, BenchmarkTargetlessWarningPaths 321.8 ns/op. No close-gate benchmarks exist; none added (no hot loop in gates).
 
 ## Open edges for the next phase
 - BUG (recorded, not fixed): hard gate 1 should execute the verification command with `cmd.Dir = dir` (worktreePath fallback projectPath); currently runs in daemon cwd. GREEN/fix bead should add a test pinning cwd (e.g. command `pwd`) and set Dir.

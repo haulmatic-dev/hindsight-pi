@@ -1804,9 +1804,7 @@ ${req.description}`;
     const testCmdLine = testCommand ? '\n- Run the exact test command: ' + testCommand + ' and confirm exit code 0' : '';
     const buildCmdLine = buildCommand ? '\n- Run the exact build command: ' + buildCommand + ' and confirm exit code 0' : '';
 
-    // Verification Command contract: propagate to every synthesized phase bead.
-    const verificationCommand = this.buildVerificationCommand(testCommand, buildCommand);
-    const verificationBlock = this.verificationCommandBlock(verificationCommand);
+    // Verification Command contract: propagated to every phase bead below.
 
     const tasks = [
       {
@@ -1922,8 +1920,7 @@ ${req.description}`;
     });
 
     for (const sub of tasks) {
-      sub.metadata.verification_command = verificationCommand;
-      sub.description += verificationBlock;
+      this.applyVerificationContract(sub, testCommand, buildCommand);
     }
 
     return tasks;
@@ -2301,8 +2298,6 @@ Aggregated FRs: ${(req.dependsOn || []).join(', ')}`,
     const acceptanceLine = this.getDirectTaskAcceptanceLine(req);
     const testCommand = (req.testCommand || '').trim();
     const buildCommand = (req.buildCommand || '').trim();
-    const verificationCommand = this.buildVerificationCommand(testCommand, buildCommand);
-    const verificationBlock = this.verificationCommandBlock(verificationCommand);
 
     let instructions = `## Direct Task
 
@@ -2333,10 +2328,9 @@ Acceptance: ${acceptanceLine}.`;
         files: req.files || [],
         parent_criteria: req.acceptanceCriteria || [],
         acceptance_line: acceptanceLine,
-        verification_command: verificationCommand,
       },
     };
-    directTask.description += verificationBlock;
+    this.applyVerificationContract(directTask, testCommand, buildCommand);
 
     const blockers = redDeps.map((depLocalId) => {
       const realId = idMapping[depLocalId];
@@ -2448,10 +2442,7 @@ Then VALIDATE the configuration in the same bead (syntax gate fused into apply):
     };
 
     // Verification Command contract (Test Command when present, Build Command + wrapper otherwise)
-    const verificationCommand = this.buildVerificationCommand(req.testCommand, req.buildCommand || parentTask.metadata?.build_command);
-    const verificationBlock = this.verificationCommandBlock(verificationCommand);
-    applyTask.metadata.verification_command = verificationCommand;
-    applyTask.description += verificationBlock;
+    this.applyVerificationContract(applyTask, req.testCommand, req.buildCommand || parentTask.metadata?.build_command);
 
     const applyBlockers = redDeps.map(localId => idMapping[localId]).filter(Boolean);
     const applyId = this.executor.createTask(applyTask, applyBlockers);
