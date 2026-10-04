@@ -128,7 +128,44 @@ check('QA parses as QA', typeOf('QA-001') === 'QA');
 check('legacy FR without targets stays tdd_chain', fr(legacy, 'FR-001').taskPattern === TaskPattern.TDD_CHAIN);
 check('legacy NFR stays verification_gate', fr(legacy, 'NFR-001').taskPattern === TaskPattern.VERIFICATION_GATE);
 
-console.log(`\nShape classification: ${11 + Object.keys(headerRoutes).length} assertions`);
+// --- System Type fallback: docs-tree deliverables in cli-tool/analysis/docs campaigns ----------
+const docsTreeCliToolPRD = `# PRD: Tool
+## §0. Scope Profile
+- **System Type:** cli-tool (analysis/documentation deliverable)
+### FR-000: Scaffolding
+**Target Files:** \`docs/reviews/rubric.md\`, \`docs/reviews/verify-citations.sh\`
+**Acceptance Criteria:**
+- verifier exits 0
+### FR-001: Report A
+**Target Files:** \`docs/reviews/a.md\`
+**Acceptance Criteria:**
+- report written
+`;
+const docsTree = analyzePRDDeterministic(docsTreeCliToolPRD);
+check('cli-tool PRD: docs-tree scaffolding (md + verifier .sh) → direct_task', fr(docsTree, 'FR-000').taskPattern === TaskPattern.DIRECT_TASK);
+check('cli-tool PRD: no tdd_chain emitted', docsTree.requirements.every((r) => r.taskPattern !== TaskPattern.TDD_CHAIN));
+
+const docsTreeFeaturePRD = `# PRD: Feature
+## §0. Scope Profile
+- **System Type:** feature
+### FR-001: Feature work
+**Target Files:** \`src/feature.ts\`, \`docs/feature.md\`
+**Acceptance Criteria:**
+- implemented
+`;
+check('feature PRD: System Type fallback does not fire (mixed targets stay tdd_chain)', fr(analyzePRDDeterministic(docsTreeFeaturePRD), 'FR-001').taskPattern === TaskPattern.TDD_CHAIN);
+
+const cliToolCodePRD = `# PRD: Tool
+## §0. Scope Profile
+- **System Type:** cli-tool
+### FR-001: Implement parser
+**Target Files:** \`src/parse.ts\`
+**Acceptance Criteria:**
+- parses input
+`;
+check('cli-tool PRD: code-targeted FR outside docs tree stays tdd_chain', fr(analyzePRDDeterministic(cliToolCodePRD), 'FR-001').taskPattern === TaskPattern.TDD_CHAIN);
+
+console.log(`\nShape classification: ${15 + Object.keys(headerRoutes).length} assertions`);
 if (failures.length > 0) {
   console.error(`\nFailing assertions: ${failures.join(', ')}`);
   process.exit(1);

@@ -840,8 +840,12 @@ export class TaskBreakdownRunner extends EventEmitter {
 
     // GREENFIELD GUARD: If no package.json exists, inject a monorepo config task
     // so that TDD beads have vitest/tsconfig scaffolding to run tests.
+    // Skipped when the PRD produced no TDD chains — analysis/docs-shaped PRDs
+    // have no test harness to scaffold, and injecting it spawned a phantom
+    // NFR-003 "Monorepo Configuration" bead in those campaigns.
     const hasPackageJson = await fs.access('package.json').then(() => true).catch(() => false);
-    if (!hasPackageJson) {
+    const hasTddChains = requirements.some(r => r.taskPattern === 'tdd_chain');
+    if (!hasPackageJson && hasTddChains) {
       console.log('  🏗️  No package.json found — injecting monorepo configuration task');
       const configReq = {
         id: 'NFR-003',

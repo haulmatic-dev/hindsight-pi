@@ -6,6 +6,10 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+### Fixed
+- `task-breakdown` shape routing wired end-to-end: `classifyRequirement` now applies the §0 `System Type` fallback (routing PRD rule (d)) — inside `cli-tool`/`analysis`/`docs` campaigns, requirements whose targets all live in the docs tree (rubric + verifier scripts included) classify as `direct_task` instead of spawning full TDD chains. The fms per-developer-review PRD now compiles to 6 direct_task + 2 verification_gate + 1 aggregation_task with zero chains. Pinned by 4 new assertions in `test-shape-classification.mjs`.
+- Phantom `NFR-003 Monorepo Configuration` bead no longer injected for analysis/docs-shaped PRDs: the runner greenfield guard now fires only when at least one requirement classified `tdd_chain` (docs-only campaigns have no test harness to scaffold).
+
 ### Changed
 - Refactored `BeadCloser.verifyBeforeClose` (internal/core/bead_closer.go) from a 207-line monolith into 9 focused helpers (`skipIfTerminal`, `verifyTDDChain`, `resolveEvidenceRepo`, `closeIntegrationBase`, `collectCloseEvidence`, `unionMainCheckoutLeaks`, `acceptAlreadyIntegrated`, `chainBranchIntegrated`, `worktreeHEADIntegratedLocally`) with the already-integrated heuristics' incident context preserved as doc comments; the integration base is now resolved once per close instead of twice (drops one duplicate mismatch log line). Behavior-preserving; full internal/core suite green (ok 366.6s).
 - Refactored `internal/core/stranded_work.go` — duplicated bead-label writing, event-emission guards, and branch-key/bead-lookup/resumability logic extracted into named helpers (`worktreeKeyFromBranch`, `beadStateFor`, `beadIsResumable`, `hasAnyLabel`, `emitStrandedEvent`, `labelBead`). Behavior unchanged; all 14 stranded-work detector/repair tests pass.

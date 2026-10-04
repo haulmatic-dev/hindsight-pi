@@ -317,7 +317,7 @@ export function analyzePRDDeterministic(prdContent) {
     }
 
     // NEW: Apply semantic classification
-    classifyRequirement(req, requirements);
+    classifyRequirement(req, requirements, systemType);
   }
 
   // Detect dependencies based on requirement references
@@ -526,7 +526,7 @@ function applyTypeMarkerRouting(req) {
   req.needsWorktree = true;
 }
 
-function classifyRequirement(req, allRequirements) {
+function classifyRequirement(req, allRequirements, systemType = null) {
   // Get list of all FR IDs for reference
   const allFRs = allRequirements.filter(r => r.type === 'FR').map(r => r.originalId);
   const allReqsById = new Map(allRequirements.map(r => [r.originalId, r]));
@@ -542,6 +542,16 @@ function classifyRequirement(req, allRequirements) {
       // Shape-aware override: deliverable shape pins the task to a direct task
       // (no RED→GREEN→REFACTOR chain) when the requirement is shape-bearing.
       if (isDirectTaskShape(req)) {
+        req.taskPattern = TaskPattern.DIRECT_TASK;
+      } else if (
+        (systemType === 'cli-tool' || systemType === 'analysis' || systemType === 'docs') &&
+        isDocsTreeDeliverable(req)
+      ) {
+        // §0 System Type fallback (routing PRD rule (d)): inside a
+        // cli-tool/analysis/docs campaign, requirements whose targets all
+        // live in the docs tree (verifier scripts alongside the docs count)
+        // are direct deliverables, not TDD chains. Feature PRDs and
+        // code-targeted requirements are untouched (fail-closed to tdd_chain).
         req.taskPattern = TaskPattern.DIRECT_TASK;
       }
 
@@ -680,6 +690,20 @@ function isDirectTaskShape(req) {
   const files = req.files || [];
   if (files.length === 0) return false;
   return files.every(isMarkdownTarget) || files.every(isTestTarget);
+}
+
+/**
+ * True when every target file lives in the docs tree or is itself a
+ * markdown/test artifact — used by the System Type fallback so docs-shaped
+ * requirements (e.g. a rubric plus its verifier script under `docs/`) stay
+ * off TDD chains in cli-tool/analysis/docs campaigns.
+ */
+function isDocsTreeDeliverable(req) {
+  const files = req.files || [];
+  if (files.length === 0) return false;
+  return files.every(
+    (f) => /^docs\//.test(f) || isMarkdownTarget(f) || isTestTarget(f),
+  );
 }
 
 function isMarkdownTarget(file) {
