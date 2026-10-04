@@ -252,6 +252,15 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 	// dependents. Only the success/"completed" path is gated; failures are
 	// handled above. When bead lookup failed we cannot verify, so we fall
 	// back to the previous behaviour and close.
+	// Close-time hard gates (FR-002): deterministic checks (executable
+	// acceptance, quarantine contradiction, dependency order) run before the
+	// VerifiedClose round so a gate failure never costs an LLM judge round.
+	if success && reason == "completed" && bead != nil {
+		if err := c.runCloseHardGates(bead, projectPath, repoName, ""); err != nil {
+			return err
+		}
+	}
+
 	if success && reason == "completed" && c.verifiedCloseEnabled() && bead != nil {
 		if err := c.verifyBeforeClose(bead, projectPath, repoName); err != nil {
 			// Rejected: the bead was reopened (or escalated) inside
