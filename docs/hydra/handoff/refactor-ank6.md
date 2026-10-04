@@ -1,17 +1,20 @@
-# refactor handoff (ank6)
+# refactor handoff (refactor-ank6)
 
 ## What changed (files + one line each)
-- .agents/skills/task-breakdown/runner.mjs: removed the duplicated two-line pair (`const verificationCommand = this.buildVerificationCommand(...); const verificationBlock = this.verificationCommandBlock(...)`) at three call sites — `generateTDDSubTasks` phase loop (now `this.applyVerificationContract(sub, testCommand, buildCommand)` per sub), `createDirectTask` (inline `verification_command` metadata literal + manual description append replaced by one `applyVerificationContract` call after the object literal), configuration apply bead (same replacement). `applyVerificationContract` is now the single propagation path for the FR-001 Verification Command contract. Behavior byte-for-byte unchanged.
+- internal/core/stranded_work.go: duplicated logic extracted into 6 named helpers — `worktreeKeyFromBranch` (prefix strip + versioned-key collapse), `beadStateFor` (GetBead lookup, unknown-owner semantics), `beadIsResumable` (non-terminal && no stranded-conflict/integration-unverified label, FR-021), `hasAnyLabel` (variadic over existing `hasLabel`), `emitStrandedEvent` (nil-sink fail-open seam, replaces 4 duplicated `if events != nil` guards), `labelBead` (fail-open UpdateBeadLabels with explicit repo argument; detector passes "" as before, repair passes `id.Repo()`). `chainActiveForKey` check folded into the activeKeys skip line. Net +112/−63 (helper doc comments).
 - CHANGELOG.md: Unreleased/Changed entry.
+- Behavior preserved: event payloads, label names, unknown-owner strandability, repo-name handling in label writes all byte-identical.
 
 ## Verification (commands run + pass/fail)
-- BEFORE (pre-edit baseline): `node test-verification-command.mjs` — 9 tests, 0 fail, rc=0.
-- AFTER: `node --check runner.mjs` — OK. `node test-verification-command.mjs` — `# tests 9 / # pass 9 / # fail 0`, rc=0.
-- All 6 suites: test-pattern-routing, test-preflight, test-crosscutting, test-shape-classification, test-direct-task — PASS; test-verification-command PASS.
-- `npx @biomejs/biome format --write runner.mjs` — no changes (already formatted; biome.json scope covers .agents/**/*.ts, runner.mjs not in lint scope).
-- One transient syntax error during the direct-task edit (metadata closing brace lost in replacement) — caught immediately by `node --check`, fixed before any test run.
+- BEFORE (pre-edit): `go test ./internal/core/ -run 'TestDetectStrandedWork|TestIntegrateStrandedRepair' -count=1` — ok (16 subtests).
+- AFTER: same command — ok, 14 named tests all PASS (gofmt clean, `go build`/`go vet ./internal/core/` clean).
+- Commit verified via `git show --stat HEAD` (7408fb3, 2 files).
+- No benchmarks exist for this functionality; no perf check run.
+
+## AC mapping
+- Unit tests per evidence class + none-present path: pre-existing suite (SkipsLiveWorker/SkipsActiveChain/SkipsEmptyDiff/SkipsOpenBead/DetectsTerminalBead/NonePresent/DedupByLabel/VersionedKeyResolvesToBase + repair trio + FR-021 pair) — all pass. MET.
+- Event payload includes quarantine branch: `stranded_conflict` Fields carries `quarantine_branch` (TestIntegrateStrandedRepair_Conflict). MET.
+- Daily count queryable from event stream: `grep -h '"worktree_stranded"' $HYDRA_HOME/events/YYYY-MM-DD.jsonl | wc -l` (per-day: one file per day). MET (pre-existing, unchanged).
 
 ## Open edges for the next phase
-- No benchmarks exist for this functionality (pure task-emission code); no perf check run.
-- Concurrent strand's uncommitted `internal/core/bead_closer_hard_gates.go` refactor (emitGateEvent helper) was present in the worktree and NOT touched or committed by this bead.
-- No bugs found; nothing recorded via `cm add`.
+- `branchAge`/`branchAheadCount` invoke one git subprocess each per branch — fine at current scale; batch via a single `for-each-ref --format` with %(committerdate) could halve calls if branch counts grow.
