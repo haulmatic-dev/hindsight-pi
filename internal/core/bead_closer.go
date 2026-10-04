@@ -1153,183 +1153,37 @@ func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, st
 // verifyBeforeClose runs the verified-close checks for a completed bead.
 // It returns nil when the bead may close, or a non-nil error (after
 // reopening or escalating the bead) when the close must be aborted.
+// verifyBeforeClose runs the VerifiedClose gate chain for a "completed"
+// close: terminal-state skip, TDD validation, evidence collection (diff +
+// scope + already-integrated heuristics), then the final accept/reject.
+// Rejections go through rejectClose so the reopen/attempt-cap/escalate
+// semantics of the VerifiedClose rounds are preserved.
 func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName string) error {
-	// Terminal beads skip verification entirely: a resurrected close attempt
-	// on an already-closed bead would only find an empty diff and reject.
-	if c.beadsClient != nil {
-		fresh, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID)
-		if err != nil {
-			return fmt.Errorf("[VerifiedClose] cannot verify state of bead %s: %w", bead.ID, err)
-		}
-		if fresh != nil && fresh.Status.IsTerminal() {
-			log.Printf("[VerifiedClose] Bead %s already terminal (%s); skipping verification", bead.ID, fresh.Status)
-			return nil
-		}
+	terminal, err := c.skipIfTerminal(bead, projectPath, repoName)
+	if err != nil {
+		return err
 	}
-	// 1. Blocking TDD validation (only gates TDD-phase beads).
-	if c.shouldRunTDDValidation(bead) && c.validationService != nil {
-		passed, err := c.validationService.TDDChainPasses(*bead, projectPath)
-		if err != nil {
-			log.Printf("[VerifiedClose] TDD verify error for %s (not blocking): %v", bead.ID, err)
-		} else if !passed {
-			return c.rejectClose(bead, projectPath, repoName, "tdd-validation-failed")
-		}
+	if terminal {
+		return nil
+	}
+	if err := c.verifyTDDChain(bead, projectPath, repoName); err != nil {
+		return err
 	}
 
-	// 2. Diff gate + 3. Target-files scope gate. Both gates need the list of
-	//    changed files, so compute it once. Failing to read the working tree
-	//    is logged and treated as "changed" (fail open) for the diff gate.
-	repoPath := c.projectResolver.ResolveRepoPath(bead.Project, repoName, projectPath)
-	if repoPath == "" {
-		repoPath = projectPath
-	}
-	mainRepoPath := projectPath
-	switchedToWorktree := false
-	if c.worktreeManager != nil && c.chainKeyFn != nil {
-		if wt, ok := c.worktreeManager.ExistingWorktree(projectPath, c.chainKeyFn(*bead)); ok {
-			repoPath = wt
-			switchedToWorktree = true
-		}
-	}
-
-	// Base for committed-work detection: the deterministic integration base
-	// (config knob or origin default) — NEVER the main checkout's current
-	// branch, which is incidental operator state (telematics 2026-09-29).
-	// Empty in main-checkout mode.
-	base := ""
-	if repoPath != projectPath {
-		b, source, err := ResolveIntegrationBase(c.config, projectPath)
-		if err != nil {
-			return fmt.Errorf("committed-work detection for %s: %w", bead.ID, err)
-		}
-		logIntegrationBaseMismatch(projectPath, b, source)
-		base = b
+	repoPath, mainRepoPath, switchedToWorktree := c.resolveEvidenceRepo(bead, projectPath, repoName)
+	base, baseSource, err := c.closeIntegrationBase(bead, projectPath, repoPath)
+	if err != nil {
+		return err
 	}
 
 	targets := beadTargetFiles(bead)
 	needDiff := c.config.Validation.RequireDiffOnClose
 	needScope := c.config.Validation.TargetScopeMode() != "off"
 
-	var changed []string
-	var changedErr error
-	if needDiff || needScope {
-		changed, changedErr = changedFilesWithBase(repoPath, base)
-		if changedErr != nil {
-			log.Printf("[VerifiedClose] diff check error for %s (not blocking): %v", bead.ID, changedErr)
-		}
-	}
-
-	// Main-checkout mode (no chain worktree): uncommitted edits are
-	// revertible and have been observed to be reverted AFTER close
-	// acceptance (2026-09-16 nipuna incident: 14 false closes). Only
-	// committed changes since the branch diverged from origin count as
-	// evidence. Unavailable base (no upstream etc.) fails open.
-	if !switchedToWorktree && needDiff && changedErr == nil {
-		base := c.sessionBaseFor(bead.ID.String())
-		if base != "" {
-			// Session-scoped: only commits made after the bead's spawn
-			// count. Pre-existing campaign commits must not satisfy the
-			// gate for a no-work session.
-			if committed, cerr := committedChangesSinceBase(projectPath, base); cerr == nil {
-				changed = committed
-			} else {
-				log.Printf("[VerifiedClose] session-evidence base unavailable for %s (fail open): %v", bead.ID, cerr)
-			}
-		} else if committed, cerr := committedChangesSinceBranchBase(projectPath); cerr == nil {
-			changed = committed
-		} else {
-			log.Printf("[VerifiedClose] committed-evidence base unavailable for %s (fail open): %v", bead.ID, cerr)
-		}
-	}
-
-	// Incident 2jjz8: the agent wrote into the main checkout instead of its
-	// worktree. When we are inspecting a worktree, also collect uncommitted
-	// changes in the main checkout and union them into the diff/scope
-	// evidence. The dirty-main auto-commit already sweeps these files onto
-	// the branch at integration time, so the work is preserved either way.
-	if switchedToWorktree && (needDiff || needScope) {
-		mainChanged, mainErr := changedFiles(mainRepoPath)
-		if mainErr != nil {
-			log.Printf("[VerifiedClose] main-checkout diff check error for %s (not blocking): %v", bead.ID, mainErr)
-		} else if len(mainChanged) > 0 {
-			seen := make(map[string]bool, len(changed))
-			for _, f := range changed {
-				seen[f] = true
-			}
-			for _, f := range mainChanged {
-				if !seen[f] {
-					log.Printf("[VerifiedClose] %s main-checkout leak: %s", bead.ID, f)
-					changed = append(changed, f)
-					seen[f] = true
-				}
-			}
-		}
-	}
+	changed := c.collectCloseEvidence(bead, projectPath, repoPath, mainRepoPath, switchedToWorktree, base, needDiff, needScope)
 
 	if needDiff && !hasTargetChanges(changed, targets) {
-		// 5k33p / dy0+ig9hw class: the worker's commits may have been
-		// integrated into the working branch before verified-close ran. The
-		// worktree can be clean while the main checkout already contains the
-		// bead's work. Try a direct ancestry check first (the chain branch tip
-		// is an ancestor of main HEAD after a successful integrate-into-chain),
-		// then fall back to the per-target merge-base heuristic for partial
-		// integrations.
-		alreadyIntegrated := false
-		if switchedToWorktree {
-			baseBranch, baseSource, berr := ResolveIntegrationBase(c.config, projectPath)
-			if berr != nil {
-				log.Printf("[VerifiedClose] %s integration base unresolved, skipping already-integrated heuristic: %v", bead.ID, berr)
-			} else if chainBranch := currentBranch(repoPath); chainBranch != "" {
-				logIntegrationBaseMismatch(projectPath, baseBranch, baseSource)
-				if isAncestor, err := branchIsAncestorOfMain(projectPath, chainBranch); err != nil {
-					log.Printf("[VerifiedClose] ancestry check failed for %s (not blocking): %v", bead.ID, err)
-				} else if isAncestor {
-					alreadyIntegrated = true
-					log.Printf("[VerifiedClose] %s chain branch %s is ancestor of main HEAD; treating as already integrated", bead.ID, chainBranch)
-				}
-
-				if !alreadyIntegrated {
-					mainChanged, mainErr := changedFilesSinceMergeBase(projectPath, baseBranch, chainBranch)
-					if mainErr != nil {
-						log.Printf("[VerifiedClose] already-integrated check failed for %s (not blocking): %v", bead.ID, mainErr)
-					} else if hasTargetChanges(mainChanged, targets) {
-						alreadyIntegrated = true
-						log.Printf("[VerifiedClose] %s targets already integrated on %s; treating as satisfied", bead.ID, baseBranch)
-					}
-				}
-			}
-
-			// Hydra-7k1 2026-09-16: the singleton integrate step merged the
-			// worktree branch into the main checkout and THEN the push was
-			// rejected (non-fast-forward), reopening the bead. From then on the
-			// worktree diff was empty (HEAD is contained in the main checkout via
-			// the merge) while the branch-name checks above could not run at all —
-			// the branch was already deleted, so chainBranch was empty and the
-			// whole block was skipped — so every re-close died empty-diff and the
-			// bead escalated after 3 rounds. The durable test is commit-level and
-			// runs whenever we are inspecting a worktree, branch name or not:
-			// worktree and main checkout share an object database, so worktree
-			// HEAD is resolvable in the main repo and
-			// `merge-base --is-ancestor <sha> HEAD` answers "is the work landed".
-			if !alreadyIntegrated {
-				if headOut, herr := gitOut(repoPath, "rev-parse", "HEAD"); herr == nil {
-					head := strings.TrimSpace(headOut)
-					if head != "" {
-						if isAncestor, aerr := commitIsAncestorOfMain(projectPath, head); aerr != nil {
-							log.Printf("[VerifiedClose] commit-ancestry check failed for %s (not blocking): %v", bead.ID, aerr)
-						} else if isAncestor {
-							alreadyIntegrated = true
-							log.Printf("[VerifiedClose] %s worktree HEAD %s is ancestor of main HEAD (locally integrated, push pending); treating as satisfied", bead.ID, head)
-							c.events.EmitRepo(projectPath, Event{Type: "close-accepted-already-integrated", Project: repoName,
-								Bead: string(bead.ID), Reason: "worktree_head_ancestor_of_main",
-								Detail: fmt.Sprintf("worktree HEAD %s contained in main HEAD; original push failure left origin behind — publisher will land it", head)})
-							AppendActivity(projectPath, string(bead.ID), "close-accepted: work already integrated locally (push pending)")
-						}
-					}
-				}
-			}
-		}
-		if !alreadyIntegrated {
+		if !c.acceptAlreadyIntegrated(bead, projectPath, repoName, repoPath, switchedToWorktree, base, baseSource, targets) {
 			// Pre-close diff gate (duty 2, 2026-09-24 campaign): an empty
 			// target diff is only closable when the worker's HYDRA_VERDICT
 			// self-reports an accepted reason (docs-only, chain-deferred-to-root,
@@ -1356,6 +1210,234 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 
 	c.logCloseEvent(bead, "accepted", "verified", c.validationRetryCount(bead))
 	return nil
+}
+
+// skipIfTerminal reports whether the bead is already terminal (verification
+// skipped entirely: a resurrected close attempt on an already-closed bead
+// would only find an empty diff and reject). Fails closed when the fresh
+// state cannot be read.
+func (c *BeadCloser) skipIfTerminal(bead *types.Bead, projectPath, repoName string) (bool, error) {
+	if c.beadsClient == nil {
+		return false, nil
+	}
+	fresh, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID)
+	if err != nil {
+		return false, fmt.Errorf("[VerifiedClose] cannot verify state of bead %s: %w", bead.ID, err)
+	}
+	if fresh != nil && fresh.Status.IsTerminal() {
+		log.Printf("[VerifiedClose] Bead %s already terminal (%s); skipping verification", bead.ID, fresh.Status)
+		return true, nil
+	}
+	return false, nil
+}
+
+// verifyTDDChain runs blocking TDD validation (only gates TDD-phase beads);
+// a validation-service error is logged and does not block the close.
+func (c *BeadCloser) verifyTDDChain(bead *types.Bead, projectPath, repoName string) error {
+	if !c.shouldRunTDDValidation(bead) || c.validationService == nil {
+		return nil
+	}
+	passed, err := c.validationService.TDDChainPasses(*bead, projectPath)
+	if err != nil {
+		log.Printf("[VerifiedClose] TDD verify error for %s (not blocking): %v", bead.ID, err)
+		return nil
+	}
+	if !passed {
+		return c.rejectClose(bead, projectPath, repoName, "tdd-validation-failed")
+	}
+	return nil
+}
+
+// resolveEvidenceRepo returns the directory whose diff/scope evidence counts
+// for this close (a chain worktree when one exists, else the resolved repo
+// path) plus the main checkout path for leak-union and ancestry checks.
+func (c *BeadCloser) resolveEvidenceRepo(bead *types.Bead, projectPath, repoName string) (repoPath, mainRepoPath string, switchedToWorktree bool) {
+	repoPath = c.projectResolver.ResolveRepoPath(bead.Project, repoName, projectPath)
+	if repoPath == "" {
+		repoPath = projectPath
+	}
+	mainRepoPath = projectPath
+	if c.worktreeManager != nil && c.chainKeyFn != nil {
+		if wt, ok := c.worktreeManager.ExistingWorktree(projectPath, c.chainKeyFn(*bead)); ok {
+			repoPath = wt
+			switchedToWorktree = true
+		}
+	}
+	return repoPath, mainRepoPath, switchedToWorktree
+}
+
+// closeIntegrationBase resolves the deterministic integration base
+// (config knob or origin default) for committed-work detection — NEVER the
+// main checkout's current branch, which is incidental operator state
+// (telematics 2026-09-29). Empty in main-checkout mode.
+func (c *BeadCloser) closeIntegrationBase(bead *types.Bead, projectPath, repoPath string) (base, source string, err error) {
+	if repoPath == projectPath {
+		return "", "", nil
+	}
+	base, source, err = ResolveIntegrationBase(c.config, projectPath)
+	if err != nil {
+		return "", "", fmt.Errorf("committed-work detection for %s: %w", bead.ID, err)
+	}
+	logIntegrationBaseMismatch(projectPath, base, source)
+	return base, source, nil
+}
+
+// collectCloseEvidence gathers the changed-file evidence for the diff and
+// scope gates: the evidence repo's diff against the integration base, with
+// two documented adjustments —
+//   - main-checkout mode: only committed changes since the branch/session
+//     base count (uncommitted edits are revertible; nipuna 2026-09-16),
+//   - worktree mode: uncommitted changes in the main checkout are unioned
+//     in as "main-checkout leaks" (incident 2jjz8; the dirty-main
+//     auto-commit sweeps them onto the branch at integration time).
+//
+// Evidence-read failures are logged and fail open.
+func (c *BeadCloser) collectCloseEvidence(bead *types.Bead, projectPath, repoPath, mainRepoPath string, switchedToWorktree bool, base string, needDiff, needScope bool) []string {
+	if !needDiff && !needScope {
+		return nil
+	}
+	changed, changedErr := changedFilesWithBase(repoPath, base)
+	if changedErr != nil {
+		log.Printf("[VerifiedClose] diff check error for %s (not blocking): %v", bead.ID, changedErr)
+	}
+
+	if !switchedToWorktree && needDiff && changedErr == nil {
+		// Main-checkout mode: uncommitted edits are revertible and have been
+		// observed to be reverted AFTER close acceptance (2026-09-16 nipuna
+		// incident: 14 false closes). Only committed changes since the branch
+		// diverged from origin count as evidence. Unavailable base (no upstream
+		// etc.) fails open.
+		sessionBase := c.sessionBaseFor(bead.ID.String())
+		if sessionBase != "" {
+			// Session-scoped: only commits made after the bead's spawn
+			// count. Pre-existing campaign commits must not satisfy the
+			// gate for a no-work session.
+			if committed, cerr := committedChangesSinceBase(projectPath, sessionBase); cerr == nil {
+				changed = committed
+			} else {
+				log.Printf("[VerifiedClose] session-evidence base unavailable for %s (fail open): %v", bead.ID, cerr)
+			}
+		} else if committed, cerr := committedChangesSinceBranchBase(projectPath); cerr == nil {
+			changed = committed
+		} else {
+			log.Printf("[VerifiedClose] committed-evidence base unavailable for %s (fail open): %v", bead.ID, cerr)
+		}
+	}
+
+	if switchedToWorktree {
+		changed = unionMainCheckoutLeaks(bead.ID, projectPath, mainRepoPath, changed)
+	}
+	return changed
+}
+
+// unionMainCheckoutLeaks merges uncommitted main-checkout changes into the
+// collected evidence (incident 2jjz8: the agent wrote into the main checkout
+// instead of its worktree). The dirty-main auto-commit already sweeps these
+// files onto the branch at integration time, so the work is preserved either
+// way. Returns the evidence unchanged when the main checkout is clean or
+// unreadable.
+func unionMainCheckoutLeaks(beadID types.BeadID, projectPath, mainRepoPath string, changed []string) []string {
+	mainChanged, mainErr := changedFiles(mainRepoPath)
+	if mainErr != nil {
+		log.Printf("[VerifiedClose] main-checkout diff check error for %s (not blocking): %v", beadID, mainErr)
+		return changed
+	}
+	if len(mainChanged) == 0 {
+		return changed
+	}
+	seen := make(map[string]bool, len(changed))
+	for _, f := range changed {
+		seen[f] = true
+	}
+	for _, f := range mainChanged {
+		if !seen[f] {
+			log.Printf("[VerifiedClose] %s main-checkout leak: %s", beadID, f)
+			changed = append(changed, f)
+			seen[f] = true
+		}
+	}
+	return changed
+}
+
+// acceptAlreadyIntegrated reports whether the bead's work has already landed
+// on the integration base (5k33p / dy0+ig9hw class: the worker's commits may
+// have been integrated before verified-close ran; the worktree can be clean
+// while the main checkout already contains the bead's work). Three
+// escalating checks, all fail open:
+//  1. chain branch tip is an ancestor of main HEAD (full integrate),
+//  2. per-target merge-base heuristic (partial integrations),
+//  3. worktree HEAD commit is an ancestor of main HEAD (locally merged,
+//     push pending).
+func (c *BeadCloser) acceptAlreadyIntegrated(bead *types.Bead, projectPath, repoName, repoPath string, switchedToWorktree bool, base, baseSource string, targets []string) bool {
+	if !switchedToWorktree {
+		return false
+	}
+	if chainBranch := currentBranch(repoPath); chainBranch != "" {
+		logIntegrationBaseMismatch(projectPath, base, baseSource)
+		if c.chainBranchIntegrated(bead, projectPath, base, chainBranch, targets) {
+			return true
+		}
+	}
+	return c.worktreeHEADIntegratedLocally(bead, projectPath, repoName, repoPath)
+}
+
+// chainBranchIntegrated runs the branch-level already-integrated checks:
+// direct ancestry of the chain branch tip in main HEAD, then the per-target
+// merge-base heuristic for partial integrations.
+func (c *BeadCloser) chainBranchIntegrated(bead *types.Bead, projectPath, base, chainBranch string, targets []string) bool {
+	isAncestor, err := branchIsAncestorOfMain(projectPath, chainBranch)
+	if err != nil {
+		log.Printf("[VerifiedClose] ancestry check failed for %s (not blocking): %v", bead.ID, err)
+	} else if isAncestor {
+		log.Printf("[VerifiedClose] %s chain branch %s is ancestor of main HEAD; treating as already integrated", bead.ID, chainBranch)
+		return true
+	}
+
+	mainChanged, mainErr := changedFilesSinceMergeBase(projectPath, base, chainBranch)
+	if mainErr != nil {
+		log.Printf("[VerifiedClose] already-integrated check failed for %s (not blocking): %v", bead.ID, mainErr)
+		return false
+	}
+	if hasTargetChanges(mainChanged, targets) {
+		log.Printf("[VerifiedClose] %s targets already integrated on %s; treating as satisfied", bead.ID, base)
+		return true
+	}
+	return false
+}
+
+// worktreeHEADIntegratedLocally is the durable, commit-level already-
+// integrated test. Hydra-7k1 2026-09-16: the singleton integrate step merged
+// the worktree branch into the main checkout and THEN the push was rejected
+// (non-fast-forward), reopening the bead. From then on the worktree diff was
+// empty (HEAD is contained in the main checkout via the merge) while the
+// branch-name checks could not run at all — the branch was already deleted —
+// so every re-close died empty-diff and the bead escalated after 3 rounds.
+// Worktree and main checkout share an object database, so worktree HEAD is
+// resolvable in the main repo and `merge-base --is-ancestor <sha> HEAD`
+// answers "is the work landed" regardless of branch names.
+func (c *BeadCloser) worktreeHEADIntegratedLocally(bead *types.Bead, projectPath, repoName, repoPath string) bool {
+	headOut, herr := gitOut(repoPath, "rev-parse", "HEAD")
+	if herr != nil {
+		return false
+	}
+	head := strings.TrimSpace(headOut)
+	if head == "" {
+		return false
+	}
+	isAncestor, aerr := commitIsAncestorOfMain(projectPath, head)
+	if aerr != nil {
+		log.Printf("[VerifiedClose] commit-ancestry check failed for %s (not blocking): %v", bead.ID, aerr)
+		return false
+	}
+	if !isAncestor {
+		return false
+	}
+	log.Printf("[VerifiedClose] %s worktree HEAD %s is ancestor of main HEAD (locally integrated, push pending); treating as satisfied", bead.ID, head)
+	c.events.EmitRepo(projectPath, Event{Type: "close-accepted-already-integrated", Project: repoName,
+		Bead: string(bead.ID), Reason: "worktree_head_ancestor_of_main",
+		Detail: fmt.Sprintf("worktree HEAD %s contained in main HEAD; original push failure left origin behind — publisher will land it", head)})
+	AppendActivity(projectPath, string(bead.ID), "close-accepted: work already integrated locally (push pending)")
+	return true
 }
 
 // checkTargetScope handles the target-files scope gate and the target-less
