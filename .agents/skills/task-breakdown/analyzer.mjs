@@ -41,6 +41,7 @@ export function analyzePRDDeterministic(prdContent) {
   let inAcceptanceCriteria = false;
   let inDescription = true;
   let inVerifiesSection = false;
+  let inDependsOnSection = false;
   let inAggregatesSection = false;
 
   // Extract feature name from title (first H1)
@@ -99,12 +100,14 @@ export function analyzePRDDeterministic(prdContent) {
         explicitVerifies: [],      // From **Verifies:** section
         explicitAggregates: [],    // From **Aggregates:** section
         explicitDependsOn: [],     // From **Depends On:** section
+        readsFrom: [],             // From **Reads From:** section (read-only deps — NOT write targets)
       };
 
       inAcceptanceCriteria = false;
       inDescription = true;
       inVerifiesSection = false;
       inAggregatesSection = false;
+      inDependsOnSection = false;
       continue;
     }
 
@@ -118,6 +121,7 @@ export function analyzePRDDeterministic(prdContent) {
         }
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inAcceptanceCriteria = false;
         inDescription = false;
         continue;
@@ -138,6 +142,7 @@ export function analyzePRDDeterministic(prdContent) {
         }
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inAcceptanceCriteria = false;
         inDescription = false;
         continue;
@@ -151,13 +156,18 @@ export function analyzePRDDeterministic(prdContent) {
             .map(f => f.trim().replace(/^`|`$/g, '').replace(/^"|"$/g, ''))
             .filter(f => f && f.length > 0);
           for (const f of files) {
-            if (!currentReq.files.includes(f)) {
-              currentReq.files.push(f);
+            // Reads From declares read-only dependencies, not write targets.
+            // Merging them into files caused false validateFileOverlap errors
+            // (a docs FR reading jest.config.ts 'targeted' it alongside its
+            // owning FR). Track separately in readsFrom.
+            if (!currentReq.readsFrom.includes(f) && !currentReq.files.includes(f)) {
+              currentReq.readsFrom.push(f);
             }
           }
         }
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inAcceptanceCriteria = false;
         inDescription = false;
         continue;
@@ -180,6 +190,7 @@ export function analyzePRDDeterministic(prdContent) {
         }
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inAcceptanceCriteria = false;
         inDescription = false;
         continue;
@@ -192,6 +203,7 @@ export function analyzePRDDeterministic(prdContent) {
         }
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inAcceptanceCriteria = false;
         inDescription = false;
         continue;
@@ -200,8 +212,10 @@ export function analyzePRDDeterministic(prdContent) {
       if (trimmedLine.match(/^\*{0,2}verifies:?\*{0,2}/i)) {
         inVerifiesSection = true;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inAcceptanceCriteria = false;
         inDescription = false;
+        parseInlineReqIds(trimmedLine, currentReq, 'explicitVerifies');
         continue;
       }
       
@@ -210,6 +224,8 @@ export function analyzePRDDeterministic(prdContent) {
         inAggregatesSection = true;
         inAcceptanceCriteria = false;
         inDescription = false;
+        inDependsOnSection = false;
+        parseInlineReqIds(trimmedLine, currentReq, 'explicitAggregates');
         continue;
       }
       
@@ -217,8 +233,12 @@ export function analyzePRDDeterministic(prdContent) {
         // Parse depends on section
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inAcceptanceCriteria = false;
         inDescription = false;
+        inDependsOnSection = true;
+        parseInlineReqIds(trimmedLine, currentReq, 'explicitDependsOn');
+        continue;
         continue;
       }
 
@@ -227,6 +247,7 @@ export function analyzePRDDeterministic(prdContent) {
         inAcceptanceCriteria = true;
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inDescription = false;
         continue;
       }
@@ -236,12 +257,24 @@ export function analyzePRDDeterministic(prdContent) {
         inAcceptanceCriteria = false;
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         // Only continue description accumulation for requirement headers
         // Non-requirement headers (like ## 5. Technical Considerations) stop description
         const isReqHeader = trimmedLine.match(
           /^#{3,4}\s+(FR-?\d+[a-z]?|NFR-[A-Z0-9]+|US-?\d+|US-INT-\d+|Setup-?\d+|Doc-?\d+|QA-?\d+|TEST-?\d+|REF-?\d+|SPIKE-?\d+|AUDIT-?\d+|DEL-?\d+|ANALYSIS-?\d+):?/i,
         );
         inDescription = !!isReqHeader;
+      }
+
+      // Parse Depends On section entries
+      if (inDependsOnSection && trimmedLine.match(/^-\s+(.+)$/)) {
+        const entry = trimmedLine.replace(/^-\s+/, '').trim();
+        // Extract requirement ID if present (e.g., "FR-001: Addition" or just "FR-001")
+        const idMatch = entry.match(REQ_ID_TOKEN_RE);
+        if (idMatch) {
+          currentReq.explicitDependsOn.push(idMatch[0].toUpperCase());
+        }
+        continue;
       }
 
       // Parse Verifies section entries
@@ -395,6 +428,23 @@ const HEADER_PREFIX_ROUTES = {
   deletion: TaskRoute.DELETION,
   analysis: TaskRoute.ANALYSIS,
 };
+
+const REQ_ID_TOKEN_RE = /\b(FR-\d+[a-z]?|NFR-[A-Z0-9]+|US-INT-\d+|US-\d+|SETUP-?\d+|DOC-?\d+|QA-?\d+|TEST-?\d+|REF-?\d+|SPIKE-?\d+|AUDIT-?\d+|DEL-?\d+|ANALYSIS-?\d+)\b/gi;
+
+/**
+ * Extract requirement IDs written inline on the marker line itself, e.g.
+ * `**Depends On:** FR-001, FR-002`. Complements the list-item sections.
+ */
+function parseInlineReqIds(line, req, field) {
+  if (!req) return;
+  const afterMarker = line.replace(/^\s*\*{0,2}[A-Za-z ]+?:?\*{0,2}\s*/, '');
+  const ids = afterMarker.match(REQ_ID_TOKEN_RE);
+  if (!ids) return;
+  for (const id of ids) {
+    const up = id.toUpperCase();
+    if (!req[field].includes(up)) req[field].push(up);
+  }
+}
 
 function routeForTypeMarker(value) {
   return TYPE_MARKER_ROUTES[String(value || '').toLowerCase().trim()] || null;

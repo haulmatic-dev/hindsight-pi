@@ -165,7 +165,61 @@ const cliToolCodePRD = `# PRD: Tool
 `;
 check('cli-tool PRD: code-targeted FR outside docs tree stays tdd_chain', fr(analyzePRDDeterministic(cliToolCodePRD), 'FR-001').taskPattern === TaskPattern.TDD_CHAIN);
 
-console.log(`\nShape classification: ${15 + Object.keys(headerRoutes).length} assertions`);
+// --- Depends On parsing (list + inline forms) --------------------------------
+const depsListPRD = `# PRD: Deps
+### FR-001: Base
+**Target Files:** \`src/base.ts\`
+**Acceptance Criteria:**
+- works
+### FR-002: Dependent
+**Target Files:** \`src/dep.ts\`
+**Depends On:**
+- FR-001
+**Acceptance Criteria:**
+- works too
+`;
+check('Depends On list form parses into explicitDependsOn', analyzePRDDeterministic(depsListPRD).requirements.find((r) => r.originalId === 'FR-002')?.explicitDependsOn?.includes('FR-001') === true);
+
+const depsInlinePRD = `# PRD: Deps inline
+### FR-001: Base
+**Target Files:** \`src/base.ts\`
+**Acceptance Criteria:**
+- works
+### FR-002: Dependent
+**Target Files:** \`src/dep.ts\`
+**Depends On:** FR-001, FR-003
+**Acceptance Criteria:**
+- works too
+### FR-003: Other base
+**Target Files:** \`src/other.ts\`
+**Acceptance Criteria:**
+- works three
+`;
+const inlineDeps = analyzePRDDeterministic(depsInlinePRD).requirements.find((r) => r.originalId === 'FR-002')?.explicitDependsOn || [];
+check('Depends On inline form parses both IDs', inlineDeps.includes('FR-001') && inlineDeps.includes('FR-003'));
+
+// --- Reads From is not a write target ------------------------------------------
+const readsFromPRD = `# PRD: Reads
+### FR-001: Owns config
+**Target Files:** \`jest.config.ts\`
+**Acceptance Criteria:**
+- written
+### FR-002: Documents config
+**Target Files:** \`docs/config.md\`
+**Reads From:** \`jest.config.ts\`
+**Acceptance Criteria:**
+- documented
+`;
+let readsOverlap = null;
+try {
+  const a = analyzePRDDeterministic(readsFromPRD);
+  readsOverlap = a.requirements.find((r) => r.originalId === 'FR-002')?.readsFrom?.includes('jest.config.ts') ? null : 'readsFrom not tracked';
+} catch (e) {
+  readsOverlap = e.message;
+}
+check('Reads From file shared with another FR does not trigger overlap', readsOverlap === null);
+
+console.log(`\nShape classification: ${18 + Object.keys(headerRoutes).length} assertions`);
 if (failures.length > 0) {
   console.error(`\nFailing assertions: ${failures.join(', ')}`);
   process.exit(1);

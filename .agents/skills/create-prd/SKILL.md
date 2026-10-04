@@ -106,6 +106,15 @@ generation.
 > two fields and use `Reads From` alone. `Reads From` is always required when
 > a runtime dependency exists.
 
+> Parser notes (task-breakdown/analyzer.mjs, verified by test-shape-classification.mjs):
+> - `**Depends On:**` accepts BOTH list form (`- FR-001` lines below the marker)
+>   and inline form (`**Depends On:** FR-001, FR-002` on the same line).
+> - `**Reads From:**` entries are read-only dependencies — they are NOT write
+>   targets and never trigger the file-overlap rule.
+> - Never write placeholder glyphs (`—`, `none`) into `**Target Files:**` —
+>   they parse as filenames. Omit the field entirely when a requirement has no
+>   file targets (verification gates, aggregation stories).
+
 #### 3.1a Task-Pattern Classification (producer contract)
 
 The task-breakdown analyzer assigns every requirement an execution pattern
