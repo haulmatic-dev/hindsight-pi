@@ -42,6 +42,9 @@ export function analyzePRDDeterministic(prdContent) {
   let inDescription = true;
   let inVerifiesSection = false;
   let inDependsOnSection = false;
+  let pendingCommandField = null; // 'testCommand' | 'buildCommand' awaiting fenced block
+  let commandFenceOpen = false;
+  let commandLines = [];
   let inAggregatesSection = false;
 
   // Extract feature name from title (first H1)
@@ -113,6 +116,26 @@ export function analyzePRDDeterministic(prdContent) {
 
     // If we have a current requirement, accumulate data
     if (currentReq) {
+      // Fenced command capture: `**Test Command:**` / `**Build Command:**`
+      // followed by a ``` block (the form the create-prd contract shows).
+      // Multi-line blocks join with ' && ' (fail-fast sequential semantics).
+      if (pendingCommandField) {
+        if (!commandFenceOpen) {
+          if (trimmedLine.startsWith('```')) { commandFenceOpen = true; continue; }
+          if (trimmedLine === '') { continue; }
+          pendingCommandField = null; // no fence followed — fall through to normal parsing
+        } else {
+          if (trimmedLine.startsWith('```')) {
+            currentReq[pendingCommandField] = commandLines.join(' && ');
+            pendingCommandField = null;
+            commandFenceOpen = false;
+            commandLines = [];
+          } else if (trimmedLine !== '') {
+            commandLines.push(trimmedLine);
+          }
+          continue;
+        }
+      }
       // Check for semantic sections
       if (trimmedLine.match(/^\*{0,2}priority:?\*{0,2}/i)) {
         const priorityMatch = trimmedLine.match(/^\*{0,2}priority:?\*{0,2}\s*(p[0-3])/i);
@@ -182,11 +205,17 @@ export function analyzePRDDeterministic(prdContent) {
         continue;
       }
 
-      // Parse Test Command and Build Command (stack-agnostic contract fields)
+      // Parse Test Command and Build Command (stack-agnostic contract fields).
+      // Both forms supported: inline (`**Test Command:** npm test`) and fenced
+      // block on the following lines (the form the create-prd contract shows).
       if (trimmedLine.match(/^\*{0,2}test command:?\*{0,2}/i)) {
         const tcMatch = trimmedLine.match(/^\*{0,2}test command:?\*{0,2}\s+(.+)/i);
         if (tcMatch && currentReq) {
           currentReq.testCommand = tcMatch[1].trim().replace(/^`|`$/g, '');
+        } else if (currentReq) {
+          pendingCommandField = 'testCommand';
+          commandFenceOpen = false;
+          commandLines = [];
         }
         inVerifiesSection = false;
         inAggregatesSection = false;
@@ -200,6 +229,10 @@ export function analyzePRDDeterministic(prdContent) {
         const bcMatch = trimmedLine.match(/^\*{0,2}build command:?\*{0,2}\s+(.+)/i);
         if (bcMatch && currentReq) {
           currentReq.buildCommand = bcMatch[1].trim().replace(/^`|`$/g, '');
+        } else if (currentReq) {
+          pendingCommandField = 'buildCommand';
+          commandFenceOpen = false;
+          commandLines = [];
         }
         inVerifiesSection = false;
         inAggregatesSection = false;

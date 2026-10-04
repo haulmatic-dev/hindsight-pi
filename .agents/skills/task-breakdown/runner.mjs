@@ -889,6 +889,34 @@ export class TaskBreakdownRunner extends EventEmitter {
       return (a.estimatedHours || 1) - (b.estimatedHours || 1);
     });
 
+    // Dependency-aware ordering: a requirement must be emitted AFTER every
+    // requirement it explicitly depends on. The sort above happily places a
+    // P0 tdd_chain before the P0 direct_task it depends on (tdd_chain sorts
+    // first within a priority tier), crashing dep resolution with
+    // 'implement-<id>-apply not found'. Stable Kahn pass over
+    // explicitDependsOn; unknown/self IDs ignored; cycles keep sort order.
+    const reqsByOrigId = new Map(requirements.map((r) => [r.originalId, r]));
+    const placedIds = new Set();
+    const topoOrdered = [];
+    const remaining = [...requirements];
+    let progressed = true;
+    while (remaining.length > 0 && progressed) {
+      progressed = false;
+      for (let i = 0; i < remaining.length; i++) {
+        const r = remaining[i];
+        const knownDeps = (r.explicitDependsOn || []).filter((d) => reqsByOrigId.has(d));
+        if (knownDeps.every((d) => placedIds.has(d))) {
+          topoOrdered.push(r);
+          placedIds.add(r.originalId);
+          remaining.splice(i, 1);
+          i--;
+          progressed = true;
+        }
+      }
+    }
+    if (remaining.length > 0) topoOrdered.push(...remaining);
+    requirements = topoOrdered;
+
     // Track tasks per requirement for dependency resolution
     const reqTasks = new Map(); // reqId -> { discoveryId, implementationId }
 
@@ -918,6 +946,19 @@ export class TaskBreakdownRunner extends EventEmitter {
       });
 
       for (const req of requirements) {
+        // Discovery is only useful when targets are unresolved (TBD) — the
+        // PRD contract already supplies Target Files, and gates/aggregations
+        // have no implementation surface to research. Skipping resolved
+        // requirements kills the discovery-bead inflation class (44 beads in
+        // one srv-telematics campaign). Impl deps fall back to approvalGate
+        // via taskInfo.discoveryLocalId || 'approvalGate'.
+        const reqFiles = req.files || [];
+        const targetsResolved = reqFiles.length > 0 && !reqFiles.includes('TBD');
+        const noDiscoverySurface =
+          req.taskPattern === 'verification_gate' || req.taskPattern === 'aggregation_task';
+        if (targetsResolved || noDiscoverySurface) {
+          continue;
+        }
         const localId = `discovery-${req.id.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
 
         const discoveryTask = {
@@ -1077,7 +1118,24 @@ export class TaskBreakdownRunner extends EventEmitter {
         }
       }
 
-      // Type-aware task creation
+      /**
+ * Terminal local task id for a dependency requirement, resolved by pattern.
+ * Chains terminate at the `-syntax` leg; single-bead patterns (direct_task,
+ * configuration_task) terminate at the `-apply` bead; verification gates and
+ * aggregation tasks emit under the base id. Hardcoding `-syntax` broke mixed
+ * graphs the moment a chain depended on a direct_task (the common case for
+ * test-coverage PRDs: implementation chains depend on test-foundation tasks).
+ */
+function terminalDepLocalId(depReq) {
+  const base = `implement-${depReq.id.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
+  if (depReq.taskPattern === 'tdd_chain') return `${base}-syntax`;
+  if (depReq.taskPattern === 'direct_task' || depReq.taskPattern === 'configuration_task') {
+    return `${base}-apply`;
+  }
+  return base;
+}
+
+// Type-aware task creation
       if (req.taskPattern === 'verification_gate') {
         // Verification NFRs: single gate bead that runs after all implementation
         // Use req.dependsOn (explicit Verifies list) for blockers
@@ -1111,10 +1169,10 @@ This gate runs after all implementation tasks complete.`,
         };
 
         const gateBlockers = gateDeps.map((dep) => {
-          // Map requirement IDs to their SYNTAX task IDs
+          // Map requirement IDs to their terminal task IDs (pattern-aware)
           const depReq = requirements.find(r => r.originalId === dep);
           if (depReq) {
-            const depLocalId = `implement-${depReq.id.toLowerCase().replace(/[^a-z0-9]/g, '-')}-syntax`;
+            const depLocalId = terminalDepLocalId(depReq);
             return idMapping[depLocalId];
           }
           return idMapping[dep];
@@ -1129,7 +1187,7 @@ This gate runs after all implementation tasks complete.`,
         const aggregatedSyntaxIds = req.dependsOn.map(depId => {
           const depReq = requirements.find(r => r.originalId === depId);
           if (depReq) {
-            return `implement-${depReq.id.toLowerCase().replace(/[^a-z0-9]/g, '-')}-syntax`;
+            return terminalDepLocalId(depReq);
           }
           return null;
         }).filter(Boolean);
@@ -1146,7 +1204,7 @@ This gate runs after all implementation tasks complete.`,
           directDeps = req.explicitDependsOn.map(depId => {
             const depReq = requirements.find(r => r.originalId === depId);
             if (depReq) {
-              return `implement-${depReq.id.toLowerCase().replace(/[^a-z0-9]/g, '-')}-syntax`;
+              return terminalDepLocalId(depReq);
             }
             return null;
           }).filter(Boolean);
@@ -1161,7 +1219,7 @@ This gate runs after all implementation tasks complete.`,
           redDeps = req.explicitDependsOn.map(depId => {
             const depReq = requirements.find(r => r.originalId === depId);
             if (depReq) {
-              return `implement-${depReq.id.toLowerCase().replace(/[^a-z0-9]/g, '-')}-syntax`;
+              return terminalDepLocalId(depReq);
             }
             return null;
           }).filter(Boolean);
@@ -2392,7 +2450,16 @@ Acceptance: ${acceptanceLine}.`;
 
     const targetFilesBlock = isWildcardFiles ? `\nTarget files (create ALL of these):\n${DEFAULT_CONFIG_TARGET_FILES.map(f => `- ${f}`).join('\n')}` : '';
 
-    const applySpecificInstructions = `Apply the configuration for ${cleanTitle}.${targetFilesBlock}
+    const isDirect = req.taskPattern === 'direct_task';
+    const applySpecificInstructions = isDirect
+      ? `Deliver ${cleanTitle}.${targetFilesBlock}
+
+This is a single-bead deliverable task — no TDD phase synthesis, no separate validation bead.
+
+1. Produce the deliverable exactly as scoped in Target Files (write the tests / code / docs this requirement calls for — for test requirements, writing the test files IS the deliverable).
+2. Run the Test Command in the Verification block below and make it exit 0 (fix the deliverable, not the command).
+3. Report what was created or modified.`
+      : `Apply the configuration for ${cleanTitle}.${targetFilesBlock}
 
 This is an infrastructure/setup task. Create or update ONLY configuration files (e.g., package.json, tsconfig.json, turbo.json, build configs) according to the acceptance criteria. Do NOT write implementation code or tests in this task.
 
@@ -2424,7 +2491,7 @@ Then VALIDATE the configuration in the same bead (syntax gate fused into apply):
 
     const applyTask = {
       localId: `${baseId}-apply`,
-      title: `APPLY: Configure ${cleanTitle}`,
+      title: isDirect ? cleanTitle : `APPLY: Configure ${cleanTitle}`,
       description: this.formatTDDDescription({
         phase: 'green',
         cleanTitle,
