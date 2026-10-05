@@ -720,7 +720,16 @@ func (o *Overseer) getUserContextForProject(projectPath string) *UserContext {
 	target := normalizeProjectPath(projectPath)
 	for _, ctx := range o.userContexts {
 		for _, p := range ctx.Config.Projects {
-			if normalizeProjectPath(p.Path) == target {
+			pp := normalizeProjectPath(p.Path)
+			if pp == target {
+				return ctx
+			}
+			// Multi projects: repos live as children under the configured
+			// parent dir (e.g. ~/projects). A repo path inside the parent
+			// belongs to this user — without this, per-owner publish identity
+			// silently fell back to the daemon identity for every
+			// auto-discovered repo (hydra-k3nb L2, exposed 2026-10-05).
+			if p.Type == "multi" && strings.HasPrefix(target, pp+string(filepath.Separator)) {
 				return ctx
 			}
 		}

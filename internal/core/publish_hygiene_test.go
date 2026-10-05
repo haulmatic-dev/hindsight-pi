@@ -47,3 +47,24 @@ func TestCleanupScopeGuard(t *testing.T) {
 		}
 	}
 }
+
+// hydra-k3nb L2 follow-up: repos under a user's type=multi parent dir must
+// attribute to that user — before this, every auto-discovered repo silently
+// published under the daemon identity.
+func TestGetUserContextForProject_MultiParentPrefix(t *testing.T) {
+	parent := t.TempDir()
+	child := parent + "/srv-jobfile"
+	o := &Overseer{userContexts: map[string]*UserContext{"ajantha": {
+		Username: "ajantha", HomeDir: parent,
+		Config: UserConfig{Projects: []UserProject{{Name: "projects", Path: parent, Type: "multi"}}},
+	}}}
+	if got := o.getUserContextForProject(child); got == nil || got.Username != "ajantha" {
+		t.Fatalf("multi child: got %+v, want ajantha", got)
+	}
+	if got := o.getUserContextForProject(child + "/"); got == nil {
+		t.Fatal("trailing slash must still attribute")
+	}
+	if got := o.getUserContextForProject("/other/place/repo"); got != nil {
+		t.Fatalf("unrelated path must not attribute, got %s", got.Username)
+	}
+}
