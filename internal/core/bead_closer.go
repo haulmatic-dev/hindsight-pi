@@ -149,6 +149,19 @@ func (c *BeadCloser) retainFailedClose(bead *types.Bead, worker *types.Worker, e
 // The bead stays open and the scheduler retries it with exponential
 // backoff up to 1 hour, then hourly thereafter.  Only code-level
 // failures (placeholder code, build errors, etc.) spawn fix beads.
+
+// closeGateWorktree resolves the bead's chain worktree for close-time gates;
+// "" when the worktree is gone (gates then fall back to the project path).
+func closeGateWorktree(c *BeadCloser, projectPath string, bead *types.Bead) string {
+	if c.worktreeManager == nil || c.chainKeyFn == nil {
+		return ""
+	}
+	if wt, ok := c.worktreeManager.ExistingWorktree(projectPath, c.chainKeyFn(*bead)); ok {
+		return wt
+	}
+	return ""
+}
+
 func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) error {
 	projectName := worker.BeadID.Project()
 	repoName := worker.BeadID.Repo()
@@ -256,7 +269,19 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 	// acceptance, quarantine contradiction, dependency order) run before the
 	// VerifiedClose round so a gate failure never costs an LLM judge round.
 	if success && reason == "completed" && bead != nil {
-		if err := c.runCloseHardGates(bead, projectPath, repoName, ""); err != nil {
+		// Resolve the chain worktree once for every close-time gate: the
+		// executable-acceptance command is repo-relative (npm run test:e2e)
+		// and MUST run where the worker's code and node_modules live.
+		// Passing "" ran it against the main checkout — older package.json,
+		// no node_modules — producing "Missing script"/exit-127 rejections
+		// that escalated six srv-jobfile beads (2026-10-05).
+		gateWt := ""
+		if c.worktreeManager != nil && c.chainKeyFn != nil {
+			if wt, ok := c.worktreeManager.ExistingWorktree(projectPath, c.chainKeyFn(*bead)); ok {
+				gateWt = wt
+			}
+		}
+		if err := c.runCloseHardGates(bead, projectPath, repoName, gateWt); err != nil {
 			return err
 		}
 	}
@@ -275,13 +300,7 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 	// persisted artifact. Gate failure reopens the bead with the parsed
 	// summary + raw log path instead of closing on agent-quoted output.
 	if success && reason == "completed" && bead != nil {
-		gateWt := ""
-		if c.worktreeManager != nil && c.chainKeyFn != nil {
-			if wt, ok := c.worktreeManager.ExistingWorktree(projectPath, c.chainKeyFn(*bead)); ok {
-				gateWt = wt
-			}
-		}
-		if err := c.runDaemonGates(bead, projectName, projectPath, repoName, gateWt); err != nil {
+		if err := c.runDaemonGates(bead, projectName, projectPath, repoName, closeGateWorktree(c, projectPath, bead)); err != nil {
 			return err
 		}
 		// Re-check terminality after the (potentially minutes-long) gate run:
