@@ -1,6 +1,8 @@
 package core
 
 import (
+	"os"
+	"path/filepath"
 	"os/exec"
 	"strings"
 	"testing"
@@ -339,5 +341,31 @@ func TestVerifiedClose_HardGateRejectionFollowsRoundCapAndEscalates(t *testing.T
 	}
 	if evs := hardGateEvents(t, sinkDir, "bead.escalated"); len(evs) != 1 {
 		t.Fatalf("expected exactly one bead.escalated event, got %d", len(evs))
+	}
+}
+
+// Regression for 2026-10-05 srv-jobfile mass-escalation: the gate exec'd the
+// verification command in the DAEMON's cwd (cmd.Dir never set), so any
+// repo-relative command (npm run test:e2e) failed with ENOENT and every
+// close was rejected 3/3. The command must run in the worktree.
+func TestCloseGate_VerificationCommandRunsInWorktree(t *testing.T) {
+	repo := initGitRepo(t)
+	c, _, sinkDir := hardGateCloser(t, hardGateConfig(3), repo)
+	// Marker exists ONLY in the worktree dir, never in the daemon cwd.
+	if err := os.WriteFile(filepath.Join(repo, "gate-marker.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bead := &types.Bead{
+		ID:          "proj-vg4",
+		Title:       "GREEN: cwd-sensitive verification",
+		Project:     "test-project",
+		Status:      types.StatusInProgress,
+		Description: "x\n**Verification Command:**\n```sh\ntest -f gate-marker.txt\n```\n",
+	}
+	if err := c.runCloseHardGates(bead, repo, "", repo); err != nil {
+		t.Fatalf("verification must execute in the worktree dir: %v", err)
+	}
+	if evs := hardGateEvents(t, sinkDir, "close_gate_rejected"); len(evs) != 0 {
+		t.Errorf("no rejection expected when command runs in the right cwd, got %v", evs)
 	}
 }

@@ -106,7 +106,15 @@ func (c *BeadCloser) gateExecutableAcceptance(bead *types.Bead, projectPath, rep
 	if dir == "" {
 		dir = projectPath
 	}
-	out, err := exec.Command("/bin/sh", "-c", cmdStr).CombinedOutput()
+	// The command MUST run in the worktree (or project path): running it in
+	// the daemon's own cwd made every npm/jest verification fail with
+	// "npm error code ENOENT" (no package.json there), rejecting every close
+	// 3/3 and escalating whole chains (srv-jobfile 2026-10-05: 6 beads
+	// escalated in one hour). The error message printed dir while executing
+	// elsewhere — the message is evidence, not decoration.
+	cmd := exec.Command("/bin/sh", "-c", cmdStr)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
 	}
