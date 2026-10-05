@@ -91,3 +91,35 @@ func TestEscalationTTLScannerEventsEmitted(t *testing.T) {
 		t.Fatal("label constant changed unexpectedly")
 	}
 }
+
+// 2026-10-05 srv-jobfile stall: escalated beads are in_progress BY
+// CONSTRUCTION (verified-close parks them with no worker), so the blanket
+// status skip made the scanner dead code. With a liveness probe, orphaned
+// escalations age out; live-worker stays are still respected.
+func TestEscalationTTLScannerDemotesOrphanedInProgressEscalation(t *testing.T) {
+	fake := newFakeTTLBeads([]types.Bead{{
+		ID: "demo-wedged", Status: types.StatusInProgress,
+		Labels:    []string{escalatedLabel, "needs-human"},
+		UpdatedAt: time.Now().Add(-80 * time.Hour),
+	}})
+	s := NewEscalationTTLScanner(fake, ttlProjects, 72*time.Hour, nil)
+	s.SetLiveWorkerFunc(func(string) bool { return false }) // no live worker
+	s.scan()
+	if got := fake.removed["demo-wedged"]; len(got) != 1 || got[0] != escalatedLabel {
+		t.Fatalf("orphaned in_progress escalation must demote, removed=%v", fake.removed)
+	}
+}
+
+func TestEscalationTTLScannerSkipsInProgressWithLiveWorker(t *testing.T) {
+	fake := newFakeTTLBeads([]types.Bead{{
+		ID: "demo-stay", Status: types.StatusInProgress,
+		Labels:    []string{escalatedLabel},
+		UpdatedAt: time.Now().Add(-200 * time.Hour),
+	}})
+	s := NewEscalationTTLScanner(fake, ttlProjects, 72*time.Hour, nil)
+	s.SetLiveWorkerFunc(func(string) bool { return true }) // live worker under stay
+	s.scan()
+	if len(fake.removed) != 0 {
+		t.Fatalf("live-worker escalation must not demote, removed=%v", fake.removed)
+	}
+}

@@ -53,6 +53,8 @@ type Charon struct {
 	maxWorkers              int                      // pool size ceiling for phantom-slot deadlock detection
 	events                  *EventSink               // structured event stream; nil-safe
 	deadlockScans           int                      // consecutive scans seeing active>=max and zero live PIDs
+	escalatedWedgeMu        sync.Mutex               // guards escalatedWedgeLast
+	escalatedWedgeLast      map[string]time.Time     // bead → last orphan_escalated_wedged event (cooldown; the skip path logs every sweep otherwise — 378 lines for 2 beads in one morning, 2026-10-05)
 }
 
 // JanitorStats tracks cleanup statistics
@@ -894,6 +896,7 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 				// escalation stopped (2026-09-06 empty-diff churn loop).
 				if hasBeadLabel(fresh.Labels, escalatedLabel) {
 					log.Printf("[OrphanRetry] bead %s carries the %q label (escalated to human); skipping reopen", beadIDStr, escalatedLabel)
+					j.emitEscalatedWedgeEvent(target, beadIDStr, fresh)
 					continue
 				}
 				// A worktree-unavailable bead was hard-parked by a fail-closed spawn:
@@ -1226,4 +1229,44 @@ func (j *Charon) isSystemProcess(comm string) bool {
 	}
 
 	return systemProcesses[name]
+}
+
+// escalatedWedgeCooldown caps how often the orphan_escalated_wedged event
+// fires per bead: the escalated-skip path runs every sweep (~1min) for the
+// whole life of an escalation, which produced 378 identical log lines for 2
+// beads in one morning (srv-jobfile 8bj/djq, 2026-10-05).
+const escalatedWedgeCooldown = 15 * time.Minute
+
+// emitEscalatedWedgeEvent reports an escalated orphan in_progress bead that
+// Charon deliberately will not reopen. Escalation leaves the bead
+// in_progress with no worker by construction, so this skip is the bead's
+// steady state until a human (or Pan's clear-escalation) resolves it; the
+// shepherd event-stream contract requires that decision to be a typed event,
+// not only a log line. Cooldown-limited per bead; fail-open.
+func (j *Charon) emitEscalatedWedgeEvent(projectPath, beadID string, b *types.Bead) {
+	if j.events == nil {
+		return
+	}
+	j.escalatedWedgeMu.Lock()
+	if j.escalatedWedgeLast == nil {
+		j.escalatedWedgeLast = make(map[string]time.Time)
+	}
+	last, seen := j.escalatedWedgeLast[beadID]
+	if seen && time.Since(last) < escalatedWedgeCooldown {
+		j.escalatedWedgeMu.Unlock()
+		return
+	}
+	j.escalatedWedgeLast[beadID] = time.Now()
+	j.escalatedWedgeMu.Unlock()
+
+	age := time.Duration(0)
+	if !b.UpdatedAt.IsZero() {
+		age = time.Since(b.UpdatedAt).Round(time.Minute)
+	}
+	j.events.EmitRepo(projectPath, Event{
+		Type:   "orphan_escalated_wedged",
+		Reason: "escalated_orphan",
+		Detail: fmt.Sprintf("escalated bead %s orphaned in_progress for %v (no live worker); Charon will not reopen — resolution belongs to a human or Pan repair:clear-escalation", beadID, age),
+		Fields: map[string]any{"bead": beadID, "project": filepath.Base(projectPath), "age": age.String()},
+	})
 }

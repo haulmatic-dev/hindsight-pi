@@ -162,17 +162,34 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				// restart cleared in-memory retry state) is invisible to Pan — the
 				// 2026-09-13 webapp wedge needed manual label clearing twice.
 				if o.beadsClient != nil {
+					wedgeGrace := time.Duration(panCfg.EscalatedWedgeGraceSeconds) * time.Second
+					if wedgeGrace <= 0 {
+						wedgeGrace = time.Hour
+					}
 					for _, project := range o.projects {
 						for _, target := range repoScanTargets(project) {
 							beads, err := o.beadsClient.ListBeads(target, "")
 							if err != nil {
 								continue // fail open: one unreadable store must not blind the scan
 							}
+							// Count live dependents per bead: an escalated chain head
+							// stalls its whole subtree (srv-jobfile 2026-10-05: 2 wedged
+							// escalations, br ready=0 for the whole repo), while an
+							// escalated leaf can safely wait out the 24h human window.
+							blockedDependents := make(map[types.BeadID]int, len(beads))
 							for _, b := range beads {
 								if b.Status.IsTerminal() {
 									continue
 								}
-								if reason, ok := panBlockedReason(b, time.Now()); ok {
+								for _, dep := range b.Dependencies {
+									blockedDependents[dep]++
+								}
+							}
+							for _, b := range beads {
+								if b.Status.IsTerminal() {
+									continue
+								}
+								if reason, ok := panBlockedReason(b, time.Now(), wedgeGrace, blockedDependents[b.ID]); ok {
 									blocked = append(blocked, pan.BlockedBead{
 										BeadID: b.ID.String(),
 										Reason: reason,
@@ -762,7 +779,16 @@ func (s *ServiceStarter) Stop() {
 // candidacy reason. Returns ok=false when no label warrants a candidate.
 // Extracted from the BlockedBeads sweep so label→candidate policy is
 // unit-testable; the sweep itself only aggregates per project store.
-func panBlockedReason(b types.Bead, now time.Time) (string, bool) {
+//
+// wedgeGrace + blockedDependents implement the wedge fast-path: an escalated
+// bead that still has live dependents stalls its dependency subtree (every
+// escalation leaves the bead in_progress with no worker by construction, so
+// Charon's orphan recovery correctly refuses to reopen it — the chain then
+// starves: srv-jobfile 2026-10-05, 2 escalated heads, br ready=0, zero
+// spawns for 3.5h). A leaf escalation can wait the 24h human window; a
+// chain-head escalation cannot, so it becomes a Pan candidate after
+// wedgeGrace with a reason that tells the judge the chain is stalled.
+func panBlockedReason(b types.Bead, now time.Time, wedgeGrace time.Duration, blockedDependents int) (string, bool) {
 	if b.Status.IsTerminal() {
 		return "", false
 	}
@@ -771,7 +797,11 @@ func panBlockedReason(b types.Bead, now time.Time) (string, bool) {
 		case worktreeUnavailableLabel, integrationExhaustedLabel:
 			return fmt.Sprintf("hard-parked by label %s (durable; scheduler never retries — clear only when the cause is fixed)", lbl), true
 		case escalatedLabel:
-			if now.Sub(b.UpdatedAt) > 24*time.Hour {
+			age := now.Sub(b.UpdatedAt)
+			if blockedDependents > 0 && wedgeGrace > 0 && age > wedgeGrace {
+				return fmt.Sprintf("escalated to a human %v ago and WEDGING %d dependent bead(s) — the dependency chain is stalled and no human has acted; prefer repair:clear-escalation so the bead gets one fair retry (the escalation re-fires if the failure recurs)", age.Round(time.Minute), blockedDependents), true
+			}
+			if age > 24*time.Hour {
 				return "escalated to a human over 24h ago — stale escalation or genuinely waiting?", true
 			}
 		case strandedConflictLabel:

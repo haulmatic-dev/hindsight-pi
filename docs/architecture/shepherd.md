@@ -195,8 +195,21 @@ human never answered wedged its scheduler slot indefinitely (measured
 91h–290h). A periodic scanner (`EscalationTTLScanner`, 1h cadence + once at
 startup) demotes non-terminal beads whose `escalated` label has aged past the
 TTL: label swapped for `escalation-expired`, typed `escalation_expired` event,
-bead returns to the ready queue. `in_progress` beads are skipped so a live
-worker finishing under the stay is never raced. Default 72h; 0 disables.
+bead returns to the ready queue. Default 72h; 0 disables.
+
+**Wedge-aware escalation handling (2026-10-05, srv-jobfile stall).** An
+escalated bead is `in_progress` with no worker *by construction*, which made
+the TTL scanner's blanket in_progress skip dead code — it had never demoted a
+single bead. The scanner now skips only in_progress beads with a **live
+registry worker** (`SetLiveWorkerFunc`; nil probe = fail-closed legacy skip)
+and scans `repoScanTargets` so multi-repo children are covered. Two faster
+paths complement the 72h backstop: (1) `panBlockedReason` surfaces an
+escalated bead to Pan after `pan.escalated_wedge_grace_seconds` (default 1h)
+when it still has live dependents — a chain head stalls its whole subtree,
+unlike a leaf which keeps the 24h human window — and the Pan rescue recipe
+prefers `repair:clear-escalation` for wedged heads; (2) Charon's
+escalated-skip emits a cooldown-limited `orphan_escalated_wedged` event per
+the event-stream contract (was log-only).
 
 **Integration-exhausted park sweeping (`overseer.integration_exhausted_sweep`,
 2026-09-30).** The `integration-exhausted` hard-park stays durable by design,

@@ -68,6 +68,12 @@ type PanConfig struct {
 	HungAfterSeconds        int    `yaml:"hung_after_seconds"`
 	ParkOverdueGraceSeconds int    `yaml:"park_overdue_grace_seconds"`
 	NudgeCap                int    `yaml:"nudge_cap"`
+	// EscalatedWedgeGraceSeconds is how long an escalated bead that blocks
+	// dependents may sit before Pan sees it as a wedge candidate. Leaf
+	// escalations keep the 24h stale-escalation path; a chain-head escalation
+	// stalls a campaign in minutes, so the wedge path must be much shorter.
+	// Default: 3600 (1h).
+	EscalatedWedgeGraceSeconds int `yaml:"escalated_wedge_grace_seconds"`
 	Provider                string `yaml:"provider"`
 	Model                   string `yaml:"model"`
 	Thinking                string `yaml:"thinking"`

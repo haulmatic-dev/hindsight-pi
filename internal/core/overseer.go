@@ -496,6 +496,9 @@ func NewOverseer(config *Config) *Overseer {
 		o.workerLifecycle,
 		nil, // userContexts set after discovery
 	)
+	if o.escalationTTL != nil {
+		o.escalationTTL.SetLiveWorkerFunc(o.workerSpawner.HasLiveRegistryWorker)
+	}
 
 	// Session-file resume pilot (Self-heal recovery A): quality-gated resume
 	// of Pi sessions after infra-class orphan deaths.
