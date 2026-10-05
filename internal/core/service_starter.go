@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -172,24 +173,21 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 							if err != nil {
 								continue // fail open: one unreadable store must not blind the scan
 							}
-							// Count live dependents per bead: an escalated chain head
-							// stalls its whole subtree (srv-jobfile 2026-10-05: 2 wedged
-							// escalations, br ready=0 for the whole repo), while an
-							// escalated leaf can safely wait out the 24h human window.
-							blockedDependents := make(map[types.BeadID]int, len(beads))
+							// dependent_count comes from br list itself (parser.go maps it
+							// into Metadata; the full dependencies list is NOT in list
+							// output). An escalated chain head stalls its whole subtree
+							// (srv-jobfile 2026-10-05: 2 wedged escalations, br ready=0
+							// for the whole repo), while an escalated leaf can safely
+							// wait out the 24h human window.
 							for _, b := range beads {
 								if b.Status.IsTerminal() {
 									continue
 								}
-								for _, dep := range b.Dependencies {
-									blockedDependents[dep]++
+								dependents := 0
+								if b.Metadata != nil {
+									dependents, _ = strconv.Atoi(b.Metadata["dependent_count"])
 								}
-							}
-							for _, b := range beads {
-								if b.Status.IsTerminal() {
-									continue
-								}
-								if reason, ok := panBlockedReason(b, time.Now(), wedgeGrace, blockedDependents[b.ID]); ok {
+								if reason, ok := panBlockedReason(b, time.Now(), wedgeGrace, dependents); ok {
 									blocked = append(blocked, pan.BlockedBead{
 										BeadID: b.ID.String(),
 										Reason: reason,
