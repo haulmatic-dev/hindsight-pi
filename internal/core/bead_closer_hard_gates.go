@@ -72,23 +72,34 @@ func extractVerificationCommand(description string) string {
 		return ""
 	}
 	rest := description[idx+len(verificationCommandMarker):]
-	fence := strings.Index(rest, "```")
-	if fence < 0 {
-		return ""
-	}
-	body := rest[fence+3:]
-	end := strings.Index(body, "```")
-	if end < 0 {
-		return ""
-	}
-	content := body[:end]
-	if nl := strings.Index(content, "\n"); nl >= 0 {
-		// Skip an optional single-token language tag line (e.g. ```sh).
-		if tag := strings.TrimSpace(content[:nl]); tag != "" && !strings.Contains(tag, " ") {
-			content = content[nl+1:]
+	// Line-based fence matching: the closing fence must be a line whose
+	// trimmed content is exactly "```". Substring matching truncated any
+	// command that itself contains a backtick run (e.g. grep -c '```' in a
+	// docs-lint check), producing "Unterminated quote" shell errors and
+	// bogus verification-failed escalations (srv-jobfile-eci, 2026-10-05).
+	lines := strings.Split(rest, "\n")
+	open := -1
+	for i, l := range lines {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "```") {
+			open = i
+			break
 		}
 	}
-	return strings.TrimSpace(content)
+	if open < 0 {
+		return ""
+	}
+	var body []string
+	for _, l := range lines[open+1:] {
+		if strings.TrimSpace(l) == "```" {
+			break
+		}
+		body = append(body, l)
+	}
+	if body == nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.Join(body, "\n"))
 }
 
 // gateExecutableAcceptance executes the bead's declared verification command

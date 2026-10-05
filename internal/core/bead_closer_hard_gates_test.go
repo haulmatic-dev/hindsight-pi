@@ -369,3 +369,14 @@ func TestCloseGate_VerificationCommandRunsInWorktree(t *testing.T) {
 		t.Errorf("no rejection expected when command runs in the right cwd, got %v", evs)
 	}
 }
+
+// Regression: a verification command that itself contains a backtick run
+// (grep -c '```' docs lint) must not be truncated at the embedded fence.
+func TestExtractVerificationCommand_EmbeddedBackticks(t *testing.T) {
+	desc := "x\n**Verification Command:**\n```sh\ntest -s docs/TESTING.md && grep -c '```' docs/TESTING.md\n```\n"
+	got := extractVerificationCommand(desc)
+	want := "test -s docs/TESTING.md && grep -c '```' docs/TESTING.md"
+	if got != want {
+		t.Fatalf("embedded fence truncated the command:\n got: %q\nwant: %q", got, want)
+	}
+}
