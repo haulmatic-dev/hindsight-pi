@@ -601,7 +601,7 @@ func (s *IntegrationRetestStage) runDefaultGates(projectName string, bead *types
 // never pushed directly) and nothing is ever force-pushed — the dogfood
 // branch is created fresh from this scratch merge.
 func (s *IntegrationRetestStage) land(projectPath, scratch, base string, bead *types.Bead) (retestOutcome, error) {
-	feature := "dogfood/" + string(bead.ID) + "-retest"
+	feature := IntegrationBranchPrefix(projectPath) + string(bead.ID) + "-retest"
 	if _, err := s.gitFn(scratch, "switch", "-c", feature); err != nil {
 		return retestOutcome{}, fmt.Errorf("create %s: %w", feature, err)
 	}

@@ -55,6 +55,25 @@ func resolvePublishIdentityFor(projectPath string) (PublishIdentity, error) {
 	return ResolveDaemonPublishIdentity()
 }
 
+// daemonOwnedChecker reports whether a project path is daemon-owned (the
+// hydra repo itself). Set by the overseer; nil = assume daemon-owned, which
+// keeps the historic dogfood/ prefix for tests and standalone tools.
+var daemonOwnedChecker func(projectPath string) bool
+
+// SetDaemonOwnedChecker installs the daemon-owned project predicate.
+func SetDaemonOwnedChecker(fn func(projectPath string) bool) { daemonOwnedChecker = fn }
+
+// IntegrationBranchPrefix returns the integration/PR branch namespace for a
+// project: "dogfood/" for daemon-owned repos (hydra self-improvement),
+// "hydra/" for user-owned product repos. Operator decision 2026-10-05:
+// dogfood/ must not leak into customer repositories (hydra-tvfd).
+func IntegrationBranchPrefix(projectPath string) string {
+	if daemonOwnedChecker != nil && !daemonOwnedChecker(projectPath) {
+		return "hydra/"
+	}
+	return "dogfood/"
+}
+
 // ResolvePublishIdentity maps a project path to its owning user and that
 // user's PAT. uc is the owner's user context from multi-user discovery
 // (nil = daemon-owned project, resolved to the service account).

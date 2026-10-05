@@ -550,6 +550,10 @@ func NewOverseer(config *Config) *Overseer {
 	SetPublishIdentityResolver(func(projectPath string) (PublishIdentity, error) {
 		return ResolvePublishIdentity(projectPath, o.getUserContextForProject(projectPath))
 	})
+	SetDaemonOwnedChecker(func(projectPath string) bool {
+		uc := o.getUserContextForProject(projectPath)
+		return uc == nil || uc.Username == daemonOwnerName
+	})
 	SetPublishGitAuthorResolver(func(projectPath string) (string, string, bool) {
 		uc := o.getUserContextForProject(projectPath)
 		if uc != nil {
@@ -713,14 +717,32 @@ func (o *Overseer) findProjectPath(bead *types.Bead) string {
 
 // getUserContextForProject returns the user context for a project path, if any.
 func (o *Overseer) getUserContextForProject(projectPath string) *UserContext {
+	target := normalizeProjectPath(projectPath)
 	for _, ctx := range o.userContexts {
 		for _, p := range ctx.Config.Projects {
-			if p.Path == projectPath {
+			if normalizeProjectPath(p.Path) == target {
 				return ctx
 			}
 		}
 	}
+	// Attribution miss on a user-home path silently falls back to the daemon
+	// identity (hydra-k3nb L2): surface it so a misconfigured/moved project
+	// does not publish under the daemon owner's credentials.
+	if strings.HasPrefix(target, "/home/") {
+		log.Printf("[Overseer] WARN: no user context for project %s — publish identity falls back to daemon owner", target)
+	}
 	return nil
+}
+
+// normalizeProjectPath canonicalizes a project path for attribution matching:
+// Clean removes trailing slashes, EvalSymlinks collapses compatibility links
+// (best-effort; a missing path just skips the symlink step).
+func normalizeProjectPath(p string) string {
+	p = filepath.Clean(p)
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		p = r
+	}
+	return p
 }
 
 // validateScope validates the scope of changes against configured limits

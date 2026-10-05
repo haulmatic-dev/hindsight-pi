@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -87,6 +88,14 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 	// 1. Land any completed worktree work on the working branch.
 	ReconcileOrphanedWorktrees(m, projectPath, activeKeys, isTerminal)
 
+	// 1b. Delete remote integration branches whose PRs have merged
+	// (hydra-9dp5): without cleanup every campaign leaves one permanent
+	// remote branch per bead — srv-telematics accumulated 88 in one
+	// campaign. Fail-open: cleanup must never gate publishing.
+	if token != "" {
+		CleanupMergedIntegrationBranches(projectPath, token)
+	}
+
 	branch, err := m.WorkingBranch(projectPath)
 	if err != nil || branch == "" {
 		log.Printf("[Publish] skip %s: no working branch (err=%v)", projectPath, err)
@@ -112,7 +121,7 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 		Fields: map[string]any{"branch": branch, "pr_merge": prMerge, "project_path": projectPath}})
 	log.Printf("[Publish] push attempted for %s (%s) pr_merge=%v", projectPath, branch, prMerge)
 	if prMerge {
-		feature := "dogfood/publish-" + prSafeName(filepath.Base(projectPath))
+		feature := IntegrationBranchPrefix(projectPath) + "publish-" + prSafeName(filepath.Base(projectPath))
 		publishEvents.EmitRepo(projectPath, Event{Type: "publish_pr_invoked", Project: filepath.Base(projectPath),
 			Detail: "PublishViaPR invoked for " + branch + " via " + feature,
 			Fields: map[string]any{"branch": branch, "feature_branch": feature, "project_path": projectPath}})
@@ -592,7 +601,7 @@ func defaultAutoPRGhMerge(repoPath, head, token string) error {
 	if token != "" {
 		env = append(env, "GH_TOKEN="+token)
 	}
-	merge := exec.Command("gh", "pr", "merge", head, "--merge", "--admin")
+	merge := exec.Command("gh", "pr", "merge", head, "--merge", "--admin", "--delete-branch")
 	merge.Dir = repoPath
 	merge.Env = env
 	if out, err := merge.CombinedOutput(); err != nil {
@@ -625,6 +634,54 @@ func defaultAutoPRGhMerge(repoPath, head, token string) error {
 		}
 	}
 	return fmt.Errorf("gh pr view: state=%q, want MERGED (after %d attempts)", state, mergeStateVerifyAttempts)
+}
+
+// CleanupMergedIntegrationBranches deletes remote integration branches
+// (dogfood/ or hydra/ — IsHydraOwnedBranch) whose PRs reached MERGED
+// (hydra-9dp5). The auto-merge path already deletes its head via
+// --delete-branch; this sweep catches human-merged PRs on tier-2 product
+// repos. Fail-open and quiet: any gh/push fault is logged, never returned.
+func CleanupMergedIntegrationBranches(projectPath, token string) {
+	env := os.Environ()
+	if token != "" {
+		env = append(env, "GH_TOKEN="+token)
+	}
+	list := exec.Command("gh", "pr", "list", "--state", "merged", "--json", "headRefName", "--limit", "200")
+	list.Dir = projectPath
+	list.Env = env
+	out, err := list.CombinedOutput()
+	if err != nil {
+		log.Printf("[Publish] merged-branch cleanup %s: gh pr list failed (not blocking): %v", projectPath, err)
+		return
+	}
+	var prs []struct {
+		HeadRefName string `json:"headRefName"`
+	}
+	if err := json.Unmarshal(out, &prs); err != nil {
+		log.Printf("[Publish] merged-branch cleanup %s: parse failed (not blocking): %v", projectPath, err)
+		return
+	}
+	originURL, err := gitOut(projectPath, "remote", "get-url", "origin")
+	if err != nil || strings.TrimSpace(originURL) == "" {
+		return
+	}
+	authURL := authenticatedURL(originURL, token)
+	if authURL == "" {
+		return
+	}
+	for _, pr := range prs {
+		head := pr.HeadRefName
+		if !IsHydraOwnedBranch(head, nil) {
+			continue
+		}
+		cmd := exec.Command("git", "-C", projectPath, "push", "--no-verify", authURL, "--delete", head)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			// Ref already gone or never pushed — benign; keep sweeping.
+			log.Printf("[Publish] merged-branch cleanup %s: delete %s failed (not blocking): %s", projectPath, head, strings.TrimSpace(string(out)))
+			continue
+		}
+		log.Printf("[Publish] merged-branch cleanup %s: deleted merged integration branch %s", projectPath, head)
+	}
 }
 
 // ghPRState reads a PR's state via gh pr view. env carries GH_TOKEN when set.
@@ -679,7 +736,7 @@ func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName
 	if cfg == nil || !cfg.AutoPREnabled() || beadsClient == nil || bead == nil || branch == "" {
 		return false
 	}
-	head := "dogfood/" + string(bead.ID)
+	head := IntegrationBranchPrefix(projectPath) + string(bead.ID)
 	for _, l := range bead.Labels {
 		if l == "pr-open" {
 			log.Printf("[AutoPR] skipping %s: already has pr-open label", bead.ID)

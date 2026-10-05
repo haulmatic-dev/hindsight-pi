@@ -898,7 +898,7 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 	}
 	c.emitIntegrationBaseMismatch(projectPath, prBase, prBaseSource)
 	if c.config.PRMergeEnabled() {
-		head := "dogfood/" + string(bead.ID)
+		head := IntegrationBranchPrefix(projectPath) + string(bead.ID)
 		// Duplicate-landing dedup: a racing close attempt may have already
 		// landed this bead's tip via PR (hydra-kf2t, 2026-09-27: two closes
 		// integrated the same singleton seconds apart). Skip when the local
@@ -955,8 +955,14 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 	}
 	// Non-FF recovery (fetch + merge + one retry) handles the common
 	// divergence case where local is behind origin because a PR merged out
-	// of band — the hydra-7k1 2026-09-16 stranding.
-	pushed, reason := PushBranchWithNonFFRecovery(projectPath, remote, branch)
+	// of band — the hydra-7k1 2026-09-16 stranding. The push embeds the
+	// project owner's token (hydra-k3nb L1): a helper-based push would
+	// silently authenticate as the daemon owner on product repos.
+	token, terr := c.ownerTokenForPublish(projectPath, *bead)
+	if terr != nil {
+		return fmt.Errorf("push %s: publish identity: %w", bead.ID, terr)
+	}
+	pushed, reason := PushBranchWithTokenNonFFRecovery(projectPath, branch, token)
 	if pushed {
 		// Logged only after PushBranch's ls-remote verification confirmed the
 		// remote ref matches the local head — never on command exit alone.
@@ -1021,7 +1027,7 @@ func (c *BeadCloser) publishSingletonViaPR(projectPath string, bead *types.Bead,
 			return nil
 		}
 	}
-	head := "dogfood/" + string(bead.ID)
+	head := IntegrationBranchPrefix(projectPath) + string(bead.ID)
 	token, terr := c.ownerTokenForPublish(projectPath, *bead)
 	if terr != nil {
 		return fmt.Errorf("publish identity: %w", terr)
