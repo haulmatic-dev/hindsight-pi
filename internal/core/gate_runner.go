@@ -60,7 +60,7 @@ type GateRequest struct {
 	// for scoped gates (npx jest <scope>). Empty scope drops the token
 	// carrying the placeholder, so the full gate command runs instead. The
 	// value is single-quote escaped before reaching the shell.
-	Scope        string
+	Scope string
 	// AllowMainCheckout permits running with WorktreePath == ProjectPath.
 	// Reserved for `hydra gates verify`, whose whole job is proving the
 	// toolchain on the real checkout before daemon_owned is enabled.
@@ -149,7 +149,21 @@ func (r *GateRunner) RunCoverageTruthGate(req GateRequest, truth CoverageTruthGa
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
-	runErr := cmd.Run()
+	// Record the actual gate child PID, not the daemon's: the running marker
+	// with the daemon PID stays "alive" while the daemon lives, so a stale
+	// running artifact (crash mid-gate before the final write) permanently
+	// fooled close-in-progress probes and blocked orphan recovery.
+	if err := cmd.Start(); err != nil {
+		return GateArtifact{}, fmt.Errorf("coverage-truth gate for %s: start: %w", req.BeadID, err)
+	}
+	a.PID = cmd.Process.Pid
+	if err := WriteGateArtifact(r.root, a); err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		return GateArtifact{}, fmt.Errorf("coverage-truth artifact pid rewrite: %w", err)
+	}
+
+	runErr := cmd.Wait()
 	a.EndedAt = time.Now()
 
 	exitCode := 0
@@ -291,7 +305,21 @@ func (r *GateRunner) RunGate(req GateRequest) (GateArtifact, error) {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
-	runErr := cmd.Run()
+	// Record the actual gate child PID, not the daemon's: the running marker
+	// with the daemon PID stays "alive" while the daemon lives, so a stale
+	// running artifact (crash mid-gate before the final write) permanently
+	// fooled close-in-progress probes and blocked orphan recovery.
+	if err := cmd.Start(); err != nil {
+		return GateArtifact{}, fmt.Errorf("gate %s for %s: start: %w", req.Gate, req.BeadID, err)
+	}
+	a.PID = cmd.Process.Pid
+	if err := WriteGateArtifact(r.root, a); err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		return GateArtifact{}, fmt.Errorf("gate artifact pid rewrite: %w", err)
+	}
+
+	runErr := cmd.Wait()
 	a.EndedAt = time.Now()
 
 	exitCode := 0

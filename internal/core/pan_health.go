@@ -184,6 +184,16 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 						break
 					}
 				}
+				// A bead whose close gates are running is not an orphan: the
+				// worker finished and the close path (build/lint/test gates,
+				// verified-close judge) is in flight. Counting it re-fired the
+				// P0 campaign anomaly across sweeps while the DAG was actually
+				// progressing (hydra 2026-10-06: 6 beads mid-close, workers
+				// exited 0 minutes earlier, Charon correctly left them — the
+				// digest kept filing orphan twins). Same probe Charon uses.
+				if orphaned && o.gateRoot != "" && GateCloseInProgress(o.gateRoot, project.Name, id) {
+					continue
+				}
 				if orphaned {
 					ph.OrphanClaims++
 				}

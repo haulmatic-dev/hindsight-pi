@@ -1,10 +1,8 @@
 package core
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -116,29 +114,17 @@ func (j *Charon) beadCloseInProgress(beadID string) bool {
 	if j.gateRoot == "" {
 		return false
 	}
-	matches, err := filepath.Glob(filepath.Join(j.gateRoot, "gates", "*", beadID, "*.json"))
+	// Gate artifacts are keyed by project name; Charon scans across all
+	// projects for the bead, so try the shared probe per artifact project dir.
+	matches, err := filepath.Glob(filepath.Join(j.gateRoot, "gates", "*", beadID))
 	if err != nil {
 		return false
 	}
-	for _, m := range matches {
-		data, err := os.ReadFile(m)
-		if err != nil {
-			continue
+	for _, dir := range matches {
+		project := filepath.Base(filepath.Dir(dir))
+		if GateCloseInProgress(j.gateRoot, project, beadID) {
+			return true
 		}
-		var a GateArtifact
-		if json.Unmarshal(data, &a) != nil {
-			continue
-		}
-		if a.Status != GateStatusRunning {
-			continue
-		}
-		if !processAlive(a.PID) {
-			continue
-		}
-		if time.Since(a.StartedAt) > 45*time.Minute {
-			continue
-		}
-		return true
 	}
 	return false
 }
