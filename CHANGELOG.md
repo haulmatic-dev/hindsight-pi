@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Documentation
+- Triage `docs/discovery/orphanclaim-churn-triage-lg7b.md`: the 13-orphan-claim digest anomaly is again the gate-failure churn retry-gap (Charon reopen events live; 11 same-day pan-filed twin pseudo-beads closed as duplicates); disk 49% (stale claim); open publish PR #263 admin-merged (e5e33b5 = origin/development tip).
 - Triage `docs/discovery/orphanclaim-churn-triage-hu12.md`: the persistent orphanclaims=6 digest anomaly is a retry-gap snapshot of a gate-failure churn loop (Charon reopened all 9 candidate beads 2–6× on 2026-10-06; loop self-terminates via escalation) — no reconciliation bug, no manual requeue, disk 49% (stale claim).
 
 ### Fixed
