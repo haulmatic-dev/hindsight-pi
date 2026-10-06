@@ -294,6 +294,35 @@ func TestRecoverOrphanInProgressBeads_SkipsEscalatedLabel(t *testing.T) {
 	}
 }
 
+// TestRecoverOrphanInProgressBeads_SkipsPanFiledLabel guards the 2026-10-06
+// orphan-claim filing loop: a pan-filed campaign/triage bead legitimately sits
+// in_progress past the grace window (awaiting spawn or close gates), and
+// reopening it respawns the same triage task — the filing loop's other half.
+func TestRecoverOrphanInProgressBeads_SkipsPanFiledLabel(t *testing.T) {
+	beadID := "test-orphan-panfiled"
+	old := time.Now().Add(-10 * time.Minute)
+
+	list := beadListJSON(beadID, old)
+	var page struct {
+		Issues []map[string]any `json:"issues"`
+	}
+	if err := json.Unmarshal(list, &page); err != nil || len(page.Issues) != 1 {
+		t.Fatalf("beadListJSON shape changed: %v", err)
+	}
+	page.Issues[0]["labels"] = []string{"pan-filed"}
+	list, _ = json.Marshal(page)
+
+	charon, exec := setupOrphanCharon(t, list, 5*time.Minute)
+
+	got := charon.recoverOrphanInProgressBeads()
+	if got != 0 {
+		t.Fatalf("recovered = %d, want 0 for pan-filed bead", got)
+	}
+	if n := exec.CountCalls("br update " + beadID + " --status open"); n != 0 {
+		t.Errorf("expected zero UpdateBeadStatus(open) calls for pan-filed bead, got %d; calls:\n%v", n, exec.Calls())
+	}
+}
+
 func TestRecoverOrphanInProgressBeads_RespectsGrace(t *testing.T) {
 	beadID := "test-orphan-young"
 	charon, exec := setupOrphanCharon(t, beadListJSON(beadID, time.Now().Add(-1*time.Minute)), 5*time.Minute)

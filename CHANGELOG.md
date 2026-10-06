@@ -9,6 +9,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ### Fixed
 
+- Pan-filed beads excluded from orphan-claim handling on both sides: the digest's `OrphanClaims` counter and Charon orphan recovery no longer treat `pan-filed` triage/campaign beads as orphaned claims. These filings legitimately sit `in_progress` past the 5m grace (awaiting spawn or close gates), so the P0 campaign-anomaly digest re-fired on its own filings — 9 twin P0 filings in 25 min on 2026-10-06, plus Charon destructively reopening pan-filed triage beads (hydra-2a3f). The file-bead cap owns their lifecycle.
 - Charon orphan recovery no longer respawns a duplicate worker while the bead's close is running (or queued behind) daemon gates: it now probes the artifact-first gate markers (`$HYDRA_HOME/gates/*/<bead>/*.json` with `status=running`, live writer PID, <45m old) before reopening an orphan `in_progress` bead. Root cause of the mo66 duplicate-spawn loop: a long sibling `test` gate holds the per-project gate lock past the 5m orphan grace, so the close looked like an orphan (kf2t 2026-09-27, mo66 2026-10-06).
 - Credential preflight parks now recover on their own: a project whose origin probe passes again is auto-unparked (only when the park reason is the preflight's own `auto-parked: GitHub credential…`), with a `credential_recovered` event. A new 10-minute sweep re-probes credential-parked projects so recovery no longer waits for a daemon restart — hydra itself sat parked 26h past its PAT fix.
 

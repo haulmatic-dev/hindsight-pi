@@ -177,6 +177,17 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 				if slices.Contains(labelsByID[id], "escalated") {
 					continue
 				}
+				// Pan-filed beads are campaign/triage filings, not pipeline work:
+				// each filing is itself an in_progress claim that may sit waiting
+				// for spawn or for its close gates long past the 5m grace. Counting
+				// them as orphaned claims re-fired the P0 anomaly for the filings
+				// the anomaly itself created (hydra 2026-10-06: 9 twin filings in
+				// 25 min, all counting the previous filings' claims), a
+				// self-referential loop on top of the 2026-10-02 inprog twin loop.
+				// Excluded; the file-bead cap owns their lifecycle.
+				if slices.Contains(labelsByID[id], pan.FiledLabel) {
+					continue
+				}
 				orphaned := true
 				for _, w := range live {
 					if w.BeadID == id {

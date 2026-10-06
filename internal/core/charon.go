@@ -942,6 +942,16 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 					}
 					continue
 				}
+				// A pan-filed bead is a campaign/triage filing, not a pipeline bead:
+				// it legitimately sits in_progress while awaiting spawn or close
+				// gates, and reopening it just respawns the same triage task in a
+				// loop (hydra 2026-10-06: charon_orphan_reopened hydra-2a3f, a
+				// pan-filed pseudo-anomaly filing, minutes after its worker had
+				// completed normally). Excluded — the file-bead cap owns retries.
+				if hasBeadLabel(fresh.Labels, panFiledLabel) {
+					log.Printf("[OrphanRetry] bead %s carries the %q label (pan-filed triage bead); skipping reopen", beadIDStr, panFiledLabel)
+					continue
+				}
 				// An escalated bead is parked for a human by design (verified-close
 				// rejected it at max attempts). It is in_progress with no worker by
 				// definition — reopening it would respawn the exact death the
