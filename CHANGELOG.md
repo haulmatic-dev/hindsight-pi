@@ -6,6 +6,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+- Orphan-claim P0 triage (docs/discovery/orphanclaim-triage-yzi1.md): all three digest claims verified stale at 2026-10-06 14:02 UTC — 0 true orphan claims (4 live workers, escalated/pan-filed excluded by design, rest registry-completed churn reopened by Charon), publisher wedge absent (PR #268 merged, 0 unlanded commits), disk 39%. No code change.
 
 ### Documentation
 - Triage `docs/discovery/orphanclaim-churn-triage-hu12.md`: the persistent orphanclaims=6 digest anomaly is a retry-gap snapshot of a gate-failure churn loop (Charon reopened all 9 candidate beads 2–6× on 2026-10-06; loop self-terminates via escalation) — no reconciliation bug, no manual requeue, disk 49% (stale claim).
