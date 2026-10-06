@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Documentation
+- Orphan-claim P0 triage (docs/discovery/orphanclaim-triage-uzmx.md): the "10 orphaned in_progress beads" anomaly verified stale at 2026-10-06 12:53 UTC — every in_progress bead has a live (working or heartbeat-fresh) registry row, Charon reaped 5 real orphans today, digest anomaly fired 0× today, disk at 49%. No force-release warranted; landed digest/Charon fixes confirmed live.
+
 ### Fixed
 
 - Charon orphan recovery no longer respawns a duplicate worker while the bead's close is running (or queued behind) daemon gates: it now probes the artifact-first gate markers (`$HYDRA_HOME/gates/*/<bead>/*.json` with `status=running`, live writer PID, <45m old) before reopening an orphan `in_progress` bead. Root cause of the mo66 duplicate-spawn loop: a long sibling `test` gate holds the per-project gate lock past the 5m orphan grace, so the close looked like an orphan (kf2t 2026-09-27, mo66 2026-10-06).
