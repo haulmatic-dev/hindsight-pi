@@ -109,6 +109,43 @@ func FinalizeStaleGateArtifacts(root string) (int, error) {
 	return finalized, err
 }
 
+// GateCloseInProgress reports whether any gate artifact for the bead still
+// claims a live running gate. Shared by Charon's orphan probe (a bead whose
+// close gates are running is not an orphan) and the fleet digest (the same
+// bead must not be counted as an orphaned claim, which re-fired the P0
+// campaign anomaly every judgment round while close gates ran — hydra
+// 2026-10-06: 6 in_progress beads mid-close counted as orphans).
+func GateCloseInProgress(root, project, beadID string) bool {
+	if root == "" {
+		return false
+	}
+	matches, err := filepath.Glob(filepath.Join(root, "gates", project, beadID, "*.json"))
+	if err != nil {
+		return false
+	}
+	for _, m := range matches {
+		data, err := os.ReadFile(m)
+		if err != nil {
+			continue
+		}
+		var a GateArtifact
+		if json.Unmarshal(data, &a) != nil {
+			continue
+		}
+		if a.Status != GateStatusRunning {
+			continue
+		}
+		if !processAlive(a.PID) {
+			continue
+		}
+		if time.Since(a.StartedAt) > 45*time.Minute {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // processAlive reports whether a PID exists and belongs to a live process.
 func processAlive(pid int) bool {
 	if pid <= 0 {
