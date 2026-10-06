@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -9,10 +10,52 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
+
+// prWaiting tracks branch tips that already have a PR standing open awaiting
+// a human merge (tier policy). While the recorded tip is unchanged, publisher
+// ticks skip the publish attempt entirely — re-pushing the same tip and
+// re-attempting the same merge is pure churn and its events read as failures.
+// Process-local: a daemon restart re-discovers the waiting PR once, which is
+// cheap and self-healing.
+var (
+	prWaitingMu sync.Mutex
+	prWaiting   = map[string]string{} // projectPath+"\x00"+branch -> tip sha
+)
+
+func prWaitingKey(projectPath, branch string) string { return projectPath + "\x00" + branch }
+
+func prWaitingMark(projectPath, branch string) string {
+	prWaitingMu.Lock()
+	defer prWaitingMu.Unlock()
+	return prWaiting[prWaitingKey(projectPath, branch)]
+}
+
+func setPRWaiting(projectPath, branch, tip string) {
+	prWaitingMu.Lock()
+	defer prWaitingMu.Unlock()
+	prWaiting[prWaitingKey(projectPath, branch)] = tip
+}
+
+func clearPRWaiting(projectPath, branch string) {
+	prWaitingMu.Lock()
+	defer prWaitingMu.Unlock()
+	delete(prWaiting, prWaitingKey(projectPath, branch))
+}
+
+// localBranchTip resolves a local branch tip; error → caller falls through to
+// the normal publish path (fail-open).
+func localBranchTip(projectPath, branch string) (string, error) {
+	out, err := exec.Command("git", "-C", projectPath, "rev-parse", "refs/heads/"+branch).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
 
 // branchAheadOfRemote reports whether localBranch has commits not yet on
 // origin/localBranch. When origin/localBranch does not exist (never pushed) it
@@ -122,6 +165,20 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 	log.Printf("[Publish] push attempted for %s (%s) pr_merge=%v", projectPath, branch, prMerge)
 	if prMerge {
 		feature := IntegrationBranchPrefix(projectPath) + "publish-" + prSafeName(filepath.Base(projectPath))
+		// Idempotence: when this project/branch already has a PR standing
+		// open (tier policy: waiting on a human merge), re-invoking
+		// PublishViaPR just re-pushes the same tip and re-attempts the same
+		// merge — 114 publish_push_rejected events/day across 3 projects on
+		// 2026-10-06, and the pr_merge_failed misnomer poisoned audit signal
+		// (routine waiting read as failure). Skip while the same branch tip
+		// is still ahead; a new bead landing on the branch flips
+		// branchAheadOfRemote back to true with a NEW tip and re-publishes.
+		if mark := prWaitingMark(projectPath, branch); mark != "" {
+			if tip, terr := localBranchTip(projectPath, branch); terr == nil && tip == mark {
+				return false, "pr awaiting human merge"
+			}
+			clearPRWaiting(projectPath, branch) // tip advanced since the wait was recorded
+		}
 		publishEvents.EmitRepo(projectPath, Event{Type: "publish_pr_invoked", Project: filepath.Base(projectPath),
 			Detail: "PublishViaPR invoked for " + branch + " via " + feature,
 			Fields: map[string]any{"branch": branch, "feature_branch": feature, "project_path": projectPath}})
@@ -133,6 +190,23 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 			func() error { return rebaseCheckoutOntoBase(projectPath, branch) },
 			projectPath, branch)
 		if err != nil {
+			var pw *PRWaitingError
+			if errors.As(err, &pw) {
+				// Standing-open PR is the DESIGNED tier policy, not a failure:
+				// emit publish_pr_waiting (reason pr_awaiting_human), record the
+				// branch tip so later ticks skip without re-pushing, and do not
+				// emit publish_push_rejected — that event is reserved for real
+				// failures (credential-class, conflicts, API errors).
+				if tip, terr := localBranchTip(projectPath, branch); terr == nil {
+					setPRWaiting(projectPath, branch, tip)
+				}
+				publishEvents.EmitRepo(projectPath, Event{Type: "publish_pr_waiting", Project: filepath.Base(projectPath), Reason: "pr_awaiting_human",
+					Detail: "PR left open awaiting human merge for " + branch + ": " + pw.URL,
+					Fields: map[string]any{"branch": branch, "feature_branch": feature, "pr_url": pw.URL, "project_path": projectPath}})
+				log.Printf("[Publish] %s/%s: PR awaiting human merge: %s", projectPath, branch, pw.URL)
+				AppendActivity(projectPath, "publish", "PR awaiting human merge: "+pw.URL)
+				return false, "pr awaiting human merge"
+			}
 			mergeErr := err.Error()
 			cls := ClassifyPushFailure(err.Error())
 			// NOT_FOUND is credential-class (org rename / missing PAT

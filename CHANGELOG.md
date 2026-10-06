@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Changed
+- **Publish idempotence + honest waiting signal**: a tier-policy "PR left open awaiting human merge" no longer emits `publish_push_rejected` (reason `pr_merge_failed`) on every publisher tick. First wait emits `publish_pr_waiting` (reason `pr_awaiting_human`) with the PR URL; later ticks skip entirely while the branch tip is unchanged (process-local tip mark; new work on the branch re-publishes). Real failures (credential-class, conflicts, API) still emit `publish_push_rejected`. 2026-10-06: 114 rejected events/day across 3 repos were routine waiting reading as failure, and the misnomer fed an audit panic about unpublished work that did not exist.
+
 ### Added
 - **Deploy md5 gate** (`scripts/verify-deploy.sh`): new optional 4th argument `build-dir` asserts the installed daemon/worker binaries are byte-identical (md5) to the just-built artifacts. Freshness and restart checks cannot catch a silent no-op install — on 2026-10-06 two deploy chains reported `active` while yesterday's binary stayed installed, costing a phantom-debugging cycle. The §10 deploy procedure now mandates the gate.
 ### Added
