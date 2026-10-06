@@ -74,6 +74,14 @@ type PanConfig struct {
 	// stalls a campaign in minutes, so the wedge path must be much shorter.
 	// Default: 3600 (1h).
 	EscalatedWedgeGraceSeconds int `yaml:"escalated_wedge_grace_seconds"`
+	// EscalatedLeafGraceSeconds is how long an escalated bead with NO
+	// dependents may sit before Pan sees it as a stale-escalation candidate
+	// (one fair retry via repair:clear-escalation; the escalation re-fires
+	// on merit if the failure recurs). Default: 86400 (24h) — the historical
+	// human window. Lower it when verified-close escalations of the
+	// daemon-defect class (gate extraction errors, broken gate cwd) should
+	// be auto-retried shortly after a fix deploys instead of waiting a day.
+	EscalatedLeafGraceSeconds int `yaml:"escalated_leaf_grace_seconds"`
 	Provider                string `yaml:"provider"`
 	Model                   string `yaml:"model"`
 	Thinking                string `yaml:"thinking"`

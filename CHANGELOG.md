@@ -6,6 +6,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+### Added
+- `pan.escalated_leaf_grace_seconds` (default 86400): how long an escalated bead with no dependents sits before Pan sees it as a stale-escalation candidate. The leaf reason now prefers `repair:clear-escalation` (one fair retry; re-fires on merit), so escalations caused by a daemon defect fixed by a later deploy get auto-retried instead of idling overnight for a human (srv-jobfile-eci: gate-extraction defect fixed by deploy, bead idled escalated with no path back). Lower the knob to cycle defect-class verified-close escalations within the hour.
 ### Fixed
 - Verification-command extractor truncated commands containing a backtick run (e.g. `grep -c '\`\`\`'` in a docs check): substring fence matching cut at the embedded ``` → `/bin/sh: Syntax error: Unterminated quoted string` → false verification-failed escalations (srv-jobfile-eci). Fence matching is now line-based.
 - Close-time hard gates received an empty worktree path from the close caller and fell back to the main checkout (older package.json, no node_modules): verification commands failed with `Missing script` / exit 127. The caller now resolves the bead's chain worktree (shared helper with the daemon-gates block).

@@ -167,6 +167,10 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 					if wedgeGrace <= 0 {
 						wedgeGrace = time.Hour
 					}
+					leafGrace := time.Duration(panCfg.EscalatedLeafGraceSeconds) * time.Second
+					if leafGrace <= 0 {
+						leafGrace = 24 * time.Hour
+					}
 					for _, project := range o.projects {
 						for _, target := range repoScanTargets(project) {
 							beads, err := o.beadsClient.ListBeads(target, "")
@@ -187,7 +191,7 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 								if b.Metadata != nil {
 									dependents, _ = strconv.Atoi(b.Metadata["dependent_count"])
 								}
-								if reason, ok := panBlockedReason(b, time.Now(), wedgeGrace, dependents); ok {
+								if reason, ok := panBlockedReason(b, time.Now(), wedgeGrace, leafGrace, dependents); ok {
 									blocked = append(blocked, pan.BlockedBead{
 										BeadID: b.ID.String(),
 										Reason: reason,
@@ -783,12 +787,21 @@ func (s *ServiceStarter) Stop() {
 // escalation leaves the bead in_progress with no worker by construction, so
 // Charon's orphan recovery correctly refuses to reopen it — the chain then
 // starves: srv-jobfile 2026-10-05, 2 escalated heads, br ready=0, zero
-// spawns for 3.5h). A leaf escalation can wait the 24h human window; a
-// chain-head escalation cannot, so it becomes a Pan candidate after
-// wedgeGrace with a reason that tells the judge the chain is stalled.
-func panBlockedReason(b types.Bead, now time.Time, wedgeGrace time.Duration, blockedDependents int) (string, bool) {
+// spawns for 3.5h). A chain-head escalation cannot wait, so it becomes a
+// Pan candidate after wedgeGrace with a reason that tells the judge the
+// chain is stalled. A leaf escalation becomes a candidate after leafGrace
+// (default 24h, configurable via pan.escalated_leaf_grace_seconds): beyond
+// grace it also gets the repair:clear-escalation preference, because an
+// escalation whose cause was a daemon defect fixed since the escalation
+// should be retried automatically rather than sitting a day for a human
+// (srv-jobfile-eci, 2026-10-05: gate-extraction defect fixed by deploy,
+// bead idled escalated overnight with no path back).
+func panBlockedReason(b types.Bead, now time.Time, wedgeGrace, leafGrace time.Duration, blockedDependents int) (string, bool) {
 	if b.Status.IsTerminal() {
 		return "", false
+	}
+	if leafGrace <= 0 {
+		leafGrace = 24 * time.Hour
 	}
 	for _, lbl := range b.Labels {
 		switch lbl {
@@ -799,8 +812,8 @@ func panBlockedReason(b types.Bead, now time.Time, wedgeGrace time.Duration, blo
 			if blockedDependents > 0 && wedgeGrace > 0 && age > wedgeGrace {
 				return fmt.Sprintf("escalated to a human %v ago and WEDGING %d dependent bead(s) — the dependency chain is stalled and no human has acted; prefer repair:clear-escalation so the bead gets one fair retry (the escalation re-fires if the failure recurs)", age.Round(time.Minute), blockedDependents), true
 			}
-			if age > 24*time.Hour {
-				return "escalated to a human over 24h ago — stale escalation or genuinely waiting?", true
+			if age > leafGrace {
+				return fmt.Sprintf("escalated to a human %v ago with no dependents blocked — beyond the %v leaf grace; prefer repair:clear-escalation so the bead gets one fair retry (the escalation re-fires if the failure recurs; if it was a daemon defect that has since been fixed, the retry should just pass)", age.Round(time.Minute), leafGrace), true
 			}
 		case strandedConflictLabel:
 			return "quarantined by integrate-stranded (merge conflict) — human review or re-attempt needed", true

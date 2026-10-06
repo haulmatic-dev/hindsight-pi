@@ -205,9 +205,17 @@ registry worker** (`SetLiveWorkerFunc`; nil probe = fail-closed legacy skip)
 and scans `repoScanTargets` so multi-repo children are covered. Two faster
 paths complement the 72h backstop: (1) `panBlockedReason` surfaces an
 escalated bead to Pan after `pan.escalated_wedge_grace_seconds` (default 1h)
-when it still has live dependents — a chain head stalls its whole subtree,
-unlike a leaf which keeps the 24h human window — and the Pan rescue recipe
-prefers `repair:clear-escalation` for wedged heads; (2) Charon's
+when it still has live dependents — a chain head stalls its whole subtree
+and the Pan rescue recipe prefers `repair:clear-escalation` for wedged
+heads.
+An escalated **leaf** (no dependents) becomes a candidate after
+`pan.escalated_leaf_grace_seconds` (default 24h, the historical human
+window) and its reason also prefers `repair:clear-escalation`: an
+escalation whose cause was a daemon defect fixed by a subsequent deploy
+should be retried automatically instead of idling a day for a human
+(srv-jobfile-eci, 2026-10-05: gate-extraction defect fixed by deploy, bead
+idled escalated overnight with no path back). Lower the leaf knob when
+verified-close defect-class escalations should cycle within the hour. (2) Charon's
 escalated-skip emits a cooldown-limited `orphan_escalated_wedged` event per
 the event-stream contract (was log-only).
 
