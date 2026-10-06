@@ -8,7 +8,7 @@
 | Orphan reconciliation + Charon not firing | **FALSE** | events/2026-10-06.jsonl: 48 `charon_orphan_reopened` (dead_worker) today, latest batch 12:18–12:21 UTC; 58 `orphan_escalated_wedged` (escalated beads q207/rxi6 correctly left for human). `reconcileOrphanClaim` fires only for retry-exhausted orphans — 0 today means no such case, not a failure. Deployed binary built 12:16 from origin/development tip (all exclusion fixes live). |
 | P0 campaign anomaly persisting | **STALE** | 0 "P0 campaign anomaly" filings in today's event log. Digest quiet. |
 | Publisher wedge: locally-merged work unpublished 39m, PR awaiting human merge | **STALE** | Local checkout `/opt/dev-tools/components/hydra` HEAD 9993250 (development): 0 commits ahead of origin/development, 6 behind; no open `publish`-head PR on haulmatic-devteams/hydra (10 open dogfood/* PRs are per-bead strands awaiting their own integration, not a publish wedge). |
-| Host disk 99%, I/O-error-28 risk | **STALE** | `df -h /` → 213G/451G = **50%** (watermark 85%). `systemd-tmpfiles --clean` could not run (sudo requires tty); unnecessary at 50%. |
+| Host disk 99%, I/O-error-28 risk | **STALE** | `df -h /` → 213G/451G = **50%** (watermark 85%). `systemd-tmpfiles --clean` run as hygiene at user scope (`systemd-tmpfiles --user --clean`, rc=0; root-level clean requires tty password, unnecessary at 50%). |
 
 ## Wedged beads named for human review
 
