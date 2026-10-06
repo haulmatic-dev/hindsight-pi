@@ -1,8 +1,10 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -42,6 +44,10 @@ func (r *realBrConfigRunner) configSet(repoDir, key, value string) error {
 // bead IDs do not collide across users or projects that share a repo name.
 type PrefixGuard struct {
 	runner brConfigRunner
+	// rawConfig reads the store's raw .beads/config.yaml so the guard can
+	// distinguish br's default prefix (written as a commented line) from an
+	// explicitly configured one. Nil falls back to reading the file directly.
+	rawConfig func(repoDir string) ([]byte, error)
 }
 
 // NewPrefixGuard creates a PrefixGuard that shells out to br.
@@ -67,6 +73,15 @@ func (g *PrefixGuard) GuardProject(project types.Project, username string, confi
 // or still at br's default (the repo directory base name). A deliberately
 // customized prefix is left alone and logged loudly. Fail-open: br errors are
 // logged and ignored so a broken br config never blocks project discovery.
+//
+// A current prefix equal to the repo basename is only treated as br's default
+// when the store's .beads/config.yaml does not explicitly configure it (br
+// writes defaults as a commented "# issue_prefix: <name>" line). An explicit
+// prefix matching the basename is an established store namespace: renaming it
+// mid-life splits the store's ID space (2026-10-05 srv-jobfile: 38
+// "srv-jobfile-*" beads vs 11 post-rename "ajantha-srv-jobfile-*" beads,
+// including every Pan-filed wedge bead — deps and fix-original references
+// across the two prefixes stopped resolving).
 func (g *PrefixGuard) guardRepo(repoDir, username, repoName, configured string) {
 	desired := issuePrefixForRepo(username, repoName, configured)
 	defaultPrefix := strings.ToLower(filepath.Base(repoDir))
@@ -77,7 +92,7 @@ func (g *PrefixGuard) guardRepo(repoDir, username, repoName, configured string) 
 		return
 	}
 
-	if current == "" || current == defaultPrefix || current == "br" {
+	if current == "" || current == "br" {
 		if err := g.runner.configSet(repoDir, "issue_prefix", desired); err != nil {
 			log.Printf("[PrefixGuard] %s: br config set failed (fail-open): %v", repoDir, err)
 			return
@@ -86,9 +101,60 @@ func (g *PrefixGuard) guardRepo(repoDir, username, repoName, configured string) 
 		return
 	}
 
+	if current == defaultPrefix {
+		explicit, err := g.storePrefixExplicit(repoDir)
+		if err != nil {
+			// Unreadable store config (e.g. the WAL-poisoned store that produced
+			// the srv-jobfile rename): preserve the established namespace rather
+			// than gamble a mid-life rename on an unreadable state.
+			log.Printf("[PrefixGuard] %s: existing issue_prefix=%q (explicit, config unreadable: %v) preserved; desired=%q", repoDir, current, err, desired)
+			return
+		}
+		if explicit {
+			log.Printf("[PrefixGuard] %s: existing issue_prefix=%q (explicit in .beads/config.yaml) preserved; desired=%q", repoDir, current, desired)
+			return
+		}
+		if err := g.runner.configSet(repoDir, "issue_prefix", desired); err != nil {
+			log.Printf("[PrefixGuard] %s: br config set failed (fail-open): %v", repoDir, err)
+			return
+		}
+		log.Printf("[PrefixGuard] Set issue_prefix=%s in %s (br default was %q)", desired, repoDir, current)
+		return
+	}
+
 	if current != desired {
 		log.Printf("[PrefixGuard] %s: existing issue_prefix=%q (custom) preserved; desired=%q", repoDir, current, desired)
 	}
+}
+
+// storePrefixExplicit reports whether .beads/config.yaml explicitly configures
+// issue_prefix (an uncommented "issue_prefix:" line). A missing file means br
+// never wrote a config: the prefix is whatever the runtime resolved, treated
+// as default (rename allowed).
+func (g *PrefixGuard) storePrefixExplicit(repoDir string) (bool, error) {
+	read := g.rawConfig
+	if read == nil {
+		read = func(dir string) ([]byte, error) {
+			return os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+		}
+	}
+	raw, err := read(repoDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		trimmed := bytes.TrimSpace(line)
+		if bytes.HasPrefix(trimmed, []byte("#")) {
+			continue
+		}
+		if bytes.HasPrefix(trimmed, []byte("issue_prefix:")) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // LogConfigPrefixCollisionGuidance scans config-listed projects and warns when
@@ -126,6 +192,7 @@ func projectDefaultPrefixes(project types.Project) []string {
 	}
 	return out
 }
+
 // An explicitly configured prefix is normalized and used as-is; otherwise
 // the prefix is auto-namespaced as <username>-<reponame>.
 func issuePrefixForRepo(username, repoName, configured string) string {

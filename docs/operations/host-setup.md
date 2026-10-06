@@ -302,7 +302,14 @@ marker). For each discovered repo, PrefixGuard writes `.beads/config.yaml` with
 projects that share a repo name. An explicit `issue_prefix` on the user
 project entry overrides the generated value. Existing deliberate custom
 prefixes are preserved with a warning; explicit config-listed projects in
-`/etc/hydra/hydra.yaml` are not mutated.
+`/etc/hydra/hydra.yaml` are not mutated. A prefix equal to the repo basename
+is only treated as br's default when `.beads/config.yaml` does not explicitly
+configure it (br writes defaults as a commented `# issue_prefix:` line) — an
+explicit value is preserved even when it equals the basename, and an unreadable
+store config preserves the namespace rather than risking a mid-life rename
+(srv-jobfile 2026-10-05: a rename split the store into `srv-jobfile-*` and
+`ajantha-srv-jobfile-*` bead IDs and broke cross-references, including every
+Pan-filed wedge bead filed after the rename).
 
 #### Beads-group permission convention (auto-onboarded)
 
