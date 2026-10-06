@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Documentation
+- Triage `docs/discovery/orphanclaim-churn-triage-284j.md`: all three P0 claims stale at 14:58 UTC — 1 working registry row, 18 in_progress all pan-filed/escalated/churn-with-fresh-completed-rows (Charon reopens live at 14:48/14:49), publish wedge absent (0 commits ahead of origin/development tip c3be2cf), disk 40%. No code change.
 - Triage `docs/discovery/orphanclaim-disk99-triage-bkip.md`: the 14-orphan cohort fully dispositioned live (8 pan-filed exclusions, 5 human-escalated by design, 3 in-flight close gates, 3 actively churn-recovered by Charon) — recovery self-healing, no code change, disk 49% (stale claim).
 - Triage `docs/discovery/orphanclaim-publisher-disk-triage-gzkr.md`: all three P0 claims in the 13:30 UTC snapshot stale — orphaned claims are retry-churn with fresh completed workers (Charon 47 reopens, digest quiet), publish already landed via PR #263 (merged 13:25:30Z), disk 50% vs 85% watermark. Twin hydra-lg7b closed as duplicate.
 - Triage `docs/discovery/orphanclaim-churn-triage-lg7b.md`: the 13-orphan-claim digest anomaly is again the gate-failure churn retry-gap (Charon reopen events live; 11 same-day pan-filed twin pseudo-beads closed as duplicates); disk 49% (stale claim); open publish PR #263 admin-merged (e5e33b5 = origin/development tip).
