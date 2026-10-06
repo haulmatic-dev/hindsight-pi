@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Documentation
+- Triage `docs/discovery/p0-anomaly-triage-yc0m.md`: all three P0 campaign claims verified stale at triage time — 0 orphan claims (escalated/pan-filed/queued classes; Charon live with 48 reopens), 0 anomaly filings today, local checkout behind origin 7/0 (publish already landed via PR #268), disk 50% vs 85% watermark. No code change.
 - Triage `docs/discovery/orphanclaim-churn-triage-hu12.md`: the persistent orphanclaims=6 digest anomaly is a retry-gap snapshot of a gate-failure churn loop (Charon reopened all 9 candidate beads 2–6× on 2026-10-06; loop self-terminates via escalation) — no reconciliation bug, no manual requeue, disk 49% (stale claim).
 - Orphan-claim triage `docs/discovery/orphanclaim-stale-snapshot-triage-ew7t.md`: the "8 in_progress beads with no live registry worker + disk 99%" digest anomaly re-verified stale at triage time — 0 live orphan claims (all rows working/fresh-heartbeat), disk 49%, Charon recovery demonstrably firing (44 reopens), 0 anomaly filings today. No code change; no further orphan hardening warranted.
 
