@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Documentation
+- Spawn-wedge triage `docs/discovery/spawn-wedge-triage-rz63.md`: the "persisting" project-scoped spawn-failed cohort in project hydra verified transient — PrunableWedgeSweep fired every tick (5 below-threshold residuals then a cohort of 2), recover-spawn-cohort cleared both spawn-failure entries (hydra-rz63, hydra-bldo) at 13:40:57 UTC and both beads respawned; underlying cause is the correct "spawn already in flight" duplicate-check recording a retry entry, not a registry/worktree fault. No code change.
 - Triage `docs/discovery/orphanclaim-churn-triage-hu12.md`: the persistent orphanclaims=6 digest anomaly is a retry-gap snapshot of a gate-failure churn loop (Charon reopened all 9 candidate beads 2–6× on 2026-10-06; loop self-terminates via escalation) — no reconciliation bug, no manual requeue, disk 49% (stale claim).
 - Orphan-claim triage `docs/discovery/orphanclaim-stale-snapshot-triage-ew7t.md`: the "8 in_progress beads with no live registry worker + disk 99%" digest anomaly re-verified stale at triage time — 0 live orphan claims (all rows working/fresh-heartbeat), disk 49%, Charon recovery demonstrably firing (44 reopens), 0 anomaly filings today. No code change; no further orphan hardening warranted.
 
