@@ -7,6 +7,10 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Documentation
+
+- Orphan-claim P0 triage (hydra-m5j9): reconciliation verified live (6 Charon reopens today); recurring ~9-claim digest count is provider-pool-queued reopened beads + by-design escalated orphans, disk 99% claim stale at 49%. See docs/discovery/orphanclaim-triage-m5j9.md.
+
 ### Fixed
 
 - Charon orphan recovery no longer respawns a duplicate worker while the bead's close is running (or queued behind) daemon gates: it now probes the artifact-first gate markers (`$HYDRA_HOME/gates/*/<bead>/*.json` with `status=running`, live writer PID, <45m old) before reopening an orphan `in_progress` bead. Root cause of the mo66 duplicate-spawn loop: a long sibling `test` gate holds the per-project gate lock past the 5m orphan grace, so the close looked like an orphan (kf2t 2026-09-27, mo66 2026-10-06).
