@@ -39,14 +39,22 @@ func ProjectKeyFromAnomalyID(id string) (string, bool) {
 // changed, defeat judgment dedup, and burn MiniMax calls on a stable fleet
 // (PR #236 reason-normalization lesson, applied at the source).
 type ProjectHealth struct {
-	Key                  string // stable display key ("nipuna.j/webapp"); basis of the pseudo ID
-	Open                 int
-	InProgress           int
-	DepBlocked           int
-	LiveWorkers          int
-	ChainedParallel      int // live-worker pairs whose beads are dep-related
-	StrandedWorktrees    int // worktree dirs whose bead is terminal
-	OrphanClaims         int // in_progress beads with no live registry worker
+	Key               string // stable display key ("nipuna.j/webapp"); basis of the pseudo ID
+	Open              int
+	InProgress        int
+	DepBlocked        int
+	LiveWorkers       int
+	ChainedParallel   int // live-worker pairs whose beads are dep-related
+	StrandedWorktrees int // worktree dirs whose bead is terminal
+	OrphanClaims      int // in_progress beads with no live registry worker
+	// GateFailedOpen counts non-terminal beads carrying the gate-failed label
+	// without an escalated/needs-human label — gate deaths sitting silent.
+	GateFailedOpen int
+	// ClosedFailedRecent counts beads labeled closed-failed whose UpdatedAt
+	// falls inside closedFailedDigestWindow — recent gate deaths, alerting Pan
+	// even though the bead is already terminal (ee5r/lkbo/ejsk 2026-10-04:
+	// three beads died at gates in one 30-minute window with zero alerts).
+	ClosedFailedRecent   int
 	UnintegratedBranches int // hydra/wt-* branch count (informational)
 	Anomalies            []string
 }
@@ -92,9 +100,9 @@ func (d HealthDigest) Text() string {
 	sort.Slice(projs, func(i, j int) bool { return projs[i].Key < projs[j].Key })
 	var b strings.Builder
 	for _, p := range projs {
-		fmt.Fprintf(&b, "%s: open=%d inprog=%d depblocked=%d workers=%d orphanclaims=%d chainedpairs=%d strandedwt=%d wtbranches=%d",
+		fmt.Fprintf(&b, "%s: open=%d inprog=%d depblocked=%d workers=%d orphanclaims=%d chainedpairs=%d strandedwt=%d wtbranches=%d gatefailed=%d closedfail=%d",
 			p.Key, p.Open, p.InProgress, p.DepBlocked, p.LiveWorkers, p.OrphanClaims,
-			p.ChainedParallel, p.StrandedWorktrees, p.UnintegratedBranches)
+			p.ChainedParallel, p.StrandedWorktrees, p.UnintegratedBranches, p.GateFailedOpen, p.ClosedFailedRecent)
 		if len(p.Anomalies) > 0 {
 			fmt.Fprintf(&b, " ANOMALIES=[%s]", strings.Join(p.Anomalies, "; "))
 		}

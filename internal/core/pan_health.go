@@ -214,6 +214,39 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 					"P0 campaign anomaly: %d in_progress bead(s) with no live registry worker (orphaned claims wedging the DAG ladder)", ph.OrphanClaims))
 			}
 
+			// Gate deaths with no escalation (ee5r/lkbo/ejsk 2026-10-04
+			// 15:45-16:17 UTC: three beads died at daemon gates in one window
+			// and nobody was alerted). Two views, one rule — a gate death must
+			// reach Pan within a digest tick:
+			//   gatefailed: non-terminal beads carrying gate-failed that never
+			//     reached the escalation ladder (no escalated/needs-human label) —
+			//     a worker died or stalled before the retry cap could fire.
+			//   closedfail: beads closed-failed inside closedFailedDigestWindow —
+			//     terminal, so every other counter skips them, yet the death is
+			//     recent and unaudited.
+			const closedFailedDigestWindow = 4 * time.Hour
+			for id, labels := range labelsByID {
+				escalatedOrHuman := slices.Contains(labels, "escalated") || slices.Contains(labels, "needs-human")
+				if !escalatedOrHuman && slices.Contains(labels, "gate-failed") {
+					if st := statusByID[id]; !st.IsTerminal() {
+						ph.GateFailedOpen++
+					}
+				}
+				if slices.Contains(labels, "closed-failed") {
+					if age := time.Since(claimsByID[id]); age >= 0 && age < closedFailedDigestWindow {
+						ph.ClosedFailedRecent++
+					}
+				}
+			}
+			if ph.GateFailedOpen > 0 {
+				ph.Anomalies = append(ph.Anomalies, fmt.Sprintf(
+					"P0 campaign anomaly: %d bead(s) marked gate-failed with no escalation — gate deaths sitting silent (worker never re-attempted close)", ph.GateFailedOpen))
+			}
+			if ph.ClosedFailedRecent > 0 {
+				ph.Anomalies = append(ph.Anomalies, fmt.Sprintf(
+					"P0 campaign anomaly: %d bead(s) closed-failed in the last 4h — recent gate deaths, no escalation fired", ph.ClosedFailedRecent))
+			}
+
 			// Chained-parallel: live-worker pairs whose beads are dep-related
 			// (either direction). The c36 blast signature.
 			for i := 0; i < len(live); i++ {

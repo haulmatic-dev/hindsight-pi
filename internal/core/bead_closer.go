@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1531,15 +1532,36 @@ func (c *BeadCloser) checkTargetScope(bead *types.Bead, projectPath, repoName st
 // the caller aborts the close.
 func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason string) error {
 	beadID := string(bead.ID)
+	closeRejectAttempt := func(prev types.Bead, n int) {
+		if c.beadsClient == nil {
+			return
+		}
+		// Replace the previous attempt label so the ladder holds exactly one
+		// marker (the highest round); RemoveBeadLabels errors are logged, not
+		// fatal — an extra attempt label only over-counts conservatively.
+		for _, l := range prev.Labels {
+			if strings.HasPrefix(l, closeRejectAttemptPrefix) {
+				if err := c.beadsClient.RemoveBeadLabels(projectPath, repoName, bead.ID, []string{l}); err != nil {
+					log.Printf("[VerifiedClose] Failed to remove stale attempt label %q from %s: %v", l, beadID, err)
+				}
+			}
+		}
+		label := fmt.Sprintf("%s%d", closeRejectAttemptPrefix, n)
+		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{label}); err != nil {
+			log.Printf("[VerifiedClose] Failed to label %s with %q: %v", beadID, label, err)
+		}
+	}
 
 	// Never reopen a terminal bead: a second close attempt after a successful
 	// close+integration sees an empty diff and must not resurrect the bead
 	// (2026-08-24/25 resurrection loop: i1g, 5r0, bz5, aga accepted-then-reopened).
+	var fresh *types.Bead
 	if c.beadsClient != nil {
-		fresh, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID)
+		f, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID)
 		if err != nil {
 			return fmt.Errorf("[VerifiedClose] cannot verify state of bead %s before reject: %w", beadID, err)
 		}
+		fresh = f
 		if fresh != nil && fresh.Status.IsTerminal() {
 			log.Printf("[VerifiedClose] Bead %s already terminal (%s); skipping reject (%s)", beadID, fresh.Status, reason)
 			return nil
@@ -1561,6 +1583,9 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 			if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"needs-human", "verified-close-escalated", escalatedLabel}); err != nil {
 				log.Printf("[VerifiedClose] Failed to label %s for escalation: %v", beadID, err)
 			}
+			if fresh != nil {
+				closeRejectAttempt(*fresh, currentAttempts)
+			}
 		}
 		c.events.EmitRepo(projectPath, Event{Type: "bead.escalated", Project: repoName,
 			Bead: beadID, Reason: reason,
@@ -1581,6 +1606,11 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"verified-close-reject-" + reason}); err != nil {
 			log.Printf("[VerifiedClose] Failed to label %s: %v", beadID, err)
 		}
+		prev := bead
+		if fresh != nil {
+			prev = fresh
+		}
+		closeRejectAttempt(*prev, currentAttempts+1)
 	}
 	if c.sessionResumePilot != nil {
 		c.sessionResumePilot.RecordReject(hasBeadLabel(bead.Labels, sessionResumedLabel))
@@ -1601,11 +1631,40 @@ func (c *BeadCloser) logCloseEvent(bead *types.Bead, verdict, reason string, att
 // CloseEvent attempt values consistent across accepted, rejected, and
 // escalated paths.
 func (c *BeadCloser) validationRetryCount(bead *types.Bead) int {
-	if c.validationService == nil || c.validationService.retryManager == nil {
-		return 0
+	n := 0
+	if c.validationService != nil && c.validationService.retryManager != nil {
+		n = c.validationService.retryManager.GetValidationRetryCount(string(bead.ID))
 	}
-	return c.validationService.retryManager.GetValidationRetryCount(string(bead.ID))
+	// Durable floor: every verified-close rejection leaves a
+	// verified-close-reject-attempt-N label on the bead (rejectClose writes
+	// it). Count the highest such attempt so a daemon restart or a Charon
+	// orphan reopening — both of which reset the in-memory retry manager —
+	// cannot restart the escalation ladder at zero (ee5r/lkbo/ejsk
+	// 2026-10-04: gate failures cycled across restarts and never reached max
+	// rounds, so nobody was alerted).
+	if d := durableRejectAttempts(bead.Labels); d > n {
+		n = d
+	}
+	return n
 }
+
+// durableRejectAttempts returns the highest N found among labels of the form
+// verified-close-reject-attempt-N (0 when none are present).
+func durableRejectAttempts(labels []string) int {
+	max := 0
+	for _, l := range labels {
+		if s, ok := strings.CutPrefix(l, closeRejectAttemptPrefix); ok {
+			if n, err := strconv.Atoi(s); err == nil && n > max {
+				max = n
+			}
+		}
+	}
+	return max
+}
+
+// closeRejectAttemptPrefix is the durable per-attempt escalation ladder
+// label written by rejectClose (one label per round, replaced each round).
+const closeRejectAttemptPrefix = "verified-close-reject-attempt-"
 
 // beadTargetFiles extracts a bead's declared target files so the diff
 // check can be scoped. It reads Metadata["files"] then Metadata["target_files"]
