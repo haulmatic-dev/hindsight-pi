@@ -336,6 +336,50 @@ func TestCollectHealthDigestEscalatedBeadNotOrphan(t *testing.T) {
 	}
 }
 
+// TestCollectHealthDigestCloseInProgressNotOrphan guards the hydra
+// 2026-10-06 persisting orphanclaims=6 anomaly: beads whose close gates were
+// mid-run (workers exited 0 minutes earlier, Charon correctly left them via
+// the close-in-progress probe) were still counted as orphaned claims because
+// the digest lacked the gate-artifact probe — every judgment round re-filed
+// a P0 campaign-anomaly twin. A bead with a live running gate artifact must
+// NOT count as an orphaned claim.
+func TestCollectHealthDigestCloseInProgressNotOrphan(t *testing.T) {
+	tw := setupTestOverseer(t)
+	o := tw.overseer
+	o.registryStore = nil
+
+	bead := types.Bead{ID: "test-project-midclose", Project: "test-project", Status: types.StatusInProgress, Type: "bug", UpdatedAt: time.Now().Add(-10 * time.Minute)}
+	tw.mockBeads.beads["test-project-midclose"] = bead
+
+	root := t.TempDir()
+	o.gateRoot = root
+	a := GateArtifact{Project: "test-project", BeadID: "test-project-midclose", Gate: "test", Status: GateStatusRunning, PID: os.Getpid(), StartedAt: time.Now()}
+	if err := WriteGateArtifact(root, a); err != nil {
+		t.Fatalf("WriteGateArtifact: %v", err)
+	}
+
+	d := o.collectHealthDigest()
+	if len(d.Projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(d.Projects))
+	}
+	ph := d.Projects[0]
+	if ph.OrphanClaims != 0 {
+		t.Errorf("OrphanClaims = %d, want 0 (bead is mid-close, not orphaned)", ph.OrphanClaims)
+	}
+	for _, an := range ph.Anomalies {
+		if strings.Contains(an, "P0 campaign anomaly") {
+			t.Errorf("unexpected orphan anomaly: %v", ph.Anomalies)
+		}
+	}
+
+	// Without the gate root the same bead still counts (probe disabled).
+	o.gateRoot = ""
+	d = o.collectHealthDigest()
+	if d.Projects[0].OrphanClaims != 1 {
+		t.Errorf("OrphanClaims = %d with probe disabled, want 1", d.Projects[0].OrphanClaims)
+	}
+}
+
 func TestCollectHealthDigestOrphanClaims(t *testing.T) {
 	tw := setupTestOverseer(t)
 	o := tw.overseer

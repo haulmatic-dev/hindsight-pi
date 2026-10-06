@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/registry"
@@ -249,9 +250,31 @@ func (s *WorkerSpawner) LastWorkerForBead(beadID string) (string, bool) {
 	return fmt.Sprintf("pid:%d", rec.PID), true
 }
 
+// deadRowGrace is how long a non-terminal registry row's heartbeat may be
+// stale before a dead-PID row is treated as residue and reconciled at spawn
+// time. Mirrors Charon's heartbeatHungAfter (5m): a fresh heartbeat covers
+// PID-reuse and the window where the worker already called reporter.Stop but
+// the process has not exited yet.
+const deadRowGrace = 5 * time.Minute
+
+// processAlive reports whether a PID still has a live process (signal 0 probe).
+func spawnProbeAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
+}
+
 // isRegistryWorkerLive reports whether a non-terminal worker row exists in
 // the daemon's registry. Parked rows are treated as live workers that block
 // respawn, unless the park is older than parkedRespawnTimeout.
+//
+// A row whose heartbeat is stale AND whose PID is dead (or unset) is residue
+// from a worker that died before reporting terminal state (kill/panic before
+// reporter.Stop). Without this check every respawn attempt fails "worker
+// already exists" until Charon's hourly ghost reap — the spawn-failed cohort
+// wedge (2026-10-06). Such a row is reconciled to terminal (orphan-reaped)
+// here so the retry succeeds on this very spawn attempt.
 func (s *WorkerSpawner) isRegistryWorkerLive(beadID string) (bool, error) {
 	if s.registryStore == nil {
 		return false, nil
@@ -265,6 +288,18 @@ func (s *WorkerSpawner) isRegistryWorkerLive(beadID string) (bool, error) {
 		return false, nil
 	}
 	if rec.State.Terminal() {
+		return false, nil
+	}
+	// Parked rows keep their own timeout semantics below; never reconcile a
+	// parked row here — park liveness is a scheduler decision.
+	if rec.State != registry.StateParked &&
+		(time.Since(rec.LastHeartbeat) > deadRowGrace) &&
+		(rec.PID <= 0 || !spawnProbeAlive(rec.PID)) {
+		log.Printf("[WorkerSpawner] reconciling dead-PID stale-heartbeat registry row for %s (pid=%d, heartbeat age %v) as orphan-reaped", beadID, rec.PID, time.Since(rec.LastHeartbeat))
+		if merr := s.registryStore.MarkCompletedWithReason(beadID, -1, "orphan-reaped"); merr != nil {
+			log.Printf("[WorkerSpawner] orphan-reap mark for %s failed (fail-closed: row stays blocking): %v", beadID, merr)
+			return true, nil
+		}
 		return false, nil
 	}
 	if rec.State == registry.StateParked {

@@ -9,12 +9,19 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ### Documentation
 - Triage `docs/discovery/orphanclaim-churn-triage-hu12.md`: the persistent orphanclaims=6 digest anomaly is a retry-gap snapshot of a gate-failure churn loop (Charon reopened all 9 candidate beads 2–6× on 2026-10-06; loop self-terminates via escalation) — no reconciliation bug, no manual requeue, disk 49% (stale claim).
+- Orphan-claim triage `docs/discovery/orphanclaim-stale-snapshot-triage-ew7t.md`: the "8 in_progress beads with no live registry worker + disk 99%" digest anomaly re-verified stale at triage time — 0 live orphan claims (all rows working/fresh-heartbeat), disk 49%, Charon recovery demonstrably firing (44 reopens), 0 anomaly filings today. No code change; no further orphan hardening warranted.
+
+- Orphan-claim P0 triage (hydra-m5j9): reconciliation verified live (6 Charon reopens today); recurring ~9-claim digest count is provider-pool-queued reopened beads + by-design escalated orphans, disk 99% claim stale at 49%. See docs/discovery/orphanclaim-triage-m5j9.md.
+- Orphan-claim P0 triage (docs/discovery/orphanclaim-triage-uzmx.md): the "10 orphaned in_progress beads" anomaly verified stale at 2026-10-06 12:53 UTC — every in_progress bead has a live (working or heartbeat-fresh) registry row, Charon reaped 5 real orphans today, digest anomaly fired 0× today, disk at 49%. No force-release warranted; landed digest/Charon fixes confirmed live.
 
 ### Fixed
 
 - Orphan-claim anomaly disposition (hydra-v5xq): the persisting "N in_progress bead(s) with no live registry worker" digest anomaly was escalated verified-close beads (k991/kvsc/ee5r), not orphans — recovery and digest exclusion behaved correctly. Beads closed as landed after origin/development integration checks; triage at `docs/discovery/orphanclaim-escalation-loop-triage-v5xq.md`. Disk-99% claim stale (host 49%).
 
 ### Fixed
+
+- Triage: P0 orphan-claim + disk-99% anomaly (hydra-cgud) verified stale — registry showed 7 working rows with fresh heartbeats, Charon reopened the full orphan cohort (lz3m/cw35/bldo/95ia/nydy/lkbo/2a3f/s8l7), and `df -h /` = 49%; recovery and disk-cleanup guard already landed. `docs/discovery/orphanclaim-disk99-triage-cgud.md`.
+- Orphaned-claims digest false positive: `collectHealthDigest` now excludes `in_progress` beads whose close gates have a live running artifact (same probe Charon uses, `GateCloseInProgress`), and gate artifacts record the gate child PID instead of the daemon's — a stale `running` marker carrying the daemon PID stayed "alive" forever, so Charon's `FinalizeStaleGateArtifacts` could never interrupt it and mid-close beads kept re-firing the P0 "orphaned claims" campaign anomaly every judgment round (hydra 2026-10-06: 6 beads whose workers had exited 0 minutes earlier). *Authored by a Hydra dogfood run.*
 
 - Charon orphan recovery no longer respawns a duplicate worker while the bead's close is running (or queued behind) daemon gates: it now probes the artifact-first gate markers (`$HYDRA_HOME/gates/*/<bead>/*.json` with `status=running`, live writer PID, <45m old) before reopening an orphan `in_progress` bead. Root cause of the mo66 duplicate-spawn loop: a long sibling `test` gate holds the per-project gate lock past the 5m orphan grace, so the close looked like an orphan (kf2t 2026-09-27, mo66 2026-10-06).
 - Credential preflight parks now recover on their own: a project whose origin probe passes again is auto-unparked (only when the park reason is the preflight's own `auto-parked: GitHub credential…`), with a `credential_recovered` event. A new 10-minute sweep re-probes credential-parked projects so recovery no longer waits for a daemon restart — hydra itself sat parked 26h past its PAT fix.
@@ -30,6 +37,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 - host-setup.md config-knob table now documents the `validation.agent_verifier` block (enabled/min_score/classes/max_diff_bytes/timeout_seconds/provider/model/pi_path) with a pointer to shepherd.md §1a.
 
 ### Fixed
+- **Spawn-path worker-already-exists race**: `WorkerSpawner.isRegistryWorkerLive` now reconciles a non-terminal registry row whose heartbeat is stale (>5m, Charon's `heartbeatHungAfter`) AND whose PID is dead/unset as `orphan-reaped` (new `registry.MarkCompletedWithReason`) instead of failing every respawn with "worker already exists" until the hourly ghost reap — the spawn-failed cohort wedge (beads blocked >1m, 2026-10-06). Fresh-heartbeat rows stay blocking (PID-reuse / reporter.Stop-in-flight protection); alive-PID rows stay blocking (hang path belongs to Charon); reconciliation write errors fail closed.
 - **Charon orphan-recovery suppression**: the registry liveness check in `beadHasLiveWorker` now requires state=working AND a live PID — a stale non-working row with a fresh-enough heartbeat suppressed orphan recovery for minutes (srv-jobfile-dh0).
 
 ### Changed
@@ -89,6 +97,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ### Documentation
 - task-0ndi: P0 orphan-claim + disk-99% digest claims verified stale — daemon (PID 3172191) carries reconcileOrphanClaim + Charon recovery + escalated exclusion (0 strings hits in binary), 0 P0 filings Oct 3–6, Charon reopened 5 real orphans today, no-registry-row in_progress beads (k991/kvsc/ee5r) are escalated human gates by design, disk 48% vs 85% watermark; no code change. *Authored by a Hydra dogfood run.*
+- task-8gvw: orphan-claim P0 triage — both claims (orphanclaims=9, disk 99%) verified stale at 2026-10-06 12:42 UTC: 0 live orphans in the registry, deployed binary current with the full PR #70→#241→#255 reconciliation chain, 44 Charon recoveries today, disk 49%. Full chain table + re-fire playbook in docs/discovery/orphanclaim-disk99-triage-8gvw.md; no code change. *Authored by a Hydra dogfood run.*
 - task-quy0: hydra PR #238 push-pending wedge verified resolved — PR #238 was CLOSED unmerged (mergedAt null), and the local checkout tip 3ac4484 is an ancestor of origin/development (landed via PR #251); bead closed not_planned, no human merge required. *Authored by a Hydra dogfood run.*
 - test-6yzo: fixture-suite validation round 1 verify-first close — all 8 shape fixtures route correctly and every task-breakdown suite (routing 8/8, preflight 10/10 ×3, crosscutting, shape-classification) passes rc=0; no code change. First-run failures were a concurrent-merge file-mutation race (30a2ac8 landed mid-run), documented in docs/hydra/handoff/test-6yzo.md. *Authored by a Hydra dogfood run.*
 

@@ -139,6 +139,11 @@ type Overseer struct {
 	// Orphan process janitor for cleaning up orphaned worker processes
 	orphanJanitor *Charon // Cleans up orphaned worker processes
 
+	// Gate artifact root ($HYDRA_HOME); enables the fleet digest's
+	// close-in-progress probe so beads mid-close are not counted as
+	// orphaned claims. Empty = probe disabled.
+	gateRoot string
+
 	// Stale-escalation ager (nil when escalation_ttl <= 0)
 	escalationTTL *EscalationTTLScanner
 
@@ -582,6 +587,7 @@ func NewOverseer(config *Config) *Overseer {
 	if home := os.Getenv("HYDRA_HOME"); home != "" {
 		o.beadCloser.SetGateRunner(NewGateRunner(home))
 		o.orphanJanitor.SetGateRoot(home)
+		o.gateRoot = home
 		if n, err := FinalizeStaleGateArtifacts(home); err != nil {
 			log.Printf("[DaemonGates] stale artifact recovery failed (continuing): %v", err)
 		} else if n > 0 {
