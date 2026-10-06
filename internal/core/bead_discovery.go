@@ -608,12 +608,26 @@ func (d *BeadDiscovery) findFromBVPlan(activeWorkers map[string]bool) ([]types.B
 // but the filtered candidate slice itself must not resurrect them. Filtering
 // before the dag==nil early return keeps the gate effective even when no DAG
 // is loaded (kgo: hydra-wdp spawned with escalated label present).
+
+// panFiledLabel mirrors internal/pan.FiledLabel (kept local to avoid pulling
+// the pan package into every discovery consumer). Pan files these beads for
+// HUMAN triage — they are findings/proposals, never worker-executable work
+// (hydra-bldo).
+const panFiledLabel = "pan-filed"
+
 func (d *BeadDiscovery) filterByDAG(candidates []types.Bead) []types.Bead {
 	kept := candidates[:0]
 	escalatedFiltered := 0
+	panFiledFiltered := 0
 	for _, bead := range candidates {
 		if hasBeadLabel(bead.Labels, escalatedLabel) {
 			escalatedFiltered++
+			continue
+		}
+		if hasBeadLabel(bead.Labels, panFiledLabel) {
+			// pan-filed beads are human-triage filings (Pan file-bead actuator):
+			// a worker must never execute them (hydra-bldo).
+			panFiledFiltered++
 			continue
 		}
 		if hasBeadLabel(bead.Labels, integrationExhaustedLabel) {
@@ -626,6 +640,9 @@ func (d *BeadDiscovery) filterByDAG(candidates []types.Bead) []types.Bead {
 	}
 	if escalatedFiltered > 0 {
 		log.Printf("[Discovery] Filtered %d escalated-labeled beads (escalated to human; not schedulable)", escalatedFiltered)
+	}
+	if panFiledFiltered > 0 {
+		log.Printf("[Discovery] Filtered %d pan-filed beads (human-triage filings; not worker-executable)", panFiledFiltered)
 	}
 	candidates = kept
 

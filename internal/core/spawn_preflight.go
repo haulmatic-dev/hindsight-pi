@@ -64,6 +64,15 @@ func (o *Overseer) spawnPreflightBead(bead types.Bead, projectPath string) error
 			Reason: fmt.Sprintf("non-executable type %q", bead.Type)}
 	}
 
+	// pan-filed beads are human-triage filings from Pan's file-bead actuator
+	// (hydra-bldo): a worker must never execute them.
+	if hasBeadLabel(bead.Labels, panFiledLabel) {
+		o.emitSpawnPreflightBlocked(projectPath, "spawn_blocked_human_triage", bead,
+			"bead is pan-filed (human triage), not worker-executable work")
+		return &SpawnSuppressedError{BeadID: beadIDStr,
+			Reason: "pan-filed human-triage bead"}
+	}
+
 	return nil
 }
 

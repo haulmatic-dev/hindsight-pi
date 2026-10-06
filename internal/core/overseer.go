@@ -1402,6 +1402,12 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 			if bead.Project == "" {
 				bead.Project = current.Project
 			}
+			// hydra-bldo: label truth matters at spawn time too — a pan-filed
+			// (human-triage) label added by Pan while the stale in-memory copy
+			// was queued must be seen by the preflight below.
+			if len(current.Labels) > 0 {
+				bead.Labels = current.Labels
+			}
 		}
 	}
 

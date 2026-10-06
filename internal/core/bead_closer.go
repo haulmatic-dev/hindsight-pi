@@ -565,11 +565,9 @@ func extractConflictPaths(detail string) []string {
 // bare in_progress, Charon reopened it, it respawned into the same death).
 const escalatedLabel = "escalated"
 
-// panFiledLabel marks beads filed by Pan via the file-bead actuator. Charon
-// must not reopen them for orphan recovery (triage beads legitimately sit
-// in_progress without a worker; reopening respawns the same filing). Keep in
-// sync with pan.FiledLabel in internal/pan.
-const panFiledLabel = "pan-filed"
+// panFiledLabel is declared in bead_discovery.go (same package); it mirrors
+// internal/pan.FiledLabel. Charon must not reopen pan-filed beads for orphan
+// recovery (triage beads legitimately sit in_progress without a worker).
 
 // hasBeadLabel reports whether labels contains label.
 func hasBeadLabel(labels []string, label string) bool {
