@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Documentation
+- Triage `docs/discovery/orphanclaim-churn-triage-xw4q.md`: orphanclaims=14 is a pre-restart churn snapshot (9 live workers + 9 pan-filed + 2 escalated excluded + 6 completed-row churn candidates being retried); Charon reopen loop live, zero P0 filings post 12:16 restart, disk 49% (stale claim) with systemd-tmpfiles cleanup run.
 - Triage `docs/discovery/orphanclaim-churn-triage-hu12.md`: the persistent orphanclaims=6 digest anomaly is a retry-gap snapshot of a gate-failure churn loop (Charon reopened all 9 candidate beads 2–6× on 2026-10-06; loop self-terminates via escalation) — no reconciliation bug, no manual requeue, disk 49% (stale claim).
 
 ### Fixed
