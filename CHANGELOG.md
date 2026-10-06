@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Documentation
+- Triage `docs/discovery/orphanclaim-churn-triage-hu12.md`: the persistent orphanclaims=6 digest anomaly is a retry-gap snapshot of a gate-failure churn loop (Charon reopened all 9 candidate beads 2–6× on 2026-10-06; loop self-terminates via escalation) — no reconciliation bug, no manual requeue, disk 49% (stale claim).
+
 ### Fixed
 
 - Charon orphan recovery no longer respawns a duplicate worker while the bead's close is running (or queued behind) daemon gates: it now probes the artifact-first gate markers (`$HYDRA_HOME/gates/*/<bead>/*.json` with `status=running`, live writer PID, <45m old) before reopening an orphan `in_progress` bead. Root cause of the mo66 duplicate-spawn loop: a long sibling `test` gate holds the per-project gate lock past the 5m orphan grace, so the close looked like an orphan (kf2t 2026-09-27, mo66 2026-10-06).
