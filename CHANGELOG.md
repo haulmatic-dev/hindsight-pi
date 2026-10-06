@@ -7,6 +7,12 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- **Adversarial close gate (bounded veto)** (`internal/core/adversary_gate.go`, `validation.agent_verifier`): after the deterministic close gates pass, a pi-backed reviewer scores the diff against the bead's acceptance criteria. Ships when zero BLOCKER findings and score ≥ `min_score` (default 0.8); NITs never block. Rejects ride the standard max_rounds reopen/escalate path with blocker feedback injected into the bead description; a different blocker set per round trips the churn guard and ships with dissent (`adversary_churn` event, `closed-with-findings` label). Verifier errors fail open with `adversary_error` events. Resurrects the dead AgentVerifier class (hardcoded localhost endpoint, silent skips, zero verdicts ever) as a Pan-shaped pi invocation with events for measurement.
+
+### Fixed
+- **Charon orphan-recovery suppression**: the registry liveness check in `beadHasLiveWorker` now requires state=working AND a live PID — a stale non-working row with a fresh-enough heartbeat suppressed orphan recovery for minutes (srv-jobfile-dh0).
+
 ### Changed
 - **Publish idempotence + honest waiting signal**: a tier-policy "PR left open awaiting human merge" no longer emits `publish_push_rejected` (reason `pr_merge_failed`) on every publisher tick. First wait emits `publish_pr_waiting` (reason `pr_awaiting_human`) with the PR URL; later ticks skip entirely while the branch tip is unchanged (process-local tip mark; new work on the branch re-publishes). Real failures (credential-class, conflicts, API) still emit `publish_push_rejected`. 2026-10-06: 114 rejected events/day across 3 repos were routine waiting reading as failure, and the misnomer fed an audit panic about unpublished work that did not exist.
 

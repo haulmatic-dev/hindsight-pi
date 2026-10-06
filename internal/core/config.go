@@ -769,6 +769,55 @@ type ValidationConfig struct {
 	// Inert unless Enabled; all embedding failures fail open to the string
 	// path. See internal/core/semantic_cluster.go.
 	SemanticClustering SemanticClusterConfig `yaml:"semantic_clustering"`
+
+	// AgentVerifier is the semantic close-gate adversary (bounded veto):
+	// after the deterministic gates pass, a pi-backed reviewer scores the
+	// diff against the acceptance criteria. See docs/architecture/shepherd.md.
+	AgentVerifier AgentVerifierConfig `yaml:"agent_verifier"`
+}
+
+// AgentVerifierConfig tunes the adversarial close gate. Bounded veto by
+// construction: a close ships when the verifier reports zero BLOCKER
+// findings AND score >= MinScore; NIT findings never block (recorded as
+// events + closed-with-findings label). Rejections ride the standard
+// verified-close rounds (Validation.MaxRounds); a verifier that produces
+// NEW findings every round trips the churn guard and the close ships — an
+// unconstrained adversary is an infinite nitpick generator, so the veto is
+// deliberately finite.
+type AgentVerifierConfig struct {
+	// Enabled gates the whole gate (default false; opt-in per class).
+	Enabled bool `yaml:"enabled"`
+	// MinScore is the ship threshold (default 0.8). Crank toward 0.95 for
+	// enhancement-hungry dogfood repos, down toward 0.5 for throughput.
+	MinScore float64 `yaml:"min_score"`
+	// Classes limits the gate to these bead types (default implement,
+	// feature, refactor). Test/docs/syntax phases are execution-gated.
+	Classes []string `yaml:"classes"`
+	// MaxDiffBytes caps the diff fed to the reviewer (default 32KB).
+	MaxDiffBytes int `yaml:"max_diff_bytes"`
+	// TimeoutSeconds bounds one verifier call (default 300).
+	TimeoutSeconds int `yaml:"timeout_seconds"`
+	// Provider/Model/PiPath mirror the Pan runner identity; empty = pi defaults.
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"`
+	PiPath   string `yaml:"pi_path"`
+}
+
+// agentVerifierWithDefaults normalizes zero-valued knobs.
+func agentVerifierWithDefaults(c AgentVerifierConfig) AgentVerifierConfig {
+	if c.MinScore <= 0 || c.MinScore > 1 {
+		c.MinScore = 0.8
+	}
+	if len(c.Classes) == 0 {
+		c.Classes = []string{"implement", "feature", "refactor"}
+	}
+	if c.MaxDiffBytes <= 0 {
+		c.MaxDiffBytes = 32768
+	}
+	if c.TimeoutSeconds <= 0 {
+		c.TimeoutSeconds = 300
+	}
+	return c
 }
 
 // TargetScopeMode returns the normalized scope gate enforcement mode.

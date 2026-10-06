@@ -1233,6 +1233,13 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 		}
 	}
 
+	// Adversarial close gate (bounded veto): last gate before acceptance.
+	// Deterministic gates have already passed; the semantic reviewer scores
+	// the diff against the acceptance criteria. Fail-open on its own errors.
+	if err := c.verifyAdversarial(bead, projectPath, repoName, repoPath, base); err != nil {
+		return err
+	}
+
 	c.logCloseEvent(bead, "accepted", "verified", c.validationRetryCount(bead))
 	return nil
 }

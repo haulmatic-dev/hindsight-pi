@@ -967,9 +967,14 @@ func (j *Charon) beadHasLiveWorker(beadID string, liveWorkers map[int]string) bo
 	}
 	if j.registryStore != nil {
 		if row, ok, err := j.registryStore.GetWorker(beadID); err == nil && ok &&
-			time.Since(row.LastHeartbeat) < j.heartbeatHungAfter {
+			row.State == registry.StateWorking &&
+			time.Since(row.LastHeartbeat) < j.heartbeatHungAfter &&
+			row.PID > 0 && j.isProcessRunning(row.PID) {
 			return true
 		}
+		// A non-working or dead-PID row is residue, not a live worker —
+		// without this check a stale row suppressed orphan recovery for
+		// minutes (srv-jobfile-dh0, 2026-10-06).
 	}
 	return false
 }

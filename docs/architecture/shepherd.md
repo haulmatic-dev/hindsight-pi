@@ -72,11 +72,47 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `bead_store_restore_failed` | snapshot restore could not verify recovery (no snapshot, copy error, re-list failure, or count still collapsed) — project stays blocked | `project_path`, `snapshot`, `error` |
 | `pan_judge_degraded` | Pan's pi judge invocation failed `judgeDegradedThreshold` (5) times in a row (re-fires every 25 further failures) — every judgment is silently running on deterministic rules. Added 2026-09-23 after 6494/6494 invocations failed across Aug–Sep with zero signal | `consecutive_failures` |
 | `pan_judge_recovered` | a judge invocation succeeded after a degraded outage | `outage_failures` |
+| `agent_verdict` | adversarial close gate (validation.agent_verifier, bounded veto) scored a close: `pass` (zero blockers, score ≥ min_score — close ships) or `reject` (blockers or score below threshold — close reopens with findings injected into the bead description, riding the standard max_rounds escalation) | `score`, `blockers`, `nits` |
+| `adversary_churn` | the verifier produced a DIFFERENT blocker set on a retry round — the infinite-nitpick signature; the close ships with dissent (`closed-with-findings` label) instead of burning remaining rounds | `score`, `blockers`, `nits` |
+| `adversary_error` | the verifier itself failed (pi error, timeout, unparseable verdict, diff-evidence failure) — FAILS OPEN: the close proceeds; the event makes the silent-skip class visible | `reason` (`verifier`/`parse`/`diff-evidence`) |
+| `publish_pr_waiting` | tier policy left an integration PR open awaiting human merge; emitted once per branch tip (later ticks skip while the tip is unchanged). Replaces the `publish_push_rejected`/`pr_merge_failed` noise that routine waiting generated | `pr_url`, `branch` |
 
 Read programmatically with `ReadEvents(path)` (torn-line tolerant; a missing
 file is an empty stream, not an error).
 
 ---
+
+## 1a. Adversarial close gate (bounded veto) — `adversary_gate.go`
+
+Last gate in `verifyBeforeClose`, after the deterministic gates (execution
+re-run, diff, scope). A pi-backed reviewer (same headless invocation shape
+as Pan's judge) scores the diff against the bead's acceptance criteria.
+
+Design invariants:
+
+- **Bounded veto.** Ship condition: zero BLOCKER findings AND
+  `score >= min_score` (default 0.8). NIT findings never block — an
+  unconstrained adversary is an infinite nitpick generator, so the veto is
+  deliberately finite.
+- **Anti-nitpick rubric.** The prompt demands every BLOCKER cite a violated
+  acceptance criterion or a reproducible defect; uncited findings are NITs.
+- **Rounds are shared.** Rejections go through `rejectClose` — the same
+  max_rounds (default 3) escalation path as verified-close, with blocker
+  feedback appended to the bead description so the retry is not blind.
+- **Churn tripwire.** A different blocker set on a retry round = adversary
+  manufacturing work; the close ships with dissent recorded
+  (`adversary_churn` event + `closed-with-findings` label) so the
+  blocker-vs-churn ratio is measurable per class.
+- **Fail-open on itself.** Verifier errors/timeouts/parse failures emit
+  `adversary_error` and the close proceeds — optional tooling never wedges
+  the pipeline.
+- **Class-gated.** Default classes: `implement`, `feature`, `refactor`.
+  Test/docs/syntax phases are execution-gated already; paying an LLM call
+  there finds nothing.
+
+Config (`validation.agent_verifier`): `enabled` (default false), `min_score`,
+`classes`, `max_diff_bytes` (32KB), `timeout_seconds` (300), `provider`,
+`model`, `pi_path`.
 
 ## 2. Close verdicts & quarantine (A1) — `bead_closer.go`, `worktree_manager.go`, `chain_completion_*.go`
 
