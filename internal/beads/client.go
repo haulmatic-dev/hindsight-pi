@@ -399,15 +399,32 @@ func (c *Client) closeBeadOnce(projectPath, repoName string, beadID types.BeadID
 	// without blocking downstream work. Without --force, a failed worker that
 	// leaves a bead stuck in_progress with open children would never be recovered.
 	if skipped {
-		log.Printf("[CloseBead] Bead %s has open children; retrying close with --force (reason: %s)", beadID.String(), reason)
-		forceOutput, forceErr := c.execInDir(repoCwd(projectPath, repoName), "br", "close", beadID.String(), "-r", reason, "--force")
-		if forceErr != nil {
-			return fmt.Errorf("force-close failed for bead %s: %w (original skip: %s)", beadID.String(), forceErr, outputStr)
+		// Epics are never force-closed over an open-children skip. br's own
+		// parent-child graph is the ground truth the DAG cannot see when
+		// compile-time epic-child dependency links failed (br single-parent
+		// constraint); a forced close would silently mark an epic done over
+		// open work (srv-jobfile master epic: closed with 33 open children).
+		bead, gerr := c.GetBead(projectPath, repoName, beadID)
+		if gerr != nil {
+			return fmt.Errorf("close of bead %s skipped (%s); refusing to force-close because bead type could not be verified: %v",
+				beadID.String(), outputStr, gerr)
 		}
-		if strings.Contains(string(forceOutput), "Warning: Skipped") {
-			return fmt.Errorf("force-close still skipped for bead %s: %s", beadID.String(), string(forceOutput))
+		if bead.Status.IsTerminal() {
+			// Terminal already: the skip was benign; verification below passes.
+		} else if bead.Type == "epic" {
+			return fmt.Errorf("refusing to force-close epic %s: br reports open children (%s)",
+				beadID.String(), outputStr)
+		} else {
+			log.Printf("[CloseBead] Bead %s has open children; retrying close with --force (reason: %s)", beadID.String(), reason)
+			forceOutput, forceErr := c.execInDir(repoCwd(projectPath, repoName), "br", "close", beadID.String(), "-r", reason, "--force")
+			if forceErr != nil {
+				return fmt.Errorf("force-close failed for bead %s: %w (original skip: %s)", beadID.String(), forceErr, outputStr)
+			}
+			if strings.Contains(string(forceOutput), "Warning: Skipped") {
+				return fmt.Errorf("force-close still skipped for bead %s: %s", beadID.String(), string(forceOutput))
+			}
+			log.Printf("[CloseBead] Force-closed bead %s (had open children at the time)", beadID.String())
 		}
-		log.Printf("[CloseBead] Force-closed bead %s (had open children at the time)", beadID.String())
 	}
 
 	// Verify the bead was actually closed

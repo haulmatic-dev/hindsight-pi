@@ -1260,8 +1260,26 @@ func (o *Overseer) persistClosedEpics(beadIDs []string) {
 			continue
 		}
 		reason := "epic auto-close: all dependencies and children closed"
-		if err := o.beadsClient.CloseBead(projectPath, "", types.BeadID(id), reason); err != nil {
-			log.Printf("[DAG] Failed to persist close for epic %s: %v", id, err)
+		err := o.beadsClient.CloseBead(projectPath, "", types.BeadID(id), reason)
+		if err != nil {
+			// br itself refused the close because the epic still has open
+			// children in its own parent-child graph (the ground truth the
+			// DAG and the Dependencies-based store scan cannot see when
+			// compile-time epic-child links failed). Classify it as a
+			// refusal so the throttle applies and operators get a typed
+			// event (srv-jobfile master epic: closed with 33 open children).
+			msg := err.Error()
+			if strings.Contains(msg, "open children") || strings.Contains(msg, "Skipped") {
+				o.epicCloseGuard.markRefused(id, time.Now())
+				log.Printf("[DAG] Epic %s auto-close refused by br (open children); throttled for re-check", id)
+				if o.eventSink != nil {
+					o.eventSink.Emit(Event{Type: "epic_close_refused", Bead: id,
+						Reason: "open_children",
+						Detail: msg})
+				}
+			} else {
+				log.Printf("[DAG] Failed to persist close for epic %s: %v", id, err)
+			}
 			continue
 		}
 		log.Printf("[DAG] Auto-closed epic %s (all dependencies and children done)", id)

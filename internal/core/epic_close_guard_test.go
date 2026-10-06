@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,5 +135,55 @@ func TestPersistClosedEpics_RefusalThrottledWithinTTL(t *testing.T) {
 	// No panic, still refused:
 	if len(mock.closeCalls) != 0 {
 		t.Fatalf("close must stay refused within TTL; got %v", mock.closeCalls)
+	}
+}
+
+// TestPersistClosedEpics_BrOpenChildrenRefusal_ClassifiedAsRefusal verifies
+// the srv-jobfile master-epic fix: when compile-time epic-child dependency
+// links failed (br single-parent constraint), neither the DAG nor the
+// Dependencies-based store scan can see the open children, so CloseReadyEpics
+// proposes the close and the epic_close_guard passes vacuously. The last line
+// of defense is br's own open-children refusal (closeBeadOnce refuses to
+// force-close epics). The overseer must classify that error as an
+// epic_close_refused event with reason open_children and throttle re-checks,
+// not log it as a generic persistence failure.
+func TestPersistClosedEpics_BrOpenChildrenRefusal_ClassifiedAsRefusal(t *testing.T) {
+	o, mock := setupEpicGuardOverseer(t)
+	epic, child := epicAndChild("proj-epic1", "proj-task1", types.StatusOpen, nil) // link FAILED: no dep on epic
+	mock.addBead(epic)
+	mock.addBead(child)
+	mock.closeErr = errors.New("refusing to force-close epic proj-epic1: br reports open children (Warning: Skipped proj-epic: parent issue has 33/33 open children (use --force to close anyway))")
+
+	eventsDir := t.TempDir()
+	o.eventSink = NewEventSink(eventsDir)
+
+	o.dag.AddNode(epic)
+	closed := o.dag.CloseReadyEpics()
+	if len(closed) != 1 {
+		t.Fatalf("expected CloseReadyEpics to propose epic1 (children invisible), got %v", closed)
+	}
+
+	o.persistClosedEpics(closed)
+
+	if !o.epicCloseGuard.recentlyRefused("proj-epic1", time.Now()) {
+		t.Fatal("br open-children refusal must be recorded as a refusal (throttled)")
+	}
+	// Event stream must carry the typed refusal.
+	data, err := os.ReadDir(eventsDir)
+	if err != nil || len(data) == 0 {
+		t.Fatalf("expected event files, got %v (%v)", data, err)
+	}
+	found := false
+	for _, f := range data {
+		b, err := os.ReadFile(filepath.Join(eventsDir, f.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), `"epic_close_refused"`) && strings.Contains(string(b), `"open_children"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected epic_close_refused/open_children event on the stream")
 	}
 }
