@@ -270,7 +270,7 @@ func (s *IntegrationRetestStage) selectBead(projectPath string, bead *types.Bead
 	if bead == nil || bead.Status.IsTerminal() {
 		return false
 	}
-	if !hasBeadLabel(bead.Labels, retestLabelFailed) && !hasBeadLabel(bead.Labels, retestLabelExhausted) {
+	if !hasBeadLabel(bead.Labels, retestLabelFailed) && !hasBeadLabel(bead.Labels, retestLabelExhausted) && !hasBeadLabel(bead.Labels, integrationPendingLabel) {
 		return false
 	}
 	for _, l := range retestExcludedParkLabels {
@@ -441,7 +441,7 @@ func (s *IntegrationRetestStage) runBead(project types.Project, projectPath stri
 		if err := s.beadsClient.CloseBead(projectPath, "", bead.ID, "integration-retest landed via PR "+outcome.PRURL); err != nil {
 			log.Printf("[IntegrationRetest] %s: close after land: %v", beadID, err)
 		}
-		if err := s.beadsClient.RemoveBeadLabels(projectPath, "", bead.ID, []string{retestLabelFailed, retestLabelExhausted}); err != nil {
+		if err := s.beadsClient.RemoveBeadLabels(projectPath, "", bead.ID, []string{retestLabelFailed, retestLabelExhausted, integrationPendingLabel}); err != nil {
 			log.Printf("[IntegrationRetest] %s: strip labels after land: %v", beadID, err)
 		}
 	}

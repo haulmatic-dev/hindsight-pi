@@ -320,8 +320,8 @@ func TestIntegrationRetestCleanLands(t *testing.T) {
 	if len(beads.closed) != 1 || !strings.Contains(beads.closed[0], "pull/280") {
 		t.Fatalf("closed = %v, want one close citing PR 280", beads.closed)
 	}
-	if len(beads.removed) != 1 || len(beads.removed[0]) != 2 {
-		t.Fatalf("labels removed = %v, want [integration-failed integration-exhausted]", beads.removed)
+	if len(beads.removed) != 1 || len(beads.removed[0]) != 3 {
+		t.Fatalf("labels removed = %v, want [integration-failed integration-exhausted integration-pending]", beads.removed)
 	}
 }
 

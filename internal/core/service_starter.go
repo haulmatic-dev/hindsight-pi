@@ -832,6 +832,9 @@ func panBlockedReason(b types.Bead, now time.Time, wedgeGrace, leafGrace time.Du
 		switch lbl {
 		case worktreeUnavailableLabel, integrationExhaustedLabel:
 			return fmt.Sprintf("hard-parked by label %s (durable; scheduler never retries — clear only when the cause is fixed)", lbl), true
+		case integrationPendingLabel:
+			age := now.Sub(b.UpdatedAt)
+			return fmt.Sprintf("work complete, integrate/push failed %v ago (label %s) — parked, NOT reopened; the integration-retest stage retries it mechanically, repair only if the retest attempts are exhausted", age.Round(time.Minute), lbl), true
 		case escalatedLabel:
 			age := now.Sub(b.UpdatedAt)
 			if blockedDependents > 0 && wedgeGrace > 0 && age > wedgeGrace {

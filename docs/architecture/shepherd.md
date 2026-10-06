@@ -604,11 +604,14 @@ worker-origin problems and scheduler-level blocked records — a hard-parked
 bead with no retry record (e.g. after a restart cleared in-memory retry state)
 was invisible to the shepherd. The `BlockedBeads` provider now also scans
 project stores for non-terminal beads carrying `worktree-unavailable`,
-`integration-exhausted`, or a >24h `escalated` label, and surfaces stranded
+`integration-exhausted`, `integration-pending`, or a >24h `escalated` label,
+and surfaces stranded
 pushes (below) as `<project>-push-pending` pseudo-beads. The
 `integration-exhausted` label is set by `failIntegration` after 3 consecutive
 integrate/push failures on one bead (2026-09-16 close-reopen loop): below the
-cap a failed close reopens the bead as before, at the cap it hard-parks here
+cap the close does NOT reopen the bead — it parks it in place with the
+durable `integration-pending` label (every respawn path skips it; the
+integration-retest stage owns the retry), at the cap it hard-parks here
 instead of respawning into the same failing integrate forever; the counter
 resets on the first successful integrate+push. When ≥3 BLOCKED
 candidates share a normalized reason, `collapseWedges` replaces them with one
@@ -618,7 +621,8 @@ of N rate-limited per-bead ones.
 **Integration-exhausted contract change (2026-09-22, Tier A).** Hard-park no
 longer means "parked until a human looks": with `integration_retest.enabled`
 the overseer tick runs a mechanical retest stage over beads labelled
-`integration-failed`/`integration-exhausted` whose `hydra/wt-<id>[-vN]` or
+`integration-failed`/`integration-exhausted`/`integration-pending` whose
+`hydra/wt-<id>[-vN]` or
 `hydra/quarantine/<id>` branch still exists (quarantine branches included
 because the telematics campaign left 35 commits of real work in 20 of them
 while beads read closed). Per bead, at most one retest per

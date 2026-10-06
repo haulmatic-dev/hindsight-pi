@@ -512,6 +512,19 @@ const closedFailedLabel = "closed-failed"
 // carrying it until Pan repair or a human clears the label.
 const integrationExhaustedLabel = "integration-exhausted"
 
+// integrationPendingLabel marks a bead whose WORK is complete (close gates
+// and verification passed) but whose integrate/push step failed — typically
+// on a transient remote condition (GitHub API 403, rate limits, org flaps).
+// Instead of reopening the bead to the ready queue — which respawns a FULL
+// LLM worker run (session resume is disabled, so ~11 spawns/45min per bead
+// were burned re-doing finished work on srv-jobfile-65l+5my, 2026-10-02) —
+// the bead stays parked in place and the mechanical integration-retest
+// stage owns the retry. Every respawn path (scheduler retry queue, DAG
+// ready filter, bead discovery, Charon orphan recovery, reconcileOrphanClaim)
+// must skip beads carrying it; the retest stage and Pan repair (via
+// integration-exhausted at the cap) are the only exits.
+const integrationPendingLabel = "integration-pending"
+
 // maxConsecutiveIntegrationFailures caps how many integrate/push failures a
 // bead may accumulate before failIntegration escalates it to the durable
 // integration-exhausted hard-park instead of a plain reopen. Uncapped, every
@@ -1089,14 +1102,15 @@ func (c *BeadCloser) resetIntegrationFailures(beadID string) {
 }
 
 // failIntegration aborts a close whose integrate/push step failed
-// verification. The bead is left open (reopened when not terminal), a typed
-// integration-failed event carries the exact error, and the worktree is
-// preserved for inspection/retry. Always returns a non-nil error so the
-// caller aborts the close.
+// verification. The bead is parked in place with the integration-pending
+// label (NOT reopened to the ready queue — a reopen respawns a full LLM
+// worker run over already-finished work), a typed integration-failed event
+// carries the exact error, and the worktree is preserved for the retest
+// stage. Always returns a non-nil error so the caller aborts the close.
 func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, stage string, cause error) error {
 	beadID := string(bead.ID)
 	detail := cause.Error()
-	log.Printf("[Integrate] FAILED %s at %s: %s — bead left open, worktree preserved", beadID, stage, detail)
+	log.Printf("[Integrate] FAILED %s at %s: %s — parked integration-pending, worktree preserved", beadID, stage, detail)
 
 	// Contention backoff: parallel same-repo closes merge conflicting
 	// CHANGELOG.md/.gitignore entries within seconds of each other (telematics
@@ -1150,10 +1164,11 @@ func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, st
 	}
 
 	if c.beadsClient != nil {
-		if err := c.beadsClient.UpdateBeadStatus(projectPath, bead.ID, types.StatusOpen); err != nil {
-			log.Printf("[Integrate] Failed to reopen %s: %v", beadID, err)
-		}
-		labels := []string{"integration-failed"}
+		// Park as integration-pending, do NOT reopen to open: the work is
+		// already done and verified; a reopen sends the bead back into the
+		// ready queue and burns a full worker LLM run re-doing it. The
+		// integration-retest stage re-attempts the integrate mechanically.
+		labels := []string{"integration-failed", integrationPendingLabel}
 		if failures >= maxConsecutiveIntegrationFailures {
 			// Cap reached: a plain reopen would respawn the bead into the
 			// same failing integrate forever. The durable hard-park label is

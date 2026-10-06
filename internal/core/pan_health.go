@@ -177,6 +177,13 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 				if slices.Contains(labelsByID[id], "escalated") {
 					continue
 				}
+				// Integration-pending beads (work complete, integrate failed,
+				// parked in place for the retest stage) sit in_progress with no
+				// worker by design — counting them re-fired the P0 orphan-claim
+				// anomaly every digest round while the retest stage owned them.
+				if slices.Contains(labelsByID[id], integrationPendingLabel) {
+					continue
+				}
 				// Pan-filed beads are campaign/triage filings, not pipeline work:
 				// each filing is itself an in_progress claim that may sit waiting
 				// for spawn or for its close gates long past the 5m grace. Counting

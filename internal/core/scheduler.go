@@ -229,6 +229,13 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 				log.Printf("[Retry] Bead %s carries the %q label (integration hard-parked); skipping retry queue", beadID, integrationExhaustedLabel)
 				continue
 			}
+			if hasBeadLabel(bead.Labels, integrationPendingLabel) {
+				// Work complete, integrate/push failed; the mechanical retest
+				// stage owns the retry. Respawning a full worker here re-does
+				// finished LLM work (srv-jobfile 403 loop, 2026-10-02).
+				log.Printf("[Retry] Bead %s carries the %q label (integration pending; retest stage owns retry); skipping retry queue", beadID, integrationPendingLabel)
+				continue
+			}
 			readyBeads = append(readyBeads, bead)
 			log.Printf("[Retry] Bead %s added to retry queue (attempt %d/%d)",
 				beadID, count+1, maxRetries)
@@ -304,7 +311,7 @@ func (s *Scheduler) reconcileOrphanClaim(beadID string, attempts int) {
 	if bead.Status != types.StatusInProgress {
 		return
 	}
-	for _, label := range []string{escalatedLabel, worktreeUnavailableLabel, integrationExhaustedLabel} {
+	for _, label := range []string{escalatedLabel, worktreeUnavailableLabel, integrationExhaustedLabel, integrationPendingLabel} {
 		if hasBeadLabel(bead.Labels, label) {
 			return // hard-parked by design; Pan repair or a human clears it
 		}

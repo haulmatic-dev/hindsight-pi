@@ -636,6 +636,10 @@ func (d *BeadDiscovery) filterByDAG(candidates []types.Bead) []types.Bead {
 			// (ag6i, 2026-09-27: ~95 respawns of a bead blocked on integrate).
 			continue
 		}
+		if hasBeadLabel(bead.Labels, integrationPendingLabel) {
+			// Work complete, integrate failed; the retest stage owns the retry.
+			continue
+		}
 		kept = append(kept, bead)
 	}
 	if escalatedFiltered > 0 {

@@ -955,6 +955,12 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 					log.Printf("[OrphanRetry] bead %s carries the %q label (integration failures capped); skipping reopen", beadIDStr, integrationExhaustedLabel)
 					continue
 				}
+				if hasBeadLabel(fresh.Labels, integrationPendingLabel) {
+					// Work complete, integrate failed; the retest stage owns the
+					// retry — orphan reopen would respawn a full worker redo.
+					log.Printf("[OrphanRetry] bead %s carries the %q label (integration pending; retest stage owns retry); skipping reopen", beadIDStr, integrationPendingLabel)
+					continue
+				}
 				// resurrected the shared-checkout corruption path, 2026-09-11/12).
 				if hasBeadLabel(fresh.Labels, worktreeUnavailableLabel) {
 					log.Printf("[OrphanRetry] bead %s carries the %q label (worktree hard-parked); skipping reopen", beadIDStr, worktreeUnavailableLabel)

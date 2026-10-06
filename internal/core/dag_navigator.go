@@ -116,6 +116,10 @@ func (n *DAGNavigator) GetReadyBeads(completed map[string]bool) []types.Bead {
 			// ~95 respawns). Only Pan repair or a human clears the label.
 			continue
 		}
+		if hasBeadLabel(node.Bead.Labels, integrationPendingLabel) {
+			// Work complete, integrate failed; the retest stage owns the retry.
+			continue
+		}
 		if completed != nil && completed[string(node.Bead.ID)] {
 			continue
 		}
