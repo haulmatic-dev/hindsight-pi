@@ -96,6 +96,13 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 		}
 
 		panCfg := o.config.Shepherd.Pan
+		// blockedLogged dedups per-process candidate logging: each blocked
+		// candidate is logged once per daemon run (keyed bead+reason) so a
+		// candidate that never reaches the judge is visible in the log
+		// (srv-jobfile-eci, 2026-10-06: past leaf grace, invisible to Pan,
+		// and the silent fail-open below gave no way to tell scan-error
+		// from no-candidate).
+		blockedLogged := make(map[string]bool)
 		o.panShepherd = pan.New(pan.Config{
 			Enabled:          panCfg.Enabled,
 			Interval:         time.Duration(panCfg.IntervalSeconds) * time.Second,
@@ -175,6 +182,7 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 						for _, target := range repoScanTargets(project) {
 							beads, err := o.beadsClient.ListBeads(target, "")
 							if err != nil {
+								log.Printf("[PanSweep] store scan failed for %s (fail-open, beads there are invisible to Pan this cycle): %v", target, err)
 								continue // fail open: one unreadable store must not blind the scan
 							}
 							// dependent_count comes from br list itself (parser.go maps it
@@ -192,6 +200,11 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 									dependents, _ = strconv.Atoi(b.Metadata["dependent_count"])
 								}
 								if reason, ok := panBlockedReason(b, time.Now(), wedgeGrace, leafGrace, dependents); ok {
+									key := b.ID.String() + "|" + reason
+									if !blockedLogged[key] {
+										blockedLogged[key] = true
+										log.Printf("[PanSweep] blocked candidate: %s — %s", b.ID.String(), reason)
+									}
 									blocked = append(blocked, pan.BlockedBead{
 										BeadID: b.ID.String(),
 										Reason: reason,
