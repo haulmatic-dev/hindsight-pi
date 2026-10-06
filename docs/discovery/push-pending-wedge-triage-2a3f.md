@@ -39,6 +39,27 @@ consider a project-scoped sweep batching push-pending reporting instead of per-b
    Token note: daemon + buddhi PATs authenticate as `haulmatic-devteams` and cannot see
    `haulmatic-dev/srv-telematics`; only ajantha's owner PAT (AjanthaHM) can.
 
+## Resolution (same bead, second pass)
+
+Both residual PRs were resolved by agentic conflict resolution (plumbing merge in /tmp scratch
+clones; base taken from origin, union-resolved conflict files, merge commit force-pushed as the
+PR head so the merge produces exactly the resolved tree):
+
+- **fms-frontend PR #144**: stale aggregate head (685-file diff, −45k) replaced with a merge of
+  origin/development + local development tip bcde045; single .gitignore conflict union-resolved
+  (origin's coverage/ + local's /docs un-ignore + hydra runtime dirs). Merge commit e26d5f2
+  pushed to hydra/publish-fms-frontend; `gh pr merge 144 --merge --admin` → **MERGED**
+  2026-10-06T11:38:58Z, mergeCommit 191c7ad.
+- **srv-telematics PR #417**: head's 88 real commits (+2457/−301, 82 files) merged onto
+  origin/feat/intergration-test-plan; two add/add changelog conflicts (CHANGELOG.md,
+  docs/hydra/handoff/discovery.md) union-resolved. Merge commit 2a008c2 pushed to
+  hydra/publish-srv-telematics; `gh pr merge 417 --merge --admin` → **MERGED**
+  2026-10-06T11:40:13Z, mergeCommit 8d33c6e.
+
+Wholesale merges were correctly avoided (the original PR heads would have reverted newer landed
+work); content was preserved and rebased onto current remote bases instead. This closes the last
+live push-pending state on the host.
+
 ## Disposition
 
 - Bead body's four-BLOCKED-beads wedge: stale — no blocked beads exist in any store, and the
@@ -47,4 +68,4 @@ consider a project-scoped sweep batching push-pending reporting instead of per-b
   standing-open PR; fixed and deployed same-day (PR #250).
 - Proposal (project-scoped batched push-pending reporting): already implemented as
   `publish_pr_waiting` + idempotent skip; no new code warranted.
-- Residual: merge PRs #144 and #417 after conflict resolution (human or future Tier B bead).
+- Residual: merge PRs #144 and #417 after conflict resolution (human or future Tier B bead). RESOLVED same bead: both PRs conflict-resolved via plumbing merge (union .gitignore / changelogs) and admin-merged — #144 MERGED 11:38:58Z (191c7ad), #417 MERGED 11:40:13Z (8d33c6e). No push-pending remains.
