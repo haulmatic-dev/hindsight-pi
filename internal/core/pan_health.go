@@ -534,9 +534,11 @@ func (o *Overseer) verifyPanFilingPremise(projectPath, beadID string) string {
 }
 
 // filePanBead implements the FR-022 bead-filing actuator daemon-side: it
-// re-verifies live state (jm2 guard), enforces the per-project cap of
-// MaxOpenFiledBeadsPerProject open "pan-filed" beads, then creates the
-// improvement bead.
+// re-verifies live state (jm2 guard), then enforces the per-project cap of
+// MaxOpenFiledBeadsPerProject non-terminal (open or in_progress) "pan-filed"
+// beads, then creates the improvement bead. Counting only open beads let the
+// cap be bypassed whenever a filed bead was claimed (goes straight to
+// in_progress) before the next filing.
 func (o *Overseer) filePanBead(projectPath, beadID, title, description string) error {
 	if reason := o.verifyPanFilingPremise(projectPath, beadID); reason != "" {
 		o.emitPanFilingSkipped(projectPath, beadID, reason)
@@ -552,7 +554,7 @@ func (o *Overseer) filePanBead(projectPath, beadID, title, description string) e
 	openFiled := 0
 	normTitle := pan.NormalizeReason(strings.TrimSpace(title))
 	for _, b := range beads {
-		if b.Status != types.StatusOpen {
+		if b.Status.IsTerminal() {
 			continue
 		}
 		isFiled := false
@@ -566,9 +568,9 @@ func (o *Overseer) filePanBead(projectPath, beadID, title, description string) e
 			continue
 		}
 		openFiled++
-		// Persistent dedupe: an open pan-filed bead with the same normalized
-		// title already tracks this finding — skip instead of filing a twin
-		// (session-level filedSigs dedupe is lost on daemon restart).
+		// Persistent dedupe: a non-terminal pan-filed bead with the same
+		// normalized title already tracks this finding — skip instead of filing
+		// a twin (session-level filedSigs dedupe is lost on daemon restart).
 		if pan.NormalizeReason(strings.TrimSpace(b.Title)) == normTitle {
 			return fmt.Errorf("file-bead %s: %w (%s)", beadID, pan.ErrFileBeadDuplicate, b.ID)
 		}

@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -58,5 +59,52 @@ func TestFilePanBead_DuplicateOpenTitleSkipped(t *testing.T) {
 	// Different title still files (cap is 2).
 	if err := o.filePanBead(path, "bead-src-3", "Different finding", "details"); err != nil {
 		t.Fatalf("different title should file: %v", err)
+	}
+}
+
+func TestFilePanBead_CapCountsInProgress(t *testing.T) {
+	o := &Overseer{beadsClient: newMockBeadsClient()}
+	path := t.TempDir()
+
+	// Fill the cap.
+	for i := 0; i < pan.MaxOpenFiledBeadsPerProject; i++ {
+		if err := o.filePanBead(path, "bead-src", fmt.Sprintf("Wedge %d", i), "details"); err != nil {
+			t.Fatalf("file-bead %d: %v", i, err)
+		}
+	}
+	// Claim one filed bead: it goes in_progress. The cap must still hold —
+	// claimed beads keep occupying a slot until terminal.
+	beads, _ := o.beadsClient.ListBeads(path, "")
+	if err := o.beadsClient.UpdateBeadStatus(path, beads[0].ID, types.StatusInProgress); err != nil {
+		t.Fatalf("claim filed bead: %v", err)
+	}
+	err := o.filePanBead(path, "bead-src", "Bypass attempt", "details")
+	if err == nil || !strings.Contains(err.Error(), "cap reached") {
+		t.Fatalf("cap must count in_progress filed beads, got %v", err)
+	}
+
+	// Close (terminal) one — frees the slot.
+	if err := o.beadsClient.UpdateBeadStatus(path, beads[0].ID, types.StatusClosed); err != nil {
+		t.Fatalf("close filed bead: %v", err)
+	}
+	if err := o.filePanBead(path, "bead-src", "Bypass attempt 2", "details"); err != nil {
+		t.Fatalf("terminal close must free slot: %v", err)
+	}
+}
+
+func TestFilePanBead_DuplicateInProgressTitleSkipped(t *testing.T) {
+	o := &Overseer{beadsClient: newMockBeadsClient()}
+	path := t.TempDir()
+	if err := o.filePanBead(path, "bead-src", "Publisher wedge (1h stale)", "details"); err != nil {
+		t.Fatalf("first filing failed: %v", err)
+	}
+	beads, _ := o.beadsClient.ListBeads(path, "")
+	if err := o.beadsClient.UpdateBeadStatus(path, beads[0].ID, types.StatusInProgress); err != nil {
+		t.Fatalf("claim filed bead: %v", err)
+	}
+	// Same normalized title on a claimed (in_progress) bead is still a twin.
+	err := o.filePanBead(path, "bead-src-2", "Publisher wedge (2h stale)", "details")
+	if !errors.Is(err, pan.ErrFileBeadDuplicate) {
+		t.Fatalf("want ErrFileBeadDuplicate for in_progress twin, got %v", err)
 	}
 }
