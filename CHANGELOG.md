@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Documentation
+- Triage `docs/discovery/orphanclaim-publisher-disk-triage-gzkr.md`: all three P0 claims in the 13:30 UTC snapshot stale — orphaned claims are retry-churn with fresh completed workers (Charon 47 reopens, digest quiet), publish already landed via PR #263 (merged 13:25:30Z), disk 50% vs 85% watermark. Twin hydra-lg7b closed as duplicate.
 - Triage `docs/discovery/orphanclaim-churn-triage-hu12.md`: the persistent orphanclaims=6 digest anomaly is a retry-gap snapshot of a gate-failure churn loop (Charon reopened all 9 candidate beads 2–6× on 2026-10-06; loop self-terminates via escalation) — no reconciliation bug, no manual requeue, disk 49% (stale claim).
 
 ### Fixed
