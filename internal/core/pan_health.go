@@ -275,6 +275,10 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 			digest.Degradations = append(digest.Degradations, st.String())
 		}
 	}
+	// Stamp freshness for the file-bead premise gate (jm2 class): a filing
+	// decision built on a digest older than panFilingDigestStaleAge is
+	// refused at filing time.
+	o.panDigestAt.Store(time.Now().UnixNano())
 	return digest
 }
 
@@ -429,10 +433,82 @@ func (o *Overseer) scanTargetByKey(key string) (string, bool) {
 	return "", false
 }
 
+// panFilingDigestStaleAge caps how old the digest backing a file-bead
+// decision may be at filing time. Pan judgments run seconds behind digest
+// collection, so a much older digest means the finding may rest on stale
+// state — and acting on stale state is exactly how ajantha-srv-jobfile-jm2
+// got filed (2026-10-05 04:01Z) claiming "no worktree, no worker" when the
+// worktree existed and the worker had been live minutes earlier.
+const panFilingDigestStaleAge = 15 * time.Minute
+
+// panDigestAt is the unix-nano timestamp of the last collectHealthDigest
+// run (0 = never run / unknown → fail-open, no staleness gate).
+
+// emitPanFilingSkipped records a typed event when a filing is refused on a
+// re-verified stale premise. Fail-open: a broken sink never blocks filing.
+func (o *Overseer) emitPanFilingSkipped(projectPath, beadID, reason string) {
+	if o.eventSink == nil {
+		return
+	}
+	o.eventSink.EmitRepo(projectPath, Event{
+		Type:    "pan_bead_filed_skipped",
+		Project: filepath.Base(projectPath),
+		Bead:    beadID,
+		Reason:  "premise_stale",
+		Fields:  map[string]any{"reason": reason},
+	})
+}
+
+// verifyPanFilingPremise re-probes live state before a wedge bead is filed.
+// Returns a reason string ("" = premise holds, filing may proceed):
+//   - digest_stale: the digest the judgment was built on is older than
+//     panFilingDigestStaleAge (or never collected) — premises may be stale;
+//   - source_resolved: the judgment source bead is now terminal — wedge gone;
+//   - worker_live: the source bead has a live registry worker (fresh
+//     heartbeat, <5m, same liveness rule as the digest) — a live worker is
+//     mid-flight, not a silent wedge.
+//
+// Fail-open: any probe error means "cannot prove the premise false" and lets
+// the filing proceed — a genuine wedge must stay visible.
+func (o *Overseer) verifyPanFilingPremise(projectPath, beadID string) string {
+	if at := o.panDigestAt.Load(); at != 0 {
+		if age := time.Since(time.Unix(0, at)); age > panFilingDigestStaleAge {
+			return "digest_stale"
+		}
+	}
+	if pan.IsPseudoBeadID(beadID) {
+		return "" // no real source bead to re-probe
+	}
+	if o.beadsClient == nil {
+		return ""
+	}
+	bead, err := o.beadsClient.GetBead(projectPath, "", types.BeadID(beadID))
+	if err != nil || bead == nil {
+		return "" // fail-open: cannot prove resolved
+	}
+	if bead.Status.IsTerminal() {
+		return "source_resolved"
+	}
+	if o.registryStore != nil {
+		if rec, ok, err := o.registryStore.GetWorker(beadID); err == nil && ok {
+			live := rec.State == registry.StateWorking || time.Since(rec.LastHeartbeat) < 5*time.Minute
+			if live {
+				return "worker_live"
+			}
+		}
+	}
+	return ""
+}
+
 // filePanBead implements the FR-022 bead-filing actuator daemon-side: it
-// enforces the per-project cap of MaxOpenFiledBeadsPerProject open
-// "pan-filed" beads, then creates the improvement bead.
+// re-verifies live state (jm2 guard), enforces the per-project cap of
+// MaxOpenFiledBeadsPerProject open "pan-filed" beads, then creates the
+// improvement bead.
 func (o *Overseer) filePanBead(projectPath, beadID, title, description string) error {
+	if reason := o.verifyPanFilingPremise(projectPath, beadID); reason != "" {
+		o.emitPanFilingSkipped(projectPath, beadID, reason)
+		return fmt.Errorf("file-bead %s: %w (%s)", beadID, pan.ErrFileBeadPremiseStale, reason)
+	}
 	if o.beadsClient == nil {
 		return fmt.Errorf("file-bead %s: beads client unavailable", beadID)
 	}

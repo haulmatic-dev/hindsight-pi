@@ -235,6 +235,16 @@ const FiledLabel = "pan-filed"
 // benign skip, not a filer failure.
 var ErrFileBeadDuplicate = errors.New("file-bead duplicate: open pan-filed bead with the same normalized title already exists")
 
+// ErrFileBeadPremiseStale signals that the filer re-verified the live state
+// backing the file-bead decision and found the premise no longer true: the
+// judgment source bead has resolved, a live worker reappeared, or the digest
+// the judgment was built on is too old to act on (2026-10-05: srv-jobfile-jm2
+// was filed claiming "no worktree, no worker" while the worktree existed and
+// the worker had been live minutes earlier — the digest snapshot was stale by
+// filing time). The caller must treat this as a benign skip, not a filer
+// failure: keep the signature, a fresh digest re-fires when the wedge returns.
+var ErrFileBeadPremiseStale = errors.New("file-bead premise stale: live state no longer matches the finding")
+
 // NormalizeReason is the exported form of normalizeReason for filers that
 // need to compare titles under the same volatile-stripping rules.
 func NormalizeReason(reason string) string { return normalizeReason(reason) }
@@ -1128,6 +1138,15 @@ func (s *Shepherd) handleFileBead(beadID, payload string) {
 			// Persistent dedupe (filer-side, survives restarts): benign skip,
 			// keep the signature so this session stops retrying too.
 			s.emitRepairEvent(beadID, ActFileBead, "skipped", "duplicate signature")
+			log.Printf("[Pan] file-bead for %s skipped: %v", beadID, err)
+			return
+		}
+		if errors.Is(err, ErrFileBeadPremiseStale) {
+			// Filer re-verified live state before creating the bead and found
+			// the premise resolved (jm2 class). Benign skip: keep the signature
+			// so this session stops retrying; a fresh digest re-fires if the
+			// wedge returns.
+			s.emitRepairEvent(beadID, ActFileBead, "skipped", "premise stale")
 			log.Printf("[Pan] file-bead for %s skipped: %v", beadID, err)
 			return
 		}

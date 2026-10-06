@@ -149,3 +149,23 @@ func TestFileBeadDuplicateFilerResultSkips(t *testing.T) {
 		t.Fatalf("repeat should have hit signature dedupe; filer calls = %d", calls)
 	}
 }
+
+// TestFileBeadPremiseStaleFilerResultSkips: the filer's stale-premise refusal
+// is a benign skip — signature retained, one filer call, no repair error.
+func TestFileBeadPremiseStaleFilerResultSkips(t *testing.T) {
+	store := &fakeStore{}
+	s := New(Config{Enabled: true}, store, nil)
+	var calls int
+	s.SetBeadFiler(func(beadID, title, description string) error {
+		calls++
+		return ErrFileBeadPremiseStale
+	})
+	s.handleFileBead("bead-stale", "Wedge found\nbody")
+	if calls != 1 {
+		t.Fatalf("filer calls = %d, want 1", calls)
+	}
+	s.handleFileBead("bead-stale", "Wedge found\nbody")
+	if calls != 1 {
+		t.Fatalf("premise-stale skip must retain signature; filer calls = %d", calls)
+	}
+}

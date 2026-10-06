@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/agents"
@@ -149,6 +150,7 @@ type Overseer struct {
 
 	// Stale integration-exhausted park sweeper (nil when disabled)
 	integrationSweep *IntegrationExhaustedSweeper
+	panDigestAt      atomic.Int64 // unix-nano of last collectHealthDigest (0 = unknown)
 
 	// Worker registry (daemon-owned SQLite truth) and Pan, the shepherd that
 	// decides the ambiguous tail of worker states. Both fail-open: a registry
