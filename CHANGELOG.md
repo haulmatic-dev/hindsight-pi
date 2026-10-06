@@ -30,6 +30,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 - RED tests for the post-close verification sweep (internal/core/postclose_sweep_test.go): pin reopen-with-both-outputs, flake-guard label-without-reopen, bounded second-reopen → needs-human, skip of >24h/commandless beads, and a real-git integration reopen; pins `NewPostCloseSweeper` API GREEN must implement; internal/core/postclose_sweep.go holds an inert RED stub (compile-clean for the lint gate, zero behavior — tests fail at runtime with contract assertions).
 
 ### Fixed
+- **Spawn-path worker-already-exists race**: `WorkerSpawner.isRegistryWorkerLive` now reconciles a non-terminal registry row whose heartbeat is stale (>5m, Charon's `heartbeatHungAfter`) AND whose PID is dead/unset as `orphan-reaped` (new `registry.MarkCompletedWithReason`) instead of failing every respawn with "worker already exists" until the hourly ghost reap — the spawn-failed cohort wedge (beads blocked >1m, 2026-10-06). Fresh-heartbeat rows stay blocking (PID-reuse / reporter.Stop-in-flight protection); alive-PID rows stay blocking (hang path belongs to Charon); reconciliation write errors fail closed.
 - **Charon orphan-recovery suppression**: the registry liveness check in `beadHasLiveWorker` now requires state=working AND a live PID — a stale non-working row with a fresh-enough heartbeat suppressed orphan recovery for minutes (srv-jobfile-dh0).
 
 ### Changed
