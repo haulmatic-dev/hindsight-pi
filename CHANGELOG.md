@@ -12,6 +12,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 - Orphan-claim triage `docs/discovery/orphanclaim-stale-snapshot-triage-ew7t.md`: the "8 in_progress beads with no live registry worker + disk 99%" digest anomaly re-verified stale at triage time — 0 live orphan claims (all rows working/fresh-heartbeat), disk 49%, Charon recovery demonstrably firing (44 reopens), 0 anomaly filings today. No code change; no further orphan hardening warranted.
 
 - Orphan-claim P0 triage (hydra-m5j9): reconciliation verified live (6 Charon reopens today); recurring ~9-claim digest count is provider-pool-queued reopened beads + by-design escalated orphans, disk 99% claim stale at 49%. See docs/discovery/orphanclaim-triage-m5j9.md.
+- Orphan-claim P0 triage (docs/discovery/orphanclaim-triage-uzmx.md): the "10 orphaned in_progress beads" anomaly verified stale at 2026-10-06 12:53 UTC — every in_progress bead has a live (working or heartbeat-fresh) registry row, Charon reaped 5 real orphans today, digest anomaly fired 0× today, disk at 49%. No force-release warranted; landed digest/Charon fixes confirmed live.
 
 ### Fixed
 
