@@ -657,3 +657,16 @@ func (s *Store) ConsumeCommand(id int64) error {
 	}
 	return nil
 }
+
+// MarkCompletedWithReason moves a worker to the terminal state with an
+// explicit err_message provenance (e.g. "orphan-reaped" for rows reconciled
+// by the spawn-path duplicate check).
+func (s *Store) MarkCompletedWithReason(beadID string, exitCode int, reason string) error {
+	_, err := s.db.Exec(
+		`UPDATE workers SET state='completed', exit_code=?, completed_at=?, err_message=? WHERE bead_id=?`,
+		exitCode, time.Now().UTC().Format(timeFmt), reason, beadID)
+	if err != nil {
+		return fmt.Errorf("mark completed %s: %w", beadID, err)
+	}
+	return nil
+}
