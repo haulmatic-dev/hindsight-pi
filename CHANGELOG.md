@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Documentation
+- Triage `docs/discovery/orphanclaim-pr264-triage-wwj2.md`: 18 of 22 in_progress beads had stale `completed` registry rows (true orphan cohort); Charon recovery verified live (44 reopen events) — churn root cause tracked by hydra-cw35, no duplicate change. Publisher wedge RESOLVED: PR #264 admin-merged (e79798a3, development tip), clearing 16 unpublished local commits. Disk 50% (stale 99% claim).
 - Triage `docs/discovery/orphanclaim-churn-triage-hu12.md`: the persistent orphanclaims=6 digest anomaly is a retry-gap snapshot of a gate-failure churn loop (Charon reopened all 9 candidate beads 2–6× on 2026-10-06; loop self-terminates via escalation) — no reconciliation bug, no manual requeue, disk 49% (stale claim).
 
 ### Fixed
