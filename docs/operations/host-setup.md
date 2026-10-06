@@ -422,17 +422,22 @@ nothing.
 sqlite3 -json /opt/dev-tools/var/hydra/.hydra/registry.db \
   "SELECT bead_id,state,pid FROM workers WHERE state IN ('working','parked')"
 
-# 2. Build packages (not single files) and swap atomically — a plain cp onto
-#    a running binary fails with "Text file busy"
-go build -o /tmp/hydra.new ./cmd/hydra && go build -o /tmp/worker.new ./cmd/worker
-cp /tmp/hydra.new /opt/dev-tools/var/hydra/bin/.hydra.new
-cp /tmp/worker.new /opt/dev-tools/var/hydra/bin/.worker.new
+# 2. Build packages (not single files) into a build dir, swap atomically —
+#    a plain cp onto a running binary fails with "Text file busy"
+mkdir -p /tmp/hydra-deploy
+go build -o /tmp/hydra-deploy/hydra ./cmd/hydra && go build -o /tmp/hydra-deploy/worker ./cmd/worker
+cp /tmp/hydra-deploy/hydra /opt/dev-tools/var/hydra/bin/.hydra.new
+cp /tmp/hydra-deploy/worker /opt/dev-tools/var/hydra/bin/.worker.new
 mv -f /opt/dev-tools/var/hydra/bin/.hydra.new /opt/dev-tools/var/hydra/bin/hydra
 mv -f /opt/dev-tools/var/hydra/bin/.worker.new /opt/dev-tools/var/hydra/bin/worker
 
-# 3. Restart and prove the deploy
+# 3. Restart and prove the deploy. The 4th argument is MANDATORY: the md5
+#    assertion is the only check that proves the installed binaries are
+#    byte-identical to what you just built (2026-10-06: two deploy chains
+#    reported active while yesterday's binary stayed installed; freshness
+#    and restart checks alone did not catch it).
 systemctl restart hydra
-scripts/verify-deploy.sh
+scripts/verify-deploy.sh "" "" both /tmp/hydra-deploy
 ```
 
 ## 11. GitHub access (for PR-flow projects)

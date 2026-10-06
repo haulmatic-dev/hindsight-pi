@@ -6,6 +6,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+
+### Added
+- **Deploy md5 gate** (`scripts/verify-deploy.sh`): new optional 4th argument `build-dir` asserts the installed daemon/worker binaries are byte-identical (md5) to the just-built artifacts. Freshness and restart checks cannot catch a silent no-op install — on 2026-10-06 two deploy chains reported `active` while yesterday's binary stayed installed, costing a phantom-debugging cycle. The §10 deploy procedure now mandates the gate.
 ### Added
 - `pan.escalated_leaf_grace_seconds` (default 86400): how long an escalated bead with no dependents sits before Pan sees it as a stale-escalation candidate. Pan's stale-escalation recipe also gained the leaf-grace exception: a reason reporting "beyond the leaf grace" overrides the "~2 days: leave blocked" default, so the judge actually acts on early candidates instead of silently watching them. The leaf reason now prefers `repair:clear-escalation` (one fair retry; re-fires on merit), so escalations caused by a daemon defect fixed by a later deploy get auto-retried instead of idling overnight for a human (srv-jobfile-eci: gate-extraction defect fixed by deploy, bead idled escalated with no path back). Lower the knob to cycle defect-class verified-close escalations within the hour.
 ### Fixed
