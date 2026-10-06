@@ -7,8 +7,15 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Fixed
+
+- Charon orphan recovery no longer respawns a duplicate worker while the bead's close is running (or queued behind) daemon gates: it now probes the artifact-first gate markers (`$HYDRA_HOME/gates/*/<bead>/*.json` with `status=running`, live writer PID, <45m old) before reopening an orphan `in_progress` bead. Root cause of the mo66 duplicate-spawn loop: a long sibling `test` gate holds the per-project gate lock past the 5m orphan grace, so the close looked like an orphan (kf2t 2026-09-27, mo66 2026-10-06).
+- Credential preflight parks now recover on their own: a project whose origin probe passes again is auto-unparked (only when the park reason is the preflight's own `auto-parked: GitHub credential…`), with a `credential_recovered` event. A new 10-minute sweep re-probes credential-parked projects so recovery no longer waits for a daemon restart — hydra itself sat parked 26h past its PAT fix.
+
 ### Added
 - **Adversarial close gate (bounded veto)** (`internal/core/adversary_gate.go`, `validation.agent_verifier`): after the deterministic close gates pass, a pi-backed reviewer scores the diff against the bead's acceptance criteria. Ships when zero BLOCKER findings and score ≥ `min_score` (default 0.8); NITs never block. Rejects ride the standard max_rounds reopen/escalate path with blocker feedback injected into the bead description; a different blocker set per round trips the churn guard and ships with dissent (`adversary_churn` event, `closed-with-findings` label). Verifier errors fail open with `adversary_error` events. Resurrects the dead AgentVerifier class (hardcoded localhost endpoint, silent skips, zero verdicts ever) as a Pan-shaped pi invocation with events for measurement.
+### Added
+- RED tests for the post-close verification sweep (internal/core/postclose_sweep_test.go): pin reopen-with-both-outputs, flake-guard label-without-reopen, bounded second-reopen → needs-human, skip of >24h/commandless beads, and a real-git integration reopen; pins `NewPostCloseSweeper` API GREEN must implement; internal/core/postclose_sweep.go holds an inert RED stub (compile-clean for the lint gate, zero behavior — tests fail at runtime with contract assertions).
 
 ### Fixed
 - **Charon orphan-recovery suppression**: the registry liveness check in `beadHasLiveWorker` now requires state=working AND a live PID — a stale non-working row with a fresh-enough heartbeat suppressed orphan recovery for minutes (srv-jobfile-dh0).
@@ -69,6 +76,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 - lint-gate: project-level Biome lint passes clean (5 files, 0 errors, 0 warnings); formatter applied safe fixes to 3 files (biome.json array compacted, trailing-comma/line-wrap fixes in the systematic-debugging TS example and its internal/integration copy). *Authored by a Hydra dogfood run.*
 
 ### Documentation
+- task-quy0: hydra PR #238 push-pending wedge verified resolved — PR #238 was CLOSED unmerged (mergedAt null), and the local checkout tip 3ac4484 is an ancestor of origin/development (landed via PR #251); bead closed not_planned, no human merge required. *Authored by a Hydra dogfood run.*
 - test-6yzo: fixture-suite validation round 1 verify-first close — all 8 shape fixtures route correctly and every task-breakdown suite (routing 8/8, preflight 10/10 ×3, crosscutting, shape-classification) passes rc=0; no code change. First-run failures were a concurrent-merge file-mutation race (30a2ac8 landed mid-run), documented in docs/hydra/handoff/test-6yzo.md. *Authored by a Hydra dogfood run.*
 
 ### Changed

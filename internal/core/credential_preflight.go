@@ -94,6 +94,43 @@ func (o *Overseer) RunCredentialPreflight() {
 	}
 }
 
+// credentialParkReasonPrefix marks parks this subsystem created; only those
+// are eligible for automatic recovery (a human-set park reason stays put).
+const credentialParkReasonPrefix = "auto-parked: GitHub credential"
+
+// RunCredentialRecoverySweep re-probes ONLY projects currently parked by a
+// credential preflight failure. A park with no paired recovery leaves the
+// project grounded forever after the operator fixes the PAT (hydra itself
+// sat parked 26h past credential recovery, 2026-10-06). Runs on an interval
+// from service_starter; per-project cost is one ls-remote and only while
+// parked. Fail-open throughout.
+func (o *Overseer) RunCredentialRecoverySweep() {
+	if o == nil || o.config == nil || o.registryStore == nil {
+		return
+	}
+	for _, project := range o.GetProjects() {
+		info, ok, err := o.registryStore.ProjectParkInfo(project.Name)
+		if err != nil || !ok || !info.Parked {
+			continue
+		}
+		if !strings.HasPrefix(info.Reason, credentialParkReasonPrefix) {
+			continue
+		}
+		repoPaths := []string{project.Path}
+		if project.Type == types.RepoTypeMulti && len(project.Repos) > 0 {
+			repoPaths = repoPaths[:0]
+			for _, repo := range project.Repos {
+				if p := resolveRepoPath(project, repo); p != "" {
+					repoPaths = append(repoPaths, p)
+				}
+			}
+		}
+		for _, repoPath := range repoPaths {
+			o.preflightOneRepo(project, repoPath)
+		}
+	}
+}
+
 // preflightOneRepo probes one repo dir. Identity resolution failure means
 // the publish path would fail closed anyway — surface it as credential_stale.
 func (o *Overseer) preflightOneRepo(project types.Project, repoPath string) {
@@ -113,7 +150,37 @@ func (o *Overseer) preflightOneRepo(project types.Project, repoPath string) {
 		}
 		return
 	}
+	o.maybeUnparkCredentialRecovered(project)
 	log.Printf("[CredentialPreflight] %s: origin probe OK (owner=%s source=%s)", project.Name, id.Owner, id.Source)
+}
+
+// maybeUnparkCredentialRecovered clears a park this subsystem set, once the
+// same probe that parked the project passes again. Human-set parks (any
+// other reason) are never touched. Fail-open: unpark failure only logs.
+func (o *Overseer) maybeUnparkCredentialRecovered(project types.Project) {
+	if o.registryStore == nil {
+		return
+	}
+	info, ok, err := o.registryStore.ProjectParkInfo(project.Name)
+	if err != nil || !ok || !info.Parked {
+		return
+	}
+	if !strings.HasPrefix(info.Reason, credentialParkReasonPrefix) {
+		return
+	}
+	if err := o.registryStore.SetProjectPark(project.Name, false,
+		"auto-unparked: GitHub credential repo-level probe passed again"); err != nil {
+		log.Printf("[CredentialPreflight] %s: auto-unpark failed: %v", project.Name, err)
+		return
+	}
+	log.Printf("[CredentialPreflight] %s: credential RECOVERED — unparked project", project.Name)
+	if o.eventSink != nil {
+		o.eventSink.Emit(Event{
+			Type:    "credential_recovered",
+			Project: project.Name,
+			Reason:  "preflight_repo_probe_passed",
+		})
+	}
 }
 
 // emitCredentialStale logs, emits the typed event, and auto-parks the

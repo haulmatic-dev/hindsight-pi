@@ -57,6 +57,18 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	// background goroutine so a slow remote never blocks startup; fail-open.
 	go o.RunCredentialPreflight()
 
+	// Credential recovery sweep: a project auto-parked by the preflight must
+	// come back on its own once the PAT is fixed — re-probe parked-only
+	// projects periodically (cheap: usually zero parked). Without this the
+	// park outlived the credential fix by 26h on hydra itself (2026-10-06).
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			o.RunCredentialRecoverySweep()
+		}
+	}()
+
 	// Open the worker registry (daemon-owned SQLite truth; PRD
 	// worker-park-and-resume Part 4) and construct Pan, the shepherd.
 	// Done here rather than in NewOverseer so tests constructing an Overseer

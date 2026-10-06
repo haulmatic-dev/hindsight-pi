@@ -1,8 +1,10 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -55,6 +57,7 @@ type Charon struct {
 	deadlockScans           int                      // consecutive scans seeing active>=max and zero live PIDs
 	escalatedWedgeMu        sync.Mutex               // guards escalatedWedgeLast
 	escalatedWedgeLast      map[string]time.Time     // bead → last orphan_escalated_wedged event (cooldown; the skip path logs every sweep otherwise — 378 lines for 2 beads in one morning, 2026-10-05)
+	gateRoot                string                   // gate artifact root ($HYDRA_HOME) for the close-in-progress probe; empty = probe disabled
 }
 
 // JanitorStats tracks cleanup statistics
@@ -98,6 +101,47 @@ func (j *Charon) SetMaxWorkers(n int) { j.maxWorkers = n }
 
 // SetEventSink attaches the structured event stream. Nil stays a no-op.
 func (j *Charon) SetEventSink(s *EventSink) { j.events = s }
+
+func (j *Charon) SetGateRoot(root string) { j.gateRoot = root }
+
+// beadCloseInProgress reports whether the bead's close is currently running
+// daemon gates — including queued behind the per-project gate lock, since the
+// artifact is written BEFORE the lock wait (gate_runner.go: artifact-first).
+// Without this probe, a long sibling gate (go test ./... on a shared repo)
+// holds the close past the orphan grace and Charon respawns a duplicate
+// worker mid-close (hydra-kf2t 2026-09-27, hydra-mo66 2026-10-06).
+// Conservative: artifact status=running + live writer PID + started within
+// 45m. Anything stale/dead falls through to normal recovery.
+func (j *Charon) beadCloseInProgress(beadID string) bool {
+	if j.gateRoot == "" {
+		return false
+	}
+	matches, err := filepath.Glob(filepath.Join(j.gateRoot, "gates", "*", beadID, "*.json"))
+	if err != nil {
+		return false
+	}
+	for _, m := range matches {
+		data, err := os.ReadFile(m)
+		if err != nil {
+			continue
+		}
+		var a GateArtifact
+		if json.Unmarshal(data, &a) != nil {
+			continue
+		}
+		if a.Status != GateStatusRunning {
+			continue
+		}
+		if !processAlive(a.PID) {
+			continue
+		}
+		if time.Since(a.StartedAt) > 45*time.Minute {
+			continue
+		}
+		return true
+	}
+	return false
+}
 
 // recordKillRetry counts a Charon kill against the bead's retry budget so
 // the spawn gate (RetryExhaustedError) stops the kill/respawn cycle.
@@ -855,6 +899,14 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 				// a tracked PID is actually running or the registry heartbeat is
 				// fresh.
 				if j.beadHasLiveWorker(beadIDStr, liveWorkers) {
+					continue
+				}
+
+				// A close running daemon gates is not an orphan: the worker is
+				// done but the bead stays in_progress for the whole gate run +
+				// any wait behind the per-project gate lock.
+				if j.beadCloseInProgress(beadIDStr) {
+					log.Printf("[Charon] bead %s close in progress (gate artifact running); leaving in_progress", beadIDStr)
 					continue
 				}
 

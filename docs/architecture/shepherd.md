@@ -75,6 +75,7 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `agent_verdict` | adversarial close gate (validation.agent_verifier, bounded veto) scored a close: `pass` (zero blockers, score ≥ min_score — close ships) or `reject` (blockers or score below threshold — close reopens with findings injected into the bead description, riding the standard max_rounds escalation) | `score`, `blockers`, `nits` |
 | `adversary_churn` | the verifier produced a DIFFERENT blocker set on a retry round — the infinite-nitpick signature; the close ships with dissent (`closed-with-findings` label) instead of burning remaining rounds | `score`, `blockers`, `nits` |
 | `adversary_error` | the verifier itself failed (pi error, timeout, unparseable verdict, diff-evidence failure) — FAILS OPEN: the close proceeds; the event makes the silent-skip class visible | `reason` (`verifier`/`parse`/`diff-evidence`) |
+| `credential_recovered` | a project auto-parked by credential preflight passed the same repo-level probe again; park cleared automatically by the 10-minute recovery sweep (no daemon restart or manual unpark needed) | — |
 | `publish_pr_waiting` | tier policy left an integration PR open awaiting human merge; emitted once per branch tip (later ticks skip while the tip is unchanged). Replaces the `publish_push_rejected`/`pr_merge_failed` noise that routine waiting generated | `pr_url`, `branch` |
 
 Read programmatically with `ReadEvents(path)` (torn-line tolerant; a missing
@@ -115,6 +116,8 @@ Config (`validation.agent_verifier`): `enabled` (default false), `min_score`,
 `model`, `pi_path`.
 
 ## 2. Close verdicts & quarantine (A1) — `bead_closer.go`, `worktree_manager.go`, `chain_completion_*.go`
+
+Orphan recovery (Charon) treats a bead whose close is running daemon gates as alive: the artifact-first gate marker (`$HYDRA_HOME/gates/<project>/<bead>/<gate>.json` with `status=running`, live writer PID, started <45m ago) is written BEFORE the per-project gate lock is taken, so a close queued behind a long sibling gate (`go test ./...`) no longer looks orphaned and gets respawned mid-close (hydra-kf2t 2026-09-27, hydra-mo66 2026-10-06).
 
 Singleton close is fail-closed end to end (2026-09-06, hydra-xnx incident). FR-010
 PR-first close contract: when the project has a remote configured, the

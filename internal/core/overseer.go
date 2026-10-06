@@ -581,6 +581,7 @@ func NewOverseer(config *Config) *Overseer {
 	// logged, never gate startup.
 	if home := os.Getenv("HYDRA_HOME"); home != "" {
 		o.beadCloser.SetGateRunner(NewGateRunner(home))
+		o.orphanJanitor.SetGateRoot(home)
 		if n, err := FinalizeStaleGateArtifacts(home); err != nil {
 			log.Printf("[DaemonGates] stale artifact recovery failed (continuing): %v", err)
 		} else if n > 0 {
