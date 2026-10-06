@@ -1,20 +1,18 @@
-# discovery handoff (hydra-ngui)
+# discovery handoff (hydra-ngui, verify-first re-run)
 
 ## What changed (files + one line each)
-- docs/discovery/evidence-of-use-probes-discovery-ngui.md: discovery for FR-004 deep-tier evidence-of-use probes — verified no tool-health code on HEAD, located the pinned RED contract on branch hydra/wt-hydra-e2a7 (commit e9783c8: ToolHealthEvidenceScanner + IntelUsageEvent + 5 tests, skip-gate design), mapped all 5 ACs, resolved 6 ambiguities (activity probe source, hindsight_memories source, sweep wiring, fail-open rules, worker-side emission path, `-buildvcs=false` rationale).
-- CHANGELOG.md: Documentation entry under Unreleased.
-- No code change (discovery bead; GREEN must implement the pinned contract).
+- docs/hydra/handoff/discovery-ngui.md: this handoff (verify-first re-run; no code change — the FR-004 deep-tier implementation landed on sibling strand hydra/wt-hydra-cbww, verified green here).
+- docs/discovery/evidence-of-use-probes-discovery-ngui.md: unchanged from first pass (requirements + AC mapping remain valid).
 
-## Verification (commands run + pass/fail)
-- `hindsight_search` at bead start — not connected ("Hindsight is not connected"), skip rule applied. PASS.
-- `graphify-out/graph.json` absent in cwd → rg/handoff fallback per protocol. PASS.
-- `rg "tool_degraded|tool_recovered|ToolHealth|intel_usage" internal cmd agents` — zero hits → no shallow-tier tool-health subsystem on HEAD. PASS.
-- RED contract located: `git show e9783c8:internal/core/tool_health_evidence.go` (+ test file, 152 lines, 5 tests: IntelUsageEventFields, DegradedWhenActivityNoMemories, NoActivityNoEvents, ActivityWithMemoriesNoDegradation, ProbeErrorFailOpen). PASS.
-- RED branch confirmed unmerged: `git log --all --grep e2a7` → commits e9783c8/0edefcc/45abc7c on hydra/wt-hydra-e2a7 only. PASS.
-- Analogous wiring pattern identified: internal/core/integration_exhausted_sweep.go (Start/Stop sweeper, knob-gated, fail-open, nil-safe). PASS.
+## Verified outcome (FR-004 implementation state)
+- Implementation commits exist on branch `hydra/wt-hydra-cbww`: 9da19047 `feat(intel): evidence-of-use probes (deep tier) — intel_usage worker event + tool_degraded evidence sweep` (+448: cmd/worker/intel_usage.go + test, internal/core/evidence_probes.go + test, tool_health_evidence.go, overseer.go + service_starter.go wiring) and 4af35a30 `refactor(intel): evidence-of-use sweep — ready() guard, emitDegraded, named consts; split worker intel_usage emitter`.
+- `git merge-base --is-ancestor 9da19047 origin/development` — NO → not yet landed on origin/development; integration belongs to the cbww strand, not this discovery bead.
+- Verify-first AC checks ran in-cwd against the cbww tip (files checked out temporarily, then removed; no commit):
+  - `go test ./internal/core/ -run 'TestToolHealthEvidence' -count=1` — ok (PASS).
+  - `go build -buildvcs=false ./...` — PASS.
+  - `go test ./cmd/worker/ -run 'IntelUsage' -count=1 -v` — PASS 3/3 (WritesJSONLBeforeFields, FailOpen, GraphifyFallbackFor).
 
 ## Open edges for the next phase
-- GREEN must cherry-pick/re-apply RED commit e9783c8 from hydra/wt-hydra-e2a7 (not in HEAD ancestry), then implement scan() bodies + IntelUsageEvent.
-- Wire intel_usage emission in cmd/worker pre-invocation (executeWithPi prompt-build path); booleans from hindsight client reachability, CASS (`cm` binary) presence, graphify-out/graph.json presence.
-- Wire probes at daemon side: activity probe via registry heartbeat freshness (<5m, same liveness rule as pan_health 0d4aeaa); hindsight probe via daemon hindsight client count; probe errors fail open.
-- Sweep cadence: mirror integration_exhausted_sweep (periodic + startup, config knob, 0 disables) or scan()-only per minimal change; ACs pin scan() behavior only.
+- CBWW strand integration: land hydra/wt-hydra-cbww (GREEN + refactor commits) via the normal dogfood PR path — this discovery bead must NOT duplicate it.
+- AC wording "sweep emits" implies the sweeper is wired into daemon Start (service_starter.go) — confirmed present in 9da19047 diff.
+- Shallow-tier tool_degraded/tool_recovered (US-001) still absent on origin/development; deep-tier `probe:"evidence"` discriminator avoids collision when it lands.

@@ -8,7 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Documentation
-- Discovery (FR-004, hydra-ngui): evidence-of-use probes (deep tier) requirements pinned — RED contract lives on branch `hydra/wt-hydra-e2a7` (e9783c8), no tool-health code on HEAD yet; ambiguities (activity/hindsight probe sources, sweep wiring, fail-open rules) resolved at `docs/discovery/evidence-of-use-probes-discovery-ngui.md`.
+- Discovery (FR-004, hydra-ngui): requirements pinned, RED-contract located on branch `hydra/wt-hydra-e2a7` (e9783c8); verify-first re-run confirmed the implementation landed on sibling strand `hydra/wt-hydra-cbww` (9da19047 GREEN + 4af35a30 refactor) and passes all AC commands (TestToolHealthEvidence ok, build ok, worker IntelUsage tests 3/3) — at `docs/discovery/evidence-of-use-probes-discovery-ngui.md`.
 - Triage `docs/discovery/orphanclaim-churn-triage-hu12.md`: the persistent orphanclaims=6 digest anomaly is a retry-gap snapshot of a gate-failure churn loop (Charon reopened all 9 candidate beads 2–6× on 2026-10-06; loop self-terminates via escalation) — no reconciliation bug, no manual requeue, disk 49% (stale claim).
 
 ### Fixed
