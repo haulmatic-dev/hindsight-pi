@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Documentation
+- Triage `docs/discovery/orphanclaim-pr-disk99-triage-fg7e.md`: all three P0 digest claims verified stale/by-design — 0 true orphans (26 in_progress − 10 escalated/pan-filed − heartbeat-fresh churn rows; Charon 48 reopens, 0 anomaly filings today), publisher wedge absent (checkout 0 ahead of origin/development; open dogfood PRs are the normal human-review queue), disk 50%. Named human-gate beads: hydra-q207, hydra-rxi6 (Pan clear-escalation).
 - Triage `docs/discovery/orphanclaim-churn-triage-hu12.md`: the persistent orphanclaims=6 digest anomaly is a retry-gap snapshot of a gate-failure churn loop (Charon reopened all 9 candidate beads 2–6× on 2026-10-06; loop self-terminates via escalation) — no reconciliation bug, no manual requeue, disk 49% (stale claim).
 - Orphan-claim triage `docs/discovery/orphanclaim-stale-snapshot-triage-ew7t.md`: the "8 in_progress beads with no live registry worker + disk 99%" digest anomaly re-verified stale at triage time — 0 live orphan claims (all rows working/fresh-heartbeat), disk 49%, Charon recovery demonstrably firing (44 reopens), 0 anomaly filings today. No code change; no further orphan hardening warranted.
 
