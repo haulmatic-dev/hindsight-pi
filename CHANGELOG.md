@@ -76,6 +76,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 - lint-gate: project-level Biome lint passes clean (5 files, 0 errors, 0 warnings); formatter applied safe fixes to 3 files (biome.json array compacted, trailing-comma/line-wrap fixes in the systematic-debugging TS example and its internal/integration copy). *Authored by a Hydra dogfood run.*
 
 ### Documentation
+- task-8gvw: orphan-claim P0 triage — both claims (orphanclaims=9, disk 99%) verified stale at 2026-10-06 12:42 UTC: 0 live orphans in the registry, deployed binary current with the full PR #70→#241→#255 reconciliation chain, 44 Charon recoveries today, disk 49%. Full chain table + re-fire playbook in docs/discovery/orphanclaim-disk99-triage-8gvw.md; no code change. *Authored by a Hydra dogfood run.*
 - task-quy0: hydra PR #238 push-pending wedge verified resolved — PR #238 was CLOSED unmerged (mergedAt null), and the local checkout tip 3ac4484 is an ancestor of origin/development (landed via PR #251); bead closed not_planned, no human merge required. *Authored by a Hydra dogfood run.*
 - test-6yzo: fixture-suite validation round 1 verify-first close — all 8 shape fixtures route correctly and every task-breakdown suite (routing 8/8, preflight 10/10 ×3, crosscutting, shape-classification) passes rc=0; no code change. First-run failures were a concurrent-merge file-mutation race (30a2ac8 landed mid-run), documented in docs/hydra/handoff/test-6yzo.md. *Authored by a Hydra dogfood run.*
 
