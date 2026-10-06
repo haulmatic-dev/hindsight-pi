@@ -1,7 +1,8 @@
 # discovery handoff (hydra-rz63)
 
 ## What changed (files + one line each)
-- docs/discovery/spawn-wedge-triage-rz63.md: triage — PrunableWedgeSweep verified firing for project hydra; the spawn-failed cohort was transient (recover-spawn-cohort cleared 2 entries at 13:40:57 UTC, both beads respawned 13:41:14); no code change.
+- internal/pan/prune_sweep.go: `[PruneSweep]` success log now prints the actual repair verb (`%s succeeded`) instead of a hardcoded "prune-worktree-registration succeeded" — spawn-class cohorts run recover-spawn-cohort, and the old log misattributed it (commit 94a6f6c).
+- docs/discovery/spawn-wedge-triage-rz63.md: triage — PrunableWedgeSweep verified firing for project hydra; the spawn-failed cohort was transient (recover-spawn-cohort cleared 2 entries at 13:40:57 UTC, both beads respawned 13:41:14); no other code change.
 - CHANGELOG.md: Documentation entry under Unreleased pointing at the triage.
 
 ## Verification (commands run + pass/fail)
@@ -15,5 +16,6 @@
 - `br doctor migrate-schema recover` run at bead start (store WAL hygiene, recurring poison). PASS.
 
 ## Open edges for the next phase
-- Cosmetic: `[PruneSweep]` success log hardcodes "prune-worktree-registration succeeded" even when the verb was recover-spawn-cohort; structured `[PanRepair]` event carries the true verb. Log-accuracy nit, not fixed here (smallest-change discipline).
+- Cosmetic nit FIXED in this bead (94a6f6c): success log now prints the actual verb.
+- Integration note: this worktree commit needed root-owned reflog files removed (logs/HEAD + logs/refs/heads/hydra/wt-hydra-rz63 were root-owned, `cannot update the ref` Permission denied); if a later commit here fails the same way, remove the root-owned reflog file first — reflog loss is safe.
 - No further action for the wedge: none persisting; store shows no open spawn-failed cohort.
