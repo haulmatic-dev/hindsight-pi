@@ -16,6 +16,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ### Fixed
 
+- Triage: P0 orphan-claim + disk-99% anomaly (hydra-cgud) verified stale — registry showed 7 working rows with fresh heartbeats, Charon reopened the full orphan cohort (lz3m/cw35/bldo/95ia/nydy/lkbo/2a3f/s8l7), and `df -h /` = 49%; recovery and disk-cleanup guard already landed. `docs/discovery/orphanclaim-disk99-triage-cgud.md`.
+
 - Charon orphan recovery no longer respawns a duplicate worker while the bead's close is running (or queued behind) daemon gates: it now probes the artifact-first gate markers (`$HYDRA_HOME/gates/*/<bead>/*.json` with `status=running`, live writer PID, <45m old) before reopening an orphan `in_progress` bead. Root cause of the mo66 duplicate-spawn loop: a long sibling `test` gate holds the per-project gate lock past the 5m orphan grace, so the close looked like an orphan (kf2t 2026-09-27, mo66 2026-10-06).
 - Credential preflight parks now recover on their own: a project whose origin probe passes again is auto-unparked (only when the park reason is the preflight's own `auto-parked: GitHub credential…`), with a `credential_recovered` event. A new 10-minute sweep re-probes credential-parked projects so recovery no longer waits for a daemon restart — hydra itself sat parked 26h past its PAT fix.
 ### Documentation
