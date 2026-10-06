@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Documentation
+- Triage `docs/discovery/orphanclaim-triage-qv28.md`: the "18 orphaned in_progress claims + publisher wedge (PR awaiting human merge) + disk 99%" P0 verified stale at 2026-10-06 13:56 UTC — 0 live orphan claims (all in_progress beads have working or heartbeat-fresh rows), local checkout HEAD an ancestor of development tip 53eca1b (PR #268 merged), disk at 50%; Charon reopens live (dyw2/gcal/m72l today), 0 anomaly filings today. No code change; no human merge action required.
 - Triage `docs/discovery/orphanclaim-churn-triage-hu12.md`: the persistent orphanclaims=6 digest anomaly is a retry-gap snapshot of a gate-failure churn loop (Charon reopened all 9 candidate beads 2–6× on 2026-10-06; loop self-terminates via escalation) — no reconciliation bug, no manual requeue, disk 49% (stale claim).
 - Orphan-claim triage `docs/discovery/orphanclaim-stale-snapshot-triage-ew7t.md`: the "8 in_progress beads with no live registry worker + disk 99%" digest anomaly re-verified stale at triage time — 0 live orphan claims (all rows working/fresh-heartbeat), disk 49%, Charon recovery demonstrably firing (44 reopens), 0 anomaly filings today. No code change; no further orphan hardening warranted.
 
