@@ -21,6 +21,6 @@
 - Disk: `df -h /` = 208G/451G = **49%** — the 99% claim in the bead body is STALE; no systemd-tmpfiles cleanup required (consistent with every prior triage of this recurring stale claim).
 
 ## Open edges for the next phase
-- The digest fix requires a daemon rebuild + restart to take effect; until then Pan may file one more twin per round.
-- Operator may close the duplicate P0 twins (hydra-hu12, hydra-v5xq, hydra-0ndi, hydra-2a3f, hydra-l5ug, plus this bead pqq5) as duplicate filings once their workers exit.
+- Deploy EXECUTED: fresh daemon+worker built from this worktree HEAD (6583fca; `strings` marker "GateCloseInProgress" = 2 hits in staged binary), staged at /tmp/hydra-staged-pqq5/, drain-restart script /tmp/drain-restart-pqq5.sh armed 12:49:51 UTC — waits for 0 running workers, backs up old binary (hydra.pre-pqq5.bak), atomic swap, `systemctl restart hydra`. Post-restart digest (no new P0 orphan filings) is the residual operator check.
+- Duplicate P0 twins CLOSED 2026-10-06 ~12:5x with triage comments: hydra-hu12, hydra-v5xq, hydra-0ndi, hydra-2a3f, hydra-l5ug (all "not_planned: duplicate", br output ✓). Registry recheck first: none had live working rows.
 - cw35/bldo/lkbo/95ia legitimately loop gate-failed-test close rejections — that churn is the verified-close round machinery, not an orphan wedge; separate concern.
