@@ -469,3 +469,31 @@ func TestCollectHealthDigestOrphanClaims_FreshClaimGrace(t *testing.T) {
 		t.Errorf("expected P0 orphan-claim anomaly for the stale claim, got %v", ph.Anomalies)
 	}
 }
+
+// TestCollectHealthDigestPanFiledBeadNotOrphan guards the 2026-10-06 filing
+// loop: pan-filed campaign/triage beads are in_progress claims with no worker
+// (before spawn, and again while awaiting close gates), so the orphan-claim
+// counter re-fired the P0 anomaly for the very filings the anomaly created —
+// 9 twin filings in 25 min. Pan-filed beads must not count as orphans; the
+// file-bead cap owns their lifecycle.
+func TestCollectHealthDigestPanFiledBeadNotOrphan(t *testing.T) {
+	tw := setupTestOverseer(t)
+	tw.overseer.registryStore = nil
+
+	bead := types.Bead{ID: "test-project-pan", Project: "test-project", Status: types.StatusInProgress, Type: "task", UpdatedAt: time.Now().Add(-10 * time.Minute), Labels: []string{"pan-filed"}}
+	tw.mockBeads.beads["test-project-pan"] = bead
+
+	d := tw.overseer.collectHealthDigest()
+	if len(d.Projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(d.Projects))
+	}
+	ph := d.Projects[0]
+	if ph.OrphanClaims != 0 {
+		t.Errorf("OrphanClaims = %d, want 0 (pan-filed bead is a triage filing, not an orphan claim)", ph.OrphanClaims)
+	}
+	for _, a := range ph.Anomalies {
+		if strings.Contains(a, "P0 campaign anomaly") {
+			t.Errorf("unexpected orphan anomaly: %v", ph.Anomalies)
+		}
+	}
+}
