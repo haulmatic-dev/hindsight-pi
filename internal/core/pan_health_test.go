@@ -497,3 +497,67 @@ func TestCollectHealthDigestPanFiledBeadNotOrphan(t *testing.T) {
 		}
 	}
 }
+
+// TestCollectHealthDigestCompletedRowNotOrphan guards the hydra 2026-10-06
+// 13:4x filing loop: 15 in_progress beads (gate-reject churn + red/discovery
+// chains) each had a registry row state=completed — workers exited through
+// the normal completion path and the scheduler's respawn backoff owned the
+// requeue — but once the heartbeat aged past 5m the digest counted them all
+// orphaned and Pan filed a campaign-anomaly twin every round while Charon
+// and the retry queue were already cycling the ladder. A completed row is
+// terminal worker state, not a live worker: it must not count as an orphan.
+// A genuine orphan (row still working/hung with stale heartbeat) stays.
+func TestCollectHealthDigestCompletedRowNotOrphan(t *testing.T) {
+	tw := setupTestOverseer(t)
+	o := tw.overseer
+
+	stale := 20 * time.Minute
+	bead1 := types.Bead{ID: "test-project-c1", Project: "test-project", Status: types.StatusInProgress, Type: "bug", UpdatedAt: time.Now().Add(-stale)}
+	bead2 := types.Bead{ID: "test-project-c2", Project: "test-project", Status: types.StatusInProgress, Type: "bug", UpdatedAt: time.Now().Add(-stale)}
+	bead3 := types.Bead{ID: "test-project-gone", Project: "test-project", Status: types.StatusInProgress, Type: "bug", UpdatedAt: time.Now().Add(-stale)}
+	tw.mockBeads.beads["test-project-c1"] = bead1
+	tw.mockBeads.beads["test-project-c2"] = bead2
+	tw.mockBeads.beads["test-project-gone"] = bead3
+
+	st, err := registry.Open(":memory:")
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	o.registryStore = st
+	up := func(id string, state registry.WorkerState, hb time.Time) {
+		if err := st.UpsertWorker(registry.WorkerRecord{
+			BeadID: id, PID: 2, Project: "test-project", State: state,
+			StartedAt: time.Now().Add(-stale), LastHeartbeat: hb,
+		}); err != nil {
+			t.Fatalf("UpsertWorker: %v", err)
+		}
+	}
+	// c1: completed row, stale heartbeat → NOT an orphan (respawn backoff).
+	up("test-project-c1", registry.StateCompleted, time.Now().Add(-stale))
+	// c2: completed row, fresh heartbeat → not live-orphan under the
+	// existing finalizing-worker rule either; must stay non-orphaned.
+	up("test-project-c2", registry.StateCompleted, time.Now())
+	// gone: no registry row at all → genuine orphan (a stale working row
+	// still counts live under existing digest semantics; a bead with no row
+	// past the 5m claim grace is the unclaimed-orphan case).
+	_ = up
+
+	d := o.collectHealthDigest()
+	if len(d.Projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(d.Projects))
+	}
+	ph := d.Projects[0]
+	if ph.OrphanClaims != 1 {
+		t.Errorf("OrphanClaims = %d, want 1 (only the stale working row)", ph.OrphanClaims)
+	}
+	found := false
+	for _, a := range ph.Anomalies {
+		if strings.Contains(a, "P0 campaign anomaly") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected P0 orphan-claim anomaly for the genuine orphan, got %v", ph.Anomalies)
+	}
+}

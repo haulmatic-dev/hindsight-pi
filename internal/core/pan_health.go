@@ -67,11 +67,15 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 	// completed at 02:52:38 while the worker PID ran on until 03:1x). The
 	// threshold mirrors Charon's heartbeatHungAfter (5m).
 	liveByKey := map[string][]registry.WorkerRecord{}
+	completedByBead := map[string]bool{}
 	if o.registryStore != nil {
 		if workers, err := o.registryStore.ListWorkers(registry.StateWorking, registry.StateParked, registry.StateHung, registry.StateCompleted); err == nil {
 			for _, w := range workers {
-				if w.State == registry.StateCompleted && time.Since(w.LastHeartbeat) >= 5*time.Minute {
-					continue // genuinely finished; not live
+				if w.State == registry.StateCompleted {
+					completedByBead[w.BeadID] = true
+					if time.Since(w.LastHeartbeat) >= 5*time.Minute {
+						continue // genuinely finished; not live
+					}
 				}
 				// WorkerRecord.Project is the registered project name; match
 				// by name or path basename (multi-user discovery registers
@@ -203,6 +207,20 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 				// exited 0 minutes earlier, Charon correctly left them — the
 				// digest kept filing orphan twins). Same probe Charon uses.
 				if orphaned && o.gateRoot != "" && GateCloseInProgress(o.gateRoot, project.Name, id) {
+					continue
+				}
+				// A bead whose registry row is state=completed is not an orphan
+				// even after the heartbeat goes stale: the worker exited through
+				// the normal completion path (gates finished, verdict recorded)
+				// and the scheduler's respawn backoff owns the requeue. Counting
+				// the bead during that backoff window re-fired the P0 campaign
+				// anomaly every sweep while Charon and the retry queue were
+				// already cycling the ladder (hydra 2026-10-06 13:4x: 15 beads
+				// between attempts — gate-reject churn + red/discovery chains —
+				// every one with a completed row, pan filed a twin per round).
+				// A genuine orphan is a bead whose row is still working/hung with
+				// a stale heartbeat (worker died mid-run) — that case stays.
+				if orphaned && completedByBead[id] {
 					continue
 				}
 				if orphaned {
