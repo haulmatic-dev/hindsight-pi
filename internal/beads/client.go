@@ -70,8 +70,24 @@ type defaultExecutorWithDir struct {
 }
 
 func (e *defaultExecutorWithDir) Execute(name string, arg ...string) ([]byte, error) {
+	// br's fsqlite WAL layer stages files under FIXED names in $TMPDIR
+	// (beads.db, bd-beads.json, beads.db-fsqlite-ns-gate, ...). Any two br
+	// processes — even against different stores — collide on those names,
+	// producing cross-store WAL phantom writes and SYNC_CONFLICT lockouts
+	// (observed 2026-10-07: hydra fix beads phantom-duplicated into
+	// srv-jobfile's WAL; store unreadable for hours). Isolate each
+	// invocation's TMPDIR and clean it up afterwards.
+	tmpDir, tmpErr := os.MkdirTemp("", "hydra-br-")
+	if tmpErr != nil {
+		// Fail open: run with the inherited TMPDIR rather than not running.
+		log.Printf("[beads] TMPDIR isolation unavailable (%v); using inherited TMPDIR", tmpErr)
+	}
 	cmd := exec.Command(name, arg...)
 	cmd.Dir = e.Dir
+	if tmpErr == nil {
+		defer os.RemoveAll(tmpDir)
+		cmd.Env = append(os.Environ(), "TMPDIR="+tmpDir)
+	}
 	// Capture both stdout and stderr so we can check for warnings
 	return cmd.CombinedOutput()
 }
