@@ -34,6 +34,18 @@ func TestQuarantinePoisonedSessions(t *testing.T) {
 	g.Truncate(poisonedSessionThresholdBytes + 1)
 	g.Close()
 
+	// Oversize but WITH a completed compaction — healthy long task, must stay.
+	healthy := filepath.Join(sessionDir, "healthy.jsonl")
+	h, err := os.Create(healthy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.WriteString(`{"type":"compaction","id":"abc"}` + "\n")
+	if err := h.Truncate(poisonedSessionThresholdBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	h.Close()
+
 	quarantinePoisonedSessions(sessionDir)
 
 	if _, err := os.Stat(small); err != nil {
@@ -41,6 +53,9 @@ func TestQuarantinePoisonedSessions(t *testing.T) {
 	}
 	if _, err := os.Stat(other); err != nil {
 		t.Errorf("non-jsonl file must remain: %v", err)
+	}
+	if _, err := os.Stat(healthy); err != nil {
+		t.Errorf("oversize file WITH compaction must remain (false-positive guard): %v", err)
 	}
 	if _, err := os.Stat(big); !os.IsNotExist(err) {
 		t.Errorf("oversize jsonl must be moved out, stat err=%v", err)

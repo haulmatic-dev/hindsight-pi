@@ -8,6 +8,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- **Poisoned-session quarantine now requires TWO signals (size >20MB AND zero compaction entries), preventing false positives on legitimately long tasks.** Pi's session file is append-only, so a productive session with many successful compactions eventually crosses 20MB while its live context stays healthy. Audit of 1,232 session files: healthy max 8.5MB with compactions present; the six poisoned sessions were 89-159MB with zero compactions. Read errors fail open (assume healthy).
+
+### Fixed
 - **Worker quarantines poisoned pi sessions before resume.** A session JSONL >20MB (~4M tokens, ~3x a 1.3M context window) can never fit the model context again; resuming it guaranteed every turn failed on context-overflow while re-POSTing the full transcript. On 2026-10-08 this produced 132 failing executions of one bead and ~148GB of request bodies with zero completions. Oversize sessions are now moved to `sessions/.poisoned-quarantine/` so the worker starts fresh. Operators: recover quarantined files manually if ever needed.
 
 ### Fixed

@@ -2181,6 +2181,15 @@ const poisonedSessionThresholdBytes = 20 << 20
 // quarantinePoisonedSessions moves oversize session JSONL files out of
 // sessionDir into <sessions-root>/.poisoned-quarantine/ so resume logic never
 // picks them up again. Fail-open: any error leaves files untouched.
+//
+// Two signals required, both empirically grounded (2026-10-09 audit of 1,232
+// session files): (1) size > 20MB — the healthy population tops at ~8.5MB,
+// the six poisoned sessions sat at 89-159MB; (2) ZERO compaction entries —
+// every poisoned session had compaction vetoed (0 entries), while healthy
+// multiturn sessions contain compaction markers. The second signal protects
+// legitimately long tasks: pi's session file is append-only, so a productive
+// session with many successful compactions would eventually cross 20MB while
+// its live context is perfectly healthy.
 func quarantinePoisonedSessions(sessionDir string) {
 	entries, err := os.ReadDir(sessionDir)
 	if err != nil {
@@ -2194,16 +2203,52 @@ func quarantinePoisonedSessions(sessionDir string) {
 		if err != nil || fi.Size() <= poisonedSessionThresholdBytes {
 			continue
 		}
+		src := filepath.Join(sessionDir, e.Name())
+		if sessionHasCompaction(src) {
+			continue // compacting fine — large but healthy
+		}
 		dstDir := filepath.Join(filepath.Dir(sessionDir), ".poisoned-quarantine")
 		if err := os.MkdirAll(dstDir, 0750); err != nil {
 			continue
 		}
-		src := filepath.Join(sessionDir, e.Name())
 		dst := filepath.Join(dstDir, filepath.Base(sessionDir)+"_"+e.Name())
 		if err := os.Rename(src, dst); err != nil {
 			continue
 		}
-		log.Printf("[Worker] Quarantined poisoned session %s (%d bytes) -> %s", src, fi.Size(), dst)
+		log.Printf("[Worker] Quarantined poisoned session %s (%d bytes, no compactions) -> %s", src, fi.Size(), dst)
+	}
+}
+
+// sessionHasCompaction reports whether the session log contains at least one
+// completed compaction entry — proof the context is being managed. Streams the
+// file; stops at first hit. Any read error returns true (assume healthy:
+// quarantine must fail open).
+func sessionHasCompaction(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	marker := []byte(`"type":"compaction"`)
+	buf := make([]byte, 1<<20)
+	var overlap []byte
+	for {
+		n, err := f.Read(buf)
+		if n > 0 {
+			chunk := append(overlap, buf[:n]...)
+			if bytes.Contains(chunk, marker) {
+				return true
+			}
+			// Keep a tail slice so a marker split across reads is still found.
+			if len(marker) < len(chunk) {
+				overlap = chunk[len(chunk)-len(marker):]
+			} else {
+				overlap = chunk
+			}
+		}
+		if err != nil {
+			return false // EOF or read error without a hit
+		}
 	}
 }
 
