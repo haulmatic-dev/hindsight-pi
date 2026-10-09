@@ -1997,6 +1997,7 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 		"--offline",
 	}
 	if sessionID != "" && sessionDir != "" {
+		quarantinePoisonedSessions(sessionDir)
 		if os.Getenv("HYDRA_RESUME_SESSION") == "1" && sessionHasFiles(sessionDir) {
 			// Resume the orphan's existing session (Self-heal recovery A).
 			// --session requires the session to exist; sessionHasFiles guards
@@ -2166,6 +2167,44 @@ func sanitizeSessionID(s string) string {
 func sessionHasFiles(dir string) bool {
 	entries, err := os.ReadDir(dir)
 	return err == nil && len(entries) > 0
+}
+
+// poisonedSessionThresholdBytes: a session JSONL beyond this can never fit a
+// model context window again (2026-10-08 incident: a compaction-vetoed session
+// grew to 138MB / 26.4M tokens = 2014% of the window; every resumed turn then
+// failed on context-overflow while re-POSTing the full transcript — 132
+// executions, ~148GB of request bodies, zero completions). Resuming such a
+// session is pure token burn, so we quarantine it and let the worker start
+// fresh. ~5 bytes/token observed, so 20MB ≈ 4M tokens ≈ 3× a 1.3M window.
+const poisonedSessionThresholdBytes = 20 << 20
+
+// quarantinePoisonedSessions moves oversize session JSONL files out of
+// sessionDir into <sessions-root>/.poisoned-quarantine/ so resume logic never
+// picks them up again. Fail-open: any error leaves files untouched.
+func quarantinePoisonedSessions(sessionDir string) {
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		fi, err := e.Info()
+		if err != nil || fi.Size() <= poisonedSessionThresholdBytes {
+			continue
+		}
+		dstDir := filepath.Join(filepath.Dir(sessionDir), ".poisoned-quarantine")
+		if err := os.MkdirAll(dstDir, 0750); err != nil {
+			continue
+		}
+		src := filepath.Join(sessionDir, e.Name())
+		dst := filepath.Join(dstDir, filepath.Base(sessionDir)+"_"+e.Name())
+		if err := os.Rename(src, dst); err != nil {
+			continue
+		}
+		log.Printf("[Worker] Quarantined poisoned session %s (%d bytes) -> %s", src, fi.Size(), dst)
+	}
 }
 
 // buildPiPrompt builds the prompt message for Pi agent
