@@ -7,6 +7,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Changed
+- **Poisoned-session quarantine threshold lowered 20MB → 8.5MB**, aligned to OpenRouter's gateway body cap (8MB): beyond it, pi's compaction summarize request is itself rejected, making a session permanently unrecoverable — pi's overflow compact-and-retry still rescues sessions below it, so a lower threshold would kill recoverable work. The two-signal rule (size AND zero compaction entries) is unchanged.
+
 ### Fixed
 - **Poisoned-session quarantine now requires TWO signals (size >20MB AND zero compaction entries), preventing false positives on legitimately long tasks.** Pi's session file is append-only, so a productive session with many successful compactions eventually crosses 20MB while its live context stays healthy. Audit of 1,232 session files: healthy max 8.5MB with compactions present; the six poisoned sessions were 89-159MB with zero compactions. Read errors fail open (assume healthy).
 

@@ -2175,8 +2175,15 @@ func sessionHasFiles(dir string) bool {
 // failed on context-overflow while re-POSTing the full transcript — 132
 // executions, ~148GB of request bodies, zero completions). Resuming such a
 // session is pure token burn, so we quarantine it and let the worker start
-// fresh. ~5 bytes/token observed, so 20MB ≈ 4M tokens ≈ 3× a 1.3M window.
-const poisonedSessionThresholdBytes = 20 << 20
+// fresh. The binding constraint is OpenRouter's gateway body cap: 8MB
+// (confirmed platform-level — opencode#33589 and independent reports). Pi's
+// compaction summarize call sends ~the full context; beyond 8MB the summarize
+// request itself is rejected, making the session permanently unrecoverable.
+// 8.5MB sits just above that wall with margin. Below it, pi's overflow
+// compact-and-retry can still save the session, so we must NOT quarantine —
+// that would kill recoverable work (a 7MB threshold was considered and
+// rejected for this reason, 2026-10-10).
+const poisonedSessionThresholdBytes = 8*1024*1024 + 512*1024 // 8.5MB
 
 // quarantinePoisonedSessions moves oversize session JSONL files out of
 // sessionDir into <sessions-root>/.poisoned-quarantine/ so resume logic never
