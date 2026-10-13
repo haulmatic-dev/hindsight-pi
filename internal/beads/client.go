@@ -202,18 +202,23 @@ func (c *Client) exec(cmd string, args ...string) ([]byte, error) {
 	return output, nil
 }
 
-// brExecMu serializes br invocations. The br daemon (SQLite-backed) returns
-// exit 8 under concurrent access, and the overseer fans out many br calls
-// during DAG builds — serializing removes that self-inflicted contention.
-var brExecMu sync.Mutex
+// brExecLocks serializes br invocations per store directory. A raced
+// concurrent `br` rebuild can delete .beads/issues.jsonl and rebuild
+// beads.db with 0 issues (srv-smart-engine, 2026-09-11). Serializing per
+// store keeps concurrency across independent projects while eliminating the
+// race for any single .beads directory.
+var brExecLocks sync.Map // string dir -> *sync.Mutex
 
 // execInDir runs a CLI command in a directory, serializing br calls and
 // retrying transient daemon-lock failures (exit 8 / "database is locked")
 // with exponential backoff. Non-transient errors return immediately.
 func (c *Client) execInDir(dir string, cmd string, args ...string) ([]byte, error) {
 	if cmd == "br" {
-		brExecMu.Lock()
-		defer brExecMu.Unlock()
+		key := filepath.Clean(dir)
+		muIface, _ := brExecLocks.LoadOrStore(key, &sync.Mutex{})
+		mu := muIface.(*sync.Mutex)
+		mu.Lock()
+		defer mu.Unlock()
 	}
 	const maxAttempts = 4
 	var lastErr error

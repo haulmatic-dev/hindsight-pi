@@ -124,6 +124,10 @@ type Overseer struct {
 	completed       map[string]bool  // Track completed beads for this session
 	retryManager    *RetryManager    // Retry and validation-retry tracking
 	intelligenceHub *IntelligenceHub // Encapsulates TLDR, GPTCache, Hindsight clients
+	// hardParkProbes tracks consecutive successful worktree probes per bead
+	// for the hard-park reconciler (hysteresis x2 before clearing labels).
+	hardParkProbes        map[string]int
+	lastHardParkReconcile time.Time
 	// These clients remain direct fields until IntelligenceHub fully exposes their APIs.
 	gptCache              *GPTCacheClient                 // GPTCache client for caching
 	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
@@ -938,6 +942,9 @@ func (o *Overseer) tick() error {
 		o.refreshDiscoveredProjects()
 	}
 	err := o.scheduler.Tick()
+	// Fail-open: clear stale worktree-unavailable hard-park labels when the
+	// worktree probe has recovered for two consecutive ticks.
+	o.reconcileHardParks()
 	// After scheduling, publish each project's working branch to its remote
 	// (opt-in via output.push). This consolidates completed worktree commits
 	// onto the working branch and pushes with the project owner's PAT, so by
@@ -986,6 +993,20 @@ func (o *Overseer) publishProjects() {
 			}
 		}
 	}
+}
+
+// reconcileHardParks runs the worktree-unavailable label reconciler at most
+// once per hardParkReconcileInterval. Fail-open: any error inside the
+// reconciler is logged there and never affects the scheduling tick.
+func (o *Overseer) reconcileHardParks() {
+	if time.Since(o.lastHardParkReconcile) < hardParkReconcileInterval {
+		return
+	}
+	o.lastHardParkReconcile = time.Now()
+	if o.hardParkProbes == nil {
+		o.hardParkProbes = map[string]int{}
+	}
+	ReconcileHardParkedWorktrees(o.beadsClient, o.projects, nil, o.hardParkProbes, o.eventSink)
 }
 
 // PushPendingEntry records a project whose integration/working branch holds
@@ -1702,10 +1723,7 @@ func (o *Overseer) shouldSpawnWorker(node *Node) bool {
 	if o.isBeadRunning(beadID) {
 		return false
 	}
-	if node.Bead.Type == "approval-gate" || node.Bead.Type == "epic" {
-		return false
-	}
-	if node.Bead.Type == "approval" {
+	if isNonExecutableBeadType(node.Bead.Type) {
 		return false
 	}
 	return true

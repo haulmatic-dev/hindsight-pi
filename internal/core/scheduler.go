@@ -144,6 +144,20 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 		readyMap[string(bead.ID)] = bead
 	}
 
+	// Human gates and container beads must never reach the spawn loop.
+	// Discovery sources can return them even when the DAG filter does not,
+	// and the retry loop below can resurrect them from the DAG, so strip
+	// them up front.
+	filteredReady := readyBeads[:0]
+	for _, bead := range readyBeads {
+		if isNonExecutableBeadType(bead.Type) {
+			delete(readyMap, string(bead.ID))
+			continue
+		}
+		filteredReady = append(filteredReady, bead)
+	}
+	readyBeads = filteredReady
+
 	// Retry state now survives a spawn, so a bead being worked on right now is
 	// still in the snapshot. Queueing it would race a second worker against the
 	// live one for the same bead — the spawner would refuse it, and that refusal
@@ -162,6 +176,19 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 
 	for beadID := range retrySnapshot {
 		if active[beadID] {
+			continue
+		}
+
+		// Human gates and container beads are never worker-executed. Drop any
+		// retry residue for them so they do not leak through to the spawn loop
+		// and burn worker turns (approval-gate parking beads were spawned from
+		// the retry queue and "completed" by workers, releasing whole
+		// campaigns — webapp-c36, 2026-09-16).
+		if bead, exists := readyMap[beadID]; exists && isNonExecutableBeadType(bead.Type) {
+			o.retryManager.ClearRetry(beadID)
+			delete(readyMap, beadID)
+			readyBeads = removeBeadByID(readyBeads, beadID)
+			log.Printf("[Retry] Dropped retry state for human/container bead %s (already in ready set)", beadID)
 			continue
 		}
 
@@ -205,6 +232,11 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 		count, _, _, _ := o.retryManager.RetryInfo(beadID)
 
 		if bead, err := s.getBeadFromDAG(beadID); err == nil {
+			if isNonExecutableBeadType(bead.Type) {
+				o.retryManager.ClearRetry(beadID)
+				log.Printf("[Retry] Dropped retry state for human/container bead %s", beadID)
+				continue
+			}
 			if hasBeadLabel(bead.Labels, escalatedLabel) {
 				// The bead was escalated to a human after max close rejections.
 				// Retry entries from earlier worker failures must not resurrect
@@ -856,16 +888,8 @@ func (s *Scheduler) ShouldSpawnWorker(node *Node) bool {
 	if o.isBeadRunning(beadID) {
 		return false
 	}
-	if node.Bead.Type == "approval-gate" {
-		log.Printf("Skipping approval gate: %s", beadID)
-		return false
-	}
-	if node.Bead.Type == "approval" {
-		log.Printf("Skipping approval bead (waiting for user approval): %s", beadID)
-		return false
-	}
-	if node.Bead.Type == "epic" {
-		log.Printf("Skipping epic (organizational): %s", beadID)
+	if isNonExecutableBeadType(node.Bead.Type) {
+		log.Printf("Skipping non-executable bead (type: %s): %s", node.Bead.Type, beadID)
 		return false
 	}
 	// HOLD gates are dependencies, not work. This is the spawn funnel —

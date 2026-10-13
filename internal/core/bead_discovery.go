@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -55,6 +56,29 @@ func (d *BeadDiscovery) guardBlocked(project types.Project) bool {
 	return d.storeGuard != nil && d.storeGuard.IsBlocked(project.Path)
 }
 
+// preflightStore refuses to schedule from a project whose canonical
+// issues.jsonl is missing while .br_history snapshots exist. That shape is
+// the srv-smart-engine 2026-09-11 corruption signature: a raced br rebuild
+// deleted issues.jsonl and left beads.db empty. Catching it before br list
+// avoids treating an empty corrupt store as "no beads".
+func (d *BeadDiscovery) preflightStore(project types.Project) bool {
+	issuesPath := filepath.Join(project.Path, ".beads", "issues.jsonl")
+	if _, err := os.Stat(issuesPath); err == nil {
+		return true
+	}
+	histDir := filepath.Join(project.Path, ".beads", ".br_history")
+	entries, err := os.ReadDir(histDir)
+	if err != nil || len(entries) == 0 {
+		// No snapshots either — project likely has no beads yet.
+		return true
+	}
+	log.Printf("🚨 [BeadDiscovery] project %s (%s): %s missing but %s has snapshots — refusing to schedule; store corrupt or rebuild in progress", project.Name, project.Path, issuesPath, histDir)
+	if d.storeGuard != nil {
+		d.storeGuard.NoteMissingCanonical(project)
+	}
+	return false
+}
+
 // FindReadyBeads retrieves beads that are ready to execute.
 // activeWorkers should be a snapshot of currently running worker IDs.
 // Priority: 1) bv --robot-plan, 2) br ready, 3) bv --robot-triage
@@ -103,6 +127,9 @@ func (d *BeadDiscovery) findFromBR(activeWorkers map[string]bool) ([]types.Bead,
 	for _, project := range d.projects {
 		if d.guardBlocked(project) {
 			// Fail-closed: store presumed corrupt, excluded until restored.
+			continue
+		}
+		if !d.preflightStore(project) {
 			continue
 		}
 		// Multi projects: br must run per-repo, never in the parent dir (which
@@ -191,7 +218,7 @@ func (d *BeadDiscovery) findFromBR(activeWorkers map[string]bool) ([]types.Bead,
 	})
 
 	log.Printf("📋 Found %d ready beads from 'br ready' (after filtering)", len(readyBeads))
-	return d.filterByDAG(readyBeads), nil
+	return d.filterHardParked(d.filterByDAG(readyBeads)), nil
 }
 
 // pruneStaleCompleted drops completed-set entries whose listed store status
@@ -477,7 +504,7 @@ func (d *BeadDiscovery) findFromBV(activeWorkers map[string]bool) ([]types.Bead,
 	})
 
 	log.Printf("📋 [BV] Found %d ready beads from triage (after filtering)", len(allReadyBeads))
-	return d.filterByDAG(allReadyBeads), nil
+	return d.filterHardParked(d.filterByDAG(allReadyBeads)), nil
 }
 
 // findFromBVPlan retrieves beads using bv --robot-plan.
@@ -595,7 +622,33 @@ func (d *BeadDiscovery) findFromBVPlan(activeWorkers map[string]bool) ([]types.B
 	})
 
 	log.Printf("📋 [BV-Plan] Found %d ready beads from plan (after filtering)", len(allReadyBeads))
-	return d.filterByDAG(allReadyBeads), nil
+	return d.filterHardParked(d.filterByDAG(allReadyBeads)), nil
+}
+
+// filterHardParked drops beads carrying a durable hard-park label:
+// `escalated` (verified-close rejection at max attempts, parked for a human)
+// or `worktree-unavailable` (fail-closed spawn, mirrors escalated). Both mean
+// "never hand to a worker until a human clears the label" — the same gate
+// dag_navigator.GetReadyBeads applies — but the br/bv intake paths list store
+// state directly and would otherwise resurrect labelled beads (hydra-wdp
+// spawned 2026-09-11 06:55 with the escalated label already in issues.jsonl).
+// This is the single chokepoint for all three discovery paths (br ready, bv
+// robot-triage, bv robot-plan); gating only one path leaves the others
+// scheduling.
+func (d *BeadDiscovery) filterHardParked(beads []types.Bead) []types.Bead {
+	var filtered []types.Bead
+	for _, bead := range beads {
+		switch {
+		case hasBeadLabel(bead.Labels, escalatedLabel):
+			log.Printf("⏸️  [Discovery] Skipping escalated bead: %s", bead.ID)
+			continue
+		case hasBeadLabel(bead.Labels, worktreeUnavailableLabel):
+			log.Printf("⏸️  [Discovery] Skipping worktree-unavailable bead: %s", bead.ID)
+			continue
+		}
+		filtered = append(filtered, bead)
+	}
+	return filtered
 }
 
 // filterByDAG intersects candidate beads with the DAG's ready nodes.

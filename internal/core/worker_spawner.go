@@ -382,10 +382,18 @@ func (s *WorkerSpawner) Spawn(bead types.Bead) (err error) {
 		return fmt.Errorf("worker limit reached: %d/%d workers active", activeCount, maxWorkers)
 	}
 
+	// The placeholder owns the slot for the duration of the spawn attempt, so
+	// carry the same identity fields a real worker will have: observers that
+	// snapshot activeWorkers while a spawn is in flight must still see which
+	// bead/project/user the slot belongs to (multi-user attribution gate).
+	projectPath := s.beadAnalyzer.FindProjectPath(&bead)
 	placeholderWorker := &types.Worker{
-		ID:        beadIDStr,
-		Status:    "spawning",
-		StartTime: time.Now(),
+		ID:          beadIDStr,
+		BeadID:      bead.ID,
+		Status:      "spawning",
+		StartTime:   time.Now(),
+		ProjectPath: projectPath,
+		Username:    s.findUserForProject(projectPath),
 	}
 	s.activeWorkers[beadIDStr] = placeholderWorker
 	s.workerMutex.Unlock()

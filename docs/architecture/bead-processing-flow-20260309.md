@@ -155,7 +155,7 @@ graph TD
 2. InDegree = 0 (no unresolved dependencies)
 3. Not currently running
 4. Not already completed
-5. Not an approval-gate (manual approval required)
+5. Not an approval-gate or approval (manual approval required)
 6. Not an epic (organizational only, not actionable)
 7. Only implementation tasks and TDD sub-tasks are actionable
 
@@ -172,8 +172,8 @@ func (o *Overseer) getReadyBeads() ([]types.Bead, error) {
             continue  // Skip already running
         }
         
-        // 3. Skip approval gates (require manual intervention)
-        if bead.Type == "approval-gate" {
+        // 3. Skip human gates (approval-gate and approval require manual intervention)
+        if bead.Type == "approval-gate" || bead.Type == "approval" {
             continue
         }
         

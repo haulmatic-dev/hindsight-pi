@@ -326,6 +326,17 @@ janitorial commits landing on the user's working branch. The bead is stamped
 is human: fix the worktree (Pan's whitelisted `repair-worktree` repair runs
 `Remove`+`EnsureWorktree` daemon-side), then clear the label.
 
+**Hard-park reconciler (2026-10-13).** Recovery is no longer manual-only. Each
+overseer tick (throttled to once per minute) runs a repo-level git probe for
+every project with `worktree-unavailable` beads. After **two consecutive
+successful probes** the reconciler clears the label, emits the typed event
+`worktree_unparked`, and the bead becomes schedulable on the normal paths.
+Probe failure resets the hysteresis counter and leaves the label untouched
+(fail-open). The reconciler never touches `escalated` or `needs-human` — those
+stay human-only. Observed before this: the fms dubious-ownership wedge was
+root-fixed at host level (2026-10-02 08:13 UTC) but 26 labeled beads stayed
+parked until an operator removed each label by hand.
+
 **Inspecting quarantined work:**
 
 ```bash
