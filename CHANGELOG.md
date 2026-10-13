@@ -7,6 +7,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 ### Fixed
+- **Store-ownership spawn preflight downgraded to fail-open** (#296 follow-up): the uid-mismatch heuristic blocked every spawn into user-owned repos (`spawn_blocked_store_ownership` events, zero log lines, silent wedge) even though cross-uid reads work and workers run as the repo owner via `su`. The sidecar uid-lock is a write hazard; the preflight now warns (typed event `spawn_warn_store_ownership` + log) and lets real write failures surface at the write site.
 - **Hard-park reconciler** (stranded worktree work, `hydra/wt-hydra-u5e`): beads labelled `worktree-unavailable` now get probed on a slow loop and auto-unparked after 2 consecutive successful probes (hysteresis), so a transient worktree failure no longer needs a human to clear the label.
 - **Non-executable bead types filtered from the retry queue** (residual graft of the Sep-20 escalated-discovery fix): approval-gate/approval/epic beads are stripped from retry eligibility case-insensitively and their retry state is cleared — they can no longer be resurrected from the DAG into a worker spawn.
 - **Bead store corruption guard** (srv `.beads` emptied under concurrent access): store-wipe detection and fail-closed exclusion.

@@ -122,10 +122,18 @@ func (o *Overseer) spawnPreflightStoreOwnership(bead types.Bead, projectPath str
 	if missing || uid == daemonUID() {
 		return nil
 	}
-	detail := fmt.Sprintf(".beads store owned by uid %d, daemon runs as uid %d — user-owned repo; daemon stops managing it (fsqlite sidecars are uid-locked, cross-uid access fails: br \"refused its namespace sidecar ... owned by uid\")", uid, daemonUID())
-	o.emitSpawnPreflightBlocked(projectPath, "spawn_blocked_store_ownership", bead, detail)
-	return &SpawnSuppressedError{BeadID: bead.ID.String(),
-		Reason: fmt.Sprintf("store owned by foreign uid %d (remedy: chown the store to the daemon uid or manage the repo user-side)", uid)}
+	// 2026-10-13: downgraded from fail-closed to fail-open. The uid-mismatch
+	// heuristic blocked every spawn into user-owned repos (event
+	// spawn_blocked_store_ownership, srv-smart-engine wedge) even though the
+	// daemon demonstrably reads foreign stores fine (br list/show as hydra on
+	// ajantha's store) and workers already execute as the repo owner via su.
+	// The hydra-6g4u sidecar uid-lock is a WRITE hazard; gating all spawns on
+	// ownership alone was a false-positive sensor. Keep the typed event for
+	// visibility; let real write failures surface at the write site.
+	detail := fmt.Sprintf(".beads store owned by uid %d, daemon runs as uid %d — cross-uid store; writes may hit fsqlite sidecar uid-lock (hydra-6g4u)", uid, daemonUID())
+	log.Printf("[Spawn] %s store-ownership preflight WARN (fail-open, spawning): %s", bead.ID, detail)
+	o.emitSpawnPreflightBlocked(projectPath, "spawn_warn_store_ownership", bead, detail)
+	return nil
 }
 
 // spawnPreflightPublishIdentity blocks the spawn funnel when the bead owner's
