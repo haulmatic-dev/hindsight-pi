@@ -24,9 +24,19 @@ Design for compiler certainty.
 
 ## Execution Rules
 
+- Follow `doctrine.md` (same directory) at every phase — it distills the
+  anti-drift and grounding rules this skill enforces.
+
 - Execute all phases sequentially without asking for confirmation
 - Ask clarifying questions only if ambiguity blocks deterministic generation (max 3)
 - Never overwrite an existing PRD — increment version suffix instead
+- **Amendments edit normative text in place.** When updating a PRD, change the
+  section that is wrong and add a dated inline note (`_Amended YYYY-MM-DD:_`).
+  Never leave the superseded instruction standing with a contradicting footnote
+  below it — the task-breakdown analyzer and most human readers consume the
+  normative text first, and a stale instruction followed by "actually, no"
+  produces beads for the wrong thing (observed 2026-10-13: §6 pre-push hook
+  instruction superseded only by footnote).
 - All requirement IDs must be stable and deterministic
 
 ---
@@ -72,6 +82,31 @@ subagent:
 ```
 
 Aggregate results into `researchContext` before Phase 3.
+
+### Repo-State Verification (mandatory, before drafting)
+
+Research agents report what the code does; this step verifies what the repo
+**is** — every factual claim the PRD will rely on. A PRD decays like a cache:
+the repo moves after anyone touches it, and a claim that was true at authoring
+is a landmine at breakdown time (observed 2026-10-13: PRD cited a jest.config.ts
+that never existed, a 52-spec baseline that was actually 73, and a missing
+node_modules that would have failed every worker instantly).
+
+Verify, with commands, before writing:
+
+1. **Cited paths exist** — every file/dir the PRD names (`ls`/`test -e`).
+2. **Cited tools work** — every command in acceptance criteria runs
+   (`node_modules/.bin/jest` present? `npm run test:cov` defined?).
+3. **Counts re-measured, never copied** — file counts, spec counts, coverage
+   baselines: run the measurement, date it (`_measured YYYY-MM-DD_`).
+4. **Referenced work actually landed** — "X was done by PR1 of plan Y" requires
+   the artifact to exist on the target branch, not just the PR to be merged.
+5. **Nothing already in flight** — `git branch -a` for branches matching the
+   planned work; existing partial work changes scope.
+
+Record results in a `## Verified Facts` section near the top of the PRD:
+each entry is a claim + the command that proves it + the date. Anything that
+cannot be verified is written as an explicit **Assumption**, never as fact.
 
 ### Failure Policy
 
@@ -409,6 +444,21 @@ If a buggy version of the code could satisfy all ACs, the ACs are underspecified
 Coverage percentage is a proxy metric — fault detection is the real criterion.
 
 ---
+
+### 3.5b Machine-Checkable State Claims
+
+When a PRD must state something about the repo (a file exists, a tool is
+installed, a baseline number), write the claim WITH the command that verifies
+it, so breakdown-time tooling can re-assert it:
+
+✅ `node_modules/.bin/jest` exists (verify: `test -x node_modules/.bin/jest`)
+✅ Baseline spec count: 73 (verify: `find src -name '*.spec.ts' | wc -l`,
+   measured 2026-10-13 — re-measure at breakdown, do not trust this number)
+❌ "The integration plan already moved the jest config" (unverifiable claim
+   about another effort's output)
+
+Numbers the repo can re-measure must be re-measured at execution time; the
+PRD value is a dated snapshot, not ground truth.
 
 ### 3.6 Requirement Types
 

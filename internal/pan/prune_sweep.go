@@ -114,7 +114,7 @@ func (s *Shepherd) PrunableWedgeSweep(cands []Candidate) SweepReport {
 		case "ok":
 			report.Successes = append(report.Successes, key)
 			report.Cleared = append(report.Cleared, beads...)
-			log.Printf("[PruneSweep] cohort %q (%d beads): prune-worktree-registration succeeded for %s — cleared in batch", key, len(beads), representative)
+			log.Printf("[PruneSweep] cohort %q (%d beads): %s succeeded for %s — cleared in batch", key, len(beads), verb, representative)
 		default:
 			// Refused, rate-limited, or failed: keep the divergence explicit.
 			report.Residuals[key] = fmt.Sprintf("repair status %q on representative %s (%d beads pending)", status, representative, len(beads))
