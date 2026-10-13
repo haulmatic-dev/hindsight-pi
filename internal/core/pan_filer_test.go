@@ -3,6 +3,8 @@ package core
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -25,9 +27,11 @@ func TestFilePanBeadCapAndLabel(t *testing.T) {
 		t.Fatalf("bead not filed with %s label: %+v", pan.FiledLabel, beads)
 	}
 
-	// Cap: fill to MaxOpenFiledBeadsPerProject, next filing must refuse.
-	for i := 1; i < pan.MaxOpenFiledBeadsPerProject; i++ {
-		if err := o.filePanBead(path, "bead-src", "Wedge found more", "details"); err != nil {
+	// Cap: fill to the effective cap, next filing must refuse. Titles must be
+	// genuinely distinct — signature dedupe (panSigTTL) collapses near-twins.
+	capNames := []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"}
+	for i := 1; i < o.panFiledBeadsPerProject(); i++ {
+		if err := o.filePanBead(path, "bead-src", "Wedge found "+capNames[i], "details"); err != nil {
 			t.Fatalf("file-bead %d: %v", i, err)
 		}
 	}
@@ -69,7 +73,7 @@ func TestFilePanBead_CapCountsInProgress(t *testing.T) {
 
 	// Fill the cap.
 	names := []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"}
-	for i := 0; i < pan.MaxOpenFiledBeadsPerProject; i++ {
+	for i := 0; i < o.panFiledBeadsPerProject(); i++ {
 		if err := o.filePanBead(path, "bead-src", fmt.Sprintf("Wedge %s: a distinct root cause", names[i]), "details"); err != nil {
 			t.Fatalf("file-bead %d: %v", i, err)
 		}
@@ -161,5 +165,80 @@ func TestFilePanBead_FilerErrorLeavesWindowOpen(t *testing.T) {
 	}
 	if err := o.filePanBead(path, "bead-src", "Wedge A", "details"); err != nil {
 		t.Fatalf("retry after filer error must file: %v", err)
+	}
+}
+func TestFilePanBead_ConfigKnobCap(t *testing.T) {
+	o := &Overseer{beadsClient: newMockBeadsClient()}
+	o.config = &Config{}
+	o.config.Shepherd.Pan.MaxFiledBeadsPerProject = 1
+	if got := o.panFiledBeadsPerProject(); got != 1 {
+		t.Fatalf("knob not honored: %d", got)
+	}
+	path := t.TempDir()
+	dir := t.TempDir()
+	o.eventSink = NewEventSink(dir)
+	o.projects = []types.Project{{Name: "p", Path: path}}
+	if err := o.filePanBead(path, "bead-src", "First wedge", "d"); err != nil {
+		t.Fatalf("first filing: %v", err)
+	}
+	// Cap 1 hit: refusal + typed event + digest anomaly.
+	err := o.filePanBead(path, "bead-src", "Second wedge", "d")
+	if err == nil || !strings.Contains(err.Error(), "cap reached") {
+		t.Fatalf("expected cap refusal, got %v", err)
+	}
+	if _, hit := o.panCapHits.Load(path); !hit {
+		t.Fatal("cap hit not recorded for digest")
+	}
+	d := o.collectHealthDigest()
+	found := false
+	for _, p := range d.Projects {
+		if p.Key == filepath.Base(path) {
+			for _, a := range p.Anomalies {
+				if strings.Contains(a, "pan-filed cap saturated") {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("digest missing pan-filed cap saturation anomaly")
+	}
+	// Typed cap-hit event emitted.
+	evs, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	eventSeen := false
+	for _, f := range evs {
+		b, _ := os.ReadFile(f)
+		if strings.Contains(string(b), "pan_filed_cap_hit") {
+			eventSeen = true
+		}
+	}
+	if !eventSeen {
+		t.Fatal("pan_filed_cap_hit event not emitted")
+	}
+	// Successful filing clears the saturation marker.
+	beads, _ := o.beadsClient.ListBeads(path, "")
+	_ = o.beadsClient.UpdateBeadStatus(path, beads[0].ID, types.StatusClosed)
+	if err := o.filePanBead(path, "bead-src", "Third wedge", "d"); err != nil {
+		t.Fatalf("post-close filing: %v", err)
+	}
+	if _, hit := o.panCapHits.Load(path); hit {
+		t.Fatal("cap hit marker not cleared on successful filing")
+	}
+}
+
+func TestFilePanBead_DefaultCapFour(t *testing.T) {
+	o := &Overseer{beadsClient: newMockBeadsClient()}
+	if got := o.panFiledBeadsPerProject(); got != DefaultPanFiledBeadsPerProject {
+		t.Fatalf("nil config should fall back to %d, got %d", DefaultPanFiledBeadsPerProject, got)
+	}
+	path := t.TempDir()
+	classNames := []string{"alpha", "beta", "gamma", "delta"}
+	for i := 0; i < DefaultPanFiledBeadsPerProject; i++ {
+		if err := o.filePanBead(path, "bead-src", fmt.Sprintf("Wedge class %s", classNames[i]), "d"); err != nil {
+			t.Fatalf("filing %d: %v", i, err)
+		}
+	}
+	if err := o.filePanBead(path, "bead-src", "Wedge class overflow", "d"); err == nil || !strings.Contains(err.Error(), "cap reached") {
+		t.Fatalf("expected cap refusal at default 4, got %v", err)
 	}
 }

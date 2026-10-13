@@ -56,6 +56,8 @@ type Charon struct {
 	escalatedWedgeMu        sync.Mutex               // guards escalatedWedgeLast
 	escalatedWedgeLast      map[string]time.Time     // bead → last orphan_escalated_wedged event (cooldown; the skip path logs every sweep otherwise — 378 lines for 2 beads in one morning, 2026-10-05)
 	gateRoot                string                   // gate artifact root ($HYDRA_HOME) for the close-in-progress probe; empty = probe disabled
+	orphanWatchMu           sync.Mutex
+	orphanWatch             map[string]orphanWatchEntry // reopened beads awaiting a resolve event (sensor symmetry)
 }
 
 // JanitorStats tracks cleanup statistics
@@ -195,6 +197,7 @@ func NewCharon(beadsClient *beads.Client, workerTracker *WorkerTracker, workerTi
 		heartbeatHungAfter: 5 * time.Minute,  // Stale registry heartbeat → hung worker
 		stopChan:           make(chan struct{}),
 		stats:              JanitorStats{},
+		orphanWatch:        make(map[string]orphanWatchEntry),
 	}
 }
 
@@ -357,7 +360,7 @@ func (j *Charon) performCleanup() {
 			if j.getProjects != nil {
 				for _, project := range j.getProjects() {
 					for _, target := range repoScanTargets(project) {
-						ReconcileOrphanedWorktrees(NewWorktreeManager(), target, active, j.terminalBeadChecker(target))
+						ReconcileOrphanedWorktrees(NewWorktreeManager(), target, active, j.terminalBeadChecker(target), j.events)
 					}
 				}
 			}
@@ -840,6 +843,17 @@ func (j *Charon) collectProjects() []types.Project {
 //
 // Without this recovery, a single stuck in_progress bead blocks all downstream beads
 // whose DAG depends on it, indefinitely stalling the swarm.
+// orphanWatchEntry records one sensor fire awaiting its resolve: a reopened
+// orphan bead whose terminal fate is not yet observable. The resolve
+// (orphan_recovered) is emitted with the same correlation ID when the bead
+// next reaches a terminal status, completing the fire/resolve pair for the
+// daily rollup.
+type orphanWatchEntry struct {
+	projectPath string
+	repo        string
+	correlation string
+}
+
 func (j *Charon) recoverOrphanInProgressBeads() int {
 	if j.orphanBeadGrace <= 0 {
 		return 0
@@ -850,6 +864,35 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 	// without a .beads/ folder would silently skip all projects.
 	projects := j.collectProjects()
 	grace := j.orphanBeadGrace
+
+	// Sensor symmetry (resolve): check previously reopened beads for a
+	// terminal outcome and emit orphan_recovered with the fire's correlation
+	// ID. GetBead-based so closed beads (excluded from ListBeads) resolve too.
+	j.orphanWatchMu.Lock()
+	watched := make(map[string]orphanWatchEntry, len(j.orphanWatch))
+	for id, e := range j.orphanWatch {
+		watched[id] = e
+	}
+	j.orphanWatchMu.Unlock()
+	for beadIDStr, e := range watched {
+		if j.beadsClient == nil {
+			break
+		}
+		fresh, err := j.beadsClient.GetBead(e.projectPath, e.repo, types.BeadID(beadIDStr))
+		if err != nil || fresh == nil {
+			continue // fail-open: keep watching, no event noise
+		}
+		if fresh.Status.IsTerminal() {
+			if j.events != nil {
+				j.events.Emit(Event{Type: "orphan_recovered", Reason: string(fresh.Status),
+					Detail: fmt.Sprintf("reopened orphan bead %s reached terminal status %s", beadIDStr, fresh.Status),
+					Fields: map[string]any{"bead": beadIDStr, "project": e.projectPath, "correlation_id": e.correlation}})
+			}
+			j.orphanWatchMu.Lock()
+			delete(j.orphanWatch, beadIDStr)
+			j.orphanWatchMu.Unlock()
+		}
+	}
 
 	liveWorkers := j.workerTracker.GetRunningWorkers()
 	recovered := 0
@@ -966,6 +1009,12 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 					log.Printf("[OrphanRetry] bead %s carries the %q label (worktree hard-parked); skipping reopen", beadIDStr, worktreeUnavailableLabel)
 					continue
 				}
+				// A git-ownership bead was hard-parked by a fail-closed spawn: git
+				// refused the repo; reopening would respawn into the same refusal.
+				if hasBeadLabel(fresh.Labels, gitOwnershipLabel) {
+					log.Printf("[OrphanRetry] bead %s carries the %q label (git-ownership hard-parked); skipping reopen", beadIDStr, gitOwnershipLabel)
+					continue
+				}
 
 				log.Printf("[Charon] 🔧 Recovering orphan in_progress bead %s (project: %s)", beadIDStr, target)
 
@@ -987,12 +1036,22 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 					}
 				}
 				if j.events != nil {
+					// Sensor symmetry (fire): corr pairs this fire with the
+					// orphan_recovered resolve once the bead reaches a terminal
+					// status (tracked in j.orphanWatch).
+					corr := SensorCorrelation("orphan-retry", beadIDStr)
 					j.events.Emit(Event{
 						Type:   "charon_orphan_reopened",
 						Reason: "dead_worker",
 						Detail: fmt.Sprintf("reopened orphan in_progress bead %s (no live worker)", beadIDStr),
-						Fields: map[string]any{"bead": beadIDStr, "project": project.Path},
+						Fields: map[string]any{"bead": beadIDStr, "project": project.Path, "correlation_id": corr},
 					})
+					// Sensor symmetry (fire): corr pairs this fire with the
+					// orphan_recovered resolve once the bead reaches a terminal
+					// status (tracked in j.orphanWatch).
+					j.orphanWatchMu.Lock()
+					j.orphanWatch[beadIDStr] = orphanWatchEntry{projectPath: target, correlation: corr}
+					j.orphanWatchMu.Unlock()
 				}
 			}
 		}

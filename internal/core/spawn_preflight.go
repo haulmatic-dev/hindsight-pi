@@ -155,6 +155,26 @@ func (o *Overseer) spawnPreflightPublishIdentity(bead types.Bead, projectPath st
 		Reason: "owner publish identity unresolved (auto-resumes when PAT lands)"}
 }
 
+// spawnPreflightGitAccess blocks the spawn funnel when the daemon user
+// (hydra) cannot run git in the project repo because git rejects the
+// repository's ownership (exit 128 "dubious ownership"). Fail-closed with
+// auto-resume: the bead is re-checked next tick once a human fixes trust.
+func (o *Overseer) spawnPreflightGitAccess(bead types.Bead, projectPath string) error {
+	if projectPath == "" || !isGitWorktree(projectPath) {
+		return nil
+	}
+	if err := gitAccessProbe(projectPath); err == nil {
+		return nil
+	} else if !isDubiousOwnershipError(err) {
+		log.Printf("[Spawn] %s git access probe failed open: %v", bead.ID, err)
+		return nil
+	}
+	o.emitSpawnPreflightBlocked(projectPath, "spawn_blocked_git_ownership", bead,
+		gitOwnershipRemediation(projectPath))
+	return &SpawnSuppressedError{BeadID: bead.ID.String(),
+		Reason: "git ownership rejected for project repo (human must set safe.directory)"}
+}
+
 // emitSpawnPreflightBlocked writes a typed, repo-mirrored event whenever the
 // spawn funnel refuses a bead.
 func (o *Overseer) emitSpawnPreflightBlocked(projectPath, evType string, bead types.Bead, detail string) {

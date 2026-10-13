@@ -50,6 +50,7 @@ type BeadCloser struct {
 	sessionResumePilot *SessionResumePilot     // session-file resume quality metrics
 	semanticClusterer  *semanticClusterer      // nil-safe; FR-020 semantic (embedding) clustering pass
 	semanticOnce       sync.Once
+	prWaitingRec       func(PRWaitingRecord) // nil-safe; PR aging sweep ledger (bead hydra-rrtq)
 }
 
 // SetWorktreeManager enables commit-on-close and singleton integrate-on-close
@@ -76,6 +77,32 @@ func NewBeadCloser(beadsClient BeadsClient, intelligenceHub *IntelligenceHub, pr
 
 // SetEventSink attaches the structured event stream. Nil stays a no-op.
 func (c *BeadCloser) SetEventSink(s *EventSink) { c.events = s }
+
+// SetPRWaitingRecorder installs the PR aging sweep's ledger recorder. Called
+// whenever a close leaves an integration PR open waiting on a human merge.
+// nil = recording disabled (tools, tests without HYDRA_HOME).
+func (c *BeadCloser) SetPRWaitingRecorder(fn func(PRWaitingRecord)) {
+	if c == nil {
+		return
+	}
+	c.prWaitingRec = fn
+}
+
+// recordPRWaitingCapture captures one waiting-on-human-merge PR into the
+// ledger (nil-safe, fail-open).
+func (c *BeadCloser) recordPRWaitingCapture(bead *types.Bead, projectPath, url string) {
+	if c == nil || c.prWaitingRec == nil || bead == nil || url == "" {
+		return
+	}
+	owner := ""
+	if id, err := resolvePublishIdentityFor(projectPath); err == nil {
+		owner = id.Owner
+	}
+	c.prWaitingRec(PRWaitingRecord{
+		BeadID: string(bead.ID), ProjectPath: projectPath,
+		Owner: owner, URL: url, Since: time.Now(),
+	})
+}
 
 // ownerTokenForPublish resolves the bead owner's publish identity for the
 // project and emits the typed identity event (publish_identity_resolved /
@@ -412,6 +439,15 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 	c.events.EmitRepo(projectPath, Event{Type: "bead_closed", Project: repoName,
 		Bead: worker.BeadID.String(), Reason: reason,
 		Fields: map[string]any{"exit_code": exitCode, "success": success}})
+	// Sensor symmetry (resolve): the verified-close sensor's paired resolve
+	// for every verified_close_rejected fire on this bead. Correlation is
+	// deterministic per bead, so fires and resolves pair across restarts.
+	if success && reason == "completed" && c.verifiedCloseEnabled() {
+		c.events.EmitRepo(projectPath, Event{Type: "verified_close_passed", Project: repoName,
+			Bead: worker.BeadID.String(), Reason: "completed",
+			Detail: fmt.Sprintf("bead %s closed verified after validation", worker.BeadID.String()),
+			Fields: map[string]any{"correlation_id": SensorCorrelation("verified-close", worker.BeadID.String())}})
+	}
 
 	if err := c.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason); err != nil {
 		return err
@@ -966,6 +1002,7 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 			if errors.As(err, &pw) {
 				log.Printf("[Output] %s PR open, waiting on human merge: %s", bead.ID, pw.URL)
 				AppendActivity(projectPath, string(bead.ID), "PR open — waiting on human merge: "+pw.URL)
+				c.recordPRWaitingCapture(bead, projectPath, pw.URL)
 				return nil
 			}
 			// Benign race loser: the winning close's PR merge landed the same
@@ -1085,6 +1122,7 @@ func (c *BeadCloser) publishSingletonViaPR(projectPath string, bead *types.Bead,
 		if errors.As(err, &pw) {
 			log.Printf("[Output] %s PR-first close: PR open, waiting on human merge: %s", bead.ID, pw.URL)
 			AppendActivity(projectPath, string(bead.ID), "PR open — waiting on human merge: "+pw.URL)
+			c.recordPRWaitingCapture(bead, projectPath, pw.URL)
 			return nil
 		}
 		if isPRNoCommitsBetween(err) {
@@ -1602,6 +1640,12 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		// Stop the reject/reopen loop; flag for a human instead of spinning.
 		c.logCloseEvent(bead, "escalated", reason, currentAttempts)
 		log.Printf("[VerifiedClose] Bead %s rejected %d/%d times (%s); escalating to human", beadID, currentAttempts, maxRounds, reason)
+		// Sensor symmetry (fire): an escalation is a sensor fire; the paired
+		// resolve is verified_close_passed with the same correlation ID.
+		c.events.EmitRepo(projectPath, Event{Type: "verified_close_rejected", Project: repoName,
+			Bead: beadID, Reason: reason,
+			Detail: fmt.Sprintf("verified-close rejected %d/%d times (%s); escalated to human", currentAttempts, maxRounds, reason),
+			Fields: map[string]any{"attempts": currentAttempts, "max_rounds": maxRounds, "correlation_id": SensorCorrelation("verified-close", beadID), "outcome": "escalated"}})
 		if c.beadsClient != nil {
 			if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"needs-human", "verified-close-escalated", escalatedLabel}); err != nil {
 				log.Printf("[VerifiedClose] Failed to label %s for escalation: %v", beadID, err)
@@ -1613,12 +1657,18 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		c.events.EmitRepo(projectPath, Event{Type: "bead.escalated", Project: repoName,
 			Bead: beadID, Reason: reason,
 			Detail: fmt.Sprintf("verified-close rejected %d/%d times (%s); escalated to human, bead left in_progress", currentAttempts, maxRounds, reason),
-			Fields: map[string]any{"attempts": currentAttempts, "max_rounds": maxRounds}})
+			Fields: map[string]any{"attempts": currentAttempts, "max_rounds": maxRounds, "correlation_id": SensorCorrelation("verified-close", beadID), "outcome": "escalated"}})
 		return fmt.Errorf("verified-close: bead %s escalated after %d rejections (%s)", beadID, currentAttempts, reason)
 	}
 
 	c.logCloseEvent(bead, "rejected", reason, currentAttempts+1)
 	log.Printf("[VerifiedClose] Bead %s rejected (%s), round %d/%d — reopening", beadID, reason, currentAttempts+1, maxRounds)
+	// Sensor symmetry (fire): each rejection round is a sensor fire; the
+	// paired resolve (verified_close_passed) carries the same correlation ID.
+	c.events.EmitRepo(projectPath, Event{Type: "verified_close_rejected", Project: repoName,
+		Bead: beadID, Reason: reason,
+		Detail: fmt.Sprintf("verified-close rejected %s (round %d/%d); bead reopened", beadID, currentAttempts+1, maxRounds),
+		Fields: map[string]any{"round": currentAttempts + 1, "correlation_id": SensorCorrelation("verified-close", beadID), "outcome": "reopened"}})
 	if c.validationService != nil && c.validationService.retryManager != nil {
 		c.validationService.retryManager.IncrementValidationRetry(beadID)
 	}

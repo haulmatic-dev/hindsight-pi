@@ -71,6 +71,15 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 			o.RunCredentialRecoverySweep()
 		}
 	}()
+	// PR aging weekly digest (no-op when disabled)
+	if o.prAging != nil {
+		o.prAging.Start()
+	}
+	// Git-ownership preflight (fmsfe wedge): run `git rev-parse` as the
+	// daemon's (hydra) user against every project repo BEFORE the project
+	// is enabled for work; a dubious-ownership refusal fails closed with a
+	// typed event + auto-park carrying the exact remediation command.
+	go o.RunGitOwnershipPreflight()
 
 	// Open the worker registry (daemon-owned SQLite truth; PRD
 	// worker-park-and-resume Part 4) and construct Pan, the shepherd.
@@ -109,6 +118,12 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 		} else if n > 0 {
 			log.Printf("[Registry] Reconciled %d dead worker row(s) orphaned by restart: %s", n, strings.Join(ids, ", "))
 		}
+
+		// Daily token-usage rollup: persists worker token totals into the
+		// durable token_usage_daily table at 00:05 UTC and emits a typed
+		// event per row, so spend trends survive ReapStale/ReapGhosts pruning.
+		o.tokenUsageRollup = NewTokenUsageRollupJob(func() *registry.Store { return o.registryStore }, o.eventSink)
+		o.tokenUsageRollup.Start()
 
 		panCfg := o.config.Shepherd.Pan
 		// blockedLogged dedups per-process candidate logging: each blocked
@@ -340,7 +355,11 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 		// Pan repair handlers: whitelisted daemon-side actions that clear
 		// scheduler-level blockers without a worker command. They are
 		// fail-open: errors are logged and emitted as audit events only.
-		o.panShepherd.SetRepairHandlers(map[string]func(beadID string) error{
+		// Sensor symmetry: every repair verdict is wrapped so each verb emits
+		// repair_succeeded (resolve) or repair_failed (fire) with a per
+		// verb+bead correlation ID; failures here are 218-vs-28 invisible
+		// outcomes in the pre-symmetry measurement window.
+		repairRaw := map[string]func(beadID string) error{
 			"repair-worktree": func(beadID string) error {
 				id := types.BeadID(beadID)
 				projectPath := projectPathForID(id)
@@ -413,7 +432,7 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				}
 				var toClear []string
 				for _, lbl := range bead.Labels {
-					if lbl == worktreeUnavailableLabel || lbl == integrationExhaustedLabel {
+					if lbl == worktreeUnavailableLabel || lbl == integrationExhaustedLabel || lbl == gitOwnershipLabel {
 						toClear = append(toClear, lbl)
 					}
 				}
@@ -583,7 +602,12 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				}
 				return nil
 			},
-		})
+		}
+		// Sensor symmetry: every repair verdict emits repair_succeeded
+		// (resolve) or repair_failed (fire) with a per verb+bead correlation
+		// ID; failures here were 218-vs-28 invisible outcomes in the
+		// pre-symmetry measurement window.
+		o.panShepherd.SetRepairHandlers(wrapRepairHandlers(repairRaw, o.eventSink))
 		o.panShepherd.SetLogImprovement(o.logImprovementRepair)
 
 		// FR-022 bead-filing actuator: Pan files improvement beads for human
@@ -785,6 +809,9 @@ func (s *ServiceStarter) Stop() {
 	if o.evidenceSweep != nil {
 		o.evidenceSweep.Stop()
 	}
+	if o.tokenUsageRollup != nil {
+		o.tokenUsageRollup.Stop()
+	}
 	if o.settledStateSvc != nil {
 		if err := o.settledStateSvc.Stop(); err != nil {
 			log.Printf("[SettledState] Error stopping service: %v", err)
@@ -805,6 +832,10 @@ func (s *ServiceStarter) Stop() {
 	if o.triageSvc != nil {
 		o.triageSvc.Stop()
 		log.Println("🧭 PR-triage pass stopped")
+	}
+	if o.prAging != nil {
+		o.prAging.Stop()
+		log.Println("📋 PR aging sweeper stopped")
 	}
 }
 
@@ -841,6 +872,8 @@ func panBlockedReason(b types.Bead, now time.Time, wedgeGrace, leafGrace time.Du
 		case integrationPendingLabel:
 			age := now.Sub(b.UpdatedAt)
 			return fmt.Sprintf("work complete, integrate/push failed %v ago (label %s) — parked, NOT reopened; the integration-retest stage retries it mechanically, repair only if the retest attempts are exhausted", age.Round(time.Minute), lbl), true
+		case gitOwnershipLabel:
+			return "hard-parked by label git-ownership (git refused the repo as the hydra user; fix is: git config --global --add safe.directory <repo-path> — human/T3 action)", true
 		case escalatedLabel:
 			age := now.Sub(b.UpdatedAt)
 			if blockedDependents > 0 && wedgeGrace > 0 && age > wedgeGrace {

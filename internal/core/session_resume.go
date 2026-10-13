@@ -77,9 +77,9 @@ func (c *SessionResumeConfig) applyDefaults() {
 // SessionResumePilot decides whether to resume a Pi session and tracks
 // quality metrics for the pilot.
 type SessionResumePilot struct {
-	cfg    SessionResumeConfig
+	cfg     SessionResumeConfig
 	enabled int32
-	mu     sync.Mutex
+	mu      sync.Mutex
 	// resumed outcome counters
 	resumedSuccess, resumedFix, resumedReject int
 	// fresh outcome counters (for comparison logging)

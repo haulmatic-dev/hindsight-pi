@@ -128,7 +128,7 @@ func TestGateRunner_ScopeSubstitution(t *testing.T) {
 		Project: "proj", BeadID: "proj-s1", Gate: "test",
 		Spec:        GateSpec{Cmd: `echo "ran: <scope>"`, Parser: "exit-code"},
 		ProjectPath: t.TempDir(), WorktreePath: t.TempDir(),
-		Scope:       "src/x/x.spec.ts",
+		Scope: "src/x/x.spec.ts",
 	})
 	if err != nil {
 		t.Fatalf("RunGate: %v", err)

@@ -280,6 +280,12 @@ At daemon start, each project repo's `origin` is probed with `git ls-remote` und
 | `deploy.enabled` (FR-031) | Opt-in (default `false`) tier-1 canary deploy with automatic rollback: after a publish lands on `deploy.repo_path`, the daemon pins max_workers to 0 (drain precondition — deploys are skipped with a typed event if workers are in flight), backs up the daemon binary, builds + atomically swaps, restarts, and runs `scripts/verify-deploy.sh`; verify failure triggers automatic rollback to the previous binary + restart. Requires `repo_path` (the hydra repo) and, by default, systemd unit `hydra`. Every step emits typed deploy events. |
 | `HYDRA_DEGRADE_WINDOW` (env, FR-032) | Fail-open degradation counter window (Go duration, default `24h`). A fail-open subsystem at 0% success over the window (>= 3 attempts) renders a `host: degradations=[name 0/N]` line in the Pan health digest. Worker-process counters are process-local; daemon-side counters (Pan store scans) surface in the digest. |
 
+### Git-ownership preflight (git-access-as-hydra, fmsfe wedge)
+
+At daemon start, each project repo is also probed with `git rev-parse` **as the daemon (hydra) user**. When git refuses the repository with exit 128 `fatal: detected dubious ownership in repository at '<path>'` (a repo owned by another user without a `safe.directory` entry), the preflight fails CLOSED: typed `git_ownership_unusable{project}` event + auto-park, and the message carries the EXACT remediation command: `git config --global --add safe.directory <repo-path>` (run as the repo owner). At spawn time the same class maps to the distinct hard-park label `git-ownership` (NOT `worktree-unavailable`) plus a typed `spawn_failed_git_ownership` event — Pan's bead filing contains the fix command.
+
+**The daemon never sets `safe.directory` itself.** Granting git trust on another user's repository is a security posture change and stays a human/T3 action. After the fix, unpark the project via the operator API and clear the `git-ownership` label (`repair:clear-hard-park`).
+
 ### Multi-user project discovery
 
 User projects are declared in `/home/<user>/.hydra/config.yaml`. A multi-repo

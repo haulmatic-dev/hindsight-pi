@@ -116,9 +116,14 @@ type Overseer struct {
 	dagMu            sync.RWMutex
 	epicCloseGuard   epicCloseGuard // store-verification refusals for epic auto-close
 	dagNavigator     *DAGNavigator
-	completed        map[string]bool  // Track completed beads for this session
-	retryManager     *RetryManager    // Retry and validation-retry tracking
-	intelligenceHub  *IntelligenceHub // Encapsulates TLDR, GPTCache, Hindsight clients
+	// panCapHits marks project paths whose pan-filed filing was refused at
+	// the per-project cap (keyed by project path; cleared on a successful
+	// filing). collectHealthDigest surfaces it as a stable anomaly so the
+	// suppression stays visible to Pan.
+	panCapHits      sync.Map
+	completed       map[string]bool  // Track completed beads for this session
+	retryManager    *RetryManager    // Retry and validation-retry tracking
+	intelligenceHub *IntelligenceHub // Encapsulates TLDR, GPTCache, Hindsight clients
 	// These clients remain direct fields until IntelligenceHub fully exposes their APIs.
 	gptCache              *GPTCacheClient                 // GPTCache client for caching
 	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
@@ -158,6 +163,13 @@ type Overseer struct {
 	integrationSweep *IntegrationExhaustedSweeper
 	panDigestAt      atomic.Int64 // unix-nano of last collectHealthDigest (0 = unknown)
 	evidenceSweep    *ToolHealthEvidenceScanner
+	tokenUsageRollup *TokenUsageRollupJob
+
+	// Waiting-on-human-merge PR ledger + weekly aging-digest scanner (nil when
+	// disabled / no HYDRA_HOME).
+	prWaiting *PRWaitingLedger
+	prAging   *PRAgingScanner
+
 	// Worker registry (daemon-owned SQLite truth) and Pan, the shepherd that
 	// decides the ambiguous tail of worker states. Both fail-open: a registry
 	// open failure or a disabled Pan leaves deterministic rules in force.
@@ -303,6 +315,9 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize DAG builder
 	o.dagBuilder = NewDAGBuilder(o.errorLogger)
+	o.dagBuilder.Sensor = NewMissingEdgeSensor(o.eventSink, func(projectPath, title, description string) error {
+		return o.filePanBead(projectPath, "", title, description)
+	})
 
 	// Prefer bv --robot-graph for DAG edges: one call per repo replaces the
 	// per-bead br show N+1 pattern (86 CLI calls per rebuild) that contended on
@@ -338,6 +353,7 @@ func NewOverseer(config *Config) *Overseer {
 		// running window=8 at 0.5/0.125. A status line that misrepresents live
 		// state is worse than no status line.
 		log.Printf("[Governor] Initialized (%s)", o.concurrencyGovernor.Describe())
+		o.concurrencyGovernor.SetEventSink(o.eventSink)
 	}
 
 	// Shared provider budget (Shepherd B3). Sized to the plan's concurrency, not
@@ -422,6 +438,16 @@ func NewOverseer(config *Config) *Overseer {
 		evidenceScanner.SetActivityProbe(o.recentWorkerActivityProbe())
 		evidenceScanner.SetHindsightProbe(o.hindsightMemoriesProbe())
 		o.evidenceSweep = evidenceScanner
+	}
+	// PR aging sweep (bead hydra-rrtq): record waiting-on-human-merge PRs at
+	// close time and produce a weekly per-owner digest for PRs open past the
+	// threshold. Ledger needs HYDRA_HOME; without it recording is inert.
+	if home := os.Getenv("HYDRA_HOME"); home != "" {
+		o.prWaiting = NewPRWaitingLedger(home)
+		if config.Overseer.PRAgingDays > 0 {
+			o.prAging = NewPRAgingScanner(o.prWaiting, o.GetProjects, config.IsPRAutoMergeRepo, config.Overseer.PRAgingDays, o.eventSink)
+		}
+		o.beadCloser.SetPRWaitingRecorder(o.recordPRWaiting)
 	}
 	// Inject access to the in-memory activeWorkers map so Charon can clean up
 	// stale placeholder entries (PID 0) that would otherwise block new spawns
@@ -619,6 +645,7 @@ func NewOverseer(config *Config) *Overseer {
 	o.beadCloser.SetEventSink(events)
 	o.providerPool.SetEventSink(events)
 	o.orphanJanitor.SetEventSink(events)
+	o.concurrencyGovernor.SetEventSink(events)
 	o.diskCleanup = &diskCleanupGuard{events: events}
 	// Integration-retest stage (Tier A): periodic mechanical recheck of
 	// integration-failed/exhausted beads. Constructed whenever HYDRA_HOME is
@@ -1435,6 +1462,9 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 		return err
 	}
 	if err := o.spawnPreflightStoreOwnership(bead, projectPath); err != nil {
+		return err
+	}
+	if err := o.spawnPreflightGitAccess(bead, projectPath); err != nil {
 		return err
 	}
 	if err := o.spawnPreflightPublishIdentity(bead, projectPath); err != nil {

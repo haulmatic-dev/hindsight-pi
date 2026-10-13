@@ -63,6 +63,9 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `spawn_blocked_type_missing` | fail-closed spawn preflight: the bead's effective `Type` is empty (post-restart reconstruction, fmsfe-a2u 2026-09-30) — an unverifiable type must never reach a worker; the bead stays open and is re-checked next tick | `bead` |
 | `spawn_blocked_human_gate` | fail-closed spawn preflight: store-truth `Type` is a human gate/container (`approval-gate`/`approval`/`epic`/`hold`, or a `hold` label) even though the scheduler's in-memory copy looked executable | `bead` |
 | `spawn_blocked_identity_missing` | spawn-funnel publish-identity preflight: the bead owner's PAT is unresolved (non-daemon-owned project) — spawn blocked, auto-resumes when the PAT lands; transient resolver errors fail open | `bead` |
+| `spawn_blocked_git_ownership` | spawn-funnel git-access preflight: git refuses the project repo as the hydra user (exit 128 "dubious ownership") — spawn blocked, auto-resumes once a human adds the repo to the owner's `safe.directory`; detail carries the exact remediation command | `bead` |
+| `git_ownership_unusable` | startup preflight: `git rev-parse` as the hydra user hit a dubious-ownership refusal on a project repo — project auto-parked (fail closed); detail carries the exact `git config --global --add safe.directory` command | `project` |
+| `spawn_failed_git_ownership` | spawn-time worktree setup failed with a dubious-ownership refusal — bead hard-parked with the distinct `git-ownership` label (not `worktree-unavailable`); detail carries the exact fix command | `bead` |
 | `integration-failed` | singleton integrate/push failed verification (merge not contained in HEAD, or push rejected / remote ref did not advance) — bead reopened with `integration-failed` label, worktree preserved. Non-fast-forward rejections get one fetch + merge + retry (`PushBranchWithNonFFRecovery`) before this fires | `stage` (`integrate`/`push`), `error` (exact remote stderr) |
 | `integration_retest` | integration-retest stage (Tier A, opt-in via `integration_retest.enabled`) rechecked an `integration-failed`/`integration-exhausted` bead: `merge-tree --write-tree origin/<base> hydra/wt-\*` proved the conflict state, gates ran in a scratch worktree off `origin/<base>` (never the user's main checkout), and the bead either landed via the dogfood PR path (`result: landed`, bead closed, labels stripped), stayed parked (`result: conflict` / `gates-failed`), or hit the attempt cap | `result` (`landed`/`conflict`/`gates-failed`), `pr` (landed only) |
 | `close-accepted-already-integrated` | verified-close accepted a bead whose worktree HEAD is a strict ancestor of the main checkout HEAD — the singleton integrate landed locally but the push was rejected (hydra-7k1 2026-09-16: non-FF push failure → reopened bead → empty-diff loop). Emitted once per accepted close; the publisher ticker remains responsible for landing the working branch on origin | `reason` (`worktree_head_ancestor_of_main`) |
@@ -257,6 +260,17 @@ idled escalated overnight with no path back). Lower the leaf knob when
 verified-close defect-class escalations should cycle within the hour. (2) Charon's
 escalated-skip emits a cooldown-limited `orphan_escalated_wedged` event per
 the event-stream contract (was log-only).
+
+**Token-usage daily rollup (fix-jwk8, 2026-10-02).** Worker-registry rows are
+ephemeral: `ReapStale` prunes completed rows after 24h and `ReapGhosts`
+removes dead workers, so token/turn spend trends were unmeasurable across
+days. Every doomed row's token usage is now persisted first (reap paths
+merge before delete) and a daily job at 00:05 UTC (`TokenUsageRollupJob`)
+snapshots live rows into the durable `token_usage_daily` table (day+project
+primary key, additive: completions, tokens_fresh/output/cache, max per bead,
+rerun count, zero-token count) and emits a typed `token_usage_daily` event
+per (day, project). Median per bead is recomputed from the stored per-bead
+token list. Fail-open; never gates the pipeline.
 
 **Integration-exhausted park sweeping (`overseer.integration_exhausted_sweep`,
 2026-09-30).** The `integration-exhausted` hard-park stays durable by design,

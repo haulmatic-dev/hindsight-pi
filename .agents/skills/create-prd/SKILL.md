@@ -137,6 +137,53 @@ only when no stronger one is present:
 > Keep the four levels in this exact order: the analyzer mirrors it, and the
 > pinned contract tests in `internal/prdcontract` fail on documentation drift.
 > Level 1 always exists so an author can override any inference explicitly.
+### 3.1a Execution-Type Producer Contract
+
+The task compiler (task-breakdown) must classify every requirement into an
+execution type. The producer (create-prd) declares enough signal for that
+classification to be deterministic. This section IS the contract; a consumer
+must not guess.
+
+**System Type enum — exactly five values.** A requirement may declare its
+system placement with a `**System Type:** value` line:
+
+| Value | Meaning |
+|-------|---------|
+| `library` | Internal code consumed in-process (Go package, JS module) |
+| `cli` | Command-line tool or binary the user invokes directly |
+| `api` | Service surface exposed over a protocol (REST, gRPC, GraphQL) |
+| `application` | End-user app or system composed of the above |
+| `ops` | Deployment, cron, infra, or operational unit (systemd unit, CI job, config) |
+
+No other values are valid. When the field is absent the consumer falls through
+the precedence order below — omission is legal, but an *invalid* value is a
+lint error (see `tools/prd-lint`).
+
+**Chain prefixes — exactly five.** The TDD chain phases carried on
+requirement/bead titles:
+
+| Prefix | Phase | Meaning |
+|--------|-------|---------|
+| `RED:` | 1 | Tests only — proves the gap, fails green |
+| `GREEN:` | 2 | Minimal implementation to pass the RED tests |
+| `REFACTOR:` | 3 | Cleanup without behavior change |
+| `SYNTAX:` | 4 | Build/lint/syntax verification closure |
+| `FIX:` | repair | Retry of a failed chain phase |
+
+**Classification precedence (strict order):**
+
+1. **Prefix** — an explicit title prefix (`RED:`/`GREEN:`/`REFACTOR:`/`SYNTAX:`/`FIX:`)
+   wins outright.
+2. **Target-file shape** — no prefix, but every target file is a test file
+   (`*_test.go`, `*.test.ts`, `test_*`) → test-only execution.
+3. **System Type** — a valid enum value maps to its execution pattern
+   (`library`/`api` → implementation chain; `ops` → configuration task; etc.).
+4. **tdd_chain** — nothing else applies → full RED→GREEN→REFACTOR→SYNTAX chain.
+
+A consumer MUST evaluate the layers in this order and stop at the first hit.
+`**Type:**` values (`fr`, `us-light`, `us-heavy`, `us-integration`,
+`nfr-verification`, `nfr-config`) are structural, not execution types — they
+feed layer 3 alongside System Type, never override it.
 
 ---
 

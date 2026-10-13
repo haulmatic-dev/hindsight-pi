@@ -20,6 +20,9 @@ type DAGBuilder struct {
 	// per-bead GetBead loop is skipped entirely, eliminating the N+1 br show
 	// contention window (2026-09-25: lock contention dropped 43 gate edges).
 	EdgeFetcher func(projectPath, repoName string) (map[string][]string, error)
+	// Sensor, when set, tracks the hourly rate of pruned missing edges and
+	// raises a typed alert when it breaches MissingEdgeAlertThreshold.
+	Sensor *MissingEdgeSensor
 }
 
 // NewDAGBuilder creates a new DAG builder.
@@ -198,6 +201,12 @@ func (b *DAGBuilder) Build(dag *DAG, beadsClient BeadsClient, projects []types.P
 	}
 
 	edgeErrors := 0
+	// Edges whose target is missing or terminal are pruned (the edge is not
+	// added), so out-of-order closes (e.g. SYNTAX closing before GREEN) cannot
+	// wedge dependents and cannot spam the log 23K times/day. Missing edges are
+	// additionally recorded by the sensor for rate alerting.
+	prunedMissing := 0
+	prunedTerminal := 0
 	for _, bead := range allBeads {
 		beadID := string(bead.ID)
 		for _, depID := range bead.Dependencies {
@@ -207,10 +216,32 @@ func (b *DAGBuilder) Build(dag *DAG, beadsClient BeadsClient, projects []types.P
 			if completedBeads[depIDStr] {
 				continue
 			}
+			// Prune edges to terminal targets already present as nodes: a
+			// closed/completed blocker must not hold its dependents back.
+			if node, ok := dag.GetNode(depIDStr); ok {
+				st := node.Bead.Status
+				if st == types.StatusClosed || st == types.StatusCompleted {
+					prunedTerminal++
+					continue
+				}
+			}
+			// Missing target: prune the edge (fail-open), record for sensor.
+			if !dag.HasNode(depIDStr) {
+				prunedMissing++
+				if b.Sensor != nil {
+					b.Sensor.OnMissingEdge(bead.Project, beadID, depIDStr)
+				}
+				continue
+			}
 			if err := dag.AddEdge(beadID, depIDStr); err != nil {
 				switch {
 				case errors.Is(err, ErrNodeNotFound):
-					log.Printf("[DAG] Dependency not found: %s -> %s", depIDStr, beadID)
+					// Unreachable in practice (the node check above handles
+					// it); kept for safety.
+					prunedMissing++
+					if b.Sensor != nil {
+						b.Sensor.OnMissingEdge(bead.Project, beadID, depIDStr)
+					}
 				case errors.Is(err, ErrSelfReference):
 					log.Printf("[DAG] Self-reference detected in bead %s, skipping edge", beadID)
 				case errors.Is(err, ErrEdgeCreatesCycle):
@@ -237,8 +268,12 @@ func (b *DAGBuilder) Build(dag *DAG, beadsClient BeadsClient, projects []types.P
 		FailedNodes:    dag.GetFailedCount(),
 	}
 
-	log.Printf("[DAG] Build complete: %+v (fetch errors: %d, node errors: %d, edge errors: %d)",
-		stats, len(fetchErrors), nodeErrors, edgeErrors)
+	if b.Sensor != nil {
+		b.Sensor.HourlyCheck()
+	}
+
+	log.Printf("[DAG] Build complete: %+v (fetch errors: %d, node errors: %d, edge errors: %d, pruned-missing: %d, pruned-terminal: %d)",
+		stats, len(fetchErrors), nodeErrors, edgeErrors, prunedMissing, prunedTerminal)
 
 	if len(allBeads) == 0 && len(fetchErrors) > 0 {
 		return &BeadFetchError{Op: "fetch all", Err: fmt.Errorf("%d fetch errors", len(fetchErrors))}

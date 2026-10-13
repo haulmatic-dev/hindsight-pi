@@ -31,7 +31,7 @@ func TestReconcileOrphanedWorktrees_IntegratesBothBranches(t *testing.T) {
 		backdateWorktree(t, m, projectPath, key) // past the reconciler age floor
 	}
 
-	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
+	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true }, nil)
 	if integrated != 2 {
 		t.Fatalf("integrated = %d, want 2", integrated)
 	}
@@ -72,7 +72,7 @@ func TestReconcileOrphanedWorktrees_SkipsRecentlyActive(t *testing.T) {
 	// Terminal bead, no active keys — but the worktree was written seconds
 	// ago. The age floor must protect it anyway (2026-09-16 webapp-zpf:
 	// the sweep deleted a live worker's sandbox when chain state lied).
-	integrated, _ := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
+	integrated, _ := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true }, nil)
 	if integrated != 0 {
 		t.Fatalf("integrated = %d, want 0 (recently active worktree protected)", integrated)
 	}
@@ -85,7 +85,7 @@ func TestReconcileOrphanedWorktrees_SkipsRecentlyActive(t *testing.T) {
 
 	// Once idle past the floor, the same worktree integrates.
 	backdateWorktree(t, m, projectPath, key)
-	integrated, _ = ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
+	integrated, _ = ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true }, nil)
 	if integrated != 1 {
 		t.Fatalf("integrated after idle = %d, want 1", integrated)
 	}
@@ -131,7 +131,7 @@ func TestReconcileOrphanedWorktrees_SkipsActiveKey(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, map[string]bool{key: true}, func(string) bool { return true })
+	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, map[string]bool{key: true}, func(string) bool { return true }, nil)
 	if integrated != 0 {
 		t.Fatalf("integrated = %d, want 0", integrated)
 	}
@@ -172,7 +172,7 @@ func TestReconcileOrphanedWorktrees_CountsConflict(t *testing.T) {
 	}
 	backdateWorktree(t, m, projectPath, key) // past the reconciler age floor
 
-	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
+	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true }, nil)
 	if integrated != 0 {
 		t.Fatalf("integrated = %d, want 0", integrated)
 	}
@@ -200,7 +200,7 @@ func TestReconcileOrphanedWorktrees_CountsConflict(t *testing.T) {
 func TestReconcileOrphanedWorktrees_NonGitReturnsZero(t *testing.T) {
 	projectPath := t.TempDir()
 	m := NewWorktreeManager()
-	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
+	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true }, nil)
 	if integrated != 0 || conflicts != 0 {
 		t.Fatalf("non-git project should return (0, 0), got (%d, %d)", integrated, conflicts)
 	}

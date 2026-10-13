@@ -157,6 +157,9 @@ func Open(path string) (*Store, error) {
 // idempotent and fail-open: missing columns are added; duplicate attempts are
 // ignored by SQLite.
 func migrateRegistry(db *sql.DB) error {
+	if err := ensureDailyUsageTable(db); err != nil {
+		return err
+	}
 	cols := []string{
 		"tokens_fresh INTEGER NOT NULL DEFAULT 0",
 		"tokens_cache_read INTEGER NOT NULL DEFAULT 0",
@@ -259,7 +262,9 @@ func (s *Store) UpsertWorker(rec WorkerRecord) error {
 	defer func() { _ = tx.Rollback() }()
 
 	var prevPID int
-	_ = tx.QueryRow(`SELECT pid FROM workers WHERE bead_id=?`, rec.BeadID).Scan(&prevPID)
+	var prevState string
+	_ = tx.QueryRow(`SELECT pid, state FROM workers WHERE bead_id=?`, rec.BeadID).Scan(&prevPID, &prevState)
+	wasCompleted := prevState == string(StateCompleted)
 
 	_, err = tx.Exec(`
 INSERT INTO workers (bead_id, pid, pgid, project, started_at, last_heartbeat,
@@ -295,6 +300,11 @@ ON CONFLICT(bead_id) DO UPDATE SET
 		return fmt.Errorf("upsert worker %s: %w", rec.BeadID, err)
 	}
 
+	if wasCompleted && rec.State != StateCompleted {
+		// Re-registration over a completed row is a rerun; record it durably.
+		_ = mergeWorkerUsage(tx, time.Now().UTC().Format("2006-01-02"), rec, 1)
+	}
+
 	if prevPID != 0 && prevPID != rec.PID {
 		if _, err := tx.Exec(`DELETE FROM commands WHERE bead_id=? AND consumed_at IS NULL`, rec.BeadID); err != nil {
 			return fmt.Errorf("clear stale commands for %s: %w", rec.BeadID, err)
@@ -328,6 +338,12 @@ func (s *Store) ReapGhosts(cutoff time.Time) (int, error) {
 		return 0, fmt.Errorf("reap ghosts begin: %w", err)
 	}
 	defer tx.Rollback()
+
+	// Persist each doomed row's token usage before deletion so spend trends
+	// survive the prune (daily rollup is additive, fail-open best effort).
+	for _, rec := range reapCandidates(tx, `SELECT `+workerCols+` FROM workers WHERE state != ? AND last_heartbeat < ?`, StateCompleted, cutoff.Format(timeFmt)) {
+		_ = mergeWorkerUsage(tx, usageDay(rec), rec, 0)
+	}
 
 	rows, err := tx.Query(
 		`SELECT bead_id FROM workers WHERE state != ? AND last_heartbeat < ?`,
@@ -465,6 +481,13 @@ func (s *Store) ReapStale(cutoff time.Time) (int, error) {
 		return 0, fmt.Errorf("reap begin: %w", err)
 	}
 	defer tx.Rollback()
+
+	// Persist doomed rows' token usage into the daily rollup before deleting
+	// them; otherwise completions older than the retention window vanish and
+	// spend trends become unmeasurable.
+	for _, rec := range reapCandidates(tx, `SELECT `+workerCols+` FROM workers WHERE state=? OR last_heartbeat < ?`, StateCompleted, cutoff.Format(timeFmt)) {
+		_ = mergeWorkerUsage(tx, usageDay(rec), rec, 0)
+	}
 
 	rows, err := tx.Query(
 		`SELECT bead_id FROM workers WHERE state=? OR last_heartbeat < ?`,

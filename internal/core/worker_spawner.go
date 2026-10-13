@@ -540,6 +540,13 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 		// pre-check so EnsureWorktree's signature stays unchanged.
 		_, existed := s.worktreeManager.ExistingWorktree(projectPath, key)
 		if wt, wtErr := s.worktreeManager.EnsureWorktree(projectPath, key); wtErr != nil {
+			// Git-ownership refusal (exit 128 "dubious ownership", fmsfe wedge):
+			// a distinct failure class, NOT generic worktree-unavailable — the
+			// fix is a one-line human safe.directory command, so Pan's filing
+			// must carry it instead of "fix the worktree".
+			if isDubiousOwnershipError(wtErr) {
+				return nil, noteSpawnGitOwnership(s.eventSink, s.beadsClient, projectPath, bead, wtErr)
+			}
 			// Fail closed, ALWAYS — never silently downgrade isolation by running
 			// the worker in the shared (main) checkout. Observed 2026-09-11/12:
 			// fallback workers committed merge-conflict markers into

@@ -315,4 +315,3 @@ func copyAtomic(src, dst string) error {
 	}
 	return nil
 }
-

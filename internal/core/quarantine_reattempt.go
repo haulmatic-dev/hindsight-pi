@@ -106,6 +106,16 @@ func quarantineReattempt(projectPath, key string, beadsClient BeadsClient, event
 			Detail:  fmt.Sprintf("quarantine branch %s now merges clean against %s — restored to %s for ordinary integration", qBranch, baseRef, wBranch),
 			Fields:  map[string]any{"quarantine_branch": qBranch, "restored_branch": wBranch, "base": baseRef, "at": now().UTC().Format(time.RFC3339)},
 		})
+		// Sensor symmetry (resolve): pairs with the worktree_quarantined fire
+		// emitted by ReconcileOrphanedWorktrees under the same correlation ID.
+		events.EmitRepo(projectPath, Event{
+			Type:    "quarantine_restored",
+			Project: filepath.Base(projectPath),
+			Bead:    key,
+			Reason:  "requeued",
+			Detail:  fmt.Sprintf("quarantine %s restored to %s (merges clean against %s)", qBranch, wBranch, baseRef),
+			Fields:  map[string]any{"correlation_id": SensorCorrelation("worktree-reconcile", key), "restored_branch": wBranch},
+		})
 	}
 	log.Printf("[PanRepair] retry-quarantine: %s merges clean against %s — requeued via %s", qBranch, baseRef, wBranch)
 	return nil

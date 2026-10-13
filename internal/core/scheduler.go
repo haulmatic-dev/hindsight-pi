@@ -212,12 +212,13 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 				log.Printf("[Retry] Bead %s carries the %q label (escalated to human); skipping retry queue", beadID, escalatedLabel)
 				continue
 			}
-			if hasBeadLabel(bead.Labels, worktreeUnavailableLabel) {
+			if hasBeadLabel(bead.Labels, worktreeUnavailableLabel) || hasBeadLabel(bead.Labels, gitOwnershipLabel) {
 				// Hard-parked: the chain worktree could not be created and the
-				// spawn failed closed. Retrying would hit the same failure and,
-				// worse, past behavior silently ran the worker in the shared main
-				// checkout (2026-09-11/12 corruption incidents). Wait for a human.
-				log.Printf("[Retry] Bead %s carries the %q label (worktree hard-parked); skipping retry queue", beadID, worktreeUnavailableLabel)
+				// spawn failed closed (or git refused the repo on ownership
+				// grounds). Retrying would hit the same failure and, worse, past
+				// behavior silently ran the worker in the shared main checkout
+				// (2026-09-11/12 corruption incidents). Wait for a human.
+				log.Printf("[Retry] Bead %s carries a hard-park label (worktree/git-ownership); skipping retry queue", beadID)
 				continue
 			}
 			if hasBeadLabel(bead.Labels, integrationExhaustedLabel) {
@@ -311,7 +312,7 @@ func (s *Scheduler) reconcileOrphanClaim(beadID string, attempts int) {
 	if bead.Status != types.StatusInProgress {
 		return
 	}
-	for _, label := range []string{escalatedLabel, worktreeUnavailableLabel, integrationExhaustedLabel, integrationPendingLabel} {
+	for _, label := range []string{escalatedLabel, worktreeUnavailableLabel, integrationExhaustedLabel, integrationPendingLabel, gitOwnershipLabel} {
 		if hasBeadLabel(bead.Labels, label) {
 			return // hard-parked by design; Pan repair or a human clears it
 		}

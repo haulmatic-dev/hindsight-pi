@@ -129,7 +129,7 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 		return false, "no worktree manager"
 	}
 	// 1. Land any completed worktree work on the working branch.
-	ReconcileOrphanedWorktrees(m, projectPath, activeKeys, isTerminal)
+	ReconcileOrphanedWorktrees(m, projectPath, activeKeys, isTerminal, publishEvents)
 
 	// 1b. Delete remote integration branches whose PRs have merged
 	// (hydra-9dp5): without cleanup every campaign leaves one permanent
@@ -422,10 +422,14 @@ func defaultRebaseBranchOntoBase(projectPath, branch, base string) error {
 // the existing quarantine/Activity channels.
 func publishWithRebaseRetry(publish func() (string, error), rebase func() error, projectPath, base string) (string, error) {
 	url, err := publish()
+	// Sensor symmetry: the rebase-retry sensor's correlation ID pairs each
+	// publish_rebase_attempted fire with the publish_succeeded resolve.
+	corr := SensorCorrelation("publish-retry", projectPath)
 	for attempt := 1; err != nil && prConflictError(err) && attempt <= MaxPRRebaseAttempts; attempt++ {
 		log.Printf("[Publish] PR conflict detected — rebase attempt %d/%d onto origin/%s", attempt, MaxPRRebaseAttempts, base)
 		publishEvents.EmitRepo(projectPath, Event{Type: "publish_rebase_attempted",
-			Detail: fmt.Sprintf("PR conflict: rebase attempt %d/%d onto origin/%s", attempt, MaxPRRebaseAttempts, base)})
+			Detail: fmt.Sprintf("PR conflict: rebase attempt %d/%d onto origin/%s", attempt, MaxPRRebaseAttempts, base),
+			Fields: map[string]any{"attempt": attempt, "correlation_id": corr}})
 		if rerr := rebase(); rerr != nil {
 			return url, fmt.Errorf("pr conflict: rebase attempt %d failed — human review needed: %w", attempt, rerr)
 		}
@@ -433,8 +437,16 @@ func publishWithRebaseRetry(publish func() (string, error), rebase func() error,
 	}
 	if err != nil && prConflictError(err) {
 		publishEvents.EmitRepo(projectPath, Event{Type: "publish_rebase_exhausted",
-			Detail: fmt.Sprintf("PR still conflicted after %d rebase attempts — human review needed", MaxPRRebaseAttempts)})
+			Detail: fmt.Sprintf("PR still conflicted after %d rebase attempts — human review needed", MaxPRRebaseAttempts),
+			Fields: map[string]any{"correlation_id": corr}})
 		return url, fmt.Errorf("pr still conflicted after %d rebase attempts — human review needed: %w", MaxPRRebaseAttempts, err)
+	}
+	if err == nil && url != "" {
+		// Sensor symmetry (resolve): a completed publish resolves the
+		// retry sensor's fires. correlation_id pairs with the attempted fires.
+		publishEvents.EmitRepo(projectPath, Event{Type: "publish_succeeded",
+			Detail: fmt.Sprintf("publish completed for %s after rebase-retry path", projectPath),
+			Fields: map[string]any{"url": url, "correlation_id": corr}})
 	}
 	return url, err
 }

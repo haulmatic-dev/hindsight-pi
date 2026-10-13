@@ -40,6 +40,8 @@ overseer:
   # retry-quarantine instead of staying hidden forever. The hard-park itself
   # is never cleared. 0 disables the sweeper. Suggested: 48h.
   integration_exhausted_sweep: 48h
+  # postclose_sweep: re-run recently closed beads' verification commands (flake
+  # guard + bounded reopen). 0 (default) disables.
 
   # Escape-rate regression budget (NFR-001): when true, a weekly sweeper
   # re-runs the declared verification command of every bead closed-completed
@@ -290,6 +292,10 @@ shepherd:
     provider: minimax
     model: MiniMax-M2.7
     api_key_name: MINIMAX_API_KEY   # env var holding Pan's own key (NOT the fleet key)
+    # Cap on open pan-filed beads per project (FR-022). When hit, filing is
+    # suppressed (event pan_filed_cap_hit + digest anomaly) until an open
+    # pan-filed bead closes. Default 4.
+    # max_filed_beads_per_project: 4
 
 # ------------------------------------------------------------------------------
 # OUTPUT — Publishing completed work back to origin and automatic PR fallback

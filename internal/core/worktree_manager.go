@@ -278,7 +278,56 @@ func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error
 		return "", err
 	}
 	m.provisionSiblingDeps(projectPath)
+	m.provisionGraphifyOut(projectPath, wtPath)
 	return wtPath, nil
+}
+
+// provisionGraphifyOut links the main checkout's graphify-out directory into
+// a newly created worktree so graphify output (graph.json) indexed in the
+// main checkout is visible in the worktree without re-indexing. The symlink
+// is ignored via the worktree's .gitignore so git status stays clean.
+// Fail-open: an absent graphify-out dir is a silent no-op; any provisioning
+// error is logged and skipped, never fatal to worktree creation.
+func (m *WorktreeManager) provisionGraphifyOut(projectPath, wtPath string) {
+	mainOut := filepath.Join(projectPath, "graphify-out")
+	info, err := os.Stat(mainOut)
+	if err != nil || !info.IsDir() {
+		return // main checkout has no graphify-out — nothing to link
+	}
+	link := filepath.Join(wtPath, "graphify-out")
+	if fi, err := os.Lstat(link); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			if target, rerr := os.Readlink(link); rerr == nil {
+				resolved := target
+				if !filepath.IsAbs(resolved) {
+					resolved = filepath.Join(wtPath, resolved)
+				}
+				if filepath.Clean(resolved) == mainOut {
+					return // already correct — idempotent keep
+				}
+			}
+		} else {
+			return // a real directory/file occupies the path — leave it alone
+		}
+		// Wrong symlink: replace it below.
+		if err := os.Remove(link); err != nil {
+			log.Printf("[Worktree] graphify-out: remove stale symlink %s: %v", link, err)
+			return
+		}
+	} else if !os.IsNotExist(err) {
+		log.Printf("[Worktree] graphify-out: lstat %s: %v", link, err)
+		return
+	}
+	if err := os.Symlink(mainOut, link); err != nil {
+		log.Printf("[Worktree] graphify-out: symlink %s -> %s: %v", link, mainOut, err)
+		return
+	}
+	// Ignore the symlink so git status stays clean. Both spellings are
+	// required: trailing-slash `graphify-out/` matches directories, but git
+	// may treat the symlink itself as a non-directory file, so the bare
+	// `graphify-out` line is what keeps status --porcelain quiet.
+	ensureGitignoreLine(filepath.Join(wtPath, ".gitignore"), "graphify-out/")
+	ensureGitignoreLine(filepath.Join(wtPath, ".gitignore"), "graphify-out")
 }
 
 func (m *WorktreeManager) ensureWorktreeLocked(projectPath, key string) (string, error) {

@@ -249,6 +249,15 @@ func checkBlock(b reqBlock) []Violation {
 		})
 	}
 
+	if st, ok := systemType(b.lines); ok && !isValidSystemType(st) {
+		violations = append(violations, Violation{
+			Rule:    "R9-system-type",
+			ID:      b.id,
+			Line:    b.headingLine,
+			Message: fmt.Sprintf("invalid System Type %q: must be one of library, cli, api, application, ops", st),
+		})
+	}
+
 	if strings.HasPrefix(typ, "us-") && !hasAggregatesSection(b.lines) {
 		violations = append(violations, Violation{
 			Rule:    "R6-aggregates",
@@ -278,6 +287,28 @@ func checkBlock(b reqBlock) []Violation {
 	}
 
 	return violations
+}
+
+func isValidSystemType(v string) bool {
+	switch v {
+	case "library", "cli", "api", "application", "ops":
+		return true
+	}
+	return false
+}
+
+// systemType extracts the optional **System Type:** metadata line value.
+// The value may carry a parenthetical qualifier ("library (internal Go)"),
+// so only the first whitespace-separated token is the enum value.
+func systemType(lines []line) (string, bool) {
+	re := regexp.MustCompile(`^\*\*System Type:\*\*\s*(\S+)`)
+	for _, l := range lines {
+		m := re.FindStringSubmatch(l.text)
+		if m != nil {
+			return strings.TrimSpace(m[1]), true
+		}
+	}
+	return "", false
 }
 
 func blockType(b reqBlock) string {

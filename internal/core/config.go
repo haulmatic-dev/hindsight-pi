@@ -59,15 +59,17 @@ type ShepherdConfig struct {
 	Pan PanConfig `yaml:"pan"`
 }
 
+const DefaultPanFiledBeadsPerProject = 4
+
 // PanConfig configures the Pan shepherd agent. Provider/Model/APIKeyName are
 // deliberately separate from the worker fleet's: Pan must stay lucid during
 // the congestion storms it manages.
 type PanConfig struct {
-	Enabled                 bool   `yaml:"enabled"`
-	IntervalSeconds         int    `yaml:"interval_seconds"`
-	HungAfterSeconds        int    `yaml:"hung_after_seconds"`
-	ParkOverdueGraceSeconds int    `yaml:"park_overdue_grace_seconds"`
-	NudgeCap                int    `yaml:"nudge_cap"`
+	Enabled                 bool `yaml:"enabled"`
+	IntervalSeconds         int  `yaml:"interval_seconds"`
+	HungAfterSeconds        int  `yaml:"hung_after_seconds"`
+	ParkOverdueGraceSeconds int  `yaml:"park_overdue_grace_seconds"`
+	NudgeCap                int  `yaml:"nudge_cap"`
 	// EscalatedWedgeGraceSeconds is how long an escalated bead that blocks
 	// dependents may sit before Pan sees it as a wedge candidate. Leaf
 	// escalations keep the 24h stale-escalation path; a chain-head escalation
@@ -81,11 +83,17 @@ type PanConfig struct {
 	// human window. Lower it when verified-close escalations of the
 	// daemon-defect class (gate extraction errors, broken gate cwd) should
 	// be auto-retried shortly after a fix deploys instead of waiting a day.
-	EscalatedLeafGraceSeconds int `yaml:"escalated_leaf_grace_seconds"`
-	Provider                string `yaml:"provider"`
-	Model                   string `yaml:"model"`
-	Thinking                string `yaml:"thinking"`
-	APIKeyName              string `yaml:"api_key_name"`
+	EscalatedLeafGraceSeconds int    `yaml:"escalated_leaf_grace_seconds"`
+	Provider                  string `yaml:"provider"`
+	Model                     string `yaml:"model"`
+	Thinking                  string `yaml:"thinking"`
+	APIKeyName                string `yaml:"api_key_name"`
+	// MaxFiledBeadsPerProject caps how many open pan-filed beads may exist
+	// per project at once (FR-022). The default (0 → 4, see
+	// DefaultPanFiledBeadsPerProject) leaves filing slots for distinct
+	// findings during wedge storms; a cap hit emits a pan_filed_cap_hit
+	// event and a Pan digest anomaly so suppression stays visible.
+	MaxFiledBeadsPerProject int `yaml:"max_filed_beads_per_project"`
 }
 
 // AgentsConfig contains agent connector settings
@@ -712,6 +720,13 @@ type OverseerConfig struct {
 	// (scripts/escape-rate-weekly.sh). Observe-and-report, fail-open. 0
 	// disables the sweeper.
 	PostCloseSweep bool `yaml:"postclose_sweep"`
+	// PRAgingDays ages integration PRs left open waiting on a human merge:
+	// a weekly per-owner digest (pr_aging_digest events) lists every PR still
+	// open past this threshold, classified as stuck-auto-merge (repo is in
+	// output.pr_auto_merge_repos / deploy.repo_path — the automated merge is
+	// wedged) or t2-human-merge-queue (designed Tier-2 stop state — gentle
+	// reminder that the human merge queue is aging). 0 disables the sweeper.
+	PRAgingDays int `yaml:"pr_aging_days"`
 	// MaxBeadTokens is the cumulative per-bead token ceiling enforced by
 	// Charon: a working worker past the ceiling is killed and escalated via
 	// the retry cap (0 = disabled). Non-converging grinders otherwise burn
@@ -900,6 +915,7 @@ func DefaultConfig() *Config {
 			EscalationTTL:             72 * time.Hour,
 			IntegrationExhaustedSweep: 48 * time.Hour,
 			PostCloseSweep:            true,
+			PRAgingDays:               PRAgingThresholdDays,
 			WorkerTimeout:             30 * time.Minute,
 			ChainDetection: ChainDetectionConfig{
 				Enabled:  true,

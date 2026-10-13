@@ -59,6 +59,7 @@ type ConcurrencyGovernor struct {
 	// what a lowered limit suppresses.
 	lastFailure time.Time
 	onChange    func(old, new int, reason string)
+	events      *EventSink // AIMD scale events (sensor symmetry); nil-safe
 	now         func() time.Time
 }
 
@@ -261,11 +262,36 @@ func (g *ConcurrencyGovernor) MaybeRecover() bool {
 	return true
 }
 
+func (g *ConcurrencyGovernor) SetEventSink(s *EventSink) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.events = s
+}
+
 func (g *ConcurrencyGovernor) emitChangeLocked(old, new int, reason string) {
 	if g.onChange != nil {
 		g.onChange(old, new, reason)
 	}
 	log.Printf("[Governor] concurrency %d -> %d (%s)", old, new, reason)
+	// Sensor symmetry: aimd_scale_up/aimd_scale_down are a symmetric
+	// fire/resolve pair — a scale-down fire is resolved by the next
+	// scale-up, and vice versa, under the shared governor correlation ID.
+	if g.events == nil {
+		return
+	}
+	switch reason {
+	case "additive_increase", "quiet_recovery":
+		g.events.Emit(Event{Type: "aimd_scale_up", Reason: reason,
+			Detail: fmt.Sprintf("AIMD concurrency %d -> %d (%s)", old, new, reason),
+			Fields: map[string]any{"old": old, "new": new, "correlation_id": SensorCorrelation("aimd", "governor")}})
+	case "additive_decrease":
+		g.events.Emit(Event{Type: "aimd_scale_down", Reason: reason,
+			Detail: fmt.Sprintf("AIMD concurrency %d -> %d (%s)", old, new, reason),
+			Fields: map[string]any{"old": old, "new": new, "correlation_id": SensorCorrelation("aimd", "governor")}})
+	}
 }
 
 // Describe returns the governor's resolved settings for logging. Reading these

@@ -286,6 +286,14 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 			ph.StrandedWorktrees = countStrandedWorktrees(target, statusByID)
 			ph.UnintegratedBranches = countWTBranches(target)
 
+			// Pan-filed cap saturation: filing is suppressed until an open
+			// pan-filed bead closes. Stable wording (no counts) so the digest
+			// does not churn Pan judgments.
+			if _, capHit := o.panCapHits.Load(target); capHit {
+				ph.Anomalies = append(ph.Anomalies,
+					"pan-filed cap saturated: filing suppressed until an open pan-filed bead closes")
+			}
+
 			if ph.ChainedParallel > 0 {
 				ph.Anomalies = append(ph.Anomalies, fmt.Sprintf(
 					"%d dep-chained bead pairs have live workers — chain discipline violated (gate executed, dep broken, or double release)", ph.ChainedParallel))
@@ -572,6 +580,18 @@ func (o *Overseer) verifyPanFilingPremise(projectPath, beadID string) string {
 // it, one normalized-signature finding files exactly one bead per project,
 // even if the earlier bead was closed or its cap slot freed. (PR #232)
 var panFileSigTTL = time.Hour
+
+// panFiledBeadsPerProject returns the effective per-project open pan-filed
+// cap: the shepherd.pan.max_filed_beads_per_project knob when set, else the
+// DefaultPanFiledBeadsPerProject default (nil-safe for direct constructions
+// in tests). (PR #105)
+func (o *Overseer) panFiledBeadsPerProject() int {
+	if o.config != nil && o.config.Shepherd.Pan.MaxFiledBeadsPerProject > 0 {
+		return o.config.Shepherd.Pan.MaxFiledBeadsPerProject
+	}
+	return DefaultPanFiledBeadsPerProject
+}
+
 func (o *Overseer) filePanBead(projectPath, beadID, title, description string) error {
 	if reason := o.verifyPanFilingPremise(projectPath, beadID); reason != "" {
 		o.emitPanFilingSkipped(projectPath, beadID, reason)
@@ -627,8 +647,20 @@ func (o *Overseer) filePanBead(projectPath, beadID, title, description string) e
 			return fmt.Errorf("file-bead %s: %w (%s)", beadID, pan.ErrFileBeadDuplicate, b.ID)
 		}
 	}
-	if openFiled >= pan.MaxOpenFiledBeadsPerProject {
-		return fmt.Errorf("file-bead %s: cap reached (%d open pan-filed beads in project)", beadID, openFiled)
+	if openFiled >= o.panFiledBeadsPerProject() {
+		capVal := o.panFiledBeadsPerProject()
+		o.panCapHits.Store(projectPath, true)
+		if o.eventSink != nil {
+			o.eventSink.EmitRepo(projectPath, Event{
+				Type:    "pan_filed_cap_hit",
+				Project: filepath.Base(projectPath),
+				Bead:    beadID,
+				Reason:  "pan_filed_cap_hit",
+				Fields:  map[string]any{"open": openFiled, "cap": capVal},
+			})
+		}
+		log.Printf("[PanRepair] file-bead %s: cap hit (%d open pan-filed beads, cap %d) in %s — filing suppressed", beadID, openFiled, capVal, projectPath)
+		return fmt.Errorf("file-bead %s: cap reached (%d open pan-filed beads in project, cap %d)", beadID, openFiled, capVal)
 	}
 	req := types.CreateBeadRequest{
 		Title:       title,
@@ -649,6 +681,7 @@ func (o *Overseer) filePanBead(projectPath, beadID, title, description string) e
 	}
 	o.recentPanSigs[sig] = time.Now()
 	o.panSigMu.Unlock()
+	o.panCapHits.Delete(projectPath)
 	if o.eventSink != nil {
 		o.eventSink.EmitRepo(projectPath, Event{
 			Type:    "pan_bead_filed",

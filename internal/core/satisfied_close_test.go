@@ -232,11 +232,11 @@ func TestBuildCloseSatisfiedCoverageThresholdAbstains(t *testing.T) {
 
 func TestBuildCloseSatisfiedAcceptanceCommandGreenCloses(t *testing.T) {
 	bead := types.Bead{
-		ID:    "test-project-abc",
-		Title: "coverage gate",
+		ID:          "test-project-abc",
+		Title:       "coverage gate",
 		Description: "Acceptance: `sh -c 'exit 0' -- --collectCoverageFrom='src/foo' --coverageThreshold='{\"global\":{\"functions\":80}}'`\nFiles: src/foo.test.js",
-		Status: types.StatusInProgress,
-		Type:   "test",
+		Status:      types.StatusInProgress,
+		Type:        "test",
 	}
 	o, mockBeads := setupSatisfiedOverseer(t, bead, "exit 0 <scope>")
 
@@ -262,11 +262,11 @@ func TestBuildCloseSatisfiedAcceptanceCommandGreenCloses(t *testing.T) {
 
 func TestBuildCloseSatisfiedMissingRatchetEntryForbidden(t *testing.T) {
 	bead := types.Bead{
-		ID:    "test-project-abc",
-		Title: "ratchet flip",
+		ID:          "test-project-abc",
+		Title:       "ratchet flip",
 		Description: "Flip coverageThreshold for src/modules/evaluation-framework/** to 80/80/80/80\nFiles: src/evaluation-framework/foo.js",
-		Status: types.StatusInProgress,
-		Type:   "test",
+		Status:      types.StatusInProgress,
+		Type:        "test",
 	}
 	o, mockBeads := setupSatisfiedOverseer(t, bead, "exit 0 <scope>")
 

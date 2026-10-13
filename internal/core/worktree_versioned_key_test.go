@@ -158,7 +158,7 @@ func TestReconcileOrphanedWorktrees_IntegratesVersionedWorktree(t *testing.T) {
 
 	// isTerminal resolves by BASE key: the bead is webapp-tc5, not -v2.
 	terminal := func(k string) bool { return k == key }
-	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, terminal)
+	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, terminal, nil)
 	if conflicts != 0 {
 		t.Fatalf("conflicts = %d, want 0", conflicts)
 	}
@@ -199,7 +199,7 @@ func TestReconcileOrphanedWorktrees_VersionedActiveKeyProtected(t *testing.T) {
 	// The chain is actively being worked under the base key — even a
 	// versioned branch must NOT be touched.
 	active := map[string]bool{key: true}
-	integrated, _ := ReconcileOrphanedWorktrees(m, projectPath, active, func(string) bool { return true })
+	integrated, _ := ReconcileOrphanedWorktrees(m, projectPath, active, func(string) bool { return true }, nil)
 	if integrated != 0 {
 		t.Fatalf("integrated = %d, want 0 (active chain protected)", integrated)
 	}

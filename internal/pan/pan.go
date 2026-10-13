@@ -220,9 +220,11 @@ const pseudoBeadSuffix = "-push-pending"
 // bead for human triage instead of mutating fleet state directly.
 const ActFileBead = "file-bead"
 
-// MaxOpenFiledBeadsPerProject caps how many open Pan-filed beads may exist
-// per project at once (FR-022): a repeating observation cannot flood the
-// backlog.
+// MaxOpenFiledBeadsPerProject is the nil-safe fallback for the per-project
+// open pan-filed-bead cap (FR-022). The live cap comes from the config knob
+// shepherd.pan.max_filed_beads_per_project (default
+// DefaultPanFiledBeadsPerProject = 4); configs predating the knob keep this
+// fallback so a nil config never widens the cap silently.
 const MaxOpenFiledBeadsPerProject = 2
 
 // panFiledLabel marks beads filed by Pan via the file-bead actuator; the cap

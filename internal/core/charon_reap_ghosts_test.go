@@ -32,10 +32,10 @@ func TestPerformCleanup_ReapsGhostRegistryRows(t *testing.T) {
 	c.SetRegistry(st)
 
 	upsertLive(t, st, "b-live", registry.StateWorking, 30*time.Second)   // fresh heartbeat: survives
-	upsertLive(t, st, "b-parked", registry.StateParked, 30*time.Second)   // live park heartbeats: survives
-	upsertLive(t, st, "b-ghost", registry.StateWorking, 3*time.Hour)      // frozen heartbeat: reaped
-	upsertLive(t, st, "b-ghost-park", registry.StateParked, 3*time.Hour)  // abandoned park: reaped
-	upsertLive(t, st, "b-done", registry.StateCompleted, 3*time.Hour)     // history: survives runtime reap
+	upsertLive(t, st, "b-parked", registry.StateParked, 30*time.Second)  // live park heartbeats: survives
+	upsertLive(t, st, "b-ghost", registry.StateWorking, 3*time.Hour)     // frozen heartbeat: reaped
+	upsertLive(t, st, "b-ghost-park", registry.StateParked, 3*time.Hour) // abandoned park: reaped
+	upsertLive(t, st, "b-done", registry.StateCompleted, 3*time.Hour)    // history: survives runtime reap
 
 	c.performCleanup()
 

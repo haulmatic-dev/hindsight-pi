@@ -1,7 +1,9 @@
 package core
 
 import (
+	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -28,7 +30,7 @@ import (
 // contents changed within this window is treated as live and skipped.
 const reconcileMinIdle = 30 * time.Minute
 
-func ReconcileOrphanedWorktrees(m *WorktreeManager, projectPath string, activeKeys map[string]bool, isTerminal func(key string) bool) (integrated int, conflicts int) {
+func ReconcileOrphanedWorktrees(m *WorktreeManager, projectPath string, activeKeys map[string]bool, isTerminal func(key string) bool, events *EventSink) (integrated int, conflicts int) {
 	// Not a git repo — nothing to reconcile.
 	if _, err := gitOut(projectPath, "rev-parse", "--git-dir"); err != nil {
 		return 0, 0
@@ -84,6 +86,13 @@ func ReconcileOrphanedWorktrees(m *WorktreeManager, projectPath string, activeKe
 				log.Printf("[WorktreeReconcile] %s: integrate failed (%v); quarantine failed (%v)", key, err, qerr)
 			} else {
 				log.Printf("[WorktreeReconcile] %s: integrate conflicted — quarantined to %s (work preserved, retry loop ends)", key, qb)
+				// Sensor symmetry (fire): the paired resolve (quarantine_restored)
+				// is emitted by the retry-quarantine repair with the same
+				// correlation ID when the quarantined branch merges clean again.
+				events.EmitRepo(projectPath, Event{Type: "worktree_quarantined", Project: filepath.Base(projectPath),
+					Bead: key, Reason: "merge_conflict",
+					Detail: fmt.Sprintf("%s quarantined to %s after integrate conflict", branch, qb),
+					Fields: map[string]any{"quarantine_branch": qb, "correlation_id": SensorCorrelation("worktree-reconcile", key)}})
 			}
 			conflicts++
 			continue

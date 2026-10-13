@@ -173,6 +173,7 @@ func runEvidence(out string, err error) string {
 	}
 	return out
 }
+
 // escapeCooldown suppresses repeat escape events for the same bead inside one
 // sweep window, so a chronically red command cannot flood the event stream.
 const escapeCooldown = 7 * 24 * time.Hour

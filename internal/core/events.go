@@ -134,6 +134,15 @@ func (s *EventSink) appendLocked(path string, line []byte) {
 	_, _ = fmt.Fprintf(f, "%s\n", line)
 }
 
+// SensorCorrelation derives the deterministic correlation ID shared by a
+// sensor's fire and resolve events. The ID is scoped per sensor and per
+// object (usually a bead ID), so the daily rollup can pair fires with
+// resolutions and compute per-sensor fire/resolve rates without a
+// long-lived in-memory registry surviving restarts.
+func SensorCorrelation(sensor, object string) string {
+	return sensor + ":" + object
+}
+
 // ReadEvents parses a JSONL event file, skipping blank and undecodable lines —
 // a torn final line from a crash must not poison the whole read. This is the
 // reader the Shepherd cron and hydra-eval build on.

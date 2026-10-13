@@ -24,8 +24,8 @@ func TestHandleCompletion_PrunesCompletedOnCloseError(t *testing.T) {
 	}
 
 	wl.HandleCompletion(workerCompletion{
-		worker: &types.Worker{ID: "hydra-x1"},
-		success: true, // worker itself succeeded; the close was rejected
+		worker:     &types.Worker{ID: "hydra-x1"},
+		success:    true, // worker itself succeeded; the close was rejected
 		closeError: errors.New("verified-close: bead hydra-x1 escalated after 3 rejections (empty-diff)"),
 	})
 

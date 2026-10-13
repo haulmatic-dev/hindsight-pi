@@ -113,8 +113,15 @@ func TestQuarantineReattempt_CleanRequeues(t *testing.T) {
 	if beads.status != types.StatusOpen {
 		t.Fatalf("bead status = %s, want open", beads.status)
 	}
-	if len(sink.events) != 1 || sink.events[0].Type != "quarantine_reattempt" {
-		t.Fatalf("want one quarantine_reattempt event, got %+v", sink.events)
+	// quarantine_reattempt + sensor-symmetry resolve quarantine_restored.
+	if len(sink.events) != 2 {
+		t.Fatalf("want two events (reattempt + restored resolve), got %+v", sink.events)
+	}
+	if sink.events[0].Type != "quarantine_reattempt" || sink.events[1].Type != "quarantine_restored" {
+		t.Fatalf("event order mismatch: %+v", sink.events)
+	}
+	if got := sink.events[1].Fields["correlation_id"]; got != SensorCorrelation("worktree-reconcile", "k-1") {
+		t.Fatalf("quarantine_restored correlation = %v, want worktree-reconcile:k-1", got)
 	}
 }
 
