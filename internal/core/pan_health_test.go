@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -82,6 +83,27 @@ func TestCollectHealthDigestChainedParallel(t *testing.T) {
 	}
 	if ph.Open != 1 || ph.InProgress != 2 {
 		t.Errorf("Open=%d InProgress=%d, want 1/2", ph.Open, ph.InProgress)
+	}
+}
+
+func TestCollectHealthDigestDiskUsedPctMatchesDf(t *testing.T) {
+	// Regression for the 2026-10-06 units bug: fs.Bfree is in blocks, so
+	// used% must be computed block-vs-block. The old byte-scaled total mixed
+	// with a block count reported a constant ~99% on any filesystem and
+	// re-fired the disk-99% campaign anomaly every digest tick.
+	tw := setupTestOverseer(t)
+	tw.overseer.SetDiskWatermark(101, "/")
+	d := tw.overseer.collectHealthDigest()
+	var fs syscall.Statfs_t
+	if err := syscall.Statfs("/", &fs); err != nil {
+		t.Skipf("statfs unavailable: %v", err)
+	}
+	if fs.Blocks == 0 {
+		t.Skip("empty filesystem")
+	}
+	want := int(((fs.Blocks - fs.Bfree) * 100) / fs.Blocks)
+	if d.DiskUsedPct < want-2 || d.DiskUsedPct > want+2 {
+		t.Fatalf("DiskUsedPct = %d, want ~%d (df block ratio) — disk units bug present", d.DiskUsedPct, want)
 	}
 }
 

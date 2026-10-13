@@ -24,6 +24,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ### Documentation
 - Validation round 3 test handoff `docs/hydra/handoff/test-jzjr.md`: the Post-close verification sweep (green-ank6 GREEN + refactor-ank6 helper extraction, commit a9a797fc) verified present and green — 8/8 `TestPostCloseSweep` contract tests pass, build/gofmt clean; no code change (the flagged RED-bead "no test files" gap is stale: postclose_sweep_test.go exists).
+### Fixed
+- `collectDiskWatermark` units bug fixed — `fs.Bfree` is in blocks but was mixed with a byte-scaled total, reporting a constant ~99% used on every filesystem. This was the true root cause of the recurring disk-99% campaign anomaly fleet-wide (448 `disk_cleanup_run` events on 2026-10-06 alone); the digest now computes used% block-vs-block, matching `df`. Regression test pins digest used% within ±2 of the real statfs block ratio. Operator: rebuild + drain-restart the daemon to stop the false filings.
+
+### Documentation
+- Triage `docs/discovery/orphanclaim-disk99-units-bug-triage-hf25.md`: 13-orphan + publisher-wedge claims verified stale (0 live orphans, 0 unpublished commits, Charon 64 reopens); disk-99% root cause FOUND and fixed (statfs units bug in collectDiskWatermark); 5 same-day twin filings closed as duplicates.
 - Triage `docs/discovery/orphanclaim-disk99-triage-bkip.md`: the 14-orphan cohort fully dispositioned live (8 pan-filed exclusions, 5 human-escalated by design, 3 in-flight close gates, 3 actively churn-recovered by Charon) — recovery self-healing, no code change, disk 49% (stale claim).
 - Triage `docs/discovery/orphanclaim-publisher-disk-triage-gzkr.md`: all three P0 claims in the 13:30 UTC snapshot stale — orphaned claims are retry-churn with fresh completed workers (Charon 47 reopens, digest quiet), publish already landed via PR #263 (merged 13:25:30Z), disk 50% vs 85% watermark. Twin hydra-lg7b closed as duplicate.
 - Triage `docs/discovery/orphanclaim-churn-triage-lg7b.md`: the 13-orphan-claim digest anomaly is again the gate-failure churn retry-gap (Charon reopen events live; 11 same-day pan-filed twin pseudo-beads closed as duplicates); disk 49% (stale claim); open publish PR #263 admin-merged (e5e33b5 = origin/development tip).

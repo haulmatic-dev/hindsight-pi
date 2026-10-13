@@ -352,11 +352,14 @@ func collectDiskWatermark(d *pan.HealthDigest, path string, watermark int) {
 	if err := syscall.Statfs(path, &fs); err != nil {
 		return // fail open
 	}
-	total := fs.Blocks * uint64(fs.Bsize)
-	if total == 0 {
+	// Used% is block-based: fs.Blocks and fs.Bfree are both in fs.Bsize blocks.
+	// (The 2026-10-06 incident mixed a byte-scaled total with a block count and
+	// reported a constant ~99% on every filesystem, re-firing the disk-99%
+	// campaign anomaly fleet-wide.)
+	if fs.Blocks == 0 {
 		return
 	}
-	usedPct := int(((total - fs.Bfree) * 100) / total)
+	usedPct := int(((fs.Blocks - fs.Bfree) * 100) / fs.Blocks)
 	d.DiskUsedPct = usedPct
 	if usedPct >= watermark {
 		d.HostAnomalies = append(d.HostAnomalies, fmt.Sprintf(
