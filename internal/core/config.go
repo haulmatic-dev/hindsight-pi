@@ -704,6 +704,14 @@ type OverseerConfig struct {
 	// staying hidden forever. The hard-park itself is never cleared. 0
 	// disables the sweeper.
 	IntegrationExhaustedSweep time.Duration `yaml:"integration_exhausted_sweep"`
+	// PostCloseSweep is the escape-rate regression budget (NFR-001): a
+	// weekly scan that re-runs the declared verification command of beads
+	// closed-completed in the last window. Any bead whose command now exits
+	// nonzero is labelled `postclose-escape` and emits a typed
+	// `postclose_escape` event — the escape-rate metric for the weekly query
+	// (scripts/escape-rate-weekly.sh). Observe-and-report, fail-open. 0
+	// disables the sweeper.
+	PostCloseSweep bool `yaml:"postclose_sweep"`
 	// MaxBeadTokens is the cumulative per-bead token ceiling enforced by
 	// Charon: a working worker past the ceiling is killed and escalated via
 	// the retry cap (0 = disabled). Non-converging grinders otherwise burn
@@ -891,6 +899,7 @@ func DefaultConfig() *Config {
 			DefaultRetries:            3,
 			EscalationTTL:             72 * time.Hour,
 			IntegrationExhaustedSweep: 48 * time.Hour,
+			PostCloseSweep:            true,
 			WorkerTimeout:             30 * time.Minute,
 			ChainDetection: ChainDetectionConfig{
 				Enabled:  true,

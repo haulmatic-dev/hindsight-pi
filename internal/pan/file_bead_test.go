@@ -169,3 +169,13 @@ func TestFileBeadPremiseStaleFilerResultSkips(t *testing.T) {
 		t.Fatalf("premise-stale skip must retain signature; filer calls = %d", calls)
 	}
 }
+
+func TestFileBeadNormalizesBeadIDsPathsAndCounts(t *testing.T) {
+	s, filed := newFileBeadShepherd(t)
+	s.handleFileBead("bead-a", "PROJECT-WEDGE: 17 beads blocked by \"spawn failed\" (at /home/ajantha/projects/srv-telematics 2026-10-02 09:24)\nDetails")
+	s.handleFileBead("bead-b", "PROJECT-WEDGE: 23 beads blocked by \"spawn failed\" (at /home/nipuna.j/projects/webapp 2026-10-03 11:00)\nDetails")
+	s.handleFileBead("bead-c", "PROJECT-WEDGE: 5 beads blocked by \"spawn failed\" (at /home/x/y 2026-10-04 01:02)\nDetails")
+	if len(*filed) != 1 {
+		t.Fatalf("filed %d beads, want 1 (bead IDs, paths, counts, timestamps normalized): %v", len(*filed), *filed)
+	}
+}

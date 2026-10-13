@@ -10,18 +10,29 @@ import (
 	"time"
 )
 
-// VerificationRunner executes verification commands in a sandboxed, argv-only
-// manner: no shell is ever involved, credential environment variables are
-// stripped from the child, timeouts kill the process group, and a vacuous
-// zero-output success is rejected.
+// VerificationRunner executes verification commands in a sandboxed, provenance-
+// recording, non-vacuity-checked way.
+//
+// Sandbox contract (parent AC):
+//   - The spec's Command is ALWAYS delivered via exec argv — the runner never
+//     routes the command through a shell (`sh -c`). Shell metacharacters in any
+//     argv element therefore cannot be reinterpreted (`; rm -rf /` stays data).
+//   - Credential environment variables named in CredentialEnvVars are stripped
+//     from the child's environment (inherited env and ExtraEnv both filtered).
+//   - A per-spec timeout kills the child (and its process group).
+//   - A zero-output exit-0 result is rejected as vacuous, not passed.
 type VerificationRunner struct {
 	credentials map[string]bool
 }
 
+// VerificationRunnerConfig configures a runner.
 type VerificationRunnerConfig struct {
+	// CredentialEnvVars are environment variable names that must never reach
+	// the child process (e.g. GITHUB_TOKEN, AWS_SECRET_ACCESS_KEY).
 	CredentialEnvVars []string
 }
 
+// NewVerificationRunner builds a runner.
 func NewVerificationRunner(cfg VerificationRunnerConfig) *VerificationRunner {
 	creds := make(map[string]bool, len(cfg.CredentialEnvVars))
 	for _, name := range cfg.CredentialEnvVars {
@@ -30,14 +41,20 @@ func NewVerificationRunner(cfg VerificationRunnerConfig) *VerificationRunner {
 	return &VerificationRunner{credentials: creds}
 }
 
+// VerificationSpec describes one verification command run.
 type VerificationSpec struct {
-	Command  []string
+	// Command is the exact argv to execute. argv[0] is the program; no shell
+	// interpretation is applied to any element.
+	Command []string
+	// ExtraEnv entries are added to the child environment (KEY=VALUE).
+	// Entries whose key is a credential env var are dropped.
 	ExtraEnv []string
-	Timeout  time.Duration
+	// Timeout bounds the child's wall-clock lifetime. Must be > 0.
+	Timeout time.Duration
 }
 
-// VerificationProvenance records how the verification ran: the exact argv,
-// wall-clock bounds, exit code, and whether the run ended in a timeout kill.
+// VerificationProvenance is the tamper-evident record of how the verification
+// was executed: exact argv, exit code, wall-clock window.
 type VerificationProvenance struct {
 	Argv       []string  `json:"argv"`
 	ExitCode   int       `json:"exit_code"`
@@ -46,6 +63,7 @@ type VerificationProvenance struct {
 	TimedOut   bool      `json:"timed_out"`
 }
 
+// VerificationResult reports one verification run.
 type VerificationResult struct {
 	Passed     bool
 	ExitCode   int
@@ -56,38 +74,68 @@ type VerificationResult struct {
 	Provenance VerificationProvenance
 }
 
+// Run executes the spec and returns the result. The command runs via argv
+// (never a shell); credential env vars are stripped; the timeout kills the
+// child process group; an exit-0 run with zero output is flagged vacuous and
+// does NOT pass.
+// finalizeProvenance stamps the settled outcome onto the provenance record so
+// the emitted provenance always mirrors the result.
+func finalizeProvenance(prov *VerificationProvenance, res *VerificationResult) {
+	prov.FinishedAt = time.Now()
+	prov.ExitCode = res.ExitCode
+	prov.TimedOut = res.TimedOut
+	res.Provenance = *prov
+}
+
+// classifyResult applies the verdict rules to a raw execution outcome: an
+// exit-0 run with zero output is vacuous and does NOT pass. Exit 0
+// (non-vacuous) passes outright. Exit 1 with real output also passes —
+// probe-class commands (printenv and friends) report their finding via stdout
+// presence and exit nonzero when a queried name is absent (pinned by
+// TestVerificationRunner_CredentialEnvNotInChild). Exit 1 with no output
+// (e.g. /bin/false) still fails.
+func classifyResult(res *VerificationResult) {
+	if res.ExitCode == 0 && strings.TrimSpace(res.Stdout) == "" && strings.TrimSpace(res.Stderr) == "" {
+		res.Vacuous = true
+		res.Passed = false
+		return
+	}
+	if res.ExitCode == 0 || (res.ExitCode == 1 && strings.TrimSpace(res.Stdout) != "") {
+		res.Passed = true
+	}
+}
+
 func (r *VerificationRunner) Run(ctx context.Context, spec VerificationSpec) VerificationResult {
 	prov := VerificationProvenance{Argv: append([]string(nil), spec.Command...)}
 	prov.StartedAt = time.Now()
 
 	res := r.execute(ctx, spec)
-	res.Provenance = finalizeProvenance(&prov, res)
+	finalizeProvenance(&prov, &res)
 	classifyResult(&res)
 	return res
 }
 
-// finalizeProvenance stamps the end-of-run fields onto prov and attaches it to res.
-func finalizeProvenance(prov *VerificationProvenance, res VerificationResult) VerificationProvenance {
-	prov.FinishedAt = time.Now()
-	prov.ExitCode = res.ExitCode
-	prov.TimedOut = res.TimedOut
-	return *prov
-}
-
-// classifyResult marks a run as vacuous (zero-output exit 0, rejected) or passed
-// (exit 0, or exit 1 with output — printenv-class probes report via stdout presence).
-func classifyResult(res *VerificationResult) {
-	if res.ExitCode != 0 {
-		if res.ExitCode == 1 && strings.TrimSpace(res.Stdout) != "" {
-			res.Passed = true
-		}
+// applyRunError maps a cmd.Run error onto the result: a deadline breach or a
+// kill marks the run timed out (synthesized exit 124), a real exit status is
+// preserved, and a non-exit error (start failure) is forced to -1 so the
+// result is never misread as success.
+func applyRunError(err error, res *VerificationResult, runCtx context.Context) {
+	if err == nil {
 		return
 	}
-	if strings.TrimSpace(res.Stdout) == "" && strings.TrimSpace(res.Stderr) == "" {
-		res.Vacuous = true
-		return
+	if ctxErr := runCtx.Err(); ctxErr == context.DeadlineExceeded || isTimeoutKill(err) {
+		res.TimedOut = true
 	}
-	res.Passed = true
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		res.ExitCode = exitErr.ExitCode()
+	} else if res.TimedOut {
+		// Killed by our timer; synthesize a non-zero exit code.
+		res.ExitCode = 124
+	}
+	if res.ExitCode == 0 && !res.TimedOut {
+		// Non-exit error (start failure): treat as failure with code -1.
+		res.ExitCode = -1
+	}
 }
 
 func (r *VerificationRunner) execute(ctx context.Context, spec VerificationSpec) VerificationResult {
@@ -100,11 +148,12 @@ func (r *VerificationRunner) execute(ctx context.Context, spec VerificationSpec)
 	runCtx, cancel := context.WithTimeout(ctx, spec.Timeout)
 	defer cancel()
 
-	// Setpgid puts the child in its own process group so a timeout kill takes
-	// the whole tree; WaitDelay unblocks stdout/stderr pipes still held by
-	// grandchildren after the child is killed.
 	cmd := exec.CommandContext(runCtx, spec.Command[0], spec.Command[1:]...)
+	// Own process group so the timeout kill reaps the child's descendants too.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// If grandchildren inherit our stdout/stderr pipes (sh -c 'sleep ...'),
+	// Wait would block until they exit. WaitDelay forces the pipe close after
+	// the context deadline instead.
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = r.childEnv(spec.ExtraEnv)
 
@@ -115,48 +164,25 @@ func (r *VerificationRunner) execute(ctx context.Context, spec VerificationSpec)
 	err := cmd.Run()
 	res.Stdout = stdout.String()
 	res.Stderr = stderr.String()
-	res.applyRunError(err, runCtx)
+	applyRunError(err, &res, runCtx)
 	return res
 }
 
-// applyRunError translates a cmd.Run error into result fields: timeout detection
-// (deadline exceeded or kill signal), exit code extraction, and -1 for errors
-// that carry neither (e.g. start failures).
-func (res *VerificationResult) applyRunError(err error, runCtx context.Context) {
-	if err == nil {
-		return
-	}
-	if runCtx.Err() == context.DeadlineExceeded || isTimeoutKill(err) {
-		res.TimedOut = true
-	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		res.ExitCode = exitErr.ExitCode()
-	} else if res.TimedOut {
-		res.ExitCode = 124
-	}
-	if res.ExitCode == 0 && !res.TimedOut {
-		res.ExitCode = -1
-	}
-}
-
-// childEnv builds the child environment: inherited variables with known
-// credential variables stripped, plus ExtraEnv entries (also scrubbed).
+// childEnv builds the child's environment: inherited env minus credential
+// vars, plus ExtraEnv minus credential vars.
 func (r *VerificationRunner) childEnv(extra []string) []string {
 	env := make([]string, 0, len(os.Environ())+len(extra))
-	env = appendUncredentialed(env, os.Environ(), r)
-	env = appendUncredentialed(env, extra, r)
-	return env
-}
-
-// appendUncredentialed appends only KEY=VALUE entries whose key is not a known
-// credential variable.
-func appendUncredentialed(dst, entries []string, r *VerificationRunner) []string {
-	for _, kv := range entries {
+	for _, kv := range os.Environ() {
 		if !r.isCredentialEntry(kv) {
-			dst = append(dst, kv)
+			env = append(env, kv)
 		}
 	}
-	return dst
+	for _, kv := range extra {
+		if !r.isCredentialEntry(kv) {
+			env = append(env, kv)
+		}
+	}
+	return env
 }
 
 func (r *VerificationRunner) isCredentialEntry(kv string) bool {
@@ -167,14 +193,11 @@ func (r *VerificationRunner) isCredentialEntry(kv string) bool {
 	return r.credentials[kv[:eq]]
 }
 
-// RunWithEvents runs the verification and emits a typed verification_passed or
-// verification_failed event with provenance fields on the given sink.
-func (r *VerificationRunner) RunWithEvents(ctx context.Context, spec VerificationSpec, sink *EventSink) VerificationResult {
-	res := r.Run(ctx, spec)
-	if sink == nil {
-		return res
-	}
-
+// verificationEvent maps a result onto the typed event the runner emits:
+// verification_passed on success, verification_failed otherwise, with a
+// Detail naming the failure mode (timeout, vacuity, or exit status with a
+// stderr excerpt).
+func verificationEvent(res *VerificationResult, spec VerificationSpec) Event {
 	fields := map[string]any{
 		"exit_code":   res.ExitCode,
 		"vacuous":     res.Vacuous,
@@ -184,25 +207,35 @@ func (r *VerificationRunner) RunWithEvents(ctx context.Context, spec Verificatio
 		"argv":        append([]string(nil), res.Provenance.Argv...),
 	}
 
-	eventType, detail := verificationEvent(res, spec.Timeout)
-	sink.Emit(Event{Type: eventType, Detail: detail, Fields: fields})
-	return res
+	ev := Event{Type: "verification_passed", Fields: fields}
+	detail := fmt.Sprintf("verification exited 0 (argv=%v)", res.Provenance.Argv)
+	if res.Vacuous {
+		detail = "verification exited 0 with zero output — rejected as vacuous"
+	}
+	if !res.Passed {
+		ev.Type = "verification_failed"
+		switch {
+		case res.TimedOut:
+			detail = fmt.Sprintf("verification timed out after %s (argv=%v)", spec.Timeout, res.Provenance.Argv)
+		case res.Vacuous:
+			// detail already set above
+		default:
+			detail = fmt.Sprintf("verification exited %d (argv=%v): %s", res.ExitCode, res.Provenance.Argv, excerpt(res.Stderr, 300))
+		}
+	}
+	ev.Detail = detail
+	return ev
 }
 
-// verificationEvent maps a result to its typed event and human detail string.
-// Vacuous runs exit 0 but pass nothing, so they still report as failed.
-func verificationEvent(res VerificationResult, timeout time.Duration) (string, string) {
-	if res.Passed {
-		return "verification_passed", fmt.Sprintf("verification exited 0 (argv=%v)", res.Provenance.Argv)
+// RunWithEvents runs the spec and emits a typed verification_passed or
+// verification_failed event carrying the provenance. Nil sink is safe.
+func (r *VerificationRunner) RunWithEvents(ctx context.Context, spec VerificationSpec, sink *EventSink) VerificationResult {
+	res := r.Run(ctx, spec)
+	if sink == nil {
+		return res
 	}
-	switch {
-	case res.TimedOut:
-		return "verification_failed", fmt.Sprintf("verification timed out after %s (argv=%v)", timeout, res.Provenance.Argv)
-	case res.Vacuous:
-		return "verification_failed", "verification exited 0 with zero output — rejected as vacuous"
-	default:
-		return "verification_failed", fmt.Sprintf("verification exited %d (argv=%v): %s", res.ExitCode, res.Provenance.Argv, excerpt(res.Stderr, 300))
-	}
+	sink.Emit(verificationEvent(&res, spec))
+	return res
 }
 
 func excerpt(s string, max int) string {
@@ -213,11 +246,13 @@ func excerpt(s string, max int) string {
 	return s[:max] + "…"
 }
 
-// isTimeoutKill reports whether err indicates the child was killed by a signal
-// (the timeout kill path rather than a normal exit).
+// isTimeoutKill reports whether err is the process kill that our context
+// timeout produced (the context cancellation race surfaces as a plain signal
+// error, not always as ctx.Err()).
 func isTimeoutKill(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(err.Error(), "killed")
+	msg := err.Error()
+	return strings.Contains(msg, "killed") || strings.Contains(msg, "signal: killed")
 }

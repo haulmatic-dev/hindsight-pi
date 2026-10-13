@@ -41,6 +41,15 @@ overseer:
   # is never cleared. 0 disables the sweeper. Suggested: 48h.
   integration_exhausted_sweep: 48h
 
+  # Escape-rate regression budget (NFR-001): when true, a weekly sweeper
+  # re-runs the declared verification command of every bead closed-completed
+  # in the last 7 days; a command that now exits nonzero gets the durable
+  # `postclose-escape` label and a typed `postclose_escape` event. The weekly
+  # escape-rate query is scripts/escape-rate-weekly.sh. Observe-and-report,
+  # fail-open; the close paths themselves always run the bead's verification
+  # command before completing. Set false to disable.
+  postclose_sweep: true
+
   worker_timeout: 10m
 
   # How long to wait for a worker to accept a handoff

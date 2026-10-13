@@ -98,6 +98,13 @@ type Overseer struct {
 	stateController  *StateController // Runtime state (running, paused, maxWorkers, interval)
 	configManager    *ConfigManager   // Dynamic configuration management
 	beadsClient      BeadsClient
+	// Pan file-bead signature window: recently filed signatures (normalized
+	// title per project) are remembered for panFileSigTTL so a closed wedge
+	// bead is not re-filed while the same root cause is still producing
+	// blocked beads (2026-10-02: one spawn failure filed 15+ PROJECT-WEDGE
+	// twins, each spawning its own diagnostic worker run).
+	panSigMu         sync.Mutex
+	recentPanSigs    map[string]time.Time
 	workerSpawner    *WorkerSpawner
 	pushPendingMu    sync.Mutex
 	pushPending      map[string]*PushPendingEntry    // projectPath → stranded-push state
@@ -119,7 +126,6 @@ type Overseer struct {
 	providerPool          *ProviderPool                   // nil-safe; shared provider concurrency budget (Shepherd B3)
 	poolReleases          sync.Map                        // workerID -> func() releasing its provider-pool slot
 	batchRetentionSvc     *services.BatchRetentionService // Batch retention service for efficient memory storage
-	hindsightLifecycle    *services.HindsightLifecycle    // Hindsight lifecycle manager for memory management
 	intelMutex            sync.RWMutex                    // Mutex for intelligence clients
 	bvClient              *bv.Client                      // BV client for graph analytics
 	settledStateSvc       *SettledStateService            // Settled-state detection service
@@ -151,7 +157,7 @@ type Overseer struct {
 	// Stale integration-exhausted park sweeper (nil when disabled)
 	integrationSweep *IntegrationExhaustedSweeper
 	panDigestAt      atomic.Int64 // unix-nano of last collectHealthDigest (0 = unknown)
-
+	evidenceSweep    *ToolHealthEvidenceScanner
 	// Worker registry (daemon-owned SQLite truth) and Pan, the shepherd that
 	// decides the ambiguous tail of worker states. Both fail-open: a registry
 	// open failure or a disabled Pan leaves deterministic rules in force.
@@ -411,6 +417,12 @@ func NewOverseer(config *Config) *Overseer {
 	if config.Overseer.IntegrationExhaustedSweep > 0 {
 		o.integrationSweep = NewIntegrationExhaustedSweeper(o.beadsClient, o.GetProjects, config.Overseer.IntegrationExhaustedSweep, o.eventSink)
 	}
+	if o.intelligenceHub != nil {
+		evidenceScanner := NewToolHealthEvidenceScanner(o.GetProjects, o.eventSink)
+		evidenceScanner.SetActivityProbe(o.recentWorkerActivityProbe())
+		evidenceScanner.SetHindsightProbe(o.hindsightMemoriesProbe())
+		o.evidenceSweep = evidenceScanner
+	}
 	// Inject access to the in-memory activeWorkers map so Charon can clean up
 	// stale placeholder entries (PID 0) that would otherwise block new spawns
 	// for the same bead. The snapshot is taken under the worker mutex by the
@@ -600,6 +612,9 @@ func NewOverseer(config *Config) *Overseer {
 	// per-repo .hydra/events.jsonl mirrors.
 	events := NewEventSink(DefaultEventsDir())
 	o.eventSink = events
+	if gidx := o.intelligenceHub.GraphifyIndexer(); gidx != nil {
+		gidx.SetEventSink(events)
+	}
 	SetPublishEventSink(events)
 	o.beadCloser.SetEventSink(events)
 	o.providerPool.SetEventSink(events)
@@ -1413,9 +1428,13 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 
 	// Fail-closed preflight (fmsfe-a2u, 2026-09-30): a bead whose Type cannot
 	// be verified, or whose store Type is a human gate/container, must never
-	// reach a worker. Also blocks the spawn funnel on an unresolved owner
-	// publish identity (auto-resumes when the PAT lands).
+	// reach a worker. Also blocks on a foreign-uid .beads store (daemon stops
+	// managing user-owned repos) and on an unresolved owner publish identity
+	// (auto-resumes when the PAT lands).
 	if err := o.spawnPreflightBead(bead, projectPath); err != nil {
+		return err
+	}
+	if err := o.spawnPreflightStoreOwnership(bead, projectPath); err != nil {
 		return err
 	}
 	if err := o.spawnPreflightPublishIdentity(bead, projectPath); err != nil {

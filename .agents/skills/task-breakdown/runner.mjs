@@ -52,6 +52,9 @@ export class TaskBreakdownRunner extends EventEmitter {
     super();
     this.sessionId = options.sessionId || `td-${Date.now()}`;
     this.state = new StateManager(this.sessionId);
+    // Repo-language detection (go/javascript/python/unknown) — drives language-
+    // specific acceptance criteria; 'unknown' keeps the legacy JS boilerplate.
+    this.repoLanguage = 'unknown';
     // Pure deterministic execution - no AI agents
     this.executor = new BeadsExecutor();
     this.rollback = new RollbackManager();
@@ -148,6 +151,10 @@ export class TaskBreakdownRunner extends EventEmitter {
   async run(prdPath) {
     console.log(`[Runner] Starting task breakdown for: ${prdPath}`);
     console.log(`[Runner] Session ID: ${this.sessionId}`);
+
+    // Detect the repo language once up front so every synthesized bead gets
+    // language-appropriate criteria (go.mod → Go, package.json → JS, ...).
+    await this.ensureRepoLanguage();
 
     // Emit workflow start
     this._emitEvent('workflow:start', {
@@ -743,7 +750,7 @@ export class TaskBreakdownRunner extends EventEmitter {
   hasClearImplementationApproach(prdContent) {
     // Check for technology stack specification
     const hasTechStack =
-      /\b(typescript|javascript|python|react|vue|angular|node|bun|deno|svelte|solid)\b/i.test(
+      /\b(typescript|javascript|python|react|vue|angular|node|bun|deno|svelte|solid|go|golang)\b/i.test(
         prdContent,
       );
     // Check for architecture patterns
@@ -845,7 +852,14 @@ export class TaskBreakdownRunner extends EventEmitter {
     // NFR-003 "Monorepo Configuration" bead in those campaigns.
     const hasPackageJson = await fs.access('package.json').then(() => true).catch(() => false);
     const hasTddChains = requirements.some(r => r.taskPattern === 'tdd_chain');
-    if (!hasPackageJson && hasTddChains) {
+    // Language gate: Go/Python repos must NOT receive the JS monorepo
+    // scaffolding task (vitest/tsconfig/biome is meaningless there). Only
+    // JS-ecosystem or unknown-language repos keep the legacy injection.
+    const injectMonorepoConfig =
+      !hasPackageJson &&
+      hasTddChains &&
+      (this.repoLanguage === 'javascript' || this.repoLanguage === 'unknown');
+    if (injectMonorepoConfig) {
       console.log('  🏗️  No package.json found — injecting monorepo configuration task');
       const configReq = {
         id: 'NFR-003',
@@ -1395,7 +1409,7 @@ This gate runs after all implementation tasks complete.`,
       localId: 'lint-gate',
       title: 'LINT GATE: Code Quality Review',
       description: `## Scope
-Comprehensive PROJECT-LEVEL Biome linting on ALL source files.
+Comprehensive PROJECT-LEVEL linting on ALL source files.
 
 ## Difference from SYNTAX phases
 - **SYNTAX phases** (per-task): Run on files modified by each specific task
@@ -1413,15 +1427,11 @@ Comprehensive PROJECT-LEVEL Biome linting on ALL source files.
 
 ## Command
 \`\`\`bash
-# Run the project's linter on all source files.
-# Inspect the project for linting configuration and run the appropriate command.
-# Examples: npx biome lint --write src/, npx eslint --fix src/, go vet ./...
+${this.lintGateCommandBlock()}
 \`\`\`
 
 ## Acceptance Criteria
-- Biome passes with exit code 0
-- All safe fixes applied automatically
-- No remaining lint errors
+${this.lintGateAcceptanceBlock()}
 
 ## Failure Handling
 If this task fails, a 'Fix All Lint Errors' task will be created.
@@ -1732,12 +1742,141 @@ ${req.description}`;
   }
 
   /**
-   * Get development constraints for Node.js/JS/TS projects
+   * Detect the repository language from marker files in the given directory
+   * (project root at runtime).
+   *   go.mod → 'go'; package.json → 'javascript';
+   *   requirements.txt / pyproject.toml → 'python'; otherwise 'unknown'.
+   * @param {string} [dir='.'] - Directory to probe.
+   * @returns {Promise<string>} Detected language.
+   */
+  async detectRepoLanguage(dir = '.') {
+    const markers = [
+      ['go.mod', 'go'],
+      ['package.json', 'javascript'],
+      ['requirements.txt', 'python'],
+      ['pyproject.toml', 'python'],
+    ];
+    for (const [file, language] of markers) {
+      // eslint-disable-next-line no-await-in-loop
+      const exists = await fs.access(path.join(dir, file)).then(() => true).catch(() => false);
+      if (exists) return language;
+    }
+    return 'unknown';
+  }
+
+  /**
+   * Detect and cache the repo language on this runner instance.
+   * @param {string} [dir='.'] - Directory to probe.
+   * @returns {Promise<string>} Detected language ('unknown' on probe error).
+   */
+  async ensureRepoLanguage(dir = '.') {
+    try {
+      this.repoLanguage = await this.detectRepoLanguage(dir);
+    } catch {
+      // Fail open: an unreadable directory keeps legacy (JS/unknown) behavior.
+      this.repoLanguage = 'unknown';
+    }
+    if (this.repoLanguage !== 'unknown') {
+      console.log(`  🔎 Repo language detected: ${this.repoLanguage}`);
+    }
+    return this.repoLanguage;
+  }
+
+  /**
+   * Formatter command appropriate to the detected repo language.
+   * @returns {string} Formatter invocation used in SYNTAX/config instructions.
+   */
+  formatterCommand() {
+    switch (this.repoLanguage) {
+      case 'go':
+        return 'gofmt -w';
+      case 'python':
+        return "the project's formatter (e.g. ruff format)";
+      default:
+        return 'biome format --write';
+    }
+  }
+
+  /**
+   * Lint-gate command block for the detected repo language.
+   * @returns {string}
+   */
+  lintGateCommandBlock() {
+    if (this.repoLanguage === 'go') {
+      return `# Run the Go linters on all source files.
+go vet ./...
+gofmt -l .`;
+    }
+    if (this.repoLanguage === 'python') {
+      return `# Run the project's Python linter on all source files.
+# Inspect the project for linting configuration and run the appropriate command.
+# Examples: ruff check ., flake8 .`;
+    }
+    return `# Run the project's linter on all source files.
+# Inspect the project for linting configuration and run the appropriate command.
+# Examples: npx biome lint --write src/, npx eslint --fix src/, go vet ./...`;
+  }
+
+  /**
+   * Lint-gate acceptance criteria for the detected repo language.
+   * @returns {string}
+   */
+  lintGateAcceptanceBlock() {
+    if (this.repoLanguage === 'go') {
+      return `- go vet ./... passes with exit code 0
+- gofmt reports no unformatted files
+- No remaining vet diagnostics`;
+    }
+    if (this.repoLanguage === 'python') {
+      return `- The project linter passes with exit code 0
+- No remaining lint errors`;
+    }
+    return `- Biome passes with exit code 0
+- All safe fixes applied automatically
+- No remaining lint errors`;
+  }
+
+  /**
+   * Biome-specific configuration block for configuration-task instructions.
+   * Empty for non-JS repos (Go/Python) — Biome boilerplate must not appear.
+   * @returns {string}
+   */
+  biomeConfigBlock() {
+    if (this.repoLanguage === 'go' || this.repoLanguage === 'python') return '';
+    return `CRITICAL — If using Biome for linting/formatting, create \`biome.json\` with:
+{
+  "files": {
+    "ignore": [".hydra", ".beads", "node_modules", ".git"]
+  }
+}
+This prevents Biome from scanning worktree directories.
+
+`;
+  }
+
+  /**
+   * Get development constraints for the detected repo language
    * @param {Object} parentTask - Parent task object
    * @param {string} phase - TDD phase (red, green, refactor, syntax)
    * @returns {string} Development constraints block
    */
   getDevelopmentConstraints() {
+    if (this.repoLanguage === 'go') {
+      return `
+### Development Constraints
+- Floating-point comparisons MUST use an explicit tolerance (e.g. math.Abs(diff) < epsilon in table tests), NOT exact equality. Applies to: sqrt, log, divide, pow, sin, cos, tan results
+- go vet ./... must pass before bead is complete
+- Test output must show 0 failures (go test ./...)
+- Tooling prerequisites verified: go in PATH`;
+    }
+    if (this.repoLanguage === 'python') {
+      return `
+### Development Constraints
+- All floating-point comparisons MUST use an explicit tolerance (e.g. pytest.approx), NOT exact equality. Applies to: sqrt, log, divide, pow, sin, cos, tan results
+- Lint must pass before bead is complete
+- Test output must show 0 failures (pytest)
+- Tooling prerequisites verified: python, pytest in PATH`;
+    }
     return `
 ### Development Constraints
 - All floating-point comparisons MUST use \`toBeCloseTo()\`, NOT \`toBe()\`. Applies to: sqrt, log, divide, pow, sin, cos, tan results
@@ -1956,7 +2095,7 @@ ${req.description}`;
         parentCriteria,
         parentFiles,
         parentFunctions,
-        specificInstructions: `Run linting and type-checking on modified files. Fix any errors or warnings.\n\nAlso verify:\n1. All public functions/methods/types have adequate documentation (JSDoc, Go doc, docstrings, etc.)\n2. Type checking passes with no errors\n3. Run biome format --write (or the project's formatter) on all modified files to ensure consistent formatting\n4. Code follows project style guidelines${syntaxTestCmd}${syntaxBuildCmd}\n5. Verify every target file is non-empty and contains no placeholder comments (e.g. "// Placeholder", "// TODO", "// FIXME")`,
+        specificInstructions: `Run linting and type-checking on modified files. Fix any errors or warnings.\n\nAlso verify:\n1. All public functions/methods/types have adequate documentation (JSDoc, Go doc, docstrings, etc.)\n2. Type checking passes with no errors\n3. Run ${this.formatterCommand()} (or the project's formatter) on all modified files to ensure consistent formatting\n4. Code follows project style guidelines${syntaxTestCmd}${syntaxBuildCmd}\n5. Verify every target file is non-empty and contains no placeholder comments (e.g. "// Placeholder", "// TODO", "// FIXME")`,
       }),
       level: parentTask.level,
       dependsOn: syntaxDependsOn,
@@ -2475,19 +2614,11 @@ CRITICAL — Create or update \`.gitignore\` to exclude:
 - .tldr/
 - *.log
 
-CRITICAL — If using Biome for linting/formatting, create \`biome.json\` with:
-{
-  "files": {
-    "ignore": [".hydra", ".beads", "node_modules", ".git"]
-  }
-}
-This prevents Biome from scanning worktree directories.
-
-Then VALIDATE the configuration in the same bead (syntax gate fused into apply):
+${this.biomeConfigBlock()}Then VALIDATE the configuration in the same bead (syntax gate fused into apply):
 1. All config files are syntactically valid
 2. Required fields are present
 3. Config matches project conventions
-4. Run biome format --write on all config files to ensure consistent formatting`;
+4. Run ${this.formatterCommand()} on all config files to ensure consistent formatting`;
 
     const applyTask = {
       localId: `${baseId}-apply`,
@@ -2535,7 +2666,7 @@ Then VALIDATE the configuration in the same bead (syntax gate fused into apply):
         parentCriteria: req.acceptanceCriteria,
         parentFiles: targetFiles,
         parentFunctions: [],
-        specificInstructions: `Validate configuration files pass linting and schema checks.\n\nVerify:\n1. All config files are syntactically valid\n2. Required fields are present\n3. Config matches project conventions\n4. Run biome format --write on all config files to ensure consistent formatting`,
+        specificInstructions: `Validate configuration files pass linting and schema checks.\n\nVerify:\n1. All config files are syntactically valid\n2. Required fields are present\n3. Config matches project conventions\n4. Run ${this.formatterCommand()} on all config files to ensure consistent formatting`,
       }),
       level: parentTask.level,
       dependsOn: [`${baseId}-apply`],

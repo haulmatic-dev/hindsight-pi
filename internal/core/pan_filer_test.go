@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/pan"
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -67,8 +68,9 @@ func TestFilePanBead_CapCountsInProgress(t *testing.T) {
 	path := t.TempDir()
 
 	// Fill the cap.
+	names := []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"}
 	for i := 0; i < pan.MaxOpenFiledBeadsPerProject; i++ {
-		if err := o.filePanBead(path, "bead-src", fmt.Sprintf("Wedge %d", i), "details"); err != nil {
+		if err := o.filePanBead(path, "bead-src", fmt.Sprintf("Wedge %s: a distinct root cause", names[i]), "details"); err != nil {
 			t.Fatalf("file-bead %d: %v", i, err)
 		}
 	}
@@ -106,5 +108,58 @@ func TestFilePanBead_DuplicateInProgressTitleSkipped(t *testing.T) {
 	err := o.filePanBead(path, "bead-src-2", "Publisher wedge (2h stale)", "details")
 	if !errors.Is(err, pan.ErrFileBeadDuplicate) {
 		t.Fatalf("want ErrFileBeadDuplicate for in_progress twin, got %v", err)
+	}
+}
+
+func TestFilePanBead_SignatureWindowDedupe(t *testing.T) {
+	o := &Overseer{beadsClient: newMockBeadsClient()}
+	path := "/tmp/fakeproj"
+	// Wedge filings whose titles differ only by volatile noise (cardinal
+	// counts, bead IDs, paths, timestamps) share one signature.
+	v1 := "PROJECT-WEDGE: 17 beads blocked by \"spawn failed\" (bead hydra-ee5r)"
+	v2 := "PROJECT-WEDGE: 23 beads blocked by \"spawn failed\" (bead hydra-x0k2)"
+	if err := o.filePanBead(path, "bead-src", v1, "details"); err != nil {
+		t.Fatalf("first wedge filing: %v", err)
+	}
+	if beads, _ := o.beadsClient.ListBeads(path, ""); len(beads) != 1 {
+		t.Fatalf("beads = %d, want 1 (identical signature dedupes)", len(beads))
+	}
+	err := o.filePanBead(path, "bead-src-2", v2, "details")
+	if !errors.Is(err, pan.ErrFileBeadDuplicate) {
+		t.Fatalf("want ErrFileBeadDuplicate for variant title, got %v", err)
+	}
+	// Even after the wedge bead closes, the window still blocks refiling.
+	beads, _ := o.beadsClient.ListBeads(path, "")
+	if err := o.beadsClient.UpdateBeadStatus(path, beads[0].ID, types.StatusClosed); err != nil {
+		t.Fatalf("close wedge bead: %v", err)
+	}
+	err = o.filePanBead(path, "bead-src-3", v2, "details")
+	if !errors.Is(err, pan.ErrFileBeadDuplicate) {
+		t.Fatalf("want ErrFileBeadDuplicate within window after close, got %v", err)
+	}
+	// After the window expires the finding may file again.
+	panFileSigTTL = -time.Second
+	defer func() { panFileSigTTL = time.Hour }()
+	if err := o.filePanBead(path, "bead-src-4", v2, "details"); err != nil {
+		t.Fatalf("filing after window expiry: %v", err)
+	}
+	// A genuinely different finding files immediately.
+	if err := o.filePanBead(path, "bead-src-5", "Disk watermark breached", "details"); err != nil {
+		t.Fatalf("different finding should file: %v", err)
+	}
+}
+
+func TestFilePanBead_FilerErrorLeavesWindowOpen(t *testing.T) {
+	mc := newMockBeadsClient()
+	mc.listErrByPath = map[string]error{"/bad": errors.New("list boom")}
+	o := &Overseer{beadsClient: mc}
+	path := "/tmp/fakeproj"
+	// Filer error (list failure) happens after the window check but before
+	// create: the signature must NOT be recorded, so a retry can file.
+	if err := o.filePanBead("/bad", "bead-src", "Wedge A", "details"); err == nil {
+		t.Fatalf("expected filer error for broken project")
+	}
+	if err := o.filePanBead(path, "bead-src", "Wedge A", "details"); err != nil {
+		t.Fatalf("retry after filer error must file: %v", err)
 	}
 }

@@ -328,6 +328,14 @@ var (
 	volatileDurationRe = regexp.MustCompile(`\d+(?:\.\d+)?(?:d|h|m|s)(?:\d+m?)?\b`)
 	volatileDateTimeRe = regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?`)
 	volatileUnitsRe    = regexp.MustCompile(`\d+\s+(?:seconds?|minutes?|hours?|days?|weeks?)\b`)
+	// Volatile identity noise that made wedge filings look distinct:
+	// filesystem paths (/home/x/projects/foo, worktrees) and bead-ID-like
+	// tokens (hydra-ee5r, fmsfe-090) embedded in blocked reasons.
+	volatilePathRe = regexp.MustCompile(`(?:/|~)[\w./~-]{2,}`)
+	volatileBeadRe = regexp.MustCompile(`(?i)\b[a-z][a-z0-9]{1,14}-[0-9a-z]{2,5}\b`)
+	// Cardinal-number variance ("2 orphaned" vs "3 in_progress", "17 beads")
+	// is likewise non-identity for signature purposes.
+	volatileNumberRe = regexp.MustCompile(`\d+`)
 )
 
 // normalizeReason strips volatile substrings — ages ("94h27m"), timestamps,
@@ -338,6 +346,9 @@ func normalizeReason(reason string) string {
 	r := volatileDateTimeRe.ReplaceAllString(reason, "#")
 	r = volatileDurationRe.ReplaceAllString(r, "#")
 	r = volatileUnitsRe.ReplaceAllString(r, "# units")
+	r = volatilePathRe.ReplaceAllString(r, "#path")
+	r = volatileBeadRe.ReplaceAllString(r, "#id")
+	r = volatileNumberRe.ReplaceAllString(r, "#N")
 	return r
 }
 

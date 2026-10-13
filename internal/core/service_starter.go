@@ -50,6 +50,9 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	if o.integrationSweep != nil {
 		o.integrationSweep.Start()
 	}
+	if o.evidenceSweep != nil {
+		o.evidenceSweep.Start()
+	}
 
 	// Credential preflight (2026-10-01 drift incident): probe each project
 	// repo's origin with the resolved publish identity; stale/revoked ->
@@ -778,6 +781,9 @@ func (s *ServiceStarter) Stop() {
 	}
 	if o.integrationSweep != nil {
 		o.integrationSweep.Stop()
+	}
+	if o.evidenceSweep != nil {
+		o.evidenceSweep.Stop()
 	}
 	if o.settledStateSvc != nil {
 		if err := o.settledStateSvc.Stop(); err != nil {

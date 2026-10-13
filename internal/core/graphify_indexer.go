@@ -38,9 +38,11 @@ type GraphifyIndexer struct {
 
 	sem chan struct{}
 
-	mu        sync.Mutex
-	lastBuilt map[string]time.Time
-	inFlight  map[string]bool
+	mu           sync.Mutex
+	lastBuilt    map[string]time.Time
+	inFlight     map[string]bool
+	missingPaths map[string]time.Time
+	events       *EventSink
 }
 
 // NewGraphifyIndexer builds an indexer from config, applying defaults for unset
@@ -72,7 +74,16 @@ func NewGraphifyIndexer(cfg GraphifyConfig) *GraphifyIndexer {
 		sem:             make(chan struct{}, maxConcurrent),
 		lastBuilt:       make(map[string]time.Time),
 		inFlight:        make(map[string]bool),
+		missingPaths:    make(map[string]time.Time),
 	}
+}
+
+// SetEventSink attaches the structured event stream (nil stays a no-op).
+func (g *GraphifyIndexer) SetEventSink(s *EventSink) {
+	if g == nil {
+		return
+	}
+	g.events = s
 }
 
 // Available reports whether the graphify binary can be found. Checked once at
@@ -103,6 +114,12 @@ func (g *GraphifyIndexer) Refresh(projectPath string) bool {
 	abs, err := filepath.Abs(projectPath)
 	if err != nil {
 		abs = projectPath
+	}
+
+	// Project-path existence guard: a refresh for a path that no longer
+	// exists must neither spawn a build goroutine nor wedge the claim map.
+	if !g.checkPathExists(abs) {
+		return false
 	}
 
 	if !g.claim(abs) {

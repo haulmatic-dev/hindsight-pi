@@ -436,6 +436,12 @@ func main() {
 	// problem is debug-logged and never gates the worker result.
 	emitSessionToolMixStats(bead, os.Getenv("HYDRA_HOME"))
 
+	// Hindsight extension-connectivity sensor: detects the fail-open class
+	// where the hindsight pi extension died at bootstrap (or never registered
+	// its tools) and the agent skipped memory recall silently. Loud log +
+	// degrade counter only; never gates the result.
+	runHindsightSensor(config.Pi, os.Getenv("HYDRA_HOME"), bead)
+
 	// Calculate duration
 	duration := time.Since(startTime)
 	if result != nil {
@@ -1567,6 +1573,16 @@ func executeWithPi(
 	// it is logged empty rather than omitted, keeping the format stable.
 	log.Printf("[Worker] prompt_sha256=%s head8k_sha256=%s prompt_bytes=%d bead=%s account=", fullSha, headSha, len(prompt), bead.ID)
 
+	// Evidence-of-use probe (deep tier): record which intelligence services
+	// contributed before the agent invocation, so the evidence sweep can tell
+	// a healthy fleet from one whose Hindsight/CASS/graphify stack silently
+	// serves nothing.
+	hem := hindsightCtx.Get()
+	emitIntelUsageEvent(os.Getenv("HYDRA_HOME"), os.Getenv("HYDRA_PROJECT"), bead,
+		hem != nil && len(hem.Memories) > 0,
+		len(extras.CassBullets) > 0,
+		graphifyFallbackFor(projectPath))
+
 	// turn is non-nil only in rpc mode, where it owns the protocol state and the
 	// verdict. It stays nil in text mode so that path is byte-for-byte unchanged.
 	var turn *rpcTurn
@@ -1793,7 +1809,7 @@ monitorLoop:
 				s.Input, s.Output, s.CacheReadInput, s.CacheCreation, s.FreshInput, s.Total)
 			reportTurnTokens(s)
 			result.TokensTotal = int64(s.Total)
-		result.TurnCount = turnCount
+			result.TurnCount = turnCount
 			result.TokensFresh = int64(s.FreshInput + s.Output)
 			result.TokensCacheRead = int64(s.CacheReadInput)
 			result.TokensCacheCreation = int64(s.CacheCreation)

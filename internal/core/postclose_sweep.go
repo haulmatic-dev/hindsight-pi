@@ -1,26 +1,21 @@
 package core
 
 import (
+	"fmt"
+	"log"
+	"regexp"
+	"strings"
+	"time"
+
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // PostCloseSweeper re-verifies recently closed beads by re-running their
 // recorded verification command in the project's default-branch checkout.
 //
-// Contract (pinned by postclose_sweep_test.go, RED phase — behavior lands in
-// the GREEN phase):
+// Contract (pinned by postclose_sweep_test.go):
 //   - Only beads with StatusClosed, metadata["test_command"] set, and
 //     UpdatedAt within 24h are considered.
-//   - Flake guard: a failing command is re-run once; a passing re-run means
-//     flake → `postclose-flake` label, no reopen.
-//   - Reopen path: both failing-run outputs are attached as a comment, the
-//     bead is reopened (StatusOpen) and labeled `postclose-reopened`.
-//   - Bounded auto-reopen: a bead already carrying `postclose-reopened` that
-//     fails again gets `needs-human` added instead of a second reopen.
-//
-// This file currently provides only the type, constructor and lifecycle
-// hooks so the pinned tests compile (the daemon's vet gate); scan() is
-// intentionally inert until the GREEN phase implements the sweep behavior.
 type PostCloseSweeper struct {
 	beadsClient BeadsClient
 	getProjects func() []types.Project
@@ -28,6 +23,7 @@ type PostCloseSweeper struct {
 	runCommand  func(projectPath, command string) (output string, err error)
 	addComment  func(projectPath string, beadID types.BeadID, body string) error
 	stopChan    chan struct{}
+	interval    time.Duration
 }
 
 // NewPostCloseSweeper constructs the sweeper.
@@ -45,11 +41,32 @@ func NewPostCloseSweeper(
 		runCommand:  runCommand,
 		addComment:  addComment,
 		stopChan:    make(chan struct{}),
+		interval:    time.Hour,
 	}
 }
 
-// Start launches the scan loop (GREEN phase wires the periodic cadence).
-func (s *PostCloseSweeper) Start() {}
+// Start launches the periodic scan loop (1h cadence + once at startup).
+func (s *PostCloseSweeper) Start() {
+	if s == nil || s.beadsClient == nil || s.getProjects == nil || s.runCommand == nil {
+		return
+	}
+	log.Printf("[PostCloseSweep] 🔎 post-close verification sweep enabled (interval: %v)", s.interval)
+	go s.run()
+}
+
+func (s *PostCloseSweeper) run() {
+	ticker := time.NewTicker(s.interval)
+	defer ticker.Stop()
+	s.scan()
+	for {
+		select {
+		case <-s.stopChan:
+			return
+		case <-ticker.C:
+			s.scan()
+		}
+	}
+}
 
 // Stop halts the scan loop.
 func (s *PostCloseSweeper) Stop() {
@@ -63,7 +80,175 @@ func (s *PostCloseSweeper) Stop() {
 	}
 }
 
-// scan performs one sweep pass. Inert in the RED scaffold: the pinned tests
-// exercise the behavior contract and fail until the GREEN phase implements
-// the reopen / flake-guard logic here.
-func (s *PostCloseSweeper) scan() {}
+// scan performs one sweep pass over every project's closed beads carrying a
+// recent test_command, implementing the reopen / flake-guard / bounded
+// auto-reopen contract pinned by postclose_sweep_test.go.
+func (s *PostCloseSweeper) scan() {
+	if s == nil || s.beadsClient == nil || s.getProjects == nil || s.runCommand == nil {
+		return
+	}
+	for _, project := range s.getProjects() {
+		beads, err := s.beadsClient.ListBeads(project.Path, "")
+		if err != nil {
+			continue // fail-open: a listing error never blocks the sweep
+		}
+		for _, bead := range beads {
+			s.verifyBead(project, bead)
+		}
+	}
+}
+
+// postCloseMaxAge bounds the sweep to recently closed beads.
+const postCloseMaxAge = 24 * time.Hour
+
+func (s *PostCloseSweeper) verifyBead(project types.Project, bead types.Bead) {
+	if bead.Status != types.StatusClosed {
+		return
+	}
+	command := bead.Metadata["test_command"]
+	if command == "" {
+		return
+	}
+	if time.Since(bead.UpdatedAt) > postCloseMaxAge {
+		return
+	}
+
+	out1, err1 := s.runCommand(project.Path, command)
+	if err1 == nil {
+		return
+	}
+	out1 = runEvidence(out1, err1)
+	// Flake guard: one failing run is re-run once.
+	out2, err2 := s.runCommand(project.Path, command)
+	out2 = runEvidence(out2, err2)
+	if err2 == nil {
+		s.addLabels(project, bead, "postclose-flake")
+		return
+	}
+
+	if hasBeadLabel(bead.Labels, "postclose-reopened") {
+		// Bounded auto-reopen: failure after a prior reopen escalates to a human.
+		s.addLabels(project, bead, "needs-human")
+		return
+	}
+
+	if s.addComment != nil {
+		if err := s.addComment(project.Path, bead.ID, postCloseCommentBody(command, out1, err1, out2, err2)); err != nil {
+			return // fail-open: do not reopen without evidence attached (grafted from PR #293)
+		}
+	}
+	s.addLabels(project, bead, "postclose-reopened")
+	_ = s.beadsClient.UpdateBeadStatus(project.Path, bead.ID, types.StatusOpen)
+}
+
+func (s *PostCloseSweeper) addLabels(project types.Project, bead types.Bead, label string) {
+	if s.beadsClient == nil {
+		return
+	}
+	_ = s.beadsClient.UpdateBeadLabels(project.Path, "", bead.ID, []string{label})
+}
+
+// postCloseCommentBody renders both failing-run outputs for the reopen comment.
+func postCloseCommentBody(command, out1 string, err1 error, out2 string, err2 error) string {
+	var b strings.Builder
+	b.WriteString("Post-close verification sweep reopened this bead: the verification command failed twice in a row.\n\n")
+	b.WriteString("**Command:** `" + command + "`\n\n")
+	b.WriteString("### Run 1 output\n\n```\n" + out1 + "\n```\n")
+	if err1 != nil {
+		b.WriteString("Run 1 error: `" + err1.Error() + "`\n")
+	}
+	b.WriteString("\n### Run 2 output\n\n```\n" + out2 + "\n```\n")
+	if err2 != nil {
+		b.WriteString("Run 2 error: `" + err2.Error() + "`\n")
+	}
+	return b.String()
+}
+
+// runEvidence returns the command output, falling back to the error string
+// when the command produced no output of its own (e.g. `false` fails with
+// only the exit status). Grafted from PR #294.
+func runEvidence(out string, err error) string {
+	if strings.TrimSpace(out) == "" && err != nil {
+		return err.Error()
+	}
+	return out
+}
+// escapeCooldown suppresses repeat escape events for the same bead inside one
+// sweep window, so a chronically red command cannot flood the event stream.
+const escapeCooldown = 7 * 24 * time.Hour
+
+// verificationMetadataKeys are the bead metadata keys that carry an explicit
+// verification command (task-breakdown direct-task synthesis writes
+// test_command; the alias keeps other producers honest).
+var verificationMetadataKeys = []string{"test_command", "verification_command"}
+
+// verificationCmdLinePattern matches a description line that names a
+// verification command: "Test Command:", "**Verification command:**", etc.,
+// with the command in backticks.
+var verificationCmdLinePattern = regexp.MustCompile(`(?i)\*{0,2}(?:test|verification|acceptance)\s+command\*{0,2}\s*[:\-]`)
+
+// verificationCommandFor extracts the bead's declared verification command.
+// Metadata wins (it is machine-written); a "Test Command:" description line
+// with a backticked command is the fallback. Absent both → no contract.
+func verificationCommandFor(bead *types.Bead) (string, bool) {
+	if bead == nil {
+		return "", false
+	}
+	for _, key := range verificationMetadataKeys {
+		if cmd := strings.TrimSpace(bead.Metadata[key]); cmd != "" {
+			return cmd, true
+		}
+	}
+	for _, raw := range strings.Split(bead.Description, "\n") {
+		line := strings.TrimSpace(raw)
+		if !verificationCmdLinePattern.MatchString(line) {
+			continue
+		}
+		if cmd, ok := extractBacktickCommand(line); ok {
+			return cleanCommand(cmd), true
+		}
+		// Same-line command without backticks (e.g. "Test Command: npm test").
+		rest := strings.TrimSpace(verificationCmdLinePattern.ReplaceAllString(line, ""))
+		if rest != "" && looksLikeCommand(rest) {
+			return cleanCommand(rest), true
+		}
+	}
+	return "", false
+}
+
+// verificationCommandGuard runs the bead's declared verification command and
+// rejects the close when it exits nonzero. No declared command, no gate
+// runner, or a runner fault → fail open (the daemon gates and the close-path
+// diff/scope gates remain the primary verification). A command that RUNS and
+// exits nonzero is a product gate: fail closed via rejectClose.
+func (c *BeadCloser) verificationCommandGuard(bead *types.Bead, projectPath string) error {
+	cmd, ok := verificationCommandFor(bead)
+	if !ok {
+		return nil
+	}
+	if c.gateRunner == nil {
+		log.Printf("[VerificationCmd] %s: verification command declared but no gate runner attached (fail open): %s", bead.ID, cmd)
+		return nil
+	}
+	a, err := c.gateRunner.RunGate(GateRequest{
+		Project: bead.Project, BeadID: bead.ID.String(), Gate: "verification-command",
+		Spec:              GateSpec{Cmd: cmd, Parser: "exit-code"},
+		ProjectPath:       projectPath,
+		WorktreePath:      projectPath,
+		AllowMainCheckout: true,
+	})
+	if err != nil {
+		log.Printf("[VerificationCmd] %s: runner fault (fail open): %v", bead.ID, err)
+		return nil
+	}
+	if a.Status != GateStatusPassed {
+		log.Printf("[VerificationCmd] %s: verification command RED (exit %d) — close rejected", bead.ID, a.ExitCode)
+		return fmt.Errorf("verification-command-failed: bead %s verification command red (exit %d): %s", bead.ID, a.ExitCode, a.Summary)
+	}
+	log.Printf("[VerificationCmd] %s: verification command passed (exit %d)", bead.ID, a.ExitCode)
+	return nil
+}
+
+// PostCloseSweeper is the weekly escape-rate regression budget monitor.
+// Fail-open: listing/runner faults are logged and retried next tick; they
+// never gate anything.

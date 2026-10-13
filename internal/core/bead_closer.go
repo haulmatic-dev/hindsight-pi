@@ -314,6 +314,14 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			log.Printf("[closeBead] Bead %s closed while gates ran (status: %s); skipping integrate/close", bead.ID, fresh.Status)
 			return nil
 		}
+		// Escape-rate regression budget (NFR-001): the bead's own declared
+		// verification command (metadata test_command / "Test Command:") must
+		// exit 0 before the bead can reach closed-completed through ANY close
+		// path on this success route — verified-close and singleton integrate
+		// both pass through here. Nonzero exit rejects the close (reopen).
+		if err := c.verificationCommandGuard(bead, projectPath); err != nil {
+			return c.rejectClose(bead, projectPath, repoName, "verification-command-failed")
+		}
 	}
 
 	// Commit the chain worktree's changes for this bead before closing, and

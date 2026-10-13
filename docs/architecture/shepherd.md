@@ -268,6 +268,24 @@ for manual intervention or the Pan retry-quarantine repair. The park itself is
 never cleared, `in_progress` beads are skipped, and beads already carrying
 `needs-human` are left alone (idempotent). Default 48h; 0 disables.
 
+**Escape-rate regression budget (NFR-001, 2026-10-03).** Two halves:
+
+- *Close-path guard.* Every close path that terminates as completed runs the
+  bead's declared verification command (metadata `test_command`, or a
+  "Test Command:" description line) via the daemon gate runner. Verified-close
+  and singleton integration share the `Close` success route; Pan's
+  satisfied-close (`close_satisfied`) runs the guard too. A command that runs
+  and exits nonzero rejects the close (reopen, same as a red daemon gate);
+  the close proceeds only on a green command or when no command is declared.
+  Fail-open only when no gate runner is attached or the runner itself faults.
+- *Weekly sweep.* `PostCloseSweeper` (`overseer.postclose_sweep`, default on,
+  daily cadence over a 7-day window) re-runs the verification command of
+  closed-completed beads; a bead that now fails is labelled `postclose-escape`
+  and emits a typed `postclose_escape` event. Observe-and-report: terminal
+  beads are never reopened by the sweep. `scripts/escape-rate-weekly.sh`
+  computes the weekly escape rate from the store (`br list --status closed
+  --json`) and the event stream (`postclose_escape` count).
+
 **Worktree-unavailable hard-park (2026-09-13).** The same durability rule now
 covers the spawn path: when `EnsureWorktree` fails (dubious-ownership,
 foreign-repo path, unresolvable base), `SpawnInternal` fails the spawn

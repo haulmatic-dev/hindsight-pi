@@ -18,7 +18,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -74,6 +77,55 @@ func (o *Overseer) spawnPreflightBead(bead types.Bead, projectPath string) error
 	}
 
 	return nil
+}
+
+// spawnPreflightStoreOwnership blocks the spawn funnel when the project's
+// .beads store is owned by a uid other than the daemon's (bug hydra-6g4u).
+// br's fsqlite WAL layer uid-locks its namespace sidecars: a store written by
+// the daemon (uid 999) can never be opened interactively by the repo owner
+// ("fsqlite refused its namespace sidecar ... owned by uid 999"), and vice
+// versa. Remedy per the bead's option (a): the daemon stops managing
+// user-owned repos — it refuses to spawn work into them (fail-closed,
+// auto-resume if ownership is later corrected) instead of deepening the
+// cross-uid churn. The probe itself fails open: a missing store or an
+// unreadable path must not stall the fleet.
+var daemonUID = func() int { return os.Geteuid() }
+
+// storeOwnerUID reports the owning uid of <projectPath>/.beads.
+// missing=false signals the store does not exist (nothing to guard).
+func storeOwnerUID(projectPath string) (uid int, missing bool, err error) {
+	storeDir := filepath.Join(projectPath, ".beads")
+	fi, err := os.Stat(storeDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, true, nil
+		}
+		return 0, false, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false, fmt.Errorf("store dir %s: not a unix stat_t", storeDir)
+	}
+	return int(st.Uid), false, nil
+}
+
+func (o *Overseer) spawnPreflightStoreOwnership(bead types.Bead, projectPath string) error {
+	if projectPath == "" {
+		return nil
+	}
+	uid, missing, err := storeOwnerUID(projectPath)
+	if err != nil {
+		// Probe error ≠ proof of foreign ownership: fail open.
+		log.Printf("[Spawn] %s store-ownership preflight probe error (fail-open, spawning): %v", bead.ID, err)
+		return nil
+	}
+	if missing || uid == daemonUID() {
+		return nil
+	}
+	detail := fmt.Sprintf(".beads store owned by uid %d, daemon runs as uid %d — user-owned repo; daemon stops managing it (fsqlite sidecars are uid-locked, cross-uid access fails: br \"refused its namespace sidecar ... owned by uid\")", uid, daemonUID())
+	o.emitSpawnPreflightBlocked(projectPath, "spawn_blocked_store_ownership", bead, detail)
+	return &SpawnSuppressedError{BeadID: bead.ID.String(),
+		Reason: fmt.Sprintf("store owned by foreign uid %d (remedy: chown the store to the daemon uid or manage the repo user-side)", uid)}
 }
 
 // spawnPreflightPublishIdentity blocks the spawn funnel when the bead owner's

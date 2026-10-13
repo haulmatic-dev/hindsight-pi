@@ -567,6 +567,11 @@ func (o *Overseer) verifyPanFilingPremise(projectPath, beadID string) string {
 // beads, then creates the improvement bead. Counting only open beads let the
 // cap be bypassed whenever a filed bead was claimed (goes straight to
 // in_progress) before the next filing.
+
+// panFileSigTTL is the dedupe window for pan-filed wedge signatures: within
+// it, one normalized-signature finding files exactly one bead per project,
+// even if the earlier bead was closed or its cap slot freed. (PR #232)
+var panFileSigTTL = time.Hour
 func (o *Overseer) filePanBead(projectPath, beadID, title, description string) error {
 	if reason := o.verifyPanFilingPremise(projectPath, beadID); reason != "" {
 		o.emitPanFilingSkipped(projectPath, beadID, reason)
@@ -575,12 +580,25 @@ func (o *Overseer) filePanBead(projectPath, beadID, title, description string) e
 	if o.beadsClient == nil {
 		return fmt.Errorf("file-bead %s: beads client unavailable", beadID)
 	}
+	normTitle := pan.NormalizeReason(strings.TrimSpace(title))
+	sig := projectPath + "|" + normTitle
+	// Time-window dedupe: a signature filed (or deduped) within
+	// panFileSigTTL must not file again, even after the earlier wedge bead
+	// was closed — N blocked beads with one root cause yield ONE wedge bead.
+	now := time.Now()
+	o.panSigMu.Lock()
+	if o.recentPanSigs != nil {
+		if seen, ok := o.recentPanSigs[sig]; ok && now.Sub(seen) < panFileSigTTL {
+			o.panSigMu.Unlock()
+			return fmt.Errorf("file-bead %s: %w (%s)", beadID, pan.ErrFileBeadDuplicate, sig)
+		}
+	}
+	o.panSigMu.Unlock()
 	beads, err := o.beadsClient.ListBeads(projectPath, "")
 	if err != nil {
 		return fmt.Errorf("file-bead %s: list beads: %w", beadID, err)
 	}
 	openFiled := 0
-	normTitle := pan.NormalizeReason(strings.TrimSpace(title))
 	for _, b := range beads {
 		if b.Status.IsTerminal() {
 			continue
@@ -600,6 +618,12 @@ func (o *Overseer) filePanBead(projectPath, beadID, title, description string) e
 		// normalized title already tracks this finding — skip instead of filing
 		// a twin (session-level filedSigs dedupe is lost on daemon restart).
 		if pan.NormalizeReason(strings.TrimSpace(b.Title)) == normTitle {
+			o.panSigMu.Lock()
+			if o.recentPanSigs == nil {
+				o.recentPanSigs = make(map[string]time.Time)
+			}
+			o.recentPanSigs[sig] = time.Now()
+			o.panSigMu.Unlock()
 			return fmt.Errorf("file-bead %s: %w (%s)", beadID, pan.ErrFileBeadDuplicate, b.ID)
 		}
 	}
@@ -617,6 +641,14 @@ func (o *Overseer) filePanBead(projectPath, beadID, title, description string) e
 	if err != nil {
 		return fmt.Errorf("file-bead %s: %w", beadID, err)
 	}
+	// Record the signature only on success (a filer error must leave the
+	// window open so the retry can file).
+	o.panSigMu.Lock()
+	if o.recentPanSigs == nil {
+		o.recentPanSigs = make(map[string]time.Time)
+	}
+	o.recentPanSigs[sig] = time.Now()
+	o.panSigMu.Unlock()
 	if o.eventSink != nil {
 		o.eventSink.EmitRepo(projectPath, Event{
 			Type:    "pan_bead_filed",
