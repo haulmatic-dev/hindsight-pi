@@ -687,6 +687,15 @@ type OverseerConfig struct {
 	DefaultRetries        int                      `yaml:"default_retries"`
 	MaxRetries            int                      `yaml:"max_retries"`
 	WorkerTimeout         time.Duration            `yaml:"worker_timeout"`
+	// WorkerMemoryMaxMB caps each worker (plus its children: pi, jest, npm)
+	// in a dedicated cgroup with memory.max (hydra-3ocq). Requires cgroup v2
+	// + Delegate=yes on hydra.service; without it, containment logs a warning
+	// and the worker runs uncapped (fail-open). <=0 disables. Default 5120 (4G OOM-killed borderline-healthy workers; observed peak 3.7G).
+	WorkerMemoryMaxMB int `yaml:"worker_memory_max_mb"`
+	// WorkerNodeHeapMB caps the V8 heap of every node process in the worker
+	// tree via NODE_OPTIONS=--max-old-space-size (pi itself and jest).
+	// Only applied when NODE_OPTIONS is not already set. <=0 disables.
+	WorkerNodeHeapMB int `yaml:"worker_node_heap_mb"`
 	RetryDelay            time.Duration            `yaml:"retry_delay"`
 	ResourceMonitoring    ResourceMonitoringConfig `yaml:"resource_monitoring"`
 	ChainDetection        ChainDetectionConfig     `yaml:"chain_detection"`
@@ -917,6 +926,8 @@ func DefaultConfig() *Config {
 			PostCloseSweep:            true,
 			PRAgingDays:               PRAgingThresholdDays,
 			WorkerTimeout:             30 * time.Minute,
+			WorkerMemoryMaxMB:         5120,
+			WorkerNodeHeapMB:          3072,
 			ChainDetection: ChainDetectionConfig{
 				Enabled:  true,
 				Interval: 10 * time.Second,

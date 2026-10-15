@@ -641,6 +641,10 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 
 	log.Printf("[Worker] Process started with PID %d for bead %s", cmd.Process.Pid, beadIDStr)
 
+	// Per-worker memory containment (hydra-3ocq): a runaway worker (jest heap
+	// spike) must kill only itself, not the daemon + fleet. Fail-open.
+	s.confineWorkerToCgroup(cmd.Process.Pid, beadIDStr)
+
 	// Stream worker output to a per-bead file to keep the daemon log lean. The
 	// full firehose (Pi reasoning, tool output, Hindsight recalls) lands in
 	// <HYDRA_HOME>/logs/workers/<bead>-<pid>.log; only notable lines (errors,

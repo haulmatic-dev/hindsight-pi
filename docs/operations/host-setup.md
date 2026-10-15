@@ -250,6 +250,43 @@ Group=beads
 UMask=0007
 ```
 
+```ini
+# cgroup-memory.conf — per-worker containment (hydra-3ocq, 2026-10-15 after
+# 4 daemon OOM deaths in one night). Delegate=yes hands the service cgroup
+# subtree to the hydra uid so worker_spawner can create per-worker
+# memory.max cgroups (daemon first moves itself into a `daemon/` leaf —
+# the kernel's no-internal-process constraint forbids enabling +memory on a
+# cgroup that directly contains processes). MemoryHigh/Max are the
+# fleet-level backstop; per-worker caps must trip first: keep
+# max_workers * worker_memory_max_mb + ~2G (daemon + hindsight) < MemoryMax.
+[Service]
+Delegate=yes
+MemoryHigh=16G
+MemoryMax=19G
+```
+
+**Swap:** zram is REQUIRED, disk-only swap absorbs jest heap spikes too
+slowly (2026-10-15: 15G swapfile full + OOM anyway). Needs
+`linux-modules-extra-$(uname -r)` (zram.ko lives there, not in
+linux-modules) + `systemd-zram-generator` with
+`/etc/systemd/zram-generator.conf`:
+
+```ini
+[zram0]
+zram-size = ram / 2
+compression-algorithm = zstd
+swap-priority = 100
+fs-type = swap
+```
+
+Verify: `zramctl` shows `/dev/zram0 zstd` at priority 100 above the
+swapfile's -2.
+
+**hindsight.service** also needs a memory cap — the python process leaks
+slowly (observed 1.8G RSS; restart returned it to 160MB):
+`/etc/systemd/system/hindsight.service.d/memory.conf` with
+`MemoryMax=2G` / `MemoryHigh=1500M`.
+
 **Verify:** `systemctl daemon-reload && systemctl start hydra`;
 `systemctl status hydra` active; `curl -s localhost:8089/health`.
 
