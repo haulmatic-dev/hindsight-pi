@@ -37,6 +37,13 @@ func setupEpicGuardOverseer(t *testing.T) (*Overseer, *mockBeadsClient) {
 func epicAndChild(epicID, childID string, childStatus types.BeadStatus, childDeps []string) (types.Bead, types.Bead) {
 	epic := types.Bead{ID: types.BeadID(epicID), Project: "proj", Status: types.StatusOpen, Type: "epic"}
 	child := types.Bead{ID: types.BeadID(childID), Project: "proj", Status: childStatus, Type: "task", Dependencies: toBeadIDs(childDeps)}
+	// The guard reads the epic's dependents from Metadata["dependent_ids"]
+	// (populated by `br show` parsing in production).
+	for _, dep := range childDeps {
+		if dep == epicID {
+			epic.Metadata = map[string]string{"dependent_ids": childID}
+		}
+	}
 	return epic, child
 }
 
@@ -86,19 +93,19 @@ func TestPersistClosedEpics_ClosesWhenStoreConfirmsNoOpenDependents(t *testing.T
 	}
 }
 
-func TestPersistClosedEpics_RefusesOnStoreListError(t *testing.T) {
+func TestPersistClosedEpics_RefusesOnStoreGetError(t *testing.T) {
 	o, mock := setupEpicGuardOverseer(t)
 	epic, child := epicAndChild("proj-epic1", "proj-task1", types.StatusClosed, []string{"proj-epic1"})
 	mock.addBead(epic)
 	mock.addBead(child)
-	mock.listErr = errListBoom
+	mock.getErr = errListBoom
 
 	o.dag.AddNode(epic)
 	closed := o.dag.CloseReadyEpics()
 	o.persistClosedEpics(closed)
 
 	if len(mock.closeCalls) != 0 {
-		t.Fatalf("listing failure must refuse close; got %v", mock.closeCalls)
+		t.Fatalf("store read failure must refuse close; got %v", mock.closeCalls)
 	}
 }
 
@@ -185,5 +192,51 @@ func TestPersistClosedEpics_BrOpenChildrenRefusal_ClassifiedAsRefusal(t *testing
 	}
 	if !found {
 		t.Fatal("expected epic_close_refused/open_children event on the stream")
+	}
+}
+
+// TestFindProjectPathForBead_NamespacedID is the hydra-ysaz regression: bead
+// IDs are user-namespaced ("ajantha-srv-smart-engine-1u3") while project.Name
+// is not ("srv-smart-engine"); the old prefix-only match never fired and epic
+// auto-close persistence silently no-opped forever (185x "Could not find
+// project path for epic" in one campaign).
+func TestFindProjectPathForBead_NamespacedID(t *testing.T) {
+	o, mock := setupEpicGuardOverseer(t)
+	o.projects = []types.Project{{Name: "srv-smart-engine", Path: filepath.Join(t.TempDir(), "srv-smart-engine"), Type: types.RepoTypeSingle}}
+	epic := types.Bead{
+		ID:      "ajantha-srv-smart-engine-1u3",
+		Project: "srv-smart-engine", // set from the store context during ListBeads
+		Status:  types.StatusOpen,
+		Type:    "epic",
+	}
+	mock.addBead(epic)
+	o.dag.AddNode(epic)
+
+	path, _ := o.findProjectPathForBead("ajantha-srv-smart-engine-1u3")
+	if path == "" {
+		t.Fatal("namespaced epic ID must resolve to its project path via the DAG bead record")
+	}
+
+	closed := o.dag.CloseReadyEpics()
+	o.persistClosedEpics(closed)
+	if len(mock.closeCalls) != 1 {
+		t.Fatalf("epic with no dependents must close, got %v", mock.closeCalls)
+	}
+}
+
+// TestFindProjectPathForBead_NamespacedIDSegmentFallback covers ghost nodes
+// and any bead whose DAG record lacks a Project: the exact-segment fallback
+// ("-<name>-" inside the ID) must resolve, and must not substring-match a
+// shorter project name.
+func TestFindProjectPathForBead_NamespacedIDSegmentFallback(t *testing.T) {
+	o, _ := setupEpicGuardOverseer(t)
+	o.projects = []types.Project{
+		{Name: "engine", Path: "/wrong", Type: types.RepoTypeSingle},
+		{Name: "srv-smart-engine", Path: "/right", Type: types.RepoTypeSingle},
+	}
+	// No DAG node at all: pure ID matching.
+	path, _ := o.findProjectPathForBead("ajantha-srv-smart-engine-1u3")
+	if path != "/right" {
+		t.Fatalf("segment fallback resolved %q, want /right", path)
 	}
 }

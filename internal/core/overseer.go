@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1308,7 +1309,13 @@ func (o *Overseer) persistClosedEpics(beadIDs []string) {
 		if o.epicCloseGuard.recentlyRefused(id, time.Now()) {
 			continue
 		}
-		if o.epicHasOpenDependent(id) {
+		projectPath, _ := o.findProjectPathForBead(id)
+		if projectPath == "" {
+			log.Printf("[DAG] Could not find project path for epic %s; skipping persistence", id)
+			o.epicCloseGuard.markRefused(id, time.Now())
+			continue
+		}
+		if o.epicHasOpenDependent(id, projectPath) {
 			log.Printf("[DAG] Epic %s has open dependents in the beads store; refusing auto-close (DAG view incomplete)", id)
 			o.epicCloseGuard.markRefused(id, time.Now())
 			if o.eventSink != nil {
@@ -1316,12 +1323,6 @@ func (o *Overseer) persistClosedEpics(beadIDs []string) {
 					Reason: "open_dependents",
 					Detail: "CloseReadyEpics proposed closing this epic but a bead-store scan found non-terminal dependents; close refused (fail-closed)."})
 			}
-			continue
-		}
-		projectPath, _ := o.findProjectPathForBead(id)
-		if projectPath == "" {
-			log.Printf("[DAG] Could not find project path for epic %s; skipping persistence", id)
-			o.epicCloseGuard.markRefused(id, time.Now())
 			continue
 		}
 		reason := "epic auto-close: all dependencies and children closed"
@@ -1356,6 +1357,25 @@ func (o *Overseer) persistClosedEpics(beadIDs []string) {
 // bead's project prefix (e.g. "srv-file-handler-xyz" -> project "srv-file-handler").
 // Returns the first matching project's path.
 func (o *Overseer) findProjectPathForBead(beadID string) (string, types.BeadID) {
+	// Prefer the DAG's bead record: bead IDs may be user-namespaced
+	// ("ajantha-srv-smart-engine-1u3") while project.Name is not
+	// ("srv-smart-engine"), so the raw prefix match below never fires and
+	// epic auto-close persistence silently no-ops forever (hydra-ysaz).
+	// dag carries its own mutex, so this is safe under dagMu.
+	if o.dag != nil {
+		if node, ok := o.dag.GetNode(beadID); ok && node.Bead.Project != "" {
+			for _, project := range o.GetProjects() {
+				if project.Name == node.Bead.Project {
+					if project.Type == types.RepoTypeMulti && len(project.Repos) > 0 {
+						if dir := repoDirForBead(project, beadID, o.beadsClient); dir != "" {
+							return dir, types.BeadID(beadID)
+						}
+					}
+					return project.Path, types.BeadID(beadID)
+				}
+			}
+		}
+	}
 	for _, project := range o.GetProjects() {
 		if len(beadID) > len(project.Name) && beadID[:len(project.Name)+1] == project.Name+"-" {
 			if project.Type == types.RepoTypeMulti && len(project.Repos) > 0 {
@@ -1363,6 +1383,28 @@ func (o *Overseer) findProjectPathForBead(beadID string) (string, types.BeadID) 
 				// there fails ("Could not find project path for epic"). Find
 				// the repo whose bead store contains the exact ID
 				// (nipuna.j fms incident, 2026-09-30).
+				if dir := repoDirForBead(project, beadID, o.beadsClient); dir != "" {
+					return dir, types.BeadID(beadID)
+				}
+			}
+			return project.Path, types.BeadID(beadID)
+		}
+	}
+	// Namespaced-ID fallback: strip the trailing "-<suffix>" and match the
+	// project name as the whole namespace or a hyphen-delimited tail of it
+	// ("ajantha-srv-smart-engine-1u3" -> namespace "ajantha-srv-smart-engine"
+	// tail-matches "srv-smart-engine"). Longest name first so
+	// "srv-smart-engine" beats "engine"; naive Contains("-"+name+"-")
+	// substring-matches hyphenated names ("-engine-" inside "smart-engine-").
+	ns := beadID
+	if idx := strings.LastIndex(beadID, "-"); idx > 0 {
+		ns = beadID[:idx]
+	}
+	projects := append([]types.Project(nil), o.GetProjects()...)
+	sort.Slice(projects, func(i, j int) bool { return len(projects[i].Name) > len(projects[j].Name) })
+	for _, project := range projects {
+		if ns == project.Name || strings.HasSuffix(ns, "-"+project.Name) {
+			if project.Type == types.RepoTypeMulti && len(project.Repos) > 0 {
 				if dir := repoDirForBead(project, beadID, o.beadsClient); dir != "" {
 					return dir, types.BeadID(beadID)
 				}
