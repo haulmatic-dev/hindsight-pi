@@ -2,6 +2,7 @@ package core
 
 import (
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -156,6 +157,9 @@ func (i *ChainCompletionInitializer) Initialize() {
 					log.Printf("[Worktree] quarantine failed for chain %s: %v", event.ChainInfo.RootBeadID, qErr)
 				} else if qBranch != "" {
 					log.Printf("[Worktree] quarantined failed chain %s on %s (not integrated)", event.ChainInfo.RootBeadID, qBranch)
+					if o.quarantineReconciler != nil {
+						o.quarantineReconciler.Record(projectPath, filepath.Base(projectPath), key, qBranch, event.ChainInfo.AllBeadIDs)
+					}
 					if o.beadCloser != nil && o.beadCloser.events != nil {
 						o.beadCloser.events.EmitRepo(projectPath, Event{Type: "chain_quarantined",
 							Bead: key, Reason: "failed_beads_in_chain",

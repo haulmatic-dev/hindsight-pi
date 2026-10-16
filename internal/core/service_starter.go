@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -743,6 +744,23 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	o.beadFileReader = NewBeadFileReader(o.projects)
 	o.beadAnalyzer.SetProjects(o.projects)
 
+	// Quarantine reconciler: constructed here, not in NewOverseer — it needs
+	// beadFileReader, which does not exist yet at NewOverseer time (first
+	// deploy silently never built it, 2026-10-16). Requires worktree isolation.
+	if o.worktreeManager != nil && o.quarantineReconciler == nil {
+		if home := os.Getenv("HYDRA_HOME"); home != "" {
+			o.quarantineReconciler = NewQuarantineReconciler(
+				filepath.Join(home, "quarantined-chains.json"),
+				o.worktreeManager, o.beadFileReader, o.eventSink,
+				func() []types.Project { return o.projects })
+			o.quarantineReconciler.SetRevalidation(
+				o.beadCloser.RunVerificationGateForRevalidation,
+				func(pp string, id types.BeadID, l []string) error { return o.beadsClient.RemoveBeadLabels(pp, "", id, l) },
+				func(pp string, id types.BeadID, l []string) error { return o.beadsClient.UpdateBeadLabels(pp, "", id, l) })
+			o.quarantineReconciler.Start()
+		}
+	}
+
 	// Update bead discovery with discovered projects
 	if o.beadDiscovery != nil {
 		o.beadDiscovery.SetProjects(o.projects)
@@ -805,6 +823,9 @@ func (s *ServiceStarter) Stop() {
 	}
 	if o.integrationSweep != nil {
 		o.integrationSweep.Stop()
+	}
+	if o.quarantineReconciler != nil {
+		o.quarantineReconciler.Stop()
 	}
 	if o.evidenceSweep != nil {
 		o.evidenceSweep.Stop()

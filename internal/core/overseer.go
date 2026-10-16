@@ -144,6 +144,10 @@ type Overseer struct {
 	// integration-parked beads; nil unless HYDRA_HOME is set.
 	integrationRetest *IntegrationRetestStage
 
+	// Quarantine reconciler: re-verdicts quarantined chains and re-integrates
+	// them once no member carries closed-failed; nil without worktree isolation.
+	quarantineReconciler *QuarantineReconciler
+
 	// MCP manager for Model Context Protocol operations
 	mcpManager *MCPManager
 
@@ -685,6 +689,8 @@ func NewOverseer(config *Config) *Overseer {
 		o.worktreeManager = NewWorktreeManager()
 		o.workerSpawner.SetWorktreeManager(o.worktreeManager, o.chainKeyForBead)
 		o.beadCloser.SetWorktreeManager(o.worktreeManager, o.chainKeyForBead, o.isChainMember)
+		// The quarantine reconciler is constructed in ServiceStarter — it needs
+		// beadFileReader, which does not exist yet at this point.
 		log.Printf("[Overseer] Worktree isolation ENABLED")
 	}
 

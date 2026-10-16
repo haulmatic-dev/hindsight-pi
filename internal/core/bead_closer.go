@@ -180,6 +180,44 @@ func (c *BeadCloser) retainFailedClose(bead *types.Bead, worker *types.Worker, e
 
 // closeGateWorktree resolves the bead's chain worktree for close-time gates;
 // "" when the worktree is gone (gates then fall back to the project path).
+// RunVerificationGateForRevalidation reruns the bead's declared verification
+// command in its chain worktree (same resolution as the close-time guard) on
+// behalf of the post-close revalidation sweep. ran=false means there was
+// nothing to run — no declared command, no gate runner, or a runner fault —
+// and the caller must leave the closed-failed label in place (fail-closed:
+// only positive green evidence overturns a failure verdict).
+// worktreePath pins the gate directory when the caller already resolved the
+// correct tree (the quarantine reconciler's scratch checkout of the
+// quarantine branch tip); empty falls back to the close-time resolution.
+func (c *BeadCloser) RunVerificationGateForRevalidation(bead *types.Bead, projectPath, worktreePath string) (passed, ran bool) {
+	cmd, ok := verificationCommandFor(bead)
+	if !ok || c.gateRunner == nil {
+		return false, false
+	}
+	gatePath := projectPath
+	if worktreePath != "" {
+		gatePath = worktreePath
+	} else if wt := closeGateWorktree(c, projectPath, bead); wt != "" {
+		gatePath = wt
+	}
+	a, err := c.gateRunner.RunGate(GateRequest{
+		Project: bead.Project, BeadID: bead.ID.String(), Gate: "verification-command",
+		// Revalidation is a background operation, not a close gate: a full-repo
+		// coverage suite legitimately runs past the 10-minute gate default, and
+		// a timeout would read as RED and keep a truthful verdict from
+		// overturning the stale one.
+		Spec:              GateSpec{Cmd: cmd, Parser: "exit-code", Timeout: 90 * time.Minute},
+		ProjectPath:       projectPath,
+		WorktreePath:      gatePath,
+		AllowMainCheckout: true,
+	})
+	if err != nil {
+		log.Printf("[VerificationCmd] %s: revalidation runner fault (label stands): %v", bead.ID, err)
+		return false, false
+	}
+	return a.Status == GateStatusPassed, true
+}
+
 func closeGateWorktree(c *BeadCloser, projectPath string, bead *types.Bead) string {
 	if c.worktreeManager == nil || c.chainKeyFn == nil {
 		return ""
@@ -436,6 +474,23 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			log.Printf("[closeBead] Failed to add %s label to %s: %v", closedFailedLabel, bead.ID, err)
 		}
 	}
+	// Close-time coherence: a completed close contradicts a pre-existing
+	// closed-failed verdict on the same bead (mqn, 2026-10-16: closed with
+	// reason "completed" while carrying closed-failed — the stale label then
+	// quarantined a 132-bead chain whose PRD validation had passed). A
+	// completed close scrubs the stale verdict and marks it revalidated.
+	if reason == "completed" && bead != nil && c.beadsClient != nil && hasBeadLabel(bead.Labels, closedFailedLabel) {
+		if err := c.beadsClient.RemoveBeadLabels(projectPath, repoName, bead.ID, []string{closedFailedLabel}); err != nil {
+			log.Printf("[closeBead] Failed to scrub stale %s label from %s: %v", closedFailedLabel, bead.ID, err)
+		} else {
+			if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{closedFailedRevalidatedLabel}); err != nil {
+				log.Printf("[closeBead] Failed to add %s label to %s: %v", closedFailedRevalidatedLabel, bead.ID, err)
+			}
+			log.Printf("[closeBead] %s closed completed — scrubbed stale %s label", bead.ID, closedFailedLabel)
+			c.events.EmitRepo(projectPath, Event{Type: "label_revalidated", Project: repoName,
+				Bead: bead.ID.String(), Reason: "completed_close_scrubs_closed_failed"})
+		}
+	}
 	c.events.EmitRepo(projectPath, Event{Type: "bead_closed", Project: repoName,
 		Bead: worker.BeadID.String(), Reason: reason,
 		Fields: map[string]any{"exit_code": exitCode, "success": success}})
@@ -548,6 +603,12 @@ const fixRecursionCappedLabel = "fix-recursion-capped"
 // store keeps no close reason, so this label is the durable record other
 // components (chain verdicts, the Shepherd cron) read.
 const closedFailedLabel = "closed-failed"
+
+// closedFailedRevalidatedLabel marks a bead whose closed-failed verdict was
+// later overturned by positive evidence (a completed close, or a green gate
+// rerun by the post-close revalidation sweep). Audit trail only — the
+// chain verdict keys on closedFailedLabel alone.
+const closedFailedRevalidatedLabel = "closed-failed-revalidated"
 
 // integrationExhaustedLabel marks a bead whose singleton integrate/push
 // failed maxConsecutiveIntegrationFailures times in a row. Like
