@@ -370,7 +370,12 @@ func (r *QuarantineReconciler) revalidateMemberLocked(e *QuarantinedChainEntry, 
 	if isGitWorktree(scratch) {
 		_, _ = gitOut(e.ProjectPath, "worktree", "remove", scratch, "--force")
 	}
-	if _, err := gitOut(e.ProjectPath, "worktree", "add", "--detach", scratch, e.Branch); err != nil {
+	// core.hooksPath=/dev/null: repo hooks (husky post-checkout) run during
+	// worktree add and fail in the daemon's clean environment, killing the
+	// scratch checkout before the gate can run (live 2026-10-16: ilu
+	// revalidation died on .husky/_/h with exit status 2). Daemon-internal
+	// git operations have no business triggering repo hooks.
+	if _, err := gitOut(e.ProjectPath, "-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach", scratch, e.Branch); err != nil {
 		log.Printf("[QuarantineReconciler] %s: scratch worktree for revalidation failed (label stands): %v", e.Key, err)
 		return
 	}
