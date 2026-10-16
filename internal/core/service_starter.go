@@ -50,6 +50,9 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	if o.integrationSweep != nil {
 		o.integrationSweep.Start()
 	}
+	if o.quarantineReconciler != nil {
+		o.quarantineReconciler.Start()
+	}
 	if o.evidenceSweep != nil {
 		o.evidenceSweep.Start()
 	}
@@ -805,6 +808,9 @@ func (s *ServiceStarter) Stop() {
 	}
 	if o.integrationSweep != nil {
 		o.integrationSweep.Stop()
+	}
+	if o.quarantineReconciler != nil {
+		o.quarantineReconciler.Stop()
 	}
 	if o.evidenceSweep != nil {
 		o.evidenceSweep.Stop()
