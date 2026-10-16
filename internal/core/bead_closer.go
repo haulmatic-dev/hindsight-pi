@@ -202,7 +202,11 @@ func (c *BeadCloser) RunVerificationGateForRevalidation(bead *types.Bead, projec
 	}
 	a, err := c.gateRunner.RunGate(GateRequest{
 		Project: bead.Project, BeadID: bead.ID.String(), Gate: "verification-command",
-		Spec:              GateSpec{Cmd: cmd, Parser: "exit-code"},
+		// Revalidation is a background operation, not a close gate: a full-repo
+		// coverage suite legitimately runs past the 10-minute gate default, and
+		// a timeout would read as RED and keep a truthful verdict from
+		// overturning the stale one.
+		Spec:              GateSpec{Cmd: cmd, Parser: "exit-code", Timeout: 90 * time.Minute},
 		ProjectPath:       projectPath,
 		WorktreePath:      gatePath,
 		AllowMainCheckout: true,
