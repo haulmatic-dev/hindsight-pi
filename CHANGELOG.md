@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Fixed
+- **Verification-command gate runs in the bead's chain worktree, not the main checkout** — pre-integration the main checkout has neither the bead's code nor a fresh dependency install, so a declared `test_command` was RED no matter what the worker did (live 2026-10-15: empty main-checkout `node_modules` → "Module ts-jest ... not found" burned 5 attempts on a syntax bead and escalated a GREEN bead 3/3 on an unwinnable gate). Falls back to main checkout only when no worktree exists; the weekly postclose sweep still re-verifies integrated state on main.
 - **Epic auto-close never persisted for user-namespaced bead IDs** (`hydra-ysaz`): `findProjectPathForBead` matched raw `project.Name` prefixes, but bead IDs are user-namespaced (`ajantha-srv-smart-engine-1u3`), so every epic auto-close decision was discarded with `Could not find project path for epic` (185x in one campaign) and epics stayed open forever. Resolution now prefers the DAG bead's `Project` field, with a longest-first namespace-tail fallback. Also fixed the epic close guard being vacuous: it scanned `ListBeads` output for `Dependencies`, which that parser never populates — the designed fail-closed gate was fail-open since it shipped. It now reads the epic's `dependent_ids` from `br show` metadata and verifies each dependent against the session-completed map, the DAG, then the store.
 
 ### Fixed

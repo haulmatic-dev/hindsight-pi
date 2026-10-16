@@ -231,11 +231,24 @@ func (c *BeadCloser) verificationCommandGuard(bead *types.Bead, projectPath stri
 		log.Printf("[VerificationCmd] %s: verification command declared but no gate runner attached (fail open): %s", bead.ID, cmd)
 		return nil
 	}
+	// Run in the bead's chain worktree when one exists: the worktree is where
+	// the work AND the dependency install live. Running in the main checkout
+	// pre-integration verifies the wrong tree — its node_modules may be stale
+	// or empty and the bead's code is not there yet, so the gate is RED no
+	// matter what the worker did (2026-10-15: ts-jest-missing in an empty
+	// main-checkout node_modules burned 5 attempts on 269, escalated vv3 3/3,
+	// and would have mass-escalated 15 NFR beads). Main checkout remains the
+	// fallback for beads with no live worktree; the weekly postclose sweep
+	// re-verifies integrated state on main.
+	gatePath := projectPath
+	if wt := closeGateWorktree(c, projectPath, bead); wt != "" {
+		gatePath = wt
+	}
 	a, err := c.gateRunner.RunGate(GateRequest{
 		Project: bead.Project, BeadID: bead.ID.String(), Gate: "verification-command",
 		Spec:              GateSpec{Cmd: cmd, Parser: "exit-code"},
 		ProjectPath:       projectPath,
-		WorktreePath:      projectPath,
+		WorktreePath:      gatePath,
 		AllowMainCheckout: true,
 	})
 	if err != nil {
