@@ -259,6 +259,8 @@ UMask=0007
 # cgroup that directly contains processes). MemoryHigh/Max are the
 # fleet-level backstop; per-worker caps must trip first: keep
 # max_workers * worker_memory_max_mb + ~2G (daemon + hindsight) < MemoryMax.
+# Also: `resource_monitoring.min_memory_available_mb` (default 2500) refuses a
+# spawn while host MemAvailable is below the floor (hydra-3ocq OOM guard).
 [Service]
 Delegate=yes
 MemoryHigh=16G
