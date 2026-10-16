@@ -6,6 +6,10 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+
+### Fixed
+- **Epic auto-close never persisted for user-namespaced bead IDs** (`hydra-ysaz`): `findProjectPathForBead` matched raw `project.Name` prefixes, but bead IDs are user-namespaced (`ajantha-srv-smart-engine-1u3`), so every epic auto-close decision was discarded with `Could not find project path for epic` (185x in one campaign) and epics stayed open forever. Resolution now prefers the DAG bead's `Project` field, with a longest-first namespace-tail fallback. Also fixed the epic close guard being vacuous: it scanned `ListBeads` output for `Dependencies`, which that parser never populates — the designed fail-closed gate was fail-open since it shipped. It now reads the epic's `dependent_ids` from `br show` metadata and verifies each dependent against the session-completed map, the DAG, then the store.
+
 ### Fixed
 - **Store-ownership spawn preflight downgraded to fail-open** (#296 follow-up): the uid-mismatch heuristic blocked every spawn into user-owned repos (`spawn_blocked_store_ownership` events, zero log lines, silent wedge) even though cross-uid reads work and workers run as the repo owner via `su`. The sidecar uid-lock is a write hazard; the preflight now warns (typed event `spawn_warn_store_ownership` + log) and lets real write failures surface at the write site.
 ### Added
