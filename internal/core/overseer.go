@@ -689,16 +689,8 @@ func NewOverseer(config *Config) *Overseer {
 		o.worktreeManager = NewWorktreeManager()
 		o.workerSpawner.SetWorktreeManager(o.worktreeManager, o.chainKeyForBead)
 		o.beadCloser.SetWorktreeManager(o.worktreeManager, o.chainKeyForBead, o.isChainMember)
-		if home := os.Getenv("HYDRA_HOME"); home != "" && o.beadFileReader != nil {
-			o.quarantineReconciler = NewQuarantineReconciler(
-				filepath.Join(home, "quarantined-chains.json"),
-				o.worktreeManager, o.beadFileReader, o.eventSink,
-				func() []types.Project { return o.projects })
-			o.quarantineReconciler.SetRevalidation(
-				o.beadCloser.RunVerificationGateForRevalidation,
-				func(pp string, id types.BeadID, l []string) error { return o.beadsClient.RemoveBeadLabels(pp, "", id, l) },
-				func(pp string, id types.BeadID, l []string) error { return o.beadsClient.UpdateBeadLabels(pp, "", id, l) })
-		}
+		// The quarantine reconciler is constructed in ServiceStarter — it needs
+		// beadFileReader, which does not exist yet at this point.
 		log.Printf("[Overseer] Worktree isolation ENABLED")
 	}
 
