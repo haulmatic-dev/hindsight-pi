@@ -6,6 +6,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+- Orphan-claim P0 triage (docs/discovery/orphanclaim-triage-yzi1.md): all three digest claims verified stale at 2026-10-06 14:02 UTC — 0 true orphan claims (4 live workers, escalated/pan-filed excluded by design, rest registry-completed churn reopened by Charon), publisher wedge absent (PR #268 merged, 0 unlanded commits), disk 39%. No code change.
 
 ### Added
 - **task-breakdown `--validate`: analyze-only compilation pre-check** — `node cli.mjs <prd> --validate` runs the deterministic analyzer and creates nothing, failing loudly (exit 1) on both PRD authoring failure modes seen live (2026-10-18, srv-data-harbour): zero `### FR-*`/`### NFR-*` headers (task-breakdown previously reported `success: true` with an empty skeleton chain) and target-file overlap between FRs (DRYAD single-owner rule). The create-prd skill's Phase 4 now mandates this gate before reporting a saved PRD, including the terminal-FR consolidation pattern for shared config files. Authored during a manual ops session; `Authored by a Hydra dogfood run.`-adjacent context: no worker involved.
