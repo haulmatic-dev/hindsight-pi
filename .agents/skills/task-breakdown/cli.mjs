@@ -3,15 +3,17 @@
 /**
  * CLI Wrapper for TaskBreakdownRunner
  *
- * Usage: node cli.mjs <prd-path> [--json] [--session-id <id>] [--no-lint]
+ * Usage: node cli.mjs <prd-path> [--json] [--session-id <id>] [--no-lint] [--validate]
  * Example: node cli.mjs docs/PRD/calculator.md
  * Example: node cli.mjs docs/PRD/calculator.md --json
  * Example: node cli.mjs docs/PRD/calculator.md --json --session-id my-session
+ * Example: node cli.mjs docs/PRD/calculator.md --validate
  */
 
 import path from 'node:path';
 import { runPreflight } from './preflight.mjs';
 import { TaskBreakdownRunner } from './runner.mjs';
+import { analyzePRDDeterministic } from './analyzer.mjs';
 
 /**
  * Parse command line arguments into an options object.
@@ -26,6 +28,7 @@ function parseArgs(argv) {
     json: false,
     sessionId: null,
     noLint: false,
+    validate: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -35,6 +38,8 @@ function parseArgs(argv) {
       options.json = true;
     } else if (arg === '--no-lint') {
       options.noLint = true;
+    } else if (arg === '--validate') {
+      options.validate = true;
     } else if (arg === '--session-id') {
       options.sessionId = args[++i];
     } else if (!arg.startsWith('--') && !options.prdPath) {
@@ -125,7 +130,7 @@ async function main() {
       console.error('❌ Error:', validation.message);
       console.error('');
       console.error(
-        'Usage: node cli.mjs <prd-path> [--json] [--session-id <id>] [--no-lint]',
+        'Usage: node cli.mjs <prd-path> [--json] [--session-id <id>] [--no-lint] [--validate]',
       );
       console.error('Example: node cli.mjs docs/PRD/calculator.md');
       console.error('Example: node cli.mjs docs/PRD/calculator.md --json');
@@ -134,6 +139,64 @@ async function main() {
   }
 
   const absolutePath = path.resolve(options.prdPath);
+
+  // Analyze-only mode: run the deterministic analyzer against the PRD and
+  // create nothing. Mandatory compilation pre-check for create-prd (and for
+  // operators amending a PRD): a PRD that fails here can never compile into
+  // beads, so the error must surface BEFORE task creation, not after — the
+  // 2026-10-18 srv-data-harbour incident produced a success:true run with 0
+  // requirements (empty skeleton chain) because nothing validated the PRD
+  // against the analyzer contract at authoring time.
+  if (options.validate) {
+    const fs = await import('node:fs');
+    let prdContent;
+    try {
+      prdContent = fs.readFileSync(absolutePath, 'utf8');
+    } catch (err) {
+      console.error('❌ Error: cannot read PRD:', err.message);
+      process.exit(1);
+    }
+    try {
+      const parsed = analyzePRDDeterministic(prdContent);
+      const reqs = parsed.requirements || [];
+      const byType = {};
+      for (const r of reqs) byType[r.type] = (byType[r.type] || 0) + 1;
+      const scoped = reqs.filter((r) => r.files && r.files.length > 0).length;
+      if (reqs.length === 0) {
+        const msg =
+          'PRD validation failed: analyzer extracted 0 requirements - the PRD has no ### FR-*/NFR-* headers; task-breakdown would create an empty skeleton chain';
+        if (options.json) {
+          console.log(JSON.stringify({ type: 'validate:failed', error: msg }));
+        } else {
+          console.error('❌', msg);
+        }
+        process.exit(1);
+      }
+      if (options.json) {
+        console.log(
+          JSON.stringify({
+            type: 'validate:success',
+            featureName: parsed.featureName,
+            requirements: reqs.length,
+            byType,
+            scoped,
+          }),
+        );
+      } else {
+        console.log('✅ PRD compiles:', parsed.featureName);
+        console.log('   requirements:', reqs.length, JSON.stringify(byType));
+        console.log('   with Target Files:', scoped, '/', reqs.length);
+      }
+      process.exit(0);
+    } catch (err) {
+      if (options.json) {
+        console.log(JSON.stringify({ type: 'validate:failed', error: err.message }));
+      } else {
+        console.error('❌', err.message);
+      }
+      process.exit(1);
+    }
+  }
 
   // Run prd-lint preflight before constructing the runner.
   const preflight = runPreflight({

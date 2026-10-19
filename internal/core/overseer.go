@@ -415,7 +415,12 @@ func NewOverseer(config *Config) *Overseer {
 		maxMemory = config.Overseer.ResourceMonitoring.MaxMemoryPercent
 	}
 	o.resourceMonitor = NewResourceMonitor(maxCPU, maxMemory)
-	log.Printf("[ResourceMonitor] Initialized with CPU: %.1f%%, Memory: %.1f%% limits (0=unlimited)", maxCPU, maxMemory)
+	minMemAvail := config.Overseer.ResourceMonitoring.MinMemAvailableMB
+	if minMemAvail == 0 {
+		minMemAvail = defaultMinMemAvailableMB
+	}
+	o.resourceMonitor.SetMinMemAvailableMB(minMemAvail)
+	log.Printf("[ResourceMonitor] Initialized with CPU: %.1f%%, Memory: %.1f%% limits, MemAvailable floor %dMB (0=unlimited)", maxCPU, maxMemory, minMemAvail)
 
 	// Initialize worker tracker for PID tracking
 	workerTracker, err := NewWorkerTracker(".")

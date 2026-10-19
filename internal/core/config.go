@@ -871,6 +871,12 @@ type ResourceMonitoringConfig struct {
 	Enabled          bool    `yaml:"enabled"`
 	MaxCPUPercent    float64 `yaml:"max_cpu_percent"`
 	MaxMemoryPercent float64 `yaml:"max_memory_percent"`
+	// MinMemAvailableMB is the absolute MemAvailable spawn floor (hydra-3ocq):
+	// a worker spawn is refused while the host has less free memory than this,
+	// even when max_memory_percent still passes — percentage ignores free
+	// headroom, which is exactly what the 2026-10-15 OOM/swap-storm outran.
+	// 0 = default 2500 (2.5G); negative disables. Probe errors fail open.
+	MinMemAvailableMB int `yaml:"min_memory_available_mb"`
 }
 
 // ProjectConfig represents a project configuration

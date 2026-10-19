@@ -62,6 +62,10 @@ overseer:
     enabled: true
     max_cpu_percent: 80
     max_memory_percent: 80
+    # Absolute MemAvailable spawn floor (hydra-3ocq): refuse to spawn a worker
+    # while the host has less free memory than this, even when the percentage
+    # gate above passes. 0 = default 2500 (2.5G); negative disables.
+    # min_memory_available_mb: 2500
     mode: hydra
 
   # Chain completion detection — triggers PRD validation when a full chain finishes

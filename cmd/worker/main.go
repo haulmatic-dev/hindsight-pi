@@ -2083,10 +2083,10 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 	cmd := exec.Command(piPath, args...)
 	cmd.Dir = path
 
-	// Create new process group
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	// Own process group + PDEATHSIG: if this worker dies without cleanup, the
+	// kernel kills Pi instead of leaving it reparented to PID 1 (see
+	// sysprocattr_linux.go).
+	cmd.SysProcAttr = piSysProcAttr()
 
 	// Prepare environment
 	envVars := os.Environ()

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"os/exec"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -292,5 +293,73 @@ func TestGateRunner_CoverageTruth_RejectMainCheckout(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "main checkout") {
 		t.Errorf("worktree == main checkout must error with 'main checkout', got %v", err)
+	}
+}
+
+// Process-hygiene regression: a gate that backgrounds a child (or one whose
+// `sh` exits while jest grandchildren hold the log pipe) must not leak past
+// the artifact. Before the fix the grandchild reparented to PID 1 and kept
+// running for its full lifetime (observed: jest alive 16+ min after the gate
+// artifact recorded exit 2).
+func TestGateRunner_KillsGrandchildrenOnCompletion(t *testing.T) {
+	wt := t.TempDir()
+	r := NewGateRunner(t.TempDir())
+	// Unique sleep so pgrep -f cannot collide with unrelated processes.
+	marker := "2912731"
+	a, err := r.RunGate(GateRequest{
+		Project: "proj", BeadID: "proj-gc", Gate: "test",
+		Spec:        GateSpec{Cmd: "sleep " + marker + " & echo done", Parser: "exit-code"},
+		ProjectPath: t.TempDir(), WorktreePath: wt,
+	})
+	if err != nil {
+		t.Fatalf("RunGate: %v", err)
+	}
+	if a.Status != GateStatusPassed {
+		t.Errorf("status = %s, want passed", a.Status)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		out, perr := exec.Command("pgrep", "-f", "sleep "+marker).Output()
+		if perr != nil || len(out) == 0 {
+			return // gone
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("grandchild leaked past gate completion: pgrep -f 'sleep %s' = %q", marker, out)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// Before Setpgid + group kill, a timed-out gate's `sh` was killed alone while
+// background children held the log file open; cmd.Wait blocked until they
+// exited and the artifact never finalized.
+func TestGateRunner_TimeoutKillsProcessGroup(t *testing.T) {
+	r := NewGateRunner(t.TempDir())
+	marker := "2912732"
+	start := time.Now()
+	a, err := r.RunGate(GateRequest{
+		Project: "proj", BeadID: "proj-timeout", Gate: "test",
+		Spec:        GateSpec{Cmd: "sleep " + marker + " & wait", Parser: "exit-code", Timeout: 700 * time.Millisecond},
+		ProjectPath: t.TempDir(), WorktreePath: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("RunGate: %v", err)
+	}
+	if a.ExitCode != -1 {
+		t.Errorf("exit = %d, want -1 (timeout)", a.ExitCode)
+	}
+	if elapsed := time.Since(start); elapsed > 15*time.Second {
+		t.Fatalf("RunGate blocked %v past timeout — process group not killed", elapsed)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		out, perr := exec.Command("pgrep", "-f", "sleep "+marker).Output()
+		if perr != nil || len(out) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout-killed gate leaked children: pgrep -f 'sleep %s' = %q", marker, out)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }

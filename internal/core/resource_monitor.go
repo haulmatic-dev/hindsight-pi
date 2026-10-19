@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -14,8 +15,16 @@ import (
 type ResourceMonitor struct {
 	maxCPUUsage    float64 // Maximum allowed CPU usage (0-100)
 	maxMemoryUsage float64 // Maximum allowed memory usage (0-100)
-	maxProcPercent float64 // Maximum allowed process count percentage (0-100)
-	checkInterval  time.Duration
+	// minMemAvailableMB is an absolute MemAvailable floor: a spawn is refused
+	// while the host has less than this much memory available (hydra-3ocq —
+	// the 2026-10-15 OOM kills left no room between worker peaks and the
+	// kernel OOM killer). <=0 disables. Probe errors fail open.
+	minMemAvailableMB int
+	maxProcPercent    float64 // Maximum allowed process count percentage (0-100)
+	checkInterval     time.Duration
+	// memAvailableFn is the MemAvailable probe (test seam). Default reads
+	// /proc/meminfo directly (no sh(1) round-trip).
+	memAvailableFn func() (int, error)
 }
 
 // NewResourceMonitor creates a new resource monitor
@@ -30,7 +39,48 @@ func NewResourceMonitor(maxCPU, maxMemory float64, maxProcPercent ...float64) *R
 		maxMemoryUsage: maxMemory,
 		maxProcPercent: procPercent,
 		checkInterval:  5 * time.Second,
+		memAvailableFn: readMemAvailableMB,
 	}
+}
+
+// SetMinMemAvailableMB sets the absolute MemAvailable spawn floor in MB.
+// Values <= 0 disable the check. Must be called before CanSpawnWorker use.
+func (rm *ResourceMonitor) SetMinMemAvailableMB(mb int) { rm.minMemAvailableMB = mb }
+
+// SetMemAvailableProbe replaces the MemAvailable probe (test seam).
+func (rm *ResourceMonitor) SetMemAvailableProbe(fn func() (int, error)) { rm.memAvailableFn = fn }
+
+// readMemAvailableMB returns MemAvailable from /proc/meminfo in MB.
+
+// defaultMinMemAvailableMB is the default absolute MemAvailable spawn floor
+// (2.5G — hydra-3ocq's "refuse spawn under 2.5G" guidance).
+const defaultMinMemAvailableMB = 2500
+
+// readMemAvailableMB returns MemAvailable from /proc/meminfo in MB.
+// Falls back to MemFree+Buffers+Cached on kernels without MemAvailable.
+func readMemAvailableMB() (int, error) {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, fmt.Errorf("read /proc/meminfo: %w", err)
+	}
+	fields := map[string]int{}
+	for _, line := range strings.Split(string(data), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		if v, perr := strconv.Atoi(parts[1]); perr == nil {
+			fields[strings.TrimSuffix(parts[0], ":")] = v
+		}
+	}
+	avail := fields["MemAvailable"]
+	if avail == 0 {
+		avail = fields["MemFree"] + fields["Buffers"] + fields["Cached"]
+	}
+	if avail <= 0 {
+		return 0, fmt.Errorf("no usable MemAvailable/MemFree fields in /proc/meminfo")
+	}
+	return avail / 1024, nil // kB -> MB
 }
 
 // getCPUUsage returns current CPU usage percentage using standard Unix commands
@@ -234,6 +284,21 @@ func (rm *ResourceMonitor) CanSpawnWorker() bool {
 		if memPercent > rm.maxMemoryUsage*0.9 {
 			log.Printf("[ResourceMonitor] Warning: Memory high - %.1f%% (Limit: %.1f%%)",
 				memPercent, rm.maxMemoryUsage)
+		}
+	}
+
+	// Absolute MemAvailable floor (hydra-3ocq): refuse to add a worker while
+	// the host is close to the OOM/swap-storm zone, even when the percentage
+	// check above passes (percentage is relative to total, not to free headroom).
+	if rm.minMemAvailableMB > 0 {
+		availMB, err := rm.memAvailableFn()
+		if err != nil {
+			log.Printf("[ResourceMonitor] Failed to read MemAvailable: %v", err)
+			// fail open — the probe being broken must not stop the fleet
+		} else if availMB < rm.minMemAvailableMB {
+			log.Printf("[ResourceMonitor] MemAvailable %dMB below floor %dMB, blocking worker spawn (OOM guard)",
+				availMB, rm.minMemAvailableMB)
+			return false
 		}
 	}
 
