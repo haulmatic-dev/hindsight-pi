@@ -119,6 +119,8 @@ type IntegrationRetestStage struct {
 	// silenceLogged dedups the no-branch loud log (hydra-1hbo): one line per
 	// bead per hour instead of one per sweep tick.
 	silenceLogged map[string]time.Time
+	// rejectLogged dedups selector-drop diagnostics (hydra-1hbo follow-up).
+	rejectLogged map[string]time.Time
 }
 
 // retestFastPathWindow: how long after a successful integration on a repo
@@ -153,6 +155,7 @@ func NewIntegrationRetestStage(cfg IntegrationRetestConfig, full *Config, beadsC
 		attempts:      map[string]int{},
 		lastAttempt:   map[string]time.Time{},
 		silenceLogged: map[string]time.Time{},
+		rejectLogged:  map[string]time.Time{},
 		lastOpen:      map[string]time.Time{},
 		sweeping:      map[string]bool{},
 	}
@@ -290,18 +293,40 @@ func (s *IntegrationRetestStage) selectBead(projectPath string, bead *types.Bead
 	if !hasBeadLabel(bead.Labels, retestLabelFailed) && !hasBeadLabel(bead.Labels, retestLabelExhausted) && !hasBeadLabel(bead.Labels, integrationPendingLabel) {
 		return false
 	}
+	// hydra-1hbo follow-up: rejection-reason observability. A labeled bead that
+	// still gets dropped by a later gate used to vanish silently (the 12:06
+	// deploy's parked set rejected before runBead's loud log could fire).
+	reject := func(reason string) bool {
+		s.mu.Lock()
+		last, logged := s.rejectLogged[bead.ID.String()]
+		if !logged || s.now().Sub(last) > 10*time.Minute {
+			s.rejectLogged[bead.ID.String()] = s.now()
+			s.mu.Unlock()
+			log.Printf("[IntegrationRetest] %s: selector DROP — %s", bead.ID.String(), reason)
+			return false
+		}
+		s.mu.Unlock()
+		return false
+	}
 	for _, l := range retestExcludedParkLabels {
 		if hasBeadLabel(bead.Labels, l) {
-			return false
+			return reject("excluded park label " + l)
 		}
 	}
 	if activeKeys[string(bead.ID)] {
-		return false
+		return reject("active worker row")
 	}
 	if !s.allowAttempt(projectPath, string(bead.ID)) {
-		return false
+		return reject("rate-limit or attempt cap")
 	}
-	return s.findBranch(projectPath, bead) != ""
+	if s.findBranch(projectPath, bead) == "" {
+		chainKey := "<nil>"
+		if s.chainKeyFn != nil {
+			chainKey = s.chainKeyFn(bead.ID)
+		}
+		return reject(fmt.Sprintf("no branch (own id; chainKey=%q)", chainKey))
+	}
+	return true
 }
 
 // allowAttempt enforces the per-bead retry interval and the global attempt
