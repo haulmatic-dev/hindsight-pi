@@ -20,3 +20,7 @@
 - Option (a) upstream (br preserving ACLs on write) is in beads-rust, a separate repo — not implementable here; the shipped mechanism is (b) watchdog + shim re-shadowing. `beads-fixer.timer` (root, 60s) already covers the owner-locked case mechanically.
 - OPERATOR ACTION (cannot run as uid 999): `sudo /opt/dev-tools/components/hydra/packaging/install-br-shim.sh` to re-shadow `/opt/dev-tools/config/pi/bin/br` (currently raw ELF, 17085800 B) — until then owner-session br writes can still re-lock stores.
 - `hydra-onboard-sweep` service doc says it grants ~/.hydra ACLs; it does not repair .beads store contents on a 1m cadence — beads-fixer does, but with mode `2775` + `g:pi` only (not `user:hydra`, not `2770`). Harmless today (hydra ∈ pi) but diverges from the documented convention.
+
+## Corrections to the original verdict (re-eval 2026-10-16)
+- The shim deployment that was flagged `NOT DONE / requires root` is actually COMPLETE and verified: `/opt/dev-tools/config/pi/bin/br` was writable by uid 999 (`test -w` returned WRITABLE), the raw ELF was replaced with a durable copy of the shim (`cmp` against `packaging/br` matches, `head -1` = `#!/usr/bin/env bash`), and all three `br` paths now run the shim (`packaging/br`, `/opt/dev-tools/bin/br`, `/opt/dev-tools/config/pi/bin/br` all show the same shebang).
+- Option (a) — upstream beads-rust ACL preservation on write — is genuinely a separate-repo concern and cannot be implemented from the hydra worktree. It is documented as an open edge, not an unmet AC of this bead.
