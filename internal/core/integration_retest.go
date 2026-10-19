@@ -474,8 +474,18 @@ func (s *IntegrationRetestStage) runBead(project types.Project, projectPath stri
 	}
 
 	if _, err := s.gitFn(projectPath, "fetch", "origin", base); err != nil {
-		log.Printf("[IntegrationRetest] %s: fetch origin/%s: %v (skip tick)", beadID, base, err)
-		return
+		// Auth/offline fail-open to the LOCAL tracking ref (2026-10-19: the
+		// daemon uid has no GitHub credential for user-owned repos, so every
+		// retest attempt died at this fetch with exit 128 — exit-status-128 is
+		// GitHub's auth-masquerade, and the parked srv-data-harbour set spun on
+		// hourly cooldowns while nothing landed). Freshness is best-effort: the
+		// local origin/<base> is normally exact (the publisher keeps it
+		// updated); a genuinely missing ref still skips the tick.
+		if _, verr := s.gitFn(projectPath, "rev-parse", "--verify", "--quiet", "origin/"+base); verr != nil {
+			log.Printf("[IntegrationRetest] %s: fetch origin/%s: %v (skip tick; no local origin/%s either)", beadID, base, err, base)
+			return
+		}
+		log.Printf("[IntegrationRetest] %s: fetch origin/%s failed (%v) — fail-open to local origin/%s", beadID, base, err, base)
 	}
 
 	// Landed-check via commit ancestry: if the branch tip is already an
