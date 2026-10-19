@@ -6,6 +6,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+- Fixed: IntegrationRetest `findBranch` falls back to the bead's chain-root worktree key (`hydra/wt-<chainKey>` / `hydra/quarantine/<chainKey>`), so chain-member beads parked on their root's branch are no longer invisible to the retest sweep. *Authored by a Hydra dogfood run.*
 - Orphan-claim P0 triage (docs/discovery/orphanclaim-triage-yzi1.md): all three digest claims verified stale at 2026-10-06 14:02 UTC — 0 true orphan claims (4 live workers, escalated/pan-filed excluded by design, rest registry-completed churn reopened by Charon), publisher wedge absent (PR #268 merged, 0 unlanded commits), disk 39%. No code change.
 
 ### Added
