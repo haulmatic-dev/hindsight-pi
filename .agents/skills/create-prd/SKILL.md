@@ -886,6 +886,24 @@ Increment suffix if exists: `-v2`, `-v3`. Never overwrite.
 
 Create `docs/PRDs/` if it does not exist.
 
+**Compilation pre-check (mandatory, added 2026-10-18):** before reporting
+success, run the task-breakdown analyzer against the saved PRD and fix until
+it passes — a PRD that cannot compile has failed its purpose, whatever its
+prose quality:
+
+```bash
+node <task-breakdown-skill-dir>/cli.mjs <prd-path> --validate
+```
+
+- exit 0 required. Both failure modes seen in the wild (2026-10-18,
+  srv-data-harbour): `0 requirements` (PRD written in prose style with no
+  `### FR-*`/`### NFR-*` headers — task-breakdown reported `success: true`
+  with an empty skeleton chain) and `target file overlap` (one file claimed
+  by two FRs — forbidden by the DRYAD single-owner rule).
+- If a shared config file (`package.json` jest block, etc.) must change at
+  different lifecycle points, consolidate those changes into ONE terminal FR
+  (single owner) that runs after its inputs — never list the file in two FRs.
+
 **Report:**
 
 ```
@@ -901,6 +919,7 @@ Requirements:
 Same-file chains:    {n chains} — {list files involved}
 Parallel groups:     {n groups}
 File conflicts:      0
+Compilation pre-check (task-breakdown --validate): PASS
 
 Compiler stub support: YES | NO
   YES → Exports/Consumes active, parallel RED chains enabled
