@@ -6,6 +6,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
 ## [Unreleased]
+- Pan file-bead pseudo-project path resolution (bug-ib4u): verify-first close, no code change — the `-push-pending`/`-campaign-anomaly` suffix-stripping fallback in the bead filer already lands, so push-pending alarms reach the filer instead of being swallowed by "project path unresolved" errors.
 - Orphan-claim P0 triage (docs/discovery/orphanclaim-triage-yzi1.md): all three digest claims verified stale at 2026-10-06 14:02 UTC — 0 true orphan claims (4 live workers, escalated/pan-filed excluded by design, rest registry-completed churn reopened by Charon), publisher wedge absent (PR #268 merged, 0 unlanded commits), disk 39%. No code change.
 
 ### Added
