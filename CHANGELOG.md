@@ -149,6 +149,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 - Post-close sweep GREEN (hydra-96th): implemented `PostCloseSweeper.scan()` — reopen path (comment with BOTH failing-run outputs, StatusOpen, `postclose-reopened` label, `postclose_reopened` event), flake guard (`postclose-flake`, no reopen), bounded second-failure (`needs-human`, no second reopen), 24h/commandless skips, hourly Start/Stop loop, nil-safe + fail-open. Unblocks the RED suite left failing by the inert scaffold (4 gate failures).
 
+- Digest no longer counts an in_progress bead with a `state=completed` registry row as an orphaned claim — a completed row is terminal worker state and the scheduler's respawn backoff owns the requeue; counting it re-fired the P0 campaign-anomaly filing loop every sweep (hydra 2026-10-06 13:4x: 15 beads between worker attempts, 5 pan-filed twins in 12 min). Genuine orphans (no row past the claim grace, or a working/hung row with stale heartbeat) still count. Regression test `TestCollectHealthDigestCompletedRowNotOrphan`; triage at `docs/discovery/orphanclaim-completed-row-triage-xcye.md`.
+
 - Orphan-claim anomaly disposition (hydra-v5xq): the persisting "N in_progress bead(s) with no live registry worker" digest anomaly was escalated verified-close beads (k991/kvsc/ee5r), not orphans — recovery and digest exclusion behaved correctly. Beads closed as landed after origin/development integration checks; triage at `docs/discovery/orphanclaim-escalation-loop-triage-v5xq.md`. Disk-99% claim stale (host 49%).
 ### Added
 
