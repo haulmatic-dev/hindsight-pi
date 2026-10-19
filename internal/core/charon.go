@@ -58,6 +58,7 @@ type Charon struct {
 	gateRoot                string                   // gate artifact root ($HYDRA_HOME) for the close-in-progress probe; empty = probe disabled
 	orphanWatchMu           sync.Mutex
 	orphanWatch             map[string]orphanWatchEntry // reopened beads awaiting a resolve event (sensor symmetry)
+	psRunner                func() ([]byte, error)      // process-table source for the reparented-worktree sweep; nil = ps(1)
 }
 
 // JanitorStats tracks cleanup statistics
@@ -435,6 +436,17 @@ func (j *Charon) performCleanup() {
 	// PIDs for two consecutive scans, reap stale phantom slots.
 	if reaped := j.checkAndReapPoolDeadlock(); reaped > 0 {
 		log.Printf("[Charon] 🧹 Pool deadlock reaper removed %d phantom slots", reaped)
+	}
+
+	// Reparented-worktree sweep: worker death (SIGKILL, OOM, crash) leaves
+	// its Pi/node/jest children reparented to PID 1 (observed live: 20+ node
+	// processes, ~9G RSS, all with .hydra-worktrees in their cmdline and PPID
+	// 1). A reparented process is a leak by construction — no live parent can
+	// own it — so kill its whole process group. Runs BEFORE the
+	// no-tracked-workers early return: an idle daemon is exactly when this
+	// residue accumulates.
+	if killed := j.sweepReparentedWorktreeProcesses(); killed > 0 {
+		log.Printf("[Charon] 🧹 Killed %d process group(s) reparented to PID 1 from dead worktree processes", killed)
 	}
 
 	if len(liveWorkers) == 0 {
@@ -1387,4 +1399,80 @@ func (j *Charon) emitEscalatedWedgeEvent(projectPath, beadID string, b *types.Be
 		Detail: fmt.Sprintf("escalated bead %s orphaned in_progress for %v (no live worker); Charon will not reopen — resolution belongs to a human or Pan repair:clear-escalation", beadID, age),
 		Fields: map[string]any{"bead": beadID, "project": filepath.Base(projectPath), "age": age.String()},
 	})
+}
+
+// sweepReparentedWorktreeProcesses kills the process group of any process
+// whose command line references a hydra worktree (.hydra-worktrees/...) and
+// whose parent is PID 1 — i.e. it was reparented because its worker (or Pi)
+// died without cleanup. PDEATHSIG covers the direct child of the worker;
+// this sweep covers everything further down the tree (node, jest, pytest)
+// that reparents only after ITS parent dies. Fail-open: a ps failure skips
+// the sweep, and a candidate is never touched without a provable PGID.
+// kill may be nil in tests that only want the parse behavior.
+func (j *Charon) sweepReparentedWorktreeProcesses() int {
+	return j.sweepReparentedWorktreeProcs(j.listProcsTable(), nil)
+}
+
+func (j *Charon) listProcsTable() string {
+	if j.psRunner != nil {
+		out, err := j.psRunner()
+		if err != nil {
+			return "" // fail-open
+		}
+		return string(out)
+	}
+	out, err := exec.Command("ps", "-e", "-o", "pid,ppid,pgid,args").Output()
+	if err != nil {
+		return "" // fail-open
+	}
+	return string(out)
+}
+
+// parseReparentedWorktreeProcs extracts (pid, pgid) of worktree-referencing
+// processes reparented to PID 1. Requires the pgid column so the whole group
+// dies, not just the reparented PID.
+func parseReparentedWorktreeProcs(table string) []int {
+	var pgids []int
+	seen := map[int]bool{}
+	for _, line := range strings.Split(table, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(fields[0])
+		ppid, err2 := strconv.Atoi(fields[1])
+		pgid, err3 := strconv.Atoi(fields[2])
+		if err1 != nil || err2 != nil || err3 != nil {
+			continue
+		}
+		if ppid != 1 || pid <= 1 {
+			continue
+		}
+		if !strings.Contains(strings.Join(fields[3:], " "), ".hydra-worktrees/") {
+			continue
+		}
+		if pgid == syscall.Getpgrp() || seen[pgid] { // never touch the daemon's own group
+			continue
+		}
+		seen[pgid] = true
+		pgids = append(pgids, pgid)
+	}
+	return pgids
+}
+
+func (j *Charon) sweepReparentedWorktreeProcs(table string, kill func(pgid int)) int {
+	var n int
+	for _, pgid := range parseReparentedWorktreeProcs(table) {
+		n++
+		if kill != nil {
+			kill(pgid)
+			continue
+		}
+		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+			log.Printf("[Charon] reparented-worktree sweep: kill -%d failed (fail-open): %v", pgid, err)
+		} else {
+			log.Printf("[Charon] reparented-worktree sweep: SIGKILL process group %d", pgid)
+		}
+	}
+	return n
 }
