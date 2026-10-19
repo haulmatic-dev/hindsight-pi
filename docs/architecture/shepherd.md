@@ -404,6 +404,16 @@ storm). The governor thins the fleet instead of freezing it:
   Driven from the scheduler tick, not from outcomes.
 - **Read:** scheduler computes slots from `min(max_workers, Limit())`.
   Every change logs `[Governor] concurrency N -> M (reason)`.
+- **Memory throttle feedback** (`memory_pressure.go`, 2026-10-15 incident):
+  memory.high reclaims WITHOUT killing, so a governor keyed only on outcomes
+  saw a healthy fleet while the slice sat pinned at memory.high with workers
+  throttled and redlined at `max_workers`. Each scheduler tick probes the
+  daemon cgroup (`/sys/fs/cgroup/system.slice/hydra.service/`): PSI
+  `memory.pressure` "some" avg10, or 100 when `memory.current >= memory.high`.
+  At or above `memory_pressure_threshold` (default 50%) the limit is halved
+  (the MD in AIMD) and recovery is re-armed so it cannot climb straight back
+  while throttling persists. Unreadable cgroup (v1, no slice) = fail-open, no
+  signal; negative threshold disables the feedback.
 
 *Why the last two rules look like that.* The original design halved on decrease
 and recovered only on a full window of outcomes. Both failed together on
@@ -425,6 +435,7 @@ overseer:
     increase_threshold: 0.125
     cooldown_seconds: 120
     recovery_interval_seconds: 300
+    memory_pressure_threshold: 50  # negative disables the memory throttle feedback
 ```
 
 Composes with the provider circuit breaker: the breaker pauses spawns for a

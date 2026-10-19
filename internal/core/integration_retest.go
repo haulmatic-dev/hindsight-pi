@@ -105,11 +105,20 @@ type IntegrationRetestStage struct {
 	landFn      func(projectPath, base, featureBranch, title, token string) (string, error)
 	tokenFn     func(projectPath string) (string, error)
 
+	// chainKeyFn maps a bead ID to its chain's worktree key (chain root ID),
+	// falling back to the bead's own ID when it belongs to no chain. Nil = no
+	// chain-root fallback: the selector only ever matches the bead's own
+	// branches. Mirrors BeadCloser/Charon's identical seam (bead_closer.go).
+	chainKeyFn func(types.BeadID) string
+
 	mu          sync.Mutex
 	attempts    map[string]int
 	lastAttempt map[string]time.Time
 	lastOpen    map[string]time.Time // repoPath -> last successful integration (fast-path window)
 	sweeping    map[string]bool      // repoPath -> fast-path sweep in flight
+	// silenceLogged dedups the no-branch loud log (hydra-1hbo): one line per
+	// bead per hour instead of one per sweep tick.
+	silenceLogged map[string]time.Time
 }
 
 // retestFastPathWindow: how long after a successful integration on a repo
@@ -120,7 +129,7 @@ const retestFastPathWindow = 5 * time.Minute
 // NewIntegrationRetestStage builds the stage. Nil beadsClient/events are
 // tolerated (stage is inert); the gate runner may be nil when no project
 // declares daemon-owned gates.
-func NewIntegrationRetestStage(cfg IntegrationRetestConfig, full *Config, beadsClient BeadsClient, events *EventSink, gateRunner *GateRunner, home string) *IntegrationRetestStage {
+func NewIntegrationRetestStage(cfg IntegrationRetestConfig, full *Config, beadsClient BeadsClient, events *EventSink, gateRunner *GateRunner, home string, chainKeyFn func(beadID types.BeadID) string) *IntegrationRetestStage {
 	cfg.applyDefaults()
 	return &IntegrationRetestStage{
 		cfg:         cfg,
@@ -129,6 +138,7 @@ func NewIntegrationRetestStage(cfg IntegrationRetestConfig, full *Config, beadsC
 		events:      events,
 		gateRunner:  gateRunner,
 		home:        home,
+		chainKeyFn:  chainKeyFn,
 		now:         time.Now,
 		gitFn:       gitOut,
 		mergeTreeFn: defaultMergeTree,
@@ -140,11 +150,18 @@ func NewIntegrationRetestStage(cfg IntegrationRetestConfig, full *Config, beadsC
 			}
 			return id.Token, nil
 		},
-		attempts:    map[string]int{},
-		lastAttempt: map[string]time.Time{},
-		lastOpen:    map[string]time.Time{},
-		sweeping:    map[string]bool{},
+		attempts:      map[string]int{},
+		lastAttempt:   map[string]time.Time{},
+		silenceLogged: map[string]time.Time{},
+		lastOpen:      map[string]time.Time{},
+		sweeping:      map[string]bool{},
 	}
+}
+
+// SetChainKeyForBeadID wires the chain-key resolver used by findBranch's
+// chain-root fallback. Optional: nil keeps the own-branch-only selector.
+func (s *IntegrationRetestStage) SetChainKeyForBeadID(fn func(types.BeadID) string) {
+	s.chainKeyFn = fn
 }
 
 // Enabled reports whether the stage should run at all.
@@ -322,6 +339,21 @@ func (s *IntegrationRetestStage) resetAttempts(beadID string) {
 	defer s.mu.Unlock()
 	delete(s.attempts, beadID)
 	delete(s.lastAttempt, beadID)
+	delete(s.silenceLogged, beadID)
+}
+
+// RetestStats exposes the per-bead attempt counters for Pan's blocked-reason
+// builder (hydra-1hbo). Before this, Pan narrated "the retest stage retries
+// mechanically" as static text while the selector silently skipped beads with
+// no branch — the 2026-10-19 srv-data-harbour incident ran 70+ minutes on that
+// fiction (11 beads parked, zero attempts). ok=false when the stage has never
+// seen the bead.
+func (s *IntegrationRetestStage) RetestStats(beadID string) (attempts int, last time.Time, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, seen := s.attempts[beadID]
+	t, hasT := s.lastAttempt[beadID]
+	return n, t, seen || hasT
 }
 
 // findBranch locates the bead's hydra-owned branch: hydra/wt-<id>[-vN] first
@@ -334,31 +366,43 @@ func (s *IntegrationRetestStage) findBranch(projectPath string, bead *types.Bead
 		return ""
 	}
 	id := string(bead.ID)
-	patterns := []string{
-		"refs/heads/" + retestWorktreeBranchPrefix + id,
-		"refs/heads/" + retestQuarantineBranchPrefix + id,
+	// Chain-root worktree fallback: chain-member beads park their work on the
+	// chain root's branch (hydra/wt-<chain-root>), so when the bead's own ID
+	// matches nothing we retry with the chain key before giving up.
+	ids := []string{id}
+	if s.chainKeyFn != nil {
+		if ck := s.chainKeyFn(bead.ID); ck != "" && ck != id {
+			ids = append(ids, ck)
+		}
 	}
-	for _, pat := range patterns {
-		if out, err := s.gitFn(projectPath, "for-each-ref", "--format=%(refname:short)", pat); err == nil {
-			if branch := firstLine(out); branch != "" {
+
+	for _, cid := range ids {
+		patterns := []string{
+			"refs/heads/" + retestWorktreeBranchPrefix + cid,
+			"refs/heads/" + retestQuarantineBranchPrefix + cid,
+		}
+		for _, pat := range patterns {
+			if out, err := s.gitFn(projectPath, "for-each-ref", "--format=%(refname:short)", pat); err == nil {
+				if branch := firstLine(out); branch != "" {
+					return branch
+				}
+			}
+		}
+		// Versioned worktree branches: hydra/wt-<cid>-vN (webapp-tc5 incident).
+		if out, err := s.gitFn(projectPath, "for-each-ref", "--format=%(refname:short)", "refs/heads/"+retestWorktreeBranchPrefix+cid+"-v*"); err == nil {
+			if branch := lastLine(out); branch != "" {
 				return branch
 			}
 		}
-	}
-	// Versioned worktree branches: hydra/wt-<id>-vN (webapp-tc5 incident).
-	if out, err := s.gitFn(projectPath, "for-each-ref", "--format=%(refname:short)", "refs/heads/"+retestWorktreeBranchPrefix+id+"-v*"); err == nil {
-		if branch := lastLine(out); branch != "" {
-			return branch
-		}
-	}
-	// Local clone may be stale; ask the remote before giving up.
-	for _, pat := range patterns {
-		short := strings.TrimPrefix(pat, "refs/heads/")
-		if out, err := s.gitFn(projectPath, "ls-remote", "--heads", "origin", short+"*"); err == nil {
-			fields := strings.Fields(out)
-			for _, f := range fields {
-				if strings.HasPrefix(f, retestWorktreeBranchPrefix) || strings.HasPrefix(f, retestQuarantineBranchPrefix) {
-					return f
+		// Local clone may be stale; ask the remote before giving up.
+		for _, pat := range patterns {
+			short := strings.TrimPrefix(pat, "refs/heads/")
+			if out, err := s.gitFn(projectPath, "ls-remote", "--heads", "origin", short+"*"); err == nil {
+				fields := strings.Fields(out)
+				for _, f := range fields {
+					if strings.HasPrefix(f, retestWorktreeBranchPrefix) || strings.HasPrefix(f, retestQuarantineBranchPrefix) {
+						return f
+					}
 				}
 			}
 		}
@@ -377,6 +421,19 @@ func (s *IntegrationRetestStage) runBead(project types.Project, projectPath stri
 	beadID := string(bead.ID)
 	branch := s.findBranch(projectPath, bead)
 	if branch == "" {
+		// hydra-1hbo: this used to be a bare `return` — the silent skip that
+		// let 11 parked beads sit for 70+ minutes while Pan narrated mechanical
+		// retries (2026-10-19). Log once per bead per hour; the retest-silence
+		// text also reaches Pan via RetestStats in the blocked-reason builder.
+		s.mu.Lock()
+		last, logged := s.silenceLogged[beadID]
+		s.mu.Unlock()
+		if !logged || s.now().Sub(last) > time.Hour {
+			s.mu.Lock()
+			s.silenceLogged[beadID] = s.now()
+			s.mu.Unlock()
+			log.Printf("[IntegrationRetest] %s: RETEST SILENCE — parked integration-pending bead has no own branch and no chain-root fallback branch; selector cannot reach it, zero attempts recorded (hydra-1hbo). Check chain registration / branch cleanup for this bead.", beadID)
+		}
 		return
 	}
 	// Guardrail, belt-and-braces: only hydra-owned prefixes, ever.
@@ -393,6 +450,21 @@ func (s *IntegrationRetestStage) runBead(project types.Project, projectPath stri
 
 	if _, err := s.gitFn(projectPath, "fetch", "origin", base); err != nil {
 		log.Printf("[IntegrationRetest] %s: fetch origin/%s: %v (skip tick)", beadID, base, err)
+		return
+	}
+
+	// Landed-check via commit ancestry: if the branch tip is already an
+	// ancestor of origin/<base>, the work landed previously (close-path
+	// integration, a sibling's retest, fast-path absorption) and only the
+	// bead never closed. Close it directly — no PR, no gates rerun: a PR here
+	// would carry an empty diff and fail the rdju no-diff class, and the
+	// close-reject ladder would grind. Ancestor test runs after the fetch so
+	// origin/<base> is fresh; merge-tree clean is NOT this check — clean
+	// means "mergeable", ancestry means "already merged".
+	if s.isAncestorOfBase(projectPath, branch, "origin/"+base) {
+		log.Printf("[IntegrationRetest] %s: branch %s already an ancestor of origin/%s — landed, closing", beadID, branch, base)
+		s.closeLanded(project, projectPath, bead,
+			fmt.Sprintf("branch %s already an ancestor of origin/%s — work landed, bead closed without PR", branch, base))
 		return
 	}
 
@@ -448,6 +520,33 @@ func (s *IntegrationRetestStage) runBead(project types.Project, projectPath stri
 	AppendActivity(projectPath, beadID, "integration-retest: landed via PR "+outcome.PRURL)
 	s.emit(projectPath, project.Name, beadID, retestResultLanded, outcome.PRURL,
 		"retest merge clean, gates green — landed via PR "+outcome.PRURL)
+}
+
+// closeLanded closes an already-landed bead: reset attempt counters, close
+// with a landed reason, strip the park labels, and emit the landed event.
+// Shared by the PR land path and the ancestry landed-check.
+func (s *IntegrationRetestStage) closeLanded(project types.Project, projectPath string, bead *types.Bead, detail string) {
+	beadID := string(bead.ID)
+	s.resetAttempts(beadID)
+	if s.beadsClient != nil {
+		if err := s.beadsClient.CloseBead(projectPath, "", bead.ID, "integration-retest: "+detail); err != nil {
+			log.Printf("[IntegrationRetest] %s: close after landed-check: %v", beadID, err)
+		}
+		if err := s.beadsClient.RemoveBeadLabels(projectPath, "", bead.ID, []string{retestLabelFailed, retestLabelExhausted, integrationPendingLabel}); err != nil {
+			log.Printf("[IntegrationRetest] %s: strip labels after landed-check: %v", beadID, err)
+		}
+	}
+	AppendActivity(projectPath, beadID, "integration-retest: "+detail)
+	s.emit(projectPath, project.Name, beadID, retestResultLanded, "", detail)
+}
+
+// isAncestorOfBase reports whether the branch tip is already contained in
+// the base ref — i.e. the work landed previously and only the bead never
+// closed. Read-only; an error reads as "not landed" (fail-open, the normal
+// retest flow continues).
+func (s *IntegrationRetestStage) isAncestorOfBase(projectPath, branch, baseRef string) bool {
+	_, err := s.gitFn(projectPath, "merge-base", "--is-ancestor", branch, baseRef)
+	return err == nil
 }
 
 // mergeTreeClean runs `git merge-tree --write-tree <base> <branch>` and

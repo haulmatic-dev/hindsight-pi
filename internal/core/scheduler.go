@@ -436,6 +436,12 @@ func (s *Scheduler) Tick() error {
 	// suppresses outcome volume — so the clock has to drive it.
 	o.concurrencyGovernor.MaybeRecover()
 
+	// Memory throttle feedback: memory.high reclaims without killing, so no OOM
+	// event ever reaches the outcome window (2026-10-15 incident). Probe the
+	// daemon cgroup's PSI/memory.high regime each tick and scale down when the
+	// workers are being throttled. Fail-open: unreadable cgroup = no signal.
+	o.concurrencyGovernor.MaybeScaleDownForMemoryPressure()
+
 	// Get active worker count
 	o.workerMutex.RLock()
 	activeCount := len(o.activeWorkers)

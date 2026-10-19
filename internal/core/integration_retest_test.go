@@ -59,7 +59,7 @@ func retestErrFake(s string) error { return retestFakeErr(s) }
 func retestTestStage() *IntegrationRetestStage {
 	s := NewIntegrationRetestStage(IntegrationRetestConfig{
 		Enabled: true, MaxAttempts: 2, RetryInterval: "1h",
-	}, &Config{}, nil, nil, nil, "")
+	}, &Config{}, nil, nil, nil, "", nil)
 	s.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
 	return s
 }
@@ -283,7 +283,7 @@ func TestIntegrationRetestCleanLands(t *testing.T) {
 	s := NewIntegrationRetestStage(IntegrationRetestConfig{
 		Enabled: true, MaxAttempts: 5, RetryInterval: "1ms",
 	}, &Config{Projects: []ProjectConfig{{Name: "proj", Path: projectPath}}},
-		beads, nil, nil, t.TempDir())
+		beads, nil, nil, t.TempDir(), nil)
 	s.now = time.Now
 	// CI runners have no daemon credential; stub the publish-identity resolver
 	// so the token resolution doesn't fail closed (2026-10-02, PR #85 CI).
@@ -336,7 +336,7 @@ func TestIntegrationRetestConflictedStaysParked(t *testing.T) {
 	s := NewIntegrationRetestStage(IntegrationRetestConfig{
 		Enabled: true, MaxAttempts: 5, RetryInterval: "1ms",
 	}, &Config{Projects: []ProjectConfig{{Name: "proj", Path: projectPath}}},
-		beads, nil, nil, t.TempDir())
+		beads, nil, nil, t.TempDir(), nil)
 	s.now = time.Now
 	s.landFn = func(projectPath, base, featureBranch, title, token string) (string, error) {
 		t.Errorf("land must not be called on a conflicted branch")

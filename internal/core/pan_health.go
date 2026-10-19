@@ -39,6 +39,13 @@ import (
 // before the health digest flags a publisher wedge (Pan-detectable).
 const unpublishedWedgeAge = 15 * time.Minute
 
+// ProjectKey is the exported canonical park-namespace key (hydra-6tfb): the
+// scheduler's campaignParked looks parks up by projectKey(projectPath), which
+// user-namespaces home/<user>/projects/<name> paths to <user>/<name>. The
+// operator API must store under the SAME key or its parks are silently
+// ignored by the scheduler.
+func ProjectKey(path string) string { return projectKey(path) }
+
 func projectKey(path string) string {
 	parts := strings.Split(filepath.Clean(path), string(filepath.Separator))
 	for i := 0; i+2 < len(parts); i++ {

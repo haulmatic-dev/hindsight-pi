@@ -67,7 +67,7 @@ func TestRetestSelector_SelectsPendingBead(t *testing.T) {
 	writeAndCommit(t, repo, "README.md", "seed\n")
 	runGitCmd(t, repo, "branch", "hydra/wt-webapp-9ah")
 
-	s := NewIntegrationRetestStage(IntegrationRetestConfig{Enabled: true}, DefaultConfig(), nil, nil, nil, t.TempDir())
+	s := NewIntegrationRetestStage(IntegrationRetestConfig{Enabled: true}, DefaultConfig(), nil, nil, nil, t.TempDir(), nil)
 	bead := &types.Bead{
 		ID:     "webapp-9ah",
 		Status: types.StatusInProgress,

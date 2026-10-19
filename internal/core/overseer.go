@@ -666,7 +666,7 @@ func NewOverseer(config *Config) *Overseer {
 	// available; the stage is inert unless integration_retest.enabled is set.
 	// Fail-open by construction: Run isolates per-project/panics.
 	if home := os.Getenv("HYDRA_HOME"); home != "" {
-		o.integrationRetest = NewIntegrationRetestStage(config.IntegrationRetest, config, o.beadsClient, events, NewGateRunner(home), home)
+		o.integrationRetest = NewIntegrationRetestStage(config.IntegrationRetest, config, o.beadsClient, events, NewGateRunner(home), home, o.chainKeyForBeadID)
 		if o.integrationRetest.Enabled() {
 			log.Printf("[IntegrationRetest] stage armed (max_attempts=%d retry_interval=%s)",
 				o.integrationRetest.cfg.MaxAttempts, o.integrationRetest.cfg.RetryInterval)

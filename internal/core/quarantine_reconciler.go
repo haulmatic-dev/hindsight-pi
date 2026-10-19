@@ -299,6 +299,14 @@ func (r *QuarantineReconciler) reconcileEntryLocked(e *QuarantinedChainEntry) {
 		log.Printf("[QuarantineReconciler] chain %s: integrated but branch delete failed: %v", e.Key, err)
 	}
 	delete(r.entries, registryKey(e.ProjectPath, e.Branch))
+	// Parked-backlog drain (chain-aware fast-path absorption): the chain's
+	// re-integration just opened the integration lane for this repo. Reset
+	// the per-repo cooldown and fire the open notifier so parked siblings —
+	// including chain members matched via the integration-retest stage's
+	// chain-root branch fallback — are swept immediately instead of waiting
+	// out the hourly RetryInterval. Fail-open: NotifyRepoOpen recovers its
+	// own panics and the notifier is nil when no retest stage is armed.
+	resetIntegrationCooldown(e.ProjectPath)
 	log.Printf("[QuarantineReconciler] ✅ chain %s re-integrated from quarantine and removed (%s)", e.Key, e.Branch)
 	if r.events != nil {
 		r.events.EmitRepo(e.ProjectPath, Event{Type: "chain_reintegrated",
