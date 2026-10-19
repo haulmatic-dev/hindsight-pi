@@ -110,6 +110,9 @@ type IntegrationRetestStage struct {
 	lastAttempt map[string]time.Time
 	lastOpen    map[string]time.Time // repoPath -> last successful integration (fast-path window)
 	sweeping    map[string]bool      // repoPath -> fast-path sweep in flight
+	// silenceLogged dedups the no-branch loud log (hydra-1hbo): one line per
+	// bead per hour instead of one per sweep tick.
+	silenceLogged map[string]time.Time
 }
 
 // retestFastPathWindow: how long after a successful integration on a repo
@@ -140,10 +143,11 @@ func NewIntegrationRetestStage(cfg IntegrationRetestConfig, full *Config, beadsC
 			}
 			return id.Token, nil
 		},
-		attempts:    map[string]int{},
-		lastAttempt: map[string]time.Time{},
-		lastOpen:    map[string]time.Time{},
-		sweeping:    map[string]bool{},
+		attempts:      map[string]int{},
+		lastAttempt:   map[string]time.Time{},
+		silenceLogged: map[string]time.Time{},
+		lastOpen:      map[string]time.Time{},
+		sweeping:      map[string]bool{},
 	}
 }
 
@@ -322,6 +326,21 @@ func (s *IntegrationRetestStage) resetAttempts(beadID string) {
 	defer s.mu.Unlock()
 	delete(s.attempts, beadID)
 	delete(s.lastAttempt, beadID)
+	delete(s.silenceLogged, beadID)
+}
+
+// RetestStats exposes the per-bead attempt counters for Pan's blocked-reason
+// builder (hydra-1hbo). Before this, Pan narrated "the retest stage retries
+// mechanically" as static text while the selector silently skipped beads with
+// no branch — the 2026-10-19 srv-data-harbour incident ran 70+ minutes on that
+// fiction (11 beads parked, zero attempts). ok=false when the stage has never
+// seen the bead.
+func (s *IntegrationRetestStage) RetestStats(beadID string) (attempts int, last time.Time, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, seen := s.attempts[beadID]
+	t, hasT := s.lastAttempt[beadID]
+	return n, t, seen || hasT
 }
 
 // findBranch locates the bead's hydra-owned branch: hydra/wt-<id>[-vN] first
@@ -377,6 +396,19 @@ func (s *IntegrationRetestStage) runBead(project types.Project, projectPath stri
 	beadID := string(bead.ID)
 	branch := s.findBranch(projectPath, bead)
 	if branch == "" {
+		// hydra-1hbo: this used to be a bare `return` — the silent skip that
+		// let 11 parked beads sit for 70+ minutes while Pan narrated mechanical
+		// retries (2026-10-19). Log once per bead per hour; the retest-silence
+		// text also reaches Pan via RetestStats in the blocked-reason builder.
+		s.mu.Lock()
+		last, logged := s.silenceLogged[beadID]
+		s.mu.Unlock()
+		if !logged || s.now().Sub(last) > time.Hour {
+			s.mu.Lock()
+			s.silenceLogged[beadID] = s.now()
+			s.mu.Unlock()
+			log.Printf("[IntegrationRetest] %s: RETEST SILENCE — parked integration-pending bead has no own branch and no chain-root fallback branch; selector cannot reach it, zero attempts recorded (hydra-1hbo). Check chain registration / branch cleanup for this bead.", beadID)
+		}
 		return
 	}
 	// Guardrail, belt-and-braces: only hydra-owned prefixes, ever.

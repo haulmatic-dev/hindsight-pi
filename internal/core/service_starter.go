@@ -230,7 +230,15 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 								if b.Metadata != nil {
 									dependents, _ = strconv.Atoi(b.Metadata["dependent_count"])
 								}
-								if reason, ok := panBlockedReason(b, time.Now(), wedgeGrace, leafGrace, dependents); ok {
+								// hydra-1hbo: real retest counters feed the blocked reason so
+								// Pan stops narrating mechanical retries that are not running.
+								var retestStatsFn func(string) (int, time.Time, bool)
+								retestMax := 0
+								if o.integrationRetest != nil {
+									retestStatsFn = o.integrationRetest.RetestStats
+									retestMax = o.config.IntegrationRetest.MaxAttempts
+								}
+								if reason, ok := panBlockedReasonWithRetest(b, time.Now(), wedgeGrace, leafGrace, dependents, retestStatsFn, retestMax); ok {
 									key := b.ID.String() + "|" + reason
 									if !blockedLogged[key] {
 										blockedLogged[key] = true
@@ -755,8 +763,12 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				func() []types.Project { return o.projects })
 			o.quarantineReconciler.SetRevalidation(
 				o.beadCloser.RunVerificationGateForRevalidation,
-				func(pp string, id types.BeadID, l []string) error { return o.beadsClient.RemoveBeadLabels(pp, "", id, l) },
-				func(pp string, id types.BeadID, l []string) error { return o.beadsClient.UpdateBeadLabels(pp, "", id, l) })
+				func(pp string, id types.BeadID, l []string) error {
+					return o.beadsClient.RemoveBeadLabels(pp, "", id, l)
+				},
+				func(pp string, id types.BeadID, l []string) error {
+					return o.beadsClient.UpdateBeadLabels(pp, "", id, l)
+				})
 			o.quarantineReconciler.Start()
 		}
 	}
@@ -880,6 +892,19 @@ func (s *ServiceStarter) Stop() {
 // (srv-jobfile-eci, 2026-10-05: gate-extraction defect fixed by deploy,
 // bead idled escalated overnight with no path back).
 func panBlockedReason(b types.Bead, now time.Time, wedgeGrace, leafGrace time.Duration, blockedDependents int) (string, bool) {
+	return panBlockedReasonWithRetest(b, now, wedgeGrace, leafGrace, blockedDependents, nil, 0)
+}
+
+// retestSilenceThreshold: integration-pending age beyond which ZERO recorded
+// retest attempts is reported to Pan as RETEST SILENCE (hydra-1hbo). ~1.5x
+// the default hourly RetryInterval so normal waiting never trips it.
+const retestSilenceThreshold = 90 * time.Minute
+
+// panBlockedReasonWithRetest is panBlockedReason with the retest-stage
+// attempt counters (hydra-1hbo). stats==nil keeps the legacy wording.
+// maxAttempts comes from the stage config so the exhausted-branch reads
+// correctly regardless of yaml tuning.
+func panBlockedReasonWithRetest(b types.Bead, now time.Time, wedgeGrace, leafGrace time.Duration, blockedDependents int, stats func(beadID string) (int, time.Time, bool), maxAttempts int) (string, bool) {
 	if b.Status.IsTerminal() {
 		return "", false
 	}
@@ -892,6 +917,18 @@ func panBlockedReason(b types.Bead, now time.Time, wedgeGrace, leafGrace time.Du
 			return fmt.Sprintf("hard-parked by label %s (durable; scheduler never retries — clear only when the cause is fixed)", lbl), true
 		case integrationPendingLabel:
 			age := now.Sub(b.UpdatedAt)
+			if stats != nil {
+				attempts, last, ok := stats(b.ID.String())
+				if ok && attempts == 0 && age > retestSilenceThreshold {
+					return fmt.Sprintf("RETEST SILENCE: work complete, parked %v with ZERO recorded retest attempts (selector mismatch suspected — hydra-1hbo data) — escalate: file a bead and alert; do NOT assume mechanical retries are happening", age.Round(time.Minute)), true
+				}
+				if ok && maxAttempts > 0 && attempts >= maxAttempts {
+					return fmt.Sprintf("work complete, integrate failed %v ago; retest attempts EXHAUSTED (%d/%d) — repair or human action required", age.Round(time.Minute), attempts, maxAttempts), true
+				}
+				if ok && attempts > 0 && !last.IsZero() {
+					return fmt.Sprintf("work complete, integrate failed %v ago; retest ACTIVE (attempt %d, last %v ago) — leave parked, the stage owns retry", age.Round(time.Minute), attempts, now.Sub(last).Round(time.Minute)), true
+				}
+			}
 			return fmt.Sprintf("work complete, integrate/push failed %v ago (label %s) — parked, NOT reopened; the integration-retest stage retries it mechanically, repair only if the retest attempts are exhausted", age.Round(time.Minute), lbl), true
 		case gitOwnershipLabel:
 			return "hard-parked by label git-ownership (git refused the repo as the hydra user; fix is: git config --global --add safe.directory <repo-path> — human/T3 action)", true

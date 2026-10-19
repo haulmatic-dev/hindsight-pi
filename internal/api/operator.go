@@ -62,7 +62,22 @@ func handlePark(c *gin.Context, o *core.Overseer, getStore func() *registry.Stor
 	_ = c.ShouldBindJSON(&body) // body optional; empty reason allowed
 
 	name := c.Param("name")
-	if err := store.SetProjectPark(name, parked, body.Reason); err != nil {
+	// hydra-6tfb: store the park under the SAME namespace the scheduler reads.
+	// campaignParked() looks up projectKey(projectPath), which user-namespaces
+	// home/<user>/projects/<name> to <user>/<name> — storing under the raw
+	// config name made parks silently ignored (2026-10-19: a parked campaign
+	// kept spawning for 10+ minutes with the API answering 200 parked:true).
+	// Accept the config name OR an already-namespaced key; resolve to the key.
+	parkKey := name
+	if o != nil {
+		for _, p := range o.GetProjects() {
+			if p.Name == name {
+				parkKey = core.ProjectKey(p.Path)
+				break
+			}
+		}
+	}
+	if err := store.SetProjectPark(parkKey, parked, body.Reason); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -92,11 +107,11 @@ func handleListQuarantine(c *gin.Context, o *core.Overseer) {
 		Labels []string `json:"labels"`
 	}
 	type projectReport struct {
-		Project  string           `json:"project"`
-		Path     string           `json:"path"`
-		Branches []string         `json:"branches"`
+		Project  string            `json:"project"`
+		Path     string            `json:"path"`
+		Branches []string          `json:"branches"`
 		Beads    []quarantinedBead `json:"beads"`
-		Error    string           `json:"error,omitempty"`
+		Error    string            `json:"error,omitempty"`
 	}
 
 	reports := []projectReport{}
