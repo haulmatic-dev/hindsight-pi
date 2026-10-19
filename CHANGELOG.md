@@ -5,6 +5,10 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 "Documentation & Changelog Discipline". Format follows
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
+
+
+## [Unreleased]
+- **Gate-Doctor: pi-based triage of verification RED** (`hydra-fva4`): on verification-command RED, a cheap LLM pass (`internal/core/gate_doctor.go`) classifies the failure family (environment / code-broken / stale-gate / flaky / uncertain) and routes the close rejection to the matching bounded action — allowed repair rerun, fix-bead filing with the exact RED output, or escalation. Bounded: the doctor never edits gates/tests and is terminal per bead per attempt. Subsumes the hydra-4nwg fix-bead branch.
 ## [Unreleased]
 - Orphan-claim P0 triage (docs/discovery/orphanclaim-triage-yzi1.md): all three digest claims verified stale at 2026-10-06 14:02 UTC — 0 true orphan claims (4 live workers, escalated/pan-filed excluded by design, rest registry-completed churn reopened by Charon), publisher wedge absent (PR #268 merged, 0 unlanded commits), disk 39%. No code change.
 
