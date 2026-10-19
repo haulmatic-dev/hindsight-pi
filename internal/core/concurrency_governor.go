@@ -19,6 +19,11 @@ type GovernorConfig struct {
 	// provider-pressure failure before the limit climbs by one, independently of
 	// how many outcomes have been observed. Default 300.
 	RecoveryIntervalSeconds int `yaml:"recovery_interval_seconds"`
+	// MemoryPressureThreshold is the cgroup memory-pressure percentage (PSI
+	// "some" avg10, or 100 when memory.current reaches memory.high) at which the
+	// governor multiplicatively halves the limit. 0 takes the default (50);
+	// negative disables the memory feedback loop. See memory_pressure.go.
+	MemoryPressureThreshold float64 `yaml:"memory_pressure_threshold"`
 }
 
 // applyGovernorDefaults fills in zero values with the documented defaults.
@@ -38,6 +43,10 @@ func applyGovernorDefaults(cfg *GovernorConfig) {
 	if cfg.RecoveryIntervalSeconds <= 0 {
 		cfg.RecoveryIntervalSeconds = 300
 	}
+	if cfg.MemoryPressureThreshold == 0 {
+		cfg.MemoryPressureThreshold = 50
+	}
+	// Negative thresholds leave the memory feedback disabled (memThreshold < 0).
 }
 
 // ConcurrencyGovernor implements AIMD (additive-increase/multiplicative-decrease)
@@ -61,6 +70,14 @@ type ConcurrencyGovernor struct {
 	onChange    func(old, new int, reason string)
 	events      *EventSink // AIMD scale events (sensor symmetry); nil-safe
 	now         func() time.Time
+	// Memory throttle feedback (see memory_pressure.go). memThreshold is the
+	// PSI/current-vs-high percentage that triggers a multiplicative scale-down;
+	// negative disables. psiPath/curPath/highPath override the cgroup probe
+	// paths (tests); empty = the daemon service slice defaults.
+	memThreshold float64
+	psiPath      string
+	curPath      string
+	highPath     string
 }
 
 // NewConcurrencyGovernor creates a governor with the supplied configuration.
@@ -80,6 +97,7 @@ func NewConcurrencyGovernor(maxWorkers int, cfg GovernorConfig) *ConcurrencyGove
 		lastChange:   time.Time{},
 		onChange:     nil,
 		now:          time.Now,
+		memThreshold: cfg.MemoryPressureThreshold,
 	}
 }
 
@@ -287,7 +305,7 @@ func (g *ConcurrencyGovernor) emitChangeLocked(old, new int, reason string) {
 		g.events.Emit(Event{Type: "aimd_scale_up", Reason: reason,
 			Detail: fmt.Sprintf("AIMD concurrency %d -> %d (%s)", old, new, reason),
 			Fields: map[string]any{"old": old, "new": new, "correlation_id": SensorCorrelation("aimd", "governor")}})
-	case "additive_decrease":
+	case "additive_decrease", "memory_throttle":
 		g.events.Emit(Event{Type: "aimd_scale_down", Reason: reason,
 			Detail: fmt.Sprintf("AIMD concurrency %d -> %d (%s)", old, new, reason),
 			Fields: map[string]any{"old": old, "new": new, "correlation_id": SensorCorrelation("aimd", "governor")}})
