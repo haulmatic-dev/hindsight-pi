@@ -313,7 +313,7 @@ func TestVerifyBeforeClose_MainCheckoutLeak(t *testing.T) {
 }
 
 func TestVerifyBeforeClose_TargetLessImplementationWarns(t *testing.T) {
-	repo, closer, bead := setupScopeGateTest(t, "block")
+	repo, closer, bead := setupScopeGateTest(t, "warn")
 	bead.Metadata = nil
 	bead.Description = "no targets declared"
 	bead.Type = "fr"
@@ -321,7 +321,7 @@ func TestVerifyBeforeClose_TargetLessImplementationWarns(t *testing.T) {
 
 	logs := captureLogOutput(t, func() {
 		if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
-			t.Fatalf("target-less warning must not reject close: %v", err)
+			t.Fatalf("warn mode must not reject target-less close: %v", err)
 		}
 	})
 
@@ -330,6 +330,25 @@ func TestVerifyBeforeClose_TargetLessImplementationWarns(t *testing.T) {
 	}
 	if !strings.Contains(logs, "internal/core/x.go") {
 		t.Fatalf("expected log containing 'internal/core/x.go', got:\n%s", logs)
+	}
+}
+
+func TestVerifyBeforeClose_TargetLessImplementationBlocks(t *testing.T) {
+	repo, closer, bead := setupScopeGateTest(t, "block")
+	bead.Metadata = nil
+	bead.Description = "no targets declared"
+	bead.Type = "fr"
+	writeAndCommit(t, repo, "internal/core/x.go", "package x\n// modified\n")
+
+	err := closer.verifyBeforeClose(bead, repo, "")
+	if err == nil {
+		t.Fatal("block mode must reject target-less non-allowlisted changes")
+	}
+	if !strings.Contains(err.Error(), "non-allowlisted changes on target-less bead") {
+		t.Fatalf("expected fail-closed rejection reason, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "internal/core/x.go") {
+		t.Fatalf("expected violation path in rejection, got: %v", err)
 	}
 }
 

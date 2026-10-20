@@ -1638,12 +1638,19 @@ func (c *BeadCloser) checkTargetScope(bead *types.Bead, projectPath, repoName st
 		return nil
 	}
 
+	// Fail-closed targetless gate (hydra-sx1z): an implementation bead that
+	// declares no Target Files but touches non-allowlisted code paths must
+	// not silently sail through verified-close in block mode. Warn mode
+	// keeps the advisory behavior; block mode rejects the close.
 	if !beadTypeShouldDeclareTargets(bead.Type) {
 		return nil
 	}
 
 	paths := targetlessWarningPaths(changed)
 	if len(paths) > 0 {
+		if mode == "block" {
+			return c.rejectClose(bead, projectPath, repoName, "non-allowlisted changes on target-less bead: "+strings.Join(paths, ", "))
+		}
 		log.Printf("[ScopeGate] bead %s declared no Target Files but changed non-allowlisted paths: %v", bead.ID, paths)
 	}
 	return nil
