@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,6 +14,31 @@ import (
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
+
+// evidenceFatalErr classifies a git evidence-read failure. FAIL-CLOSED only
+// for failures inside a REAL repository whose status genuinely cannot be read
+// (dubious ownership, permission denied — the 2026-10-20 zero-work cascade
+// was a dubious-ownership exit 128 on a mis-rooted worktree). A path that is
+// not a git repository has no evidence to verify by design — legacy fail-open
+// there keeps fixtures, doc-only project dirs and path-resolution closes
+// working (worker_completion fixtures close against /test/test-project).
+func evidenceFatalErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		stderr := strings.ToLower(string(exitErr.Stderr))
+		if strings.Contains(stderr, "not a git repository") {
+			return false
+		}
+		return true
+	}
+	// Non-exit errors (fork/exec): a missing directory is "no evidence
+	// surface"; anything else is an environment fault.
+	msg := strings.ToLower(err.Error())
+	return !strings.Contains(msg, "no such file or directory")
+}
 
 // getSemanticClusterer lazily builds the embedding-based clustering pass on
 // first use (an API key may only be set at close time, and building it
@@ -1488,7 +1514,7 @@ func (c *BeadCloser) collectCloseEvidence(bead *types.Bead, projectPath, repoPat
 				changed = committed
 			} else {
 				log.Printf("[VerifiedClose] session-evidence base unavailable for %s: %v", bead.ID, cerr)
-				if changedErr != nil {
+				if evidenceFatalErr(changedErr) {
 					return nil, fmt.Errorf("[VerifiedClose] cannot verify work for %s: status: %v; session evidence: %v", bead.ID, changedErr, cerr)
 				}
 			}
@@ -1496,7 +1522,7 @@ func (c *BeadCloser) collectCloseEvidence(bead *types.Bead, projectPath, repoPat
 			changed = committed
 		} else {
 			log.Printf("[VerifiedClose] committed-evidence base unavailable for %s: %v", bead.ID, cerr)
-			if changedErr != nil {
+			if evidenceFatalErr(changedErr) {
 				return nil, fmt.Errorf("[VerifiedClose] cannot verify work for %s: status: %v; committed evidence: %v", bead.ID, changedErr, cerr)
 			}
 		}
@@ -1509,7 +1535,7 @@ func (c *BeadCloser) collectCloseEvidence(bead *types.Bead, projectPath, repoPat
 	if switchedToWorktree {
 		var uerr error
 		changed, uerr = unionMainCheckoutLeaks(bead.ID, projectPath, mainRepoPath, changed)
-		if uerr != nil && len(changed) == 0 {
+		if uerr != nil && len(changed) == 0 && evidenceFatalErr(uerr) {
 			return nil, fmt.Errorf("[VerifiedClose] cannot verify work for %s: main-checkout diff unreadable: %v", bead.ID, uerr)
 		}
 	}

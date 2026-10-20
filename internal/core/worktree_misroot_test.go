@@ -1,7 +1,9 @@
 package core
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -95,14 +97,37 @@ func TestCollectCloseEvidence_MainModeCommittedEvidenceRescuesStatusError(t *tes
 	repo, closer, _ := setupScopeGateTest(t, "block")
 	nonGit := t.TempDir() // evidence repo: status will fail
 	// Fresh bead ID (no session base): committedChangesSinceBranchBase fails
-	// (no origin/<branch> merge-base in the fixture repo) → both evidence
-	// sources unavailable → fatal.
+	// AND the evidence repo is a NON-git dir → git reports "not a git
+	// repository" → no evidence surface by design → legacy fail-open
+	// (worker_completion fixture contract; git cannot distinguish an
+	// unreadable .git from a non-repo either). Real-repo git faults are
+	// pinned by the evidenceFatalErr classifier table below.
 	bead := &types.Bead{ID: "no-session-bead", Title: "Test bead", Metadata: map[string]string{"files": "x/a.go"}}
+	if _, err := closer.collectCloseEvidence(bead, repo, nonGit, nonGit, false, "", true, false); err != nil {
+		t.Fatalf("non-repo evidence surface must stay legacy fail-open, got: %v", err)
+	}
+}
 
-	// no session base: committedChangesSinceBranchBase also fails on a
-	// non-git dir → both evidence sources unavailable → fatal.
-	if _, err := closer.collectCloseEvidence(bead, repo, nonGit, nonGit, false, "", true, false); err == nil {
-		t.Fatal("status error + committed-evidence error must fail closed in main mode")
+// TestEvidenceFatalErr_Classifier: FAIL-CLOSED is scoped to real-repo git
+// faults (dubious ownership, permission denied, corruption). A non-repo path
+// or a missing directory has no evidence surface — legacy fail-open.
+func TestEvidenceFatalErr_Classifier(t *testing.T) {
+	cases := []struct {
+		name  string
+		err   error
+		fatal bool
+	}{
+		{"nil", nil, false},
+		{"not a git repository", &exec.ExitError{Stderr: []byte("fatal: not a git repository (or any of the parent directories): .git")}, false},
+		{"dubious ownership", &exec.ExitError{Stderr: []byte("fatal: detected dubious ownership in repository at '/x'")}, true},
+		{"permission denied", &exec.ExitError{Stderr: []byte("fatal: Unable to create '/x/.git/index.lock': Permission denied")}, true},
+		{"missing dir", fmt.Errorf("chdir /gone: no such file or directory"), false},
+		{"fork/exec env fault", fmt.Errorf("fork/exec /bin/git: resource temporarily unavailable"), true},
+	}
+	for _, tc := range cases {
+		if got := evidenceFatalErr(tc.err); got != tc.fatal {
+			t.Errorf("%s: evidenceFatalErr=%v want %v", tc.name, got, tc.fatal)
+		}
 	}
 }
 
@@ -119,37 +144,29 @@ func TestCollectCloseEvidence_MainModeFailOpenOnStatusOnly(t *testing.T) {
 	_ = changed
 }
 
-// TestCollectCloseEvidence_MainLeakUnionErrorFatalWhenNoEvidence: a
-// main-checkout status error with an empty worktree diff (no evidence at
-// all) must fail closed.
-func TestCollectCloseEvidence_MainLeakUnionErrorFatalWhenNoEvidence(t *testing.T) {
+// TestCollectCloseEvidence_MainLeakUnionErrorLegacyForNonRepo: a
+// main-checkout path that is not a git repo is legacy fail-open even with an
+// empty worktree diff (worker_completion fixture contract).
+func TestCollectCloseEvidence_MainLeakUnionErrorLegacyForNonRepo(t *testing.T) {
 	repo, closer, bead := setupScopeGateTest(t, "block")
-	nonGit := t.TempDir() // main checkout unreadable
+	nonGit := t.TempDir() // main checkout: no evidence surface
 
-	_, err := closer.collectCloseEvidence(bead, repo, repo, nonGit, true, "", true, false)
-	if err == nil {
-		t.Fatal("unreadable main checkout with zero evidence must fail closed")
-	}
-	if !strings.Contains(err.Error(), "cannot verify work") {
-		t.Fatalf("unexpected error: %v", err)
+	if _, err := closer.collectCloseEvidence(bead, repo, repo, nonGit, true, "", true, false); err != nil {
+		t.Fatalf("non-repo main checkout must stay fail-open, got: %v", err)
 	}
 }
 
-// TestVerifyBeforeClose_WorktreeDiffErrorRejectsClose: end-to-end — a broken
-// evidence repo in worktree mode produces a cannot-verify-diff rejection
-// (bead reopened), never an accept.
+// TestVerifyBeforeClose_WorktreeDiffErrorRejectsClose: end-to-end — an
+// evidence failure in WORKTREE mode fails closed (cannot-read-diff error);
+// worktree mode is blanket fail-closed because ExistingWorktree already
+// guarantees a real repo identity.
 func TestVerifyBeforeClose_WorktreeDiffErrorRejectsClose(t *testing.T) {
 	_, closer, _ := setupScopeGateTest(t, "block")
-	// Unknown project + fresh bead ID: the resolver falls back to projectPath
-	// (non-git) as the evidence repo, and no session base exists — both
-	// evidence sources are broken → cannot-verify-diff rejection.
-	bead := &types.Bead{ID: "unverifiable-bead", Title: "Test bead", Metadata: map[string]string{"files": "x/a.go"}}
-	nonGit := t.TempDir()
-	err := closer.verifyBeforeClose(bead, nonGit, "")
+	_, err := closer.collectCloseEvidence(&types.Bead{ID: "unverifiable-bead", Title: "Test bead", Metadata: map[string]string{"files": "x/a.go"}}, "", "/definitely/not/a/repo", "", true, "", true, false)
 	if err == nil {
-		t.Fatal("unverifiable evidence must reject the close")
+		t.Fatal("worktree-mode evidence failure must fail closed")
 	}
-	if !strings.Contains(err.Error(), "cannot-verify-diff") {
-		t.Fatalf("rejection reason must be cannot-verify-diff, got: %v", err)
+	if !strings.Contains(err.Error(), "cannot read diff evidence") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
