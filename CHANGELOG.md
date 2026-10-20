@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 ## [Unreleased]
+- Fixed: Worktree mis-rooting + verified-close fail-open cascade (hydra-akn8): `ExistingWorktree` now validates the worktree's common gitdir against the project repo (submodule-aware, `isOurWorktree`) and refuses mis-rooted paths with a typed `worktree_refused/misrooted_gitdir` event; `ensureWorktreeLocked` asserts identity immediately after `worktree add` and removes+fails-closed a mis-rooted creation; verified-close diff/work evidence reads are FAIL-CLOSED (`collectCloseEvidence`/`unionMainCheckoutLeaks` return errors, close rejected with `cannot-verify-diff` and reopened) instead of logging "not blocking" and letting nil changed files pass `hasTargetChanges` as "unknown, fail open" — which let hydra-xnk7/r2rl/htq0 close-verified with zero work (2026-10-20, dubious-ownership exit 128 on a monorepo-rooted chain worktree). *Authored by a Hydra dogfood run.*
 - Fixed: PushPendingEntry (overseer) now tracks consecutive publish-failure state — Failures count and LastClass (ClassifyPushFailure result) are recorded per project so backoff/escalation logic can distinguish transient vs permanent failure classes. *Authored by a Hydra dogfood run.*
 - Fixed: IntegrationRetest `findBranch` falls back to the bead's chain-root worktree key (`hydra/wt-<chainKey>` / `hydra/quarantine/<chainKey>`), so chain-member beads parked on their root's branch are no longer invisible to the retest sweep. *Authored by a Hydra dogfood run.*
 ### Documentation

@@ -82,7 +82,12 @@ func TestVerifyBeforeClose_EmptyTargetsBypasses(t *testing.T) {
 	}
 }
 
-func TestVerifyBeforeClose_ChangedFilesErrorFailsOpen(t *testing.T) {
+func TestVerifyBeforeClose_ChangedFilesErrorFailsClosed(t *testing.T) {
+	// FAIL-CLOSED (2026-10-20 zero-work cascade): a git error reading the
+	// evidence repo means the work cannot be verified — the close is
+	// rejected (cannot-verify-diff), never accepted. Previously the error
+	// was logged "not blocking" and nil changed files passed hasTargetChanges
+	// as "unknown, fail open", letting zero-work closes through.
 	// Use a non-git directory so changedFiles returns an error.
 	nonGitRepo := t.TempDir()
 	closer := newScopeGateCloser(t, nonGitRepo, "block")
@@ -93,8 +98,12 @@ func TestVerifyBeforeClose_ChangedFilesErrorFailsOpen(t *testing.T) {
 		Metadata: map[string]string{"files": "x/a.go"},
 	}
 
-	if err := closer.verifyBeforeClose(bead, nonGitRepo, ""); err != nil {
-		t.Fatalf("changedFiles error should fail open: %v", err)
+	err := closer.verifyBeforeClose(bead, nonGitRepo, "")
+	if err == nil {
+		t.Fatal("changedFiles error must fail CLOSED: close must be rejected, not accepted")
+	}
+	if !strings.Contains(err.Error(), "cannot-verify-diff") {
+		t.Fatalf("rejection reason must be cannot-verify-diff, got: %v", err)
 	}
 }
 
