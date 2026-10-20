@@ -259,7 +259,32 @@ func (m *WorktreeManager) worktreePath(projectPath, key string) string {
 // chain integrates).
 func (m *WorktreeManager) ExistingWorktree(projectPath, key string) (string, bool) {
 	wtPath := m.worktreePath(projectPath, key)
-	return wtPath, isGitWorktree(wtPath)
+	if !isGitWorktree(wtPath) {
+		return wtPath, false
+	}
+	// Identity validation (2026-10-20 mis-rooting cascade): a path may be a
+	// valid git worktree of the WRONG repository — observed live when a chain
+	// worktree was attached to the parent monorepo's gitdir while the project
+	// is a submodule (hydra-q3p: every git op exit 128, verified-close then
+	// failed open and accepted zero-work closes). Never hand a worktree whose
+	// common gitdir does not match the project repo to a worker or the closer.
+	if !isOurWorktree(projectPath, wtPath) {
+		m.emitMisrootedRefusal(projectPath, wtPath, key)
+		return "", false
+	}
+	return wtPath, true
+}
+
+// emitMisrootedRefusal records the typed event for a refused mis-rooted
+// worktree. Fail-open: an event failure never changes the refusal.
+func (m *WorktreeManager) emitMisrootedRefusal(projectPath, wtPath, key string) {
+	log.Printf("[Worktree] refusing %s: gitdir does not match project repo %s (mis-rooted worktree, key %s)", wtPath, projectPath, key)
+	if m.eventSink == nil {
+		return
+	}
+	m.eventSink.Emit(Event{Type: "worktree_refused", Reason: "misrooted_gitdir",
+		Detail: fmt.Sprintf("worktree %s is a git worktree of a different repository than project %s", wtPath, projectPath),
+		Fields: map[string]any{"project_path": projectPath, "worktree": wtPath, "key": key}})
 }
 
 // WorkingBranch returns the project checkout's current branch name.
@@ -440,6 +465,16 @@ func (m *WorktreeManager) ensureWorktreeLocked(projectPath, key string) (string,
 		if _, err := gitOut(projectPath, "worktree", "add", "-b", branch, wtPath, base); err != nil {
 			return "", fmt.Errorf("worktree add %s off %s: %w", branch, base, err)
 		}
+	}
+	// Post-creation identity assertion (2026-10-20 mis-rooting cascade): the
+	// fresh worktree MUST share the project's common gitdir. A path-decoding
+	// or exec-dir bug can attach the parent monorepo's gitdir when the project
+	// is a submodule; detect it immediately, remove the mis-rooted worktree,
+	// and fail closed instead of spawning a worker into a foreign repo.
+	if !isOurWorktree(projectPath, wtPath) {
+		_, _ = gitOut(projectPath, "worktree", "remove", wtPath, "--force")
+		_, _ = gitOut(projectPath, "worktree", "prune")
+		return "", fmt.Errorf("worktree %s mis-rooted: gitdir does not match project repo %s (removed)", wtPath, projectPath)
 	}
 
 	// A stale branch may carry old commits; reset the (possibly reattached)

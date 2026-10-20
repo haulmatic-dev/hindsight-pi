@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,6 +14,31 @@ import (
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
+
+// evidenceFatalErr classifies a git evidence-read failure. FAIL-CLOSED only
+// for failures inside a REAL repository whose status genuinely cannot be read
+// (dubious ownership, permission denied — the 2026-10-20 zero-work cascade
+// was a dubious-ownership exit 128 on a mis-rooted worktree). A path that is
+// not a git repository has no evidence to verify by design — legacy fail-open
+// there keeps fixtures, doc-only project dirs and path-resolution closes
+// working (worker_completion fixtures close against /test/test-project).
+func evidenceFatalErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		stderr := strings.ToLower(string(exitErr.Stderr))
+		if strings.Contains(stderr, "not a git repository") {
+			return false
+		}
+		return true
+	}
+	// Non-exit errors (fork/exec): a missing directory is "no evidence
+	// surface"; anything else is an environment fault.
+	msg := strings.ToLower(err.Error())
+	return !strings.Contains(msg, "no such file or directory")
+}
 
 // getSemanticClusterer lazily builds the embedding-based clustering pass on
 // first use (an API key may only be set at close time, and building it
@@ -1333,7 +1359,14 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 	needDiff := c.config.Validation.RequireDiffOnClose
 	needScope := c.config.Validation.TargetScopeMode() != "off"
 
-	changed := c.collectCloseEvidence(bead, projectPath, repoPath, mainRepoPath, switchedToWorktree, base, needDiff, needScope)
+	changed, evErr := c.collectCloseEvidence(bead, projectPath, repoPath, mainRepoPath, switchedToWorktree, base, needDiff, needScope)
+	if evErr != nil {
+		// FAIL-CLOSED (2026-10-20 zero-work cascade): a git error in the
+		// evidence read means the work cannot be verified — the close is
+		// rejected (reopen with the retry ladder), never accepted.
+		log.Printf("[VerifiedClose] %s", evErr)
+		return c.rejectClose(bead, projectPath, repoName, "cannot-verify-diff")
+	}
 
 	if needDiff && !hasTargetChanges(changed, targets) {
 		if !c.acceptAlreadyIntegrated(bead, projectPath, repoName, repoPath, switchedToWorktree, base, baseSource, targets) {
@@ -1451,17 +1484,22 @@ func (c *BeadCloser) closeIntegrationBase(bead *types.Bead, projectPath, repoPat
 //     in as "main-checkout leaks" (incident 2jjz8; the dirty-main
 //     auto-commit sweeps them onto the branch at integration time).
 //
-// Evidence-read failures are logged and fail open.
-func (c *BeadCloser) collectCloseEvidence(bead *types.Bead, projectPath, repoPath, mainRepoPath string, switchedToWorktree bool, base string, needDiff, needScope bool) []string {
+// Evidence-read failures are FAIL-CLOSED (2026-10-20 zero-work cascade:
+// hydra-xnk7/r2rl/htq0 closed-verified with exactly zero work because a
+// dubious-ownership exit 128 was logged "not blocking" and nil changed files
+// are treated as "unknown, fail open" by hasTargetChanges): cannot verify
+// evidence == cannot close. Callers must reject the close (reopen with the
+// retry ladder), never accept it.
+func (c *BeadCloser) collectCloseEvidence(bead *types.Bead, projectPath, repoPath, mainRepoPath string, switchedToWorktree bool, base string, needDiff, needScope bool) ([]string, error) {
 	if !needDiff && !needScope {
-		return nil
+		return nil, nil
 	}
 	changed, changedErr := changedFilesWithBase(repoPath, base)
 	if changedErr != nil {
-		log.Printf("[VerifiedClose] diff check error for %s (not blocking): %v", bead.ID, changedErr)
+		log.Printf("[VerifiedClose] diff check error for %s: %v", bead.ID, changedErr)
 	}
 
-	if !switchedToWorktree && needDiff && changedErr == nil {
+	if !switchedToWorktree && needDiff {
 		// Main-checkout mode: uncommitted edits are revertible and have been
 		// observed to be reverted AFTER close acceptance (2026-09-16 nipuna
 		// incident: 14 false closes). Only committed changes since the branch
@@ -1475,19 +1513,33 @@ func (c *BeadCloser) collectCloseEvidence(bead *types.Bead, projectPath, repoPat
 			if committed, cerr := committedChangesSinceBase(projectPath, sessionBase); cerr == nil {
 				changed = committed
 			} else {
-				log.Printf("[VerifiedClose] session-evidence base unavailable for %s (fail open): %v", bead.ID, cerr)
+				log.Printf("[VerifiedClose] session-evidence base unavailable for %s: %v", bead.ID, cerr)
+				if evidenceFatalErr(changedErr) {
+					return nil, fmt.Errorf("[VerifiedClose] cannot verify work for %s: status: %v; session evidence: %v", bead.ID, changedErr, cerr)
+				}
 			}
 		} else if committed, cerr := committedChangesSinceBranchBase(projectPath); cerr == nil {
 			changed = committed
 		} else {
-			log.Printf("[VerifiedClose] committed-evidence base unavailable for %s (fail open): %v", bead.ID, cerr)
+			log.Printf("[VerifiedClose] committed-evidence base unavailable for %s: %v", bead.ID, cerr)
+			if evidenceFatalErr(changedErr) {
+				return nil, fmt.Errorf("[VerifiedClose] cannot verify work for %s: status: %v; committed evidence: %v", bead.ID, changedErr, cerr)
+			}
 		}
+	} else if changedErr != nil {
+		// Worktree mode: the evidence repo diff is the ONLY evidence for the
+		// work — a git error there is fatal (fail-closed).
+		return nil, fmt.Errorf("[VerifiedClose] cannot read diff evidence for %s in %s: %v", bead.ID, repoPath, changedErr)
 	}
 
 	if switchedToWorktree {
-		changed = unionMainCheckoutLeaks(bead.ID, projectPath, mainRepoPath, changed)
+		var uerr error
+		changed, uerr = unionMainCheckoutLeaks(bead.ID, projectPath, mainRepoPath, changed)
+		if uerr != nil && len(changed) == 0 && evidenceFatalErr(uerr) {
+			return nil, fmt.Errorf("[VerifiedClose] cannot verify work for %s: main-checkout diff unreadable: %v", bead.ID, uerr)
+		}
 	}
-	return changed
+	return changed, nil
 }
 
 // unionMainCheckoutLeaks merges uncommitted main-checkout changes into the
@@ -1496,14 +1548,14 @@ func (c *BeadCloser) collectCloseEvidence(bead *types.Bead, projectPath, repoPat
 // files onto the branch at integration time, so the work is preserved either
 // way. Returns the evidence unchanged when the main checkout is clean or
 // unreadable.
-func unionMainCheckoutLeaks(beadID types.BeadID, projectPath, mainRepoPath string, changed []string) []string {
+func unionMainCheckoutLeaks(beadID types.BeadID, projectPath, mainRepoPath string, changed []string) ([]string, error) {
 	mainChanged, mainErr := changedFiles(mainRepoPath)
 	if mainErr != nil {
-		log.Printf("[VerifiedClose] main-checkout diff check error for %s (not blocking): %v", beadID, mainErr)
-		return changed
+		log.Printf("[VerifiedClose] main-checkout diff check error for %s: %v", beadID, mainErr)
+		return changed, mainErr
 	}
 	if len(mainChanged) == 0 {
-		return changed
+		return changed, nil
 	}
 	seen := make(map[string]bool, len(changed))
 	for _, f := range changed {
@@ -1516,7 +1568,7 @@ func unionMainCheckoutLeaks(beadID types.BeadID, projectPath, mainRepoPath strin
 			seen[f] = true
 		}
 	}
-	return changed
+	return changed, nil
 }
 
 // acceptAlreadyIntegrated reports whether the bead's work has already landed

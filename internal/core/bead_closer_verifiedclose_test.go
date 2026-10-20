@@ -82,8 +82,15 @@ func TestVerifyBeforeClose_EmptyTargetsBypasses(t *testing.T) {
 	}
 }
 
-func TestVerifyBeforeClose_ChangedFilesErrorFailsOpen(t *testing.T) {
-	// Use a non-git directory so changedFiles returns an error.
+func TestVerifyBeforeClose_NonRepoEvidenceSurfaceLegacyFailOpen(t *testing.T) {
+	// Contract refinement (akn8 gate round 2): a path that is NOT a git
+	// repository has no evidence surface by design — git itself reports
+	// "not a git repository" and cannot distinguish it from an unreadable
+	// .git — so the close proceeds (legacy fail-open; the worker_completion
+	// path-resolution fixtures close against /test/test-project). Real-repo
+	// git faults (dubious ownership, permission denied) are fail-closed,
+	// pinned by TestEvidenceFatalErr_Classifier in worktree_misroot_test.go
+	// and by the worktree-mode blanket-fatal test.
 	nonGitRepo := t.TempDir()
 	closer := newScopeGateCloser(t, nonGitRepo, "block")
 	bead := &types.Bead{
@@ -94,7 +101,7 @@ func TestVerifyBeforeClose_ChangedFilesErrorFailsOpen(t *testing.T) {
 	}
 
 	if err := closer.verifyBeforeClose(bead, nonGitRepo, ""); err != nil {
-		t.Fatalf("changedFiles error should fail open: %v", err)
+		t.Fatalf("non-repo evidence surface must stay legacy fail-open, got: %v", err)
 	}
 }
 
