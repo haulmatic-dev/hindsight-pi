@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"fmt"
 	"sync"
 	"testing"
@@ -28,7 +29,7 @@ func initGitRepoAt(t *testing.T, parent, name string) string {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
-	git("init")
+	git("init", "-b", "main")
 	git("config", "user.email", "test@example.com")
 	git("config", "user.name", "Test")
 	cmd := exec.Command("sh", "-c", "echo x > file.txt && git add file.txt && git commit -m init")
@@ -136,14 +137,16 @@ func (m *enhancedMockBeadsClient) CloseBead(projectPath, repoName string, beadID
 // setupWorkerCompletionTest creates an overseer configured for worker completion testing
 func setupWorkerCompletionTest(t *testing.T) (*Overseer, *enhancedMockBeadsClient, []types.Project) {
 	t.Helper()
-	repo := gitTestProject(t)
-	multiRoot := t.TempDir()
-	// Each sub-repo is its own git repo: the multi-repo close path runs git
-	// evidence checks per repo dir.
-	backendRoot := initGitRepoAt(t, multiRoot, "backend")
-	_ = backendRoot
-	frontendRoot := initGitRepoAt(t, multiRoot, "frontend")
-	_ = frontendRoot
+	// Named dirs: the mock beads client keys stores by filepath.Base(path),
+	// so repos MUST be named test-project / multi-project for ListBeads to
+	// find the beads (random TempDir names starve the DAG -> nil nodes).
+	repo := initGitRepoAt(t, t.TempDir(), "test-project")
+	multiRoot := filepath.Join(t.TempDir(), "multi-project")
+	if err := os.MkdirAll(multiRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, multiRoot, "backend")
+	initGitRepoAt(t, multiRoot, "frontend")
 
 	config := DefaultConfig()
 	config.Overseer.MaxWorkers = 4

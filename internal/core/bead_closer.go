@@ -1324,7 +1324,15 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 	}
 
 	repoPath, mainRepoPath, switchedToWorktree := c.resolveEvidenceRepo(bead, projectPath, repoName)
-	base, baseSource, err := c.closeIntegrationBase(bead, projectPath, repoPath)
+	// Base resolves from the repo dir only for the multi-repo case (repoPath
+	// is a repo subdir of a non-git project parent). In worktree mode the
+	// evidence lives in the worktree but the integration base is the
+	// PROJECT's base (resolved from the main checkout).
+	baseFrom := projectPath
+	if repoPath != projectPath && !switchedToWorktree {
+		baseFrom = repoPath
+	}
+	base, baseSource, err := c.closeIntegrationBase(bead, baseFrom, repoPath)
 	if err != nil {
 		return err
 	}
@@ -1437,16 +1445,24 @@ func (c *BeadCloser) resolveEvidenceRepo(bead *types.Bead, projectPath, repoName
 // (config knob or origin default) for committed-work detection — NEVER the
 // main checkout's current branch, which is incidental operator state
 // (telematics 2026-09-29). Empty in main-checkout mode.
-func (c *BeadCloser) closeIntegrationBase(bead *types.Bead, projectPath, repoPath string) (base, source string, err error) {
-	if repoPath == projectPath {
+func (c *BeadCloser) closeIntegrationBase(bead *types.Bead, baseFromPath, repoPath string) (base, source string, err error) {
+	if repoPath == baseFromPath {
 		return "", "", nil
 	}
-	base, source, err = ResolveIntegrationBase(c.config, projectPath)
+	// Multi-repo projects resolve the base from the REPO directory, never
+	// the project parent: a multi-repo parent has no .beads store AND no git
+	// repo (fms doctrine, nipuna.j 2026-09-30). Resolving against the parent
+	// made every multi-repo close die at "integration base unresolved"
+	// (worker_completion multi-repo fixture, 2026-10-20).
+	// baseFromPath defines the integration base: repo subdir for multi-repo
+	// (parent has no git - fms doctrine), project root otherwise; never the
+	// evidence worktree (its HEAD is the chain branch, not the base).
+	base, source, err = ResolveIntegrationBase(c.config, baseFromPath)
 	if err != nil {
 		return "", "", fmt.Errorf("committed-work detection for %s: %w", bead.ID, err)
 	}
-	logIntegrationBaseMismatch(projectPath, base, source)
-	return base, source, nil
+	logIntegrationBaseMismatch(baseFromPath, base, source)
+	return base, source, err
 }
 
 // collectCloseEvidence gathers the changed-file evidence for the diff and

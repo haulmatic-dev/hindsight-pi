@@ -66,7 +66,16 @@ func (r *ProjectResolver) ResolveRepoPath(projectName, repoName, projectPath str
 			if p.Type == "multi" {
 				for _, repo := range p.Repos {
 					if repo.Name == repoName {
-						return repo.Path
+						// Join the project root: repo.Path is a relative
+						// segment ("backend"). Returning it raw made every
+						// multi-repo evidence read chdir into a nonexistent
+						// relative dir - masked for months by the fail-open
+						// close, exposed by the fail-closed hardening
+						// (2026-10-20 worker_completion multi-repo fixture).
+						if filepath.IsAbs(repo.Path) {
+							return repo.Path
+						}
+						return filepath.Join(p.Path, repo.Path)
 					}
 				}
 			}
