@@ -1,4 +1,14 @@
-# bug handoff (akn8)
+# bug handoff (akn8) — gate-round-2 addendum
+
+## Gate failure + fix (round 2)
+- Gate: `TestWorkerCompletion_ProjectPathResolution` (3 subtests) — `closeBead failed: verified-close: bead test-project-001 rejected (cannot-verify-diff)`. Root: round-1 blanket fail-closed rejected closes whose evidence surface is a NON-git path (fixtures close against /test/test-project, which does not exist).
+- Fix: `evidenceFatalErr` classifier (internal/core/bead_closer.go) — `*exec.ExitError` whose stderr says "not a git repository" (and fork/exec "no such file or directory") = legacy fail-open: no evidence surface by design, and git itself cannot distinguish an unreadable .git from a non-repo (verified: chmod 000 .git → "fatal: not a git repository"). All other exit-status faults in a real repo (dubious ownership, permission denied — the 2026-10-20 cascade) are fatal → `cannot-verify-diff` rejection. Worktree mode stays blanket fail-closed (ExistingWorktree guarantees repo identity).
+- Tests: `TestEvidenceFatalErr_Classifier` (6-case table: nil / not-a-repo / dubious ownership / permission denied / missing dir / fork-exec env fault), non-repo fixtures re-pinned as legacy fail-open (`TestVerifyBeforeClose_NonRepoEvidenceSurfaceLegacyFailOpen`, `TestCollectCloseEvidence_MainModeCommittedEvidenceRescuesStatusError` reworded, `TestCollectCloseEvidence_MainLeakUnionErrorLegacyForNonRepo`), worktree-mode fatal test reworked to call `collectCloseEvidence` directly (`TestVerifyBeforeClose_WorktreeDiffErrorRejectsClose`).
+- Commits: 2da92109 (round 1) + round-2 commit on hydra/wt-hydra-akn8.
+
+---
+
+# bug handoff (akn8) — round 1
 
 ## What changed (files + one line each)
 - internal/core/worktree_manager.go: `ExistingWorktree` now validates identity before returning a chain worktree — a path that is a git worktree of a DIFFERENT repo (mis-rooted, e.g. attached to the parent monorepo's gitdir while the project is a submodule) returns ("", false) + typed `worktree_refused/misrooted_gitdir` event; `ensureWorktreeLocked` post-`worktree add` assertion removes+fails-closed a mis-rooted creation ("worktree %s mis-rooted: gitdir does not match project repo %s (removed)").
@@ -27,3 +37,4 @@
 ## Open edges for the next phase
 - `cannot-verify-diff` rejections consume a VerifiedClose round; persistent unreadable evidence (e.g. durable dubious ownership) escalates after 3 rounds via the existing ladder — expected fail-closed behavior, watch for churn on hosts with git-trust problems (git-ownership preflight hydra-hlen should pre-empt).
 - Post-close sweep (`postclose-escape`) runs `git status` in project checkouts; same dubious-ownership class could surface there — fail-open by design there (verification rerun, not evidence gate).
+- classifier reads stderr via `exec.ExitError.Stderr` (populated by `cmd.Output()`); if a future evidence read switches to `CombinedOutput`/custom Stderr pipe, the classifier must be revisited.
