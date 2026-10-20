@@ -692,7 +692,21 @@ defaults `go build ./...` / `npm run build`; fail-open when undetectable).
 Gates green → land via the existing dogfood PR path (`dogfood/<id>-retest` +
 `gh pr create` + `gh pr merge --admin`, verified MERGED — branch protection
 respected, never direct-push, never force-push), close the bead, strip both
-labels, emit `integration_retest{result:landed,pr}`. Gates red → stay parked,
+labels, emit `integration_retest{result:landed,pr}`. Four refinements landed 2026-10-19/20 (srv-data-harbour drain incident):
+the selector is **chain-aware** — a chain member's worktree branch is the
+chain root's `hydra/wt-<chain-root>` (DRYAD members share one worktree), so
+when the bead's own branch matches nothing the stage retries with the chain
+key; a branch tip already an ancestor of `origin/<base>` closes the bead
+directly (`closeLanded`, no empty-diff PR); the base `fetch` **fails open**
+to the local tracking ref (the daemon uid has no GitHub credential for
+user-owned repos — exit 128 was killing every attempt); and Pan's blocked
+reasons now carry the stage's REAL attempt counters (`RETEST SILENCE` when a
+bead sits past 90 min with zero attempts, `retest ACTIVE (attempt n, last …)`
+otherwise, `EXHAUSTED (n/max)` at the cap) instead of a static "retries
+mechanically" that once narrated a fiction for 70+ minutes. Selector drops
+log their reason (excluded label / active worker / rate-limit / no-branch
+with chain key), deduped per bead per 10 minutes.
+Gates red → stay parked,
 emit `integration_retest{result:gates-failed}`. Beads also carrying
 `worktree-unavailable` or `infra-exhausted` (parked by Pan for another cause)
 are skipped. Everything fails open: gh/network/registry errors skip the bead

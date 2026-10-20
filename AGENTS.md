@@ -287,6 +287,14 @@ ls <hydra-repo>/.pi/skills/
 # Should show symlinks to ../../.agents/skills/...
 ```
 
+### 1c. Campaign onboarding ritual (2026-10-19 lessons, srv-data-harbour incident)
+
+Before generating PRD/beads for a product repo:
+1. Create the campaign branch off the base (`git checkout -b feat/<campaign> origin/<development>`) and leave the **main checkout on it** — the checked-out branch IS the integration/working branch; every landed worktree commit and publish PR targets it.
+2. **Push the campaign branch to origin once** — `gh pr create` fails with `Base sha can't be blank` when the base ref doesn't exist remotely.
+3. **Gitignore the test runner's temp dirs** (`.tmp/` for jest-retry) in the campaign branch — unignored artifacts get committed by workers and poison every later integrate (4,118 junk files, add/add conflicts).
+4. Product repos are NOT daemon-owned: publish identity resolves from the owner user's per-user PAT, and the operator API parks under the `projectKey` namespace (`<user>/<repo>` for `~/projects` paths — `hydra-6tfb`).
+
 ### 2. Worker Binary (CRITICAL)
 
 Hydra MUST use the **real worker** (`cmd/worker/main.go`) to test code generation:
@@ -391,7 +399,7 @@ When correctly configured, you should see:
 ```
 [PiSetup] ✅ Pi skills ready
 [Worker] Added 27 skill flags
-🔧 Executing Pi: /bin/pi --no-session --provider kimi-coding --model kimi-for-coding
+🔧 Executing Pi: /bin/pi --no-session --provider kimi-router --model glm-5.3-flash
 📁 Working directory: /tmp/hydra-e2e-test/url-shortener
 ✅ Pi completed successfully
 📝 Execution output written to: /tmp/hydra-executions/br-xxx-YYYYMMDD-HHMMSS.json
