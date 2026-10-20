@@ -133,7 +133,7 @@ func TestRoguePIScanner(t *testing.T) {
 	// Tracked worker pi → not rogue.
 	mkProc(4000002, "/usr/local/bin/pi", "0::/user.slice/other.scope", "0")
 	// Young rogue → not rogue (age gate).
-	mkProc(4000003, "/usr/local/bin/pi", "0::/user.slice/young.scope", "720000")  // +2h over btime(now-3h) = started 1h ago → under the 2h gate
+	mkProc(4000003, "/usr/local/bin/pi", "0::/user.slice/young.scope", "720000") // +2h over btime(now-3h) = started 1h ago → under the 2h gate
 	// Non-pi process outside hydra.service → not rogue.
 	mkProc(4000004, "/usr/bin/vim", "0::/user.slice/editor.scope", "0")
 
@@ -255,4 +255,71 @@ func TestRoguePIScanner_LiveFixture(t *testing.T) {
 	if !found {
 		t.Fatalf("live rogue-pi fixture PID %d NOT detected; rogues=%+v", fixturePID, rogues)
 	}
+}
+
+// TestKillRoguePis_LiveFixture is the live dispatch proof for the Pan
+// repair: it runs the REAL kill path (no killFn stub) against the preserved
+// rogue fixture PID 3002553. When the daemon account can signal it, the
+// repair kills it; when the fixture is root-owned (this box: daemon uid
+// hydra, fixture owner root) the repair fails closed with the typed
+// rogue_pi_kill_denied escalation and the exact root remedy. Skips when the
+// fixture is already gone.
+func TestKillRoguePis_LiveFixture(t *testing.T) {
+	const fixturePID = 3002553
+	if _, err := os.Stat(fmt.Sprintf("/proc/%d/cmdline", fixturePID)); err != nil {
+		t.Skipf("live rogue-pi fixture PID %d not present (already killed): %v", fixturePID, err)
+	}
+	j := newHygieneTestCharon(t)
+	sink := NewEventSink(t.TempDir())
+	j.events = sink
+	procIsOurs := func(pid int) bool {
+		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+		if err != nil {
+			return false
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(line, "Uid:") {
+				fields := strings.Fields(line)
+				return len(fields) > 1 && fields[1] == fmt.Sprint(os.Getuid())
+			}
+		}
+		return false
+	}
+	rogues := j.scanRoguePis()
+	var target *RoguePi
+	for i := range rogues {
+		if rogues[i].PID == fixturePID {
+			target = &rogues[i]
+		}
+	}
+	if target == nil {
+		t.Fatalf("scanner did not report live fixture PID %d; rogues=%+v", fixturePID, rogues)
+	}
+	n, err := j.KillRoguePis() // REAL kill: SIGTERM → grace → SIGKILL
+	if err == nil && n == 1 {
+		if _, statErr := os.Stat(fmt.Sprintf("/proc/%d/cmdline", fixturePID)); statErr == nil {
+			time.Sleep(3 * time.Second)
+		}
+		if _, statErr := os.Stat(fmt.Sprintf("/proc/%d/cmdline", fixturePID)); statErr == nil {
+			t.Fatalf("repair reported killed but PID %d still alive", fixturePID)
+		}
+		t.Logf("LIVE REPAIR KILLED fixture PID %d", fixturePID)
+		return
+	}
+	// Not killed: either EPERM (root-owned fixture) or fixture vanished
+	// between scan and kill. Root-owned is the expected live outcome here.
+	if _, statErr := os.Stat(fmt.Sprintf("/proc/%d/cmdline", fixturePID)); statErr != nil {
+		t.Logf("fixture vanished between scan and kill; repair path exercised")
+		return
+	}
+	if !isKillPermissionDenied(err) {
+		t.Fatalf("live repair failed for a non-permission reason: %v", err)
+	}
+	if procIsOurs(fixturePID) {
+		t.Fatalf("fixture PID %d is owned by the daemon uid — kill should have succeeded", fixturePID)
+	}
+	if got := j.RoguePiReport(); len(got) != 0 {
+		t.Fatalf("snapshot should be cleared even on escalation: %+v", got)
+	}
+	t.Logf("LIVE REPAIR DISPATCHED: real kill path attempted on PID %d; permission-denied escalation verified (root-owned rogue — root must kill PID %d)", fixturePID, fixturePID)
 }

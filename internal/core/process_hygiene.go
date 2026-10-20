@@ -1,12 +1,14 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/registry"
@@ -283,7 +285,21 @@ func (j *Charon) KillRoguePis() (int, error) {
 	var firstErr error
 	for _, r := range rogues {
 		if err := j.killPID(r.PID); err != nil {
-			log.Printf("[PanRepair] kill-rogue-pi: kill PID %d failed: %v", r.PID, err)
+			if isKillPermissionDenied(err) {
+				// Root-owned rogue (live fixture 3002553: owner root, daemon
+				// uid hydra): the repair CANNOT succeed from the daemon
+				// account — fail closed, loud: typed needs-human event with
+				// the exact remedy instead of silently dropping the finding.
+				if j.events != nil {
+					j.events.Emit(Event{Type: "rogue_pi_kill_denied",
+						Reason: "permission-denied-root-owned-rogue",
+						Detail: fmt.Sprintf("kill-rogue-pi: PID %d (%s) is owned by another user (root); daemon uid cannot signal it — ROOT MUST KILL PID %d (rogue pi outside hydra.service, age %v)", r.PID, r.Cmdline, r.PID, r.Age.Round(time.Minute)),
+						Fields: map[string]any{"pid": r.PID, "cmdline": r.Cmdline}})
+				}
+				log.Printf("[PanRepair] kill-rogue-pi: PID %d owned by another user — ESCALATION: root must kill PID %d (rogue pi, %v)", r.PID, r.PID, r.Age.Round(time.Hour))
+			} else {
+				log.Printf("[PanRepair] kill-rogue-pi: kill PID %d failed: %v", r.PID, err)
+			}
 			if firstErr == nil {
 				firstErr = fmt.Errorf("kill-rogue-pi: kill PID %d: %w", r.PID, err)
 			}
@@ -293,6 +309,19 @@ func (j *Charon) KillRoguePis() (int, error) {
 		killed++
 	}
 	return killed, firstErr
+}
+
+// isKillPermissionDenied classifies EPERM from the kill syscall surfaces
+// (os.Process.Signal returns OsError-wrapped syscall.EPERM; the kill(1)
+// fallback exits 1 with "Operation not permitted" on stderr).
+func isKillPermissionDenied(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EPERM) {
+		return true
+	}
+	return strings.Contains(err.Error(), "operation not permitted")
 }
 
 // isHydraServiceCgroup reports whether the /proc/<pid>/cgroup content places

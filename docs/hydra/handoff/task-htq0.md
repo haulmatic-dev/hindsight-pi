@@ -19,8 +19,13 @@
 - `go build ./...` — PASS. `go vet ./internal/core/ ./internal/pan/` — clean after adding missing `log` import. gofmt clean.
 - Commit verified via `git show --stat HEAD` (9 files, +737/−1).
 
+## Gate-round-2 addendum (live repair dispatch)
+- Live repair test `TestKillRoguePis_LiveFixture` (PASS): runs the REAL kill path (no stub) against fixture PID 3002553. Finding: fixture is ROOT-OWNED; daemon runs as uid 999 (hydra) — `kill -0 3002553` → "Operation not permitted" (VERIFIED), so the daemon account physically cannot signal it. killProcess rewritten to direct syscalls (SIGTERM→5s grace→SIGKILL) so the failure carries syscall.EPERM instead of kill(1)'s opaque "exit status 1"; KillRoguePis classifies EPERM fail-closed: typed `rogue_pi_kill_denied` event + loud log "ESCALATION: root must kill PID 3002553 (rogue pi, 52h)" (verified in live run output), snapshot cleared, error returned.
+- LIVE REPAIR DISPATCHED log: `LIVE REPAIR DISPATCHED: real kill path attempted on PID 3002553; permission-denied escalation verified (root-owned rogue — root must kill PID 3002553)`.
+- Narrow suite re-run after syscall change: 9/9 PASS incl. TestCharon/TestKill/TestRecoverOrphan regression (ok 16.4s). go vet clean, gofmt clean.
+
 ## Open edges for the next phase
-- The live kill of PID 3002553 happens post-deploy via Pan `repair:kill-rogue-pi` (operator must NOT kill it manually first, per bead).
+- The live kill of PID 3002553 CANNOT be completed by the daemon account (root-owned fixture, no sudo for uid 999 — VERIFIED). The repair is live and correct: dispatch → EPERM → `rogue_pi_kill_denied` escalation naming the root remedy. Operator/root kills PID 3002553 (one command) or grants the daemon account signal rights; after that the deployed `repair:kill-rogue-pi` completes the kill unaided.
 - Zero-token stall findings are advisory until Pan dispatches the kill: detector does not auto-kill (deliberate — a spawn window race is handled by the 15m age gate, but the kill is judgment-gated).
 - Rogue-pi scanner skips cgroup-unreadable PIDs and processes without a readable cmdline (kernel threads etc.); boot-time read comes from `<procRoot>/stat`.
 - No benchmarks; scanner is an O(procs) readdir per Charon tick (1m), reads 3 small files per candidate pi process only.

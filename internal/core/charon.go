@@ -5,7 +5,6 @@ import (
 	"log"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -1243,17 +1242,13 @@ func (j *Charon) killPID(pid int) error {
 	return j.killProcess(pid)
 }
 
-// killProcess kills a process by PID
+// killProcess kills a process by PID: SIGTERM (graceful), 5s grace, then
+// SIGKILL. Direct syscalls, not kill(1): the syscall error is inspectable
+// (syscall.EPERM → the rogue-pi repair's root-owned escalation class); the
+// external kill(1) collapsed every failure to "exit status 1" and lost the
+// reason.
 func (j *Charon) killProcess(pid int) error {
-	// Try graceful termination first (SIGTERM)
-	var cmd *exec.Cmd
-	if runtime.GOOS == "darwin" {
-		cmd = exec.Command("kill", "-15", strconv.Itoa(pid))
-	} else {
-		cmd = exec.Command("kill", "-15", strconv.Itoa(pid))
-	}
-
-	if err := cmd.Run(); err != nil {
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		log.Printf("[Charon] SIGTERM failed for PID %d: %v", pid, err)
 	}
 
@@ -1264,14 +1259,7 @@ func (j *Charon) killProcess(pid int) error {
 	if j.isProcessRunning(pid) {
 		log.Printf("[Charon] PID %d still running after SIGTERM, using SIGKILL", pid)
 
-		// Force kill (SIGKILL)
-		if runtime.GOOS == "darwin" {
-			cmd = exec.Command("kill", "-9", strconv.Itoa(pid))
-		} else {
-			cmd = exec.Command("kill", "-9", strconv.Itoa(pid))
-		}
-
-		if err := cmd.Run(); err != nil {
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 			return fmt.Errorf("SIGKILL failed: %w", err)
 		}
 	}
