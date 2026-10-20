@@ -1031,6 +1031,13 @@ type PushPendingEntry struct {
 	ProjectName string
 	Since       time.Time
 	Reason      string
+	// Failures tracks consecutive non-benign publish failures for the
+	// project (failure state tracking for backoff/escalation logic).
+	Failures int
+	// LastClass records the publish failure classification of the most
+	// recent failure (ClassifyPushFailure result, e.g. TRANSIENT,
+	// CREDENTIAL) so backoff logic can distinguish transient vs permanent.
+	LastClass string
 }
 
 // benignPublishReasons are PublishRepo results that mean "nothing stranded".
@@ -1214,8 +1221,11 @@ func (o *Overseer) notePushPending(project types.Project, reason string) {
 	if o.pushPending == nil {
 		o.pushPending = make(map[string]*PushPendingEntry)
 	}
+	cls := string(ClassifyPushFailure(reason))
 	if e, ok := o.pushPending[project.Path]; ok {
 		e.Reason = reason
+		e.Failures++
+		e.LastClass = cls
 		return
 	}
 	o.pushPending[project.Path] = &PushPendingEntry{
@@ -1223,6 +1233,8 @@ func (o *Overseer) notePushPending(project types.Project, reason string) {
 		ProjectName: project.Name,
 		Since:       time.Now(),
 		Reason:      reason,
+		Failures:    1,
+		LastClass:   cls,
 	}
 	log.Printf("[Publish] push pending for %s: %s (surfaced to Pan as PUSH-PENDING)", project.Path, reason)
 }
