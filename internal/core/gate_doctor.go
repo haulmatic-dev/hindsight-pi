@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/haulmatic-dev/hydra/internal/triage"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -204,4 +205,23 @@ func (d *GateDoctor) FileFixBead(projectPath, repoName, beadID, gateName string,
 	} else {
 		log.Printf("[GateDoctor] %s: filed fix-bead for code-broken %s", beadID, gateName)
 	}
+}
+
+// runGateDoctorPi implements the PiRunner interface for GateDoctor.
+// It maps the GateDoctorConfig to a triage.JudgeConfig and invokes
+// triage.DefaultPiRunner, which uses the standard headless pi invocation.
+func runGateDoctorPi(ctx context.Context, cfg GateDoctorConfig, prompt string) (string, error) {
+	return triage.DefaultPiRunner(ctx, triage.JudgeConfig{
+		Provider:   cfg.Provider,
+		Model:      cfg.Model,
+		Thinking:   cfg.Thinking,
+		APIKeyName: cfg.APIKeyName,
+		PiPath:     cfg.PiPath,
+	}, prompt)
+}
+
+// NewGateDoctor wires the doctor's PiRunner to triage.RunPi and uses the
+// default cheap-model config (GLM class) for classify-turns.
+func NewGateDoctor(cfg GateDoctorConfig) *GateDoctor {
+	return &GateDoctor{PiRunner: runGateDoctorPi, Config: cfg}
 }
