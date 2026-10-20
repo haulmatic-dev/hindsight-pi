@@ -606,6 +606,10 @@ func NewOverseer(config *Config) *Overseer {
 	// Initialize bead closer
 	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o.validationService, config)
 	o.beadCloser.SetSourceIndex(o.beadSource)
+	// Gate-doctor (feature-fva4): pi-based triage of verification RED on the
+	// close path. Fail-open: with the doctor absent Triage escalates uncertain,
+	// so wiring it here (not optional) is safe.
+	o.beadCloser.SetGateDoctor(NewGateDoctor(DefaultGateDoctorConfig()))
 
 	// Owner-identity publish (OPERATOR RULE 2026-09-29): project -> owning
 	// user -> owner PAT, fail-closed for non-daemon-owned projects.

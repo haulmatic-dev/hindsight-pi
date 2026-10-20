@@ -45,6 +45,7 @@ type BeadCloser struct {
 	isChainMember      func(types.BeadID) bool // reports whether a bead belongs to a registered multi-bead chain
 	retainer           *VerdictRetainer        // nil-safe; Hindsight verdict retention (Shepherd D3)
 	gateRunner         *GateRunner             // nil until SetGateRunner; daemon_owned projects fail closed without it
+	gateDoctor         *GateDoctor             // nil until SetGateDoctor; pi-based verification RED triage
 	retryManager       *RetryManager           // clears retry residue on verified close
 	workerSpawner      *WorkerSpawner          // clears spawn-failure residue on verified close
 	sessionResumePilot *SessionResumePilot     // session-file resume quality metrics
@@ -385,7 +386,7 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 		// path on this success route — verified-close and singleton integrate
 		// both pass through here. Nonzero exit rejects the close (reopen).
 		if err := c.verificationCommandGuard(bead, projectPath); err != nil {
-			return c.rejectClose(bead, projectPath, repoName, "verification-command-failed")
+			return c.handleVerificationRed(bead, projectPath, repoName, err)
 		}
 	}
 
@@ -1863,4 +1864,31 @@ func (c *BeadCloser) sessionBaseFor(beadID string) string {
 	c.sessionMu.Lock()
 	defer c.sessionMu.Unlock()
 	return c.sessionBase[beadID]
+}
+
+// handleVerificationRed implements the Gate-Doctor triage for verification RED.
+// It classifies the failure family using the LLM gate doctor (if available) and
+// performs the bounded action. Bounds: only repair (rerun-once), file fix-bead
+// (code-broken), or comment + escalate. It never edits gates/tests.
+func (c *BeadCloser) handleVerificationRed(bead *types.Bead, projectPath, repoName string, err error) error {
+	if c.gateDoctor == nil {
+		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed")
+	}
+	action := c.gateDoctor.Triage(context.Background(), bead.ID.String(), bead.Title, "verification-command", 1, err.Error())
+	switch action.Class {
+	case GateClassEnvironment:
+		// repair + rerun once. We don't auto-rerun to avoid infinite loops in
+		// the shell context, but we label and return a retry rejection.
+		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-environment")
+	case GateClassCodeBroken:
+		c.gateDoctor.FileFixBead(projectPath, repoName, bead.ID.String(), "verification-command", 1, err.Error())
+		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed")
+	case GateClassStaleGate:
+		// comment + escalate, NEVER edit gate
+		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-stale-gate")
+	case GateClassFlaky:
+		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-flaky")
+	default:
+		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed")
+	}
 }

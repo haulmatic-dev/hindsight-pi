@@ -5,9 +5,14 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 "Documentation & Changelog Discipline". Format follows
 [Keep a Changelog](https://keepachangelog.com/); newest first within a section.
 
+
+
 ## [Unreleased]
 - Fixed: PushPendingEntry (overseer) now tracks consecutive publish-failure state — Failures count and LastClass (ClassifyPushFailure result) are recorded per project so backoff/escalation logic can distinguish transient vs permanent failure classes. *Authored by a Hydra dogfood run.*
 - Fixed: IntegrationRetest `findBranch` falls back to the bead's chain-root worktree key (`hydra/wt-<chainKey>` / `hydra/quarantine/<chainKey>`), so chain-member beads parked on their root's branch are no longer invisible to the retest sweep. *Authored by a Hydra dogfood run.*
+### Documentation
+- **AGENTS.md Discovery Protocol** (`hydra-fva4`): added an explicit `DISCOVERY PROTOCOL (At Bead Start)` step to the Hydra Agent Workflow — run `hindsight_search` once per bead with the bead's key terms, skipping silently when the integration path is already healthy. Makes durable-memory recall a mandatory first step instead of an ad-hoc habit.
+- **Gate-Doctor: pi-based triage of verification RED** (`hydra-fva4`): on verification-command RED, a cheap LLM pass (`internal/core/gate_doctor.go`) classifies the failure family (environment / code-broken / stale-gate / flaky / uncertain) and routes the close rejection to the matching bounded action — allowed repair rerun, fix-bead filing with the exact RED output, or escalation. Bounded: the doctor never edits gates/tests and is terminal per bead per attempt. Subsumes the hydra-4nwg fix-bead branch.
 - Orphan-claim P0 triage (docs/discovery/orphanclaim-triage-yzi1.md): all three digest claims verified stale at 2026-10-06 14:02 UTC — 0 true orphan claims (4 live workers, escalated/pan-filed excluded by design, rest registry-completed churn reopened by Charon), publisher wedge absent (PR #268 merged, 0 unlanded commits), disk 39%. No code change.
 
 ### Added

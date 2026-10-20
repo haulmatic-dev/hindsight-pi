@@ -18,6 +18,11 @@ import (
 // fails closed in runDaemonGates.
 func (c *BeadCloser) SetGateRunner(r *GateRunner) { c.gateRunner = r }
 
+// SetGateDoctor attaches the pi-based verification RED triage agent. Nil
+// doctor + verification-command RED falls back to the standard rejectClose
+// escalation path (fail-closed, no special repair).
+func (c *BeadCloser) SetGateDoctor(d *GateDoctor) { c.gateDoctor = d }
+
 // gatesFor returns the gate set declared for a project, or nil.
 func (c *BeadCloser) gatesFor(projectName string) *GateSet {
 	if c.config == nil {
