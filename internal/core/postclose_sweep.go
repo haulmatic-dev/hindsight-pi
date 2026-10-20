@@ -200,7 +200,8 @@ func verificationCommandFor(bead *types.Bead) (string, bool) {
 			return cmd, true
 		}
 	}
-	for _, raw := range strings.Split(bead.Description, "\n") {
+	lines := strings.Split(bead.Description, "\n")
+	for i, raw := range lines {
 		line := strings.TrimSpace(raw)
 		if !verificationCmdLinePattern.MatchString(line) {
 			continue
@@ -210,8 +211,58 @@ func verificationCommandFor(bead *types.Bead) (string, bool) {
 		}
 		// Same-line command without backticks (e.g. "Test Command: npm test").
 		rest := strings.TrimSpace(verificationCmdLinePattern.ReplaceAllString(line, ""))
-		if rest != "" && looksLikeCommand(rest) {
+		if rest != "" && looksLikeCommand(rest) && !looksLikeSentence(rest) {
 			return cleanCommand(rest), true
+		}
+		// Fenced command block on the lines following the marker (the real
+		// task-breakdown shape puts a prose instruction line before the block).
+		if cmd, ok := fencedCommandAfter(lines[i+1:]); ok {
+			return cmd, true
+		}
+	}
+	return "", false
+}
+
+// looksLikeSentence reports whether s reads as sentence prose (dash-led
+// bullet or common prose connective) rather than a runnable command —
+// extracted prose was passed to sh -c which died "Illegal option" in 4ms.
+func looksLikeSentence(s string) bool {
+	if strings.HasPrefix(s, "-") || strings.HasPrefix(s, "•") {
+		return true
+	}
+	lower := " " + strings.ToLower(s) + " "
+	for _, w := range []string{" the ", " and ", " with ", " then ", " your ", " this ", " that ", " when ", " if ", " should ", " must ", " exact ", " please ", " run the "} {
+		if strings.Contains(lower, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// fencedCommandAfter extracts the command from a ```sh fenced block in the
+// lines following a "Test Command:" marker. Rejects content that is prose
+// (sentence fragments) rather than a runnable command. Returns the first
+// non-empty, prose-free line inside the fence.
+func fencedCommandAfter(lines []string) (string, bool) {
+	for i, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if !strings.HasPrefix(line, "```") {
+			continue
+		}
+		// Opening fence found; collect until closing fence.
+		for _, inner := range lines[i+1:] {
+			inner = strings.TrimSpace(inner)
+			if strings.HasPrefix(inner, "```") {
+				return "", false
+			}
+			if inner == "" {
+				continue
+			}
+			if looksLikeSentence(inner) {
+				// Bullet/sentence prose leaked into the block — not a command.
+				return "", false
+			}
+			return cleanCommand(inner), true
 		}
 	}
 	return "", false

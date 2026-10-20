@@ -4,6 +4,12 @@
 
 Every implementation, fix, or refactor MUST follow this 5-step workflow. Skipping steps reproduces bugs that were already fixed.
 
+### DISCOVERY PROTOCOL (At Bead Start)
+
+At the start of every bead, run `hindsight_search` once using this bead's key terms.
+Skip silently if no results or if the integration path is already healthy
+(no red state, no pending PR landings to inspect).
+
 ### Step 1: Query CASS (Institutional Memory)
 
 ```bash
