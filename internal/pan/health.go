@@ -79,6 +79,13 @@ type HealthDigest struct {
 	// within the window (internal/degrade): "name 0/N" fragments. Advisory
 	// telemetry like HostAnomalies — never pseudo-candidates.
 	Degradations []string
+	// Process-hygiene sensors (Charon tick snapshots, 2026-10-20 incident):
+	// zero-token stalls (working rows with tokens_so_far==0 older than 15m —
+	// the session never completed a turn) and rogue pi processes (pi outside
+	// hydra.service, untracked, older than 2h). Rendered in Text() as host
+	// anomalies; the repair verbs are kill-stalled-worker and kill-rogue-pi.
+	ZeroTokenStalls []string
+	RoguePis        []string
 }
 
 // Anomalous returns the projects carrying at least one anomaly flag.
@@ -110,6 +117,16 @@ func (d HealthDigest) Text() string {
 	}
 	if len(d.HostAnomalies) > 0 {
 		fmt.Fprintf(&b, "host: disk=%d%% ANOMALIES=[%s]\n", d.DiskUsedPct, strings.Join(d.HostAnomalies, "; "))
+	}
+	if len(d.ZeroTokenStalls) > 0 || len(d.RoguePis) > 0 {
+		fmt.Fprintf(&b, "host: process-hygiene")
+		if len(d.ZeroTokenStalls) > 0 {
+			fmt.Fprintf(&b, " stall=%s", strings.Join(d.ZeroTokenStalls, ","))
+		}
+		if len(d.RoguePis) > 0 {
+			fmt.Fprintf(&b, " rogue=%s", strings.Join(d.RoguePis, ","))
+		}
+		fmt.Fprintf(&b, " — repair:kill-stalled-worker <bead> / repair:kill-rogue-pi\n")
 	}
 	if len(d.Degradations) > 0 {
 		fmt.Fprintf(&b, "host: degradations=[%s] — fail-open subsystem at 0%% success; check its backing service\n", strings.Join(d.Degradations, ", "))

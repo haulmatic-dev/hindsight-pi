@@ -59,6 +59,8 @@ type Charon struct {
 	orphanWatchMu           sync.Mutex
 	orphanWatch             map[string]orphanWatchEntry // reopened beads awaiting a resolve event (sensor symmetry)
 	psRunner                func() ([]byte, error)      // process-table source for the reparented-worktree sweep; nil = ps(1)
+	killFn                  func(pid int) error         // injectable process kill for tests; nil = killProcess
+	hygiene                 *processHygiene             // process-hygiene sensors (zero-token stalls, rogue pi); nil = legacy behavior
 }
 
 // JanitorStats tracks cleanup statistics
@@ -199,6 +201,7 @@ func NewCharon(beadsClient *beads.Client, workerTracker *WorkerTracker, workerTi
 		stopChan:           make(chan struct{}),
 		stats:              JanitorStats{},
 		orphanWatch:        make(map[string]orphanWatchEntry),
+		hygiene:            &processHygiene{rogueEmitted: map[int]bool{}},
 	}
 }
 
@@ -447,6 +450,17 @@ func (j *Charon) performCleanup() {
 	// residue accumulates.
 	if killed := j.sweepReparentedWorktreeProcesses(); killed > 0 {
 		log.Printf("[Charon] 🧹 Killed %d process group(s) reparented to PID 1 from dead worktree processes", killed)
+	}
+
+	// Process-hygiene sensors (2026-10-20 incident): both must run BEFORE the
+	// no-tracked-workers early return — an idle fleet is exactly when a
+	// zero-token stall (fresh heartbeats, zero ever-tokens) and a rogue bare-pi
+	// process survive unnoticed.
+	if stalls := j.detectZeroTokenStalls(); len(stalls) > 0 {
+		log.Printf("[Charon] 🧯 %d worker(s) in zero-token stall (working, tokens_so_far=0, age>15m) — surfaced to Pan (repair:kill-stalled-worker)", len(stalls))
+	}
+	if rogues := j.scanRoguePis(); len(rogues) > 0 {
+		log.Printf("[Charon] 🚨 %d rogue pi process(es) outside hydra.service (age>2h) — surfaced to Pan (repair:kill-rogue-pi)", len(rogues))
 	}
 
 	if len(liveWorkers) == 0 {
@@ -1219,6 +1233,14 @@ func (j *Charon) isProcessRunning(pid int) bool {
 	cmd := exec.Command("ps", "-p", strconv.Itoa(pid))
 	err := cmd.Run()
 	return err == nil
+}
+
+// killPID is the kill seam: injectable in tests, real killProcess otherwise.
+func (j *Charon) killPID(pid int) error {
+	if j.killFn != nil {
+		return j.killFn(pid)
+	}
+	return j.killProcess(pid)
 }
 
 // killProcess kills a process by PID

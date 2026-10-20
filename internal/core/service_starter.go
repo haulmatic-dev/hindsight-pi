@@ -611,6 +611,44 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				}
 				return nil
 			},
+			// kill-stalled-worker implements the zero-token-stall repair
+			// (2026-10-20 incident): kills the stalled worker by its EXPLICIT
+			// registry PID (never by PGID — close gates share the daemon's
+			// process group), marks the worker row dead, and reopens the bead
+			// for respawn with one fair retry.
+			"kill-stalled-worker": func(beadID string) error {
+				if o.orphanJanitor == nil {
+					return fmt.Errorf("kill-stalled-worker: no Charon janitor configured")
+				}
+				if err := o.orphanJanitor.KillStalledWorker(beadID); err != nil {
+					return err
+				}
+				id := types.BeadID(beadID)
+				projectPath := projectPathForID(id)
+				if projectPath == "" {
+					return fmt.Errorf("kill-stalled-worker: project path unresolved for %s", beadID)
+				}
+				if err := o.beadsClient.UpdateBeadStatus(projectPath, id, types.StatusOpen); err != nil {
+					return fmt.Errorf("kill-stalled-worker: reopen %s: %w", beadID, err)
+				}
+				if o.retryManager != nil {
+					o.retryManager.ResetRetryCount(beadID)
+				}
+				return nil
+			},
+			// kill-rogue-pi implements the rogue-pi repair: kills every rogue
+			// bare-pi process Charon recorded, by EXPLICIT PID only. beadID is
+			// unused — the finding is host-level.
+			"kill-rogue-pi": func(beadID string) error {
+				if o.orphanJanitor == nil {
+					return fmt.Errorf("kill-rogue-pi: no Charon janitor configured")
+				}
+				killed, err := o.orphanJanitor.KillRoguePis()
+				if killed > 0 {
+					log.Printf("[PanRepair] kill-rogue-pi: killed %d rogue pi process(es)", killed)
+				}
+				return err
+			},
 		}
 		// Sensor symmetry: every repair verdict emits repair_succeeded
 		// (resolve) or repair_failed (fire) with a per verb+bead correlation

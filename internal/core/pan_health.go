@@ -62,6 +62,23 @@ func projectKey(path string) string {
 // one unreadable store or repo must not blind the whole scan.
 func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 	digest := pan.HealthDigest{}
+	// Process-hygiene sensors (Charon tick snapshots, 2026-10-20 incident):
+	// zero-token stalls and rogue pi processes are host anomalies carrying
+	// their repair verbs so a Pan judgment can dispatch the kill explicitly.
+	if o.orphanJanitor != nil {
+		for _, r := range o.orphanJanitor.ZeroTokenStallReport() {
+			frag := fmt.Sprintf("%s@pid%d", r.BeadID, r.PID)
+			digest.ZeroTokenStalls = append(digest.ZeroTokenStalls, frag)
+			digest.HostAnomalies = append(digest.HostAnomalies,
+				fmt.Sprintf("P0 process hygiene: worker for %s (PID %d) is working with tokens_so_far=0 — the session never completed a turn; repair:kill-stalled-worker %s", r.BeadID, r.PID, r.BeadID))
+		}
+		for _, rp := range o.orphanJanitor.RoguePiReport() {
+			frag := fmt.Sprintf("pid%d(%v)", rp.PID, rp.Age.Round(time.Hour))
+			digest.RoguePis = append(digest.RoguePis, frag)
+			digest.HostAnomalies = append(digest.HostAnomalies,
+				fmt.Sprintf("P0 process hygiene: rogue pi PID %d (%s, cgroup %q, age %v) is outside hydra.service and untracked; repair:kill-rogue-pi", rp.PID, rp.Cmdline, rp.Cgroup, rp.Age.Round(time.Minute)))
+		}
+	}
 	if o.beadsClient == nil {
 		return digest
 	}
