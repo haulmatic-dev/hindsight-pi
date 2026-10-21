@@ -242,3 +242,35 @@ func TestFilePanBead_DefaultCapFour(t *testing.T) {
 		t.Fatalf("expected cap refusal at default 4, got %v", err)
 	}
 }
+
+func TestFilePanBead_CodeChangeProposalRoutedAsTask(t *testing.T) {
+	o := &Overseer{beadsClient: newMockBeadsClient()}
+	path := t.TempDir()
+	if err := o.filePanBead(path, "src-ukf", "Stale worker claim wedges bead", "hydra code change suggested: reconcile claims"); err != nil {
+		t.Fatalf("file: %v", err)
+	}
+	beads, _ := o.beadsClient.ListBeads(path, "")
+	if len(beads) != 1 {
+		t.Fatalf("want 1 bead, got %d", len(beads))
+	}
+	if slices.Contains(beads[0].Labels, pan.FiledLabel) {
+		t.Fatalf("code-change proposal must not carry pan-filed label: %v", beads[0].Labels)
+	}
+	if beads[0].Type != "task" {
+		t.Fatalf("want type task, got %q", beads[0].Type)
+	}
+
+	// Human-triage filing keeps the label and both count against the cap.
+	if err := o.filePanBead(path, "src-anom", "P0 campaign anomaly", "orphaned in_progress claims — human triage"); err != nil {
+		t.Fatalf("triage filing: %v", err)
+	}
+	for i, w := range []string{"alpha", "beta"} {
+		if err := o.filePanBead(path, "src-x", fmt.Sprintf("Wedge %s: distinct root cause", w), "details"); err != nil {
+			t.Fatalf("fill %d: %v", i, err)
+		}
+	}
+	err := o.filePanBead(path, "src-y", "Yet another wedge entirely", "details")
+	if err == nil || !strings.Contains(err.Error(), "cap reached") {
+		t.Fatalf("proposal filings must count toward cap, got %v", err)
+	}
+}

@@ -97,7 +97,7 @@ func (v *ValidationService) RunTDDValidation(refactorBead types.Bead, projectPat
 
 	beadID := string(refactorBead.ID)
 
-	redBead, greenBead, err := v.findTDDChainBeads(refactorBead)
+	redBead, greenBead, err := v.findTDDChainBeads(refactorBead, projectPath)
 	if err != nil {
 		log.Printf("[TDDValidation] Could not find RED/GREEN beads for %s: %v", beadID, err)
 		return nil
@@ -192,7 +192,7 @@ func (v *ValidationService) TDDChainPasses(refactorBead types.Bead, projectPath 
 		return true, nil
 	}
 
-	redBead, greenBead, err := v.findTDDChainBeads(refactorBead)
+	redBead, greenBead, err := v.findTDDChainBeads(refactorBead, projectPath)
 	if err != nil {
 		// Cannot locate the chain — do not hard-block on inability to verify.
 		return true, nil
@@ -332,12 +332,20 @@ func (v *ValidationService) RunPRDValidation(chainInfo *ChainInfo, projectPath s
 }
 
 // findTDDChainBeads locates RED and GREEN beads that are dependencies of a REFACTOR bead.
-func (v *ValidationService) findTDDChainBeads(refactorBead types.Bead) (types.Bead, types.Bead, error) {
+func (v *ValidationService) findTDDChainBeads(refactorBead types.Bead, projectPath string) (types.Bead, types.Bead, error) {
 	var redBead, greenBead types.Bead
 	var redFound, greenFound bool
 
 	for _, depID := range refactorBead.Dependencies {
-		bead, err := v.beadsClient.GetBead(refactorBead.Project, refactorBead.Repo, depID)
+		// Use the projectPath parameter (the checkout directory that holds
+		// the .beads store), NOT refactorBead.Project: the bead's Project
+		// field is routinely empty for project-scoped beads (br stores it as
+		// null), and GetBead with an empty path runs br show in the daemon's
+		// cwd — no .beads there, every dependency silently skipped, and the
+		// TDD chain validator reads "no RED or GREEN beads found" even when
+		// the closed RED bead is a perfectly healthy dependency (2026-10-21
+		// 8nz terminal-chain verification-fail loop, srv-data-harbour).
+		bead, err := v.beadsClient.GetBead(projectPath, refactorBead.Repo, depID)
 		if err != nil {
 			continue
 		}

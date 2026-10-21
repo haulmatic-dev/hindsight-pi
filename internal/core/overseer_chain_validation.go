@@ -15,6 +15,6 @@ func (o *Overseer) RunPRDValidation(chainInfo *ChainInfo, projectPath string) er
 }
 
 // findTDDChainBeads delegates to the validation service.
-func (o *Overseer) findTDDChainBeads(refactorBead types.Bead) (types.Bead, types.Bead, error) {
-	return o.validationService.findTDDChainBeads(refactorBead)
+func (o *Overseer) findTDDChainBeads(refactorBead types.Bead, projectPath string) (types.Bead, types.Bead, error) {
+	return o.validationService.findTDDChainBeads(refactorBead, projectPath)
 }

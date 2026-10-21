@@ -652,6 +652,7 @@ func (s *Scheduler) Tick() error {
 		// campaigns (webapp-c36, 2026-09-16).
 		lt := strings.ToLower(strings.TrimSpace(bead.Type))
 		if lt == "approval-gate" || lt == "approval" || lt == "epic" || isHoldBead(bead) {
+			logContainerTypeSkip(bead)
 			continue
 		}
 
@@ -909,4 +910,14 @@ func (s *Scheduler) ShouldSpawnWorker(node *Node) bool {
 		return false
 	}
 	return true
+}
+
+// logContainerTypeSkip emits the skip line for the retry-spawn loop's
+// container-type filter. Every other skip in that loop logs; this one was
+// silent, which turned a fully-filtered tick into an undiagnosable freeze
+// (2026-10-21, 05:37–05:52 UTC: 28 br-ready → filters → 3 spawnable →
+// nothing, with no trace of WHY the 3 vanished). Extracted so tests can
+// assert the log emission (no silent continues in the retry spawn loop).
+func logContainerTypeSkip(bead types.Bead) {
+	log.Printf("⏸️  Skipping container-type bead in retry path (type %q, gate closed via operator not worker): %s", bead.Type, bead.ID)
 }
