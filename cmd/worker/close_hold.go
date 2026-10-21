@@ -144,6 +144,19 @@ func runCloseHold(bead types.Bead, projectPath string, v *Verdict) (held bool) {
 	return true
 }
 
+// closeWithHold performs the worker-side bead close honoring the bounded
+// close-hold: when closeHoldFor(v) is true, runCloseHold gates the close —
+// held means the bead stays open (retry loop owns it), forced means the
+// close proceeds anyway (fail-open path). Nil/malformed verdict fails open:
+// the close proceeds exactly as today. Returns the close error verbatim so
+// each call site keeps its own log line.
+func closeWithHold(bead types.Bead, projectPath, repoName, reason string, v *Verdict) error {
+	if closeHoldFor(v) && runCloseHold(bead, projectPath, v) {
+		return nil // close held — bead intentionally left open
+	}
+	return closeBeadFromWorker(bead, projectPath, repoName, reason)
+}
+
 // persistCloseHoldLabel replaces any previous close-hold label with
 // close-hold-<holdCount> via the br CLI, run in the project directory. The
 // old label is removed first so the ladder holds exactly one hold label.
