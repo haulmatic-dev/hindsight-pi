@@ -150,17 +150,26 @@ func offendingStorePathsDetail(projectPath string) string {
 	return " [offending: " + strings.Join(parts, ", ") + "]"
 }
 
+// storeOwnershipDetail assembles the cross-uid diagnosis: the generic
+// store-wide string (who owns the store, who runs the daemon) plus the
+// offending-path breakdown from offendingStorePathsDetail.
+func storeOwnershipDetail(projectPath string, storeUID, daemon int) string {
+	return fmt.Sprintf(".beads store owned by uid %d, daemon runs as uid %d — cross-uid store; writes may hit fsqlite sidecar uid-lock (hydra-6g4u)%s",
+		storeUID, daemon, offendingStorePathsDetail(projectPath))
+}
+
 func (o *Overseer) spawnPreflightStoreOwnership(bead types.Bead, projectPath string) error {
 	if projectPath == "" {
 		return nil
 	}
+	daemon := daemonUID()
 	uid, missing, err := storeOwnerUID(projectPath)
 	if err != nil {
 		// Probe error ≠ proof of foreign ownership: fail open.
 		log.Printf("[Spawn] %s store-ownership preflight probe error (fail-open, spawning): %v", bead.ID, err)
 		return nil
 	}
-	if missing || uid == daemonUID() {
+	if missing || uid == daemon {
 		return nil
 	}
 	// 2026-10-13: downgraded from fail-closed to fail-open. The uid-mismatch
@@ -178,7 +187,7 @@ func (o *Overseer) spawnPreflightStoreOwnership(bead types.Bead, projectPath str
 	// (no typed event, no spawn churn). A failing probe keeps today's warn +
 	// event, naming the actual offending paths (up to 3).
 	probeErr := brListProbe(projectPath)
-	detail := fmt.Sprintf(".beads store owned by uid %d, daemon runs as uid %d — cross-uid store; writes may hit fsqlite sidecar uid-lock (hydra-6g4u)%s", uid, daemonUID(), offendingStorePathsDetail(projectPath))
+	detail := storeOwnershipDetail(projectPath, uid, daemon)
 	if probeErr == nil {
 		logx.Debugf("[Spawn] %s store-ownership preflight (fail-open, spawning): %s", bead.ID, detail)
 		return nil

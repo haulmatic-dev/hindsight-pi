@@ -1815,11 +1815,7 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		// When a verification command produced stderr the first line is the discriminating
 		// input (same classification string with different stderr must not collide);
 		// rejections without command output fall back to the classification reason.
-		fpSource := reason
-		if len(stderr) > 0 && stderr[0] != "" {
-			fpSource = firstLine(stderr[0])
-		}
-		fp := getVerificationFingerprint(bead, fpSource)
+		fp := getVerificationFingerprint(bead, verificationFingerprintSource(reason, stderr))
 		err := c.trackVerificationFingerprint(bead, fp, projectPath, repoName)
 		if err != nil {
 			log.Printf("[VerifiedClose] Failed to track fingerprint for %s: %v", beadID, err)
@@ -1856,22 +1852,30 @@ func (c *BeadCloser) trackVerificationFingerprint(bead *types.Bead, fp, projectP
 		return nil
 	}
 	label := gateFingerprintLabelPrefix + fp
-	for _, l := range bead.Labels {
-		if l == label {
-			c.events.EmitRepo(projectPath, Event{
-				Type:    "verification_substantive",
-				Project: repoName,
-				Bead:    string(bead.ID),
-				Fields: map[string]any{
-					"bead":        string(bead.ID),
-					"fingerprint": fp,
-					"count":       2,
-				},
-			})
-			return nil
-		}
+	if hasBeadLabel(bead.Labels, label) {
+		c.events.EmitRepo(projectPath, Event{
+			Type:    "verification_substantive",
+			Project: repoName,
+			Bead:    string(bead.ID),
+			Fields: map[string]any{
+				"bead":        string(bead.ID),
+				"fingerprint": fp,
+				"count":       2,
+			},
+		})
+		return nil
 	}
 	return c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{label})
+}
+
+// verificationFingerprintSource selects the discriminating input for a close-gate
+// rejection fingerprint: the first stderr line when the verification command
+// produced output, else the classification reason.
+func verificationFingerprintSource(reason string, stderr []string) string {
+	if len(stderr) > 0 && stderr[0] != "" {
+		return firstLine(stderr[0])
+	}
+	return reason
 }
 
 // logCloseEvent emits a single structured close-decision line for
