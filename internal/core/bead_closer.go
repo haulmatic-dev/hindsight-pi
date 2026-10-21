@@ -1723,7 +1723,7 @@ func (c *BeadCloser) checkTargetScope(bead *types.Bead, projectPath, repoName st
 // rejectClose reopens a bead that failed verification, or escalates to a
 // human after MaxRounds rejections. It always returns a non-nil error so
 // the caller aborts the close.
-func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason string) error {
+func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason string, stderr ...string) error {
 	beadID := string(bead.ID)
 	closeRejectAttempt := func(prev types.Bead, n int) {
 		if c.beadsClient == nil {
@@ -1811,8 +1811,15 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"verified-close-reject-" + reason}); err != nil {
 			log.Printf("[VerifiedClose] Failed to label %s: %v", beadID, err)
 		}
-		// Fingerprint tracking: sha256(bead_id + verification command + first stderr line)
-		fp := getVerificationFingerprint(bead, reason)
+		// Fingerprint tracking: sha256(bead_id + verification command + first stderr line).
+		// When a verification command produced stderr the first line is the discriminating
+		// input (same classification string with different stderr must not collide);
+		// rejections without command output fall back to the classification reason.
+		fpSource := reason
+		if len(stderr) > 0 && stderr[0] != "" {
+			fpSource = firstLine(stderr[0])
+		}
+		fp := getVerificationFingerprint(bead, fpSource)
 		err := c.trackVerificationFingerprint(bead, fp, projectPath, repoName)
 		if err != nil {
 			log.Printf("[VerifiedClose] Failed to track fingerprint for %s: %v", beadID, err)
