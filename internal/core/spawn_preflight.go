@@ -120,10 +120,9 @@ const maxOffendingStorePaths = 3
 
 // offendingStorePathsDetail returns " [.beads/x: uid N ...]" naming up to
 // maxOffendingStorePaths paths under <projectPath>/.beads owned by a uid
-// different from the daemon's. Errors are swallowed (fail-open): the
+// different from daemon's. Errors are swallowed (fail-open): the
 // generic store-wide detail already carries the diagnosis.
-func offendingStorePathsDetail(projectPath string) string {
-	daemon := daemonUID()
+func offendingStorePathsDetail(projectPath string, daemon int) string {
 	storeDir := filepath.Join(projectPath, ".beads")
 	entries, err := os.ReadDir(storeDir)
 	if err != nil {
@@ -155,7 +154,7 @@ func offendingStorePathsDetail(projectPath string) string {
 // offending-path breakdown from offendingStorePathsDetail.
 func storeOwnershipDetail(projectPath string, storeUID, daemon int) string {
 	return fmt.Sprintf(".beads store owned by uid %d, daemon runs as uid %d — cross-uid store; writes may hit fsqlite sidecar uid-lock (hydra-6g4u)%s",
-		storeUID, daemon, offendingStorePathsDetail(projectPath))
+		storeUID, daemon, offendingStorePathsDetail(projectPath, daemon))
 }
 
 func (o *Overseer) spawnPreflightStoreOwnership(bead types.Bead, projectPath string) error {
