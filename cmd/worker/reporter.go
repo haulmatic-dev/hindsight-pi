@@ -190,7 +190,9 @@ func (r *stateReporter) SetTokens(total int64) {
 
 // SetTokenBreakdown updates the cache-aware token counters that drive budgets
 // and backstops. total is the provider-facing total; fresh is fresh_input +
-// output and is what Charon/Pan arbitrate on.
+// output and is what Charon/Pan arbitrate on. Every usage-bearing event also
+// stamps LastRpcActivity — turn usage is an rpc-activity signal in its own
+// right.
 func (r *stateReporter) SetTokenBreakdown(total, fresh, cacheRead, cacheCreation, output int64) {
 	if !r.Enabled() {
 		return
@@ -201,6 +203,19 @@ func (r *stateReporter) SetTokenBreakdown(total, fresh, cacheRead, cacheCreation
 	r.rep.TokensCacheRead = cacheRead
 	r.rep.TokensCacheCreation = cacheCreation
 	r.rep.TokensOutput = output
+	r.rep.LastRpcActivity = time.Now()
+	r.mu.Unlock()
+}
+
+// SetRpcActivity stamps LastRpcActivity for usage-free rpc signals (extension
+// notifications) so Charon's zero-token classifier can tell an active session
+// from a hung one.
+func (r *stateReporter) SetRpcActivity() {
+	if !r.Enabled() {
+		return
+	}
+	r.mu.Lock()
+	r.rep.LastRpcActivity = time.Now()
 	r.mu.Unlock()
 }
 

@@ -96,7 +96,7 @@ func (c *BeadCloser) runDaemonGates(bead *types.Bead, projectName, projectPath, 
 			Fields: map[string]any{"status": a.Status, "exit_code": a.ExitCode}})
 		if a.Status != GateStatusPassed {
 			c.annotateGateFailure(bead, projectPath, repoName, g.name, a)
-			return c.rejectClose(bead, projectPath, repoName, "gate-"+g.name+"-failed")
+			return c.rejectClose(bead, projectPath, repoName, "gate-"+g.name+"-failed", a.Summary)
 		}
 		log.Printf("[DaemonGates] %s gate %s passed (exit %d)", bead.ID, g.name, a.ExitCode)
 	}
@@ -119,7 +119,7 @@ func (c *BeadCloser) runDaemonGates(bead *types.Bead, projectName, projectPath, 
 			Fields: map[string]any{"status": a.Status, "exit_code": a.ExitCode}})
 		if a.Status != GateStatusPassed {
 			c.annotateGateFailure(bead, projectPath, repoName, "coverage-truth", a)
-			return c.rejectClose(bead, projectPath, repoName, "gate-coverage-truth-failed")
+			return c.rejectClose(bead, projectPath, repoName, "gate-coverage-truth-failed", a.Summary)
 		}
 		log.Printf("[DaemonGates] %s coverage-truth passed (exit %d)", bead.ID, a.ExitCode)
 	}

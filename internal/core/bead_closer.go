@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -1721,7 +1723,7 @@ func (c *BeadCloser) checkTargetScope(bead *types.Bead, projectPath, repoName st
 // rejectClose reopens a bead that failed verification, or escalates to a
 // human after MaxRounds rejections. It always returns a non-nil error so
 // the caller aborts the close.
-func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason string) error {
+func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason string, stderr ...string) error {
 	beadID := string(bead.ID)
 	closeRejectAttempt := func(prev types.Bead, n int) {
 		if c.beadsClient == nil {
@@ -1809,6 +1811,15 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"verified-close-reject-" + reason}); err != nil {
 			log.Printf("[VerifiedClose] Failed to label %s: %v", beadID, err)
 		}
+		// Fingerprint tracking: sha256(bead_id + verification command + classification
+		// reason). The classification string (e.g. verification-command-failed) is the
+		// discriminating input — same-classification failures with different stderr
+		// MUST collide so the repeat emits verification_substantive.
+		fp := getVerificationFingerprint(bead, verificationFingerprintSource(reason, stderr))
+		err := c.trackVerificationFingerprint(bead, fp, projectPath, repoName)
+		if err != nil {
+			log.Printf("[VerifiedClose] Failed to track fingerprint for %s: %v", beadID, err)
+		}
 		prev := bead
 		if fresh != nil {
 			prev = fresh
@@ -1819,6 +1830,53 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		c.sessionResumePilot.RecordReject(hasBeadLabel(bead.Labels, sessionResumedLabel))
 	}
 	return fmt.Errorf("verified-close: bead %s rejected (%s)", beadID, reason)
+}
+
+// gateFingerprintLabelPrefix is the durable label prefix marking a bead whose
+// close-gate rejection fingerprint has been seen at least once.
+const gateFingerprintLabelPrefix = "gate-fp-"
+
+// getVerificationFingerprint computes sha256(bead_id + verification command +
+// classification reason) truncated to 8 hex chars.
+func getVerificationFingerprint(bead *types.Bead, reason string) string {
+	cmd, _ := verificationCommandFor(bead)
+	h := sha256.Sum256([]byte(string(bead.ID) + cmd + reason))
+	return hex.EncodeToString(h[:])[:8]
+}
+
+// trackVerificationFingerprint records the rejection fingerprint as a durable
+// gate-fp-<first8> label. When the same fingerprint repeats on the same bead,
+// it emits a typed verification_substantive event instead of re-labelling.
+func (c *BeadCloser) trackVerificationFingerprint(bead *types.Bead, fp, projectPath, repoName string) error {
+	if c.beadsClient == nil {
+		return nil
+	}
+	label := gateFingerprintLabelPrefix + fp
+	if hasBeadLabel(bead.Labels, label) {
+		c.events.EmitRepo(projectPath, Event{
+			Type:    "verification_substantive",
+			Project: repoName,
+			Bead:    string(bead.ID),
+			Fields: map[string]any{
+				"bead":        string(bead.ID),
+				"fingerprint": fp,
+				"count":       2,
+			},
+		})
+		return nil
+	}
+	return c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{label})
+}
+
+// verificationFingerprintSource selects the input hashed into a close-gate
+// rejection fingerprint: always the classification reason string (e.g.
+// "verification-command-failed"), never the literal stderr — same-classification
+// failures with different output must collide so the repeat is detected as
+// verification_substantive. stderr is accepted for call-site stability and
+// deliberately ignored.
+func verificationFingerprintSource(reason string, stderr []string) string {
+	_ = stderr
+	return reason
 }
 
 // logCloseEvent emits a single structured close-decision line for
@@ -1940,23 +1998,24 @@ func (c *BeadCloser) sessionBaseFor(beadID string) string {
 // (code-broken), or comment + escalate. It never edits gates/tests.
 func (c *BeadCloser) handleVerificationRed(bead *types.Bead, projectPath, repoName string, err error) error {
 	if c.gateDoctor == nil {
-		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed")
+		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed", err.Error())
 	}
 	action := c.gateDoctor.Triage(context.Background(), bead.ID.String(), bead.Title, "verification-command", 1, err.Error())
 	switch action.Class {
 	case GateClassEnvironment:
 		// repair + rerun once. We don't auto-rerun to avoid infinite loops in
 		// the shell context, but we label and return a retry rejection.
-		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-environment")
+		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-environment", err.Error())
 	case GateClassCodeBroken:
 		c.gateDoctor.FileFixBead(projectPath, repoName, bead.ID.String(), "verification-command", 1, err.Error())
-		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed")
+		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed", err.Error())
 	case GateClassStaleGate:
 		// comment + escalate, NEVER edit gate
-		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-stale-gate")
+		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-stale-gate", err.Error())
 	case GateClassFlaky:
-		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-flaky")
+		// comment + escalate, NEVER edit gate
+		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-flaky", err.Error())
 	default:
-		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed")
+		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed", err.Error())
 	}
 }

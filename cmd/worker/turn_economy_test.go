@@ -47,7 +47,7 @@ func TestBuildPiPrompt_IncludesTurnEconomy(t *testing.T) {
 
 	for _, want := range []string{
 		"TURN ECONOMY",
-		"same message",   // batch independent tool calls together
+		"same message",    // batch independent tool calls together
 		"full test suite", // don't re-run per micro-edit
 	} {
 		if !strings.Contains(prompt, want) {

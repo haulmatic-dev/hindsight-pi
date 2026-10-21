@@ -2,10 +2,10 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"fmt"
 	"sync"
 	"testing"
 	"time"

@@ -24,6 +24,10 @@ type WorkerReport struct {
 	ParkReason          string    `json:"park_reason"`
 	NudgeCount          int       `json:"nudge_count"`
 	WorktreeKey         string    `json:"worktree_key"`
+	// LastRpcActivity is the worker's most recent rpc-stream event (a turn
+	// usage event or an extension notification). Charon uses it to keep an
+	// active-but-zero-token worker out of the zero-token stall classifier.
+	LastRpcActivity time.Time `json:"last_rpc_activity"`
 }
 
 // CmdCloseSatisfied tells Pan to close a bead whose acceptance criteria are
