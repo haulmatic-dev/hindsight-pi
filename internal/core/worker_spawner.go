@@ -949,23 +949,45 @@ func (s *WorkerSpawner) ensureContextPack(bead types.Bead, projectPath string) {
 	if len(chain.AllBeadIDs) == 0 {
 		return
 	}
-	if len(chain.AllBeadIDs) > maxPackChainMembers {
-		log.Printf("[ContextPack] chain has %d members (> %d); skipping pack for %s", len(chain.AllBeadIDs), maxPackChainMembers, bead.ID)
-		return
+	// Cap the per-spawn chain scan on NON-TERMINAL members: terminal beads
+	// (completed/closed/failed) contribute nothing to the pack (no digest,
+	// no terms) but each costs a `br show`. Fetch members to classify them;
+	// the fetched beads also feed the digest/term collection below.
+	cfg := ContextPackConfig{}
+	if s.config != nil {
+		cfg = s.config.ContextPack
 	}
-
-	// One pass over chain members: collect titles for requirement terms and
-	// find any member already carrying a parseable pack.
-	var existing *ContextPack
-	var terms []string
-	var titles []string
+	cap := cfg.MaxChainMembersOrDefault()
+	members := make([]types.Bead, 0, len(chain.AllBeadIDs))
+	nonTerminal := 0
 	for _, id := range chain.AllBeadIDs {
 		b, err := s.beadsClient.GetBead(projectPath, bead.Repo, id)
 		if err != nil || b == nil {
 			continue
 		}
+		members = append(members, *b)
+		if !b.Status.IsTerminal() {
+			nonTerminal++
+		}
+	}
+	if nonTerminal > cap {
+		log.Printf("[ContextPack] chain has %d members (%d non-terminal > %d); skipping pack for %s",
+			len(chain.AllBeadIDs), nonTerminal, cap, bead.ID)
+		return
+	}
+
+	// One pass over the fetched members: collect titles for requirement
+	// terms and find any member already carrying a parseable pack.
+	var existing *ContextPack
+	var terms []string
+	var titles []string
+	var digests []PackMemberDigest
+	for i := range members {
+		b := members[i]
+		id := b.ID
 		terms = append(terms, RequirementTermsForBead(b.Title)...)
 		titles = append(titles, b.Title)
+		digests = append(digests, PackMemberDigest{ID: id, Digest: "- " + string(id) + ": " + b.Title})
 		if existing == nil {
 			if p, err := ParseContextPack(b.AgentContext); err == nil && p != nil {
 				existing = p
@@ -986,6 +1008,7 @@ func (s *WorkerSpawner) ensureContextPack(bead types.Bead, projectPath string) {
 		// at confidence get ONE bounded scout pass (chain-level, not per bead).
 		unmapped := UnmappedRequirements(titles, pack.Files, PackScoutConfidenceThreshold)
 		pack.Files = s.scoutUnmapped(bead, projectPath, unmapped, pack.Files)
+		s.applyPackDigestBudget(pack, bead, digests)
 		log.Printf("[ContextPack] built pack for chain of %s (base_sha=%s, gates=%d, anchors=%d)",
 			bead.ID, pack.BaseSHA, len(pack.GateCommands), len(pack.Files))
 		s.writePackToChain(chain, projectPath, bead, pack, "pack_created")
@@ -1003,11 +1026,36 @@ func (s *WorkerSpawner) ensureContextPack(bead types.Bead, projectPath string) {
 		if len(reScout) > 0 {
 			refreshed.Files = s.scoutUnmapped(bead, projectPath, reScout, refreshed.Files)
 		}
+		s.applyPackDigestBudget(refreshed, bead, digests)
 		log.Printf("[ContextPack] refreshed pack for chain of %s (base_sha %s → %s, dropped %d anchors)",
 			bead.ID, existing.BaseSHA, refreshed.BaseSHA, len(dropped))
 		s.writePackToChain(chain, projectPath, bead, refreshed, "pack_refreshed")
 	default:
 		log.Printf("[ContextPack] pack for chain of %s still fresh (base_sha=%s)", bead.ID, existing.BaseSHA)
+	}
+}
+
+// packTokenBudget returns the configured pack token budget (default when unset).
+func (s *WorkerSpawner) packTokenBudget() int {
+	if s.config == nil {
+		return DefaultMaxPackTokens
+	}
+	return s.config.ContextPack.MaxPackTokensOrDefault()
+}
+
+// applyPackDigestBudget attaches member digests and trims them to the token
+// budget, emitting one pack_trimmed event when any digest is elided.
+func (s *WorkerSpawner) applyPackDigestBudget(pack *ContextPack, bead types.Bead, digests []PackMemberDigest) {
+	pack.MemberDigests = digests
+	elided := ApplyPackTokenBudget(pack, s.packTokenBudget(), bead.ID)
+	if len(elided) == 0 {
+		return
+	}
+	log.Printf("[ContextPack] pack for %s over token budget: elided %d member digests", bead.ID, len(elided))
+	if s.eventSink != nil {
+		s.eventSink.Emit(Event{Type: "pack_trimmed", Project: bead.Project, Bead: string(bead.ID),
+			Reason: "budget",
+			Detail: fmt.Sprintf("elided_count=%d budget=%d", len(elided), s.packTokenBudget())})
 	}
 }
 

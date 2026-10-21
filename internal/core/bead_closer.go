@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -1809,6 +1811,12 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"verified-close-reject-" + reason}); err != nil {
 			log.Printf("[VerifiedClose] Failed to label %s: %v", beadID, err)
 		}
+		// Fingerprint tracking: sha256(bead_id + verification command + first stderr line)
+		fp := getVerificationFingerprint(bead, reason)
+		err := c.trackVerificationFingerprint(bead, fp, projectPath, repoName)
+		if err != nil {
+			log.Printf("[VerifiedClose] Failed to track fingerprint for %s: %v", beadID, err)
+		}
 		prev := bead
 		if fresh != nil {
 			prev = fresh
@@ -1819,6 +1827,44 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		c.sessionResumePilot.RecordReject(hasBeadLabel(bead.Labels, sessionResumedLabel))
 	}
 	return fmt.Errorf("verified-close: bead %s rejected (%s)", beadID, reason)
+}
+
+// gateFingerprintLabelPrefix is the durable label prefix marking a bead whose
+// close-gate rejection fingerprint has been seen at least once.
+const gateFingerprintLabelPrefix = "gate-fp-"
+
+// getVerificationFingerprint computes sha256(bead_id + verification command +
+// first stderr line) truncated to 8 hex chars.
+func getVerificationFingerprint(bead *types.Bead, reason string) string {
+	cmd, _ := verificationCommandFor(bead)
+	h := sha256.Sum256([]byte(string(bead.ID) + cmd + reason))
+	return hex.EncodeToString(h[:])[:8]
+}
+
+// trackVerificationFingerprint records the rejection fingerprint as a durable
+// gate-fp-<first8> label. When the same fingerprint repeats on the same bead,
+// it emits a typed verification_substantive event instead of re-labelling.
+func (c *BeadCloser) trackVerificationFingerprint(bead *types.Bead, fp, projectPath, repoName string) error {
+	if c.beadsClient == nil {
+		return nil
+	}
+	label := gateFingerprintLabelPrefix + fp
+	for _, l := range bead.Labels {
+		if l == label {
+			c.events.EmitRepo(projectPath, Event{
+				Type:    "verification_substantive",
+				Project: repoName,
+				Bead:    string(bead.ID),
+				Fields: map[string]any{
+					"bead":        string(bead.ID),
+					"fingerprint": fp,
+					"count":       2,
+				},
+			})
+			return nil
+		}
+	}
+	return c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{label})
 }
 
 // logCloseEvent emits a single structured close-decision line for

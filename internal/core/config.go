@@ -50,6 +50,39 @@ type ContextPackConfig struct {
 	// Scout is the agentic fallback for requirements the mechanical pack
 	// cannot map (confidence below threshold). Disabled by default.
 	Scout ScoutConfig `yaml:"scout"`
+	// MaxPackTokens caps the pack's estimated token size (chars/4) by
+	// trimming member digests oldest-first. 0 = default (40000).
+	MaxPackTokens int `yaml:"max_pack_tokens"`
+	// MaxChainMembers caps the per-spawn chain scan: fetching every member's
+	// bead to find an existing pack costs one `br show` each — fine for
+	// chains, not for epic-scale lists. Only non-terminal members count.
+	// 0 = default (50).
+	MaxChainMembers int `yaml:"max_chain_members"`
+}
+
+// DefaultMaxChainMembers is the default non-terminal-member cap for the
+// context-pack chain scan (see ContextPackConfig.MaxChainMembers).
+const DefaultMaxChainMembers = 50
+
+// MaxPackTokensOrDefault returns the configured pack token budget, or the
+// default (40000) when unset.
+func (c ContextPackConfig) MaxPackTokensOrDefault() int {
+	if c.MaxPackTokens > 0 {
+		return c.MaxPackTokens
+	}
+	return DefaultMaxPackTokens
+}
+
+// MaxChainMembersOrDefault returns the configured non-terminal chain-member
+// cap, or the default (50) when unset.
+func (c *ContextPackConfig) MaxChainMembersOrDefault() int {
+	if c == nil {
+		return DefaultMaxChainMembers
+	}
+	if c.MaxChainMembers > 0 {
+		return c.MaxChainMembers
+	}
+	return DefaultMaxChainMembers
 }
 
 // ShepherdConfig configures Pan, the shepherd that decides the ambiguous
@@ -682,11 +715,11 @@ type HindsightConfig struct {
 
 // OverseerConfig contains overseer-specific settings
 type OverseerConfig struct {
-	BeadDiscoveryInterval time.Duration            `yaml:"bead_discovery_interval"`
-	MaxWorkers            int                      `yaml:"max_workers"`
-	DefaultRetries        int                      `yaml:"default_retries"`
-	MaxRetries            int                      `yaml:"max_retries"`
-	WorkerTimeout         time.Duration            `yaml:"worker_timeout"`
+	BeadDiscoveryInterval time.Duration `yaml:"bead_discovery_interval"`
+	MaxWorkers            int           `yaml:"max_workers"`
+	DefaultRetries        int           `yaml:"default_retries"`
+	MaxRetries            int           `yaml:"max_retries"`
+	WorkerTimeout         time.Duration `yaml:"worker_timeout"`
 	// WorkerMemoryMaxMB caps each worker (plus its children: pi, jest, npm)
 	// in a dedicated cgroup with memory.max (hydra-3ocq). Requires cgroup v2
 	// + Delegate=yes on hydra.service; without it, containment logs a warning
@@ -695,10 +728,10 @@ type OverseerConfig struct {
 	// WorkerNodeHeapMB caps the V8 heap of every node process in the worker
 	// tree via NODE_OPTIONS=--max-old-space-size (pi itself and jest).
 	// Only applied when NODE_OPTIONS is not already set. <=0 disables.
-	WorkerNodeHeapMB int `yaml:"worker_node_heap_mb"`
-	RetryDelay            time.Duration            `yaml:"retry_delay"`
-	ResourceMonitoring    ResourceMonitoringConfig `yaml:"resource_monitoring"`
-	ChainDetection        ChainDetectionConfig     `yaml:"chain_detection"`
+	WorkerNodeHeapMB   int                      `yaml:"worker_node_heap_mb"`
+	RetryDelay         time.Duration            `yaml:"retry_delay"`
+	ResourceMonitoring ResourceMonitoringConfig `yaml:"resource_monitoring"`
+	ChainDetection     ChainDetectionConfig     `yaml:"chain_detection"`
 	// ConcurrencyGovernor enables AIMD adaptive concurrency limiting.
 	// Disabled by default.
 	ConcurrencyGovernor GovernorConfig `yaml:"concurrency_governor"`

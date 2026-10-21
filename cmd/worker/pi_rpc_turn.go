@@ -167,6 +167,35 @@ func (t *rpcTurn) currentStats() piagents.SessionStats {
 	defer t.mu.Unlock()
 	return t.currentStatsLocked()
 }
+
+// rpcActivity touches the process-global reporter's rpc-activity signal so
+// Charon's zero-token stall classifier can tell an active session (extension
+// notifications, turn events) from a hung one — even when no token usage has
+// arrived yet.
+func (t *rpcTurn) rpcActivity() {
+	if activeReporter != nil {
+		activeReporter.SetRpcActivity()
+	}
+}
+
+// forwardUsage accumulates a usage-bearing event into the turn counters and
+// immediately forwards the accumulated totals to the process-global reporter
+// (FR-003): the rpc scanner must forward parsed usage on every usage-bearing
+// event, not only at run exit — otherwise the registry shows tokens_so_far = 0
+// for the whole session and Charon's zero-token stall probe flags a working
+// worker (PID 2353988 class). Zero-usage blocks are skipped (extractUsage
+// treats them as absent), so a session with no real usage never fabricates
+// tokens.
+func (t *rpcTurn) forwardUsage(event map[string]any) {
+	u, ok := extractUsage(event)
+	if !ok {
+		return
+	}
+	t.addUsage(u)
+	if s := t.currentStats(); s.Total > 0 {
+		reportTurnTokens(&s)
+	}
+}
 func (t *rpcTurn) abort(stdin io.Writer) {
 	t.mu.Lock()
 	t.aborting = true
@@ -227,6 +256,7 @@ func (t *rpcTurn) handleLine(line string, stdin io.Writer) bool {
 			}
 			t.notifications[method]++
 			t.mu.Unlock()
+			t.rpcActivity()
 			// Log the message body for `notify`, which is how extensions report
 			// what they actually did — rtk announces each rewrite this way
 			// ("RTK rewrite: git status --short -> rtk git status --short").
@@ -264,6 +294,9 @@ func (t *rpcTurn) handleLine(line string, stdin io.Writer) bool {
 		}
 
 	case "turn_end", "message_end":
+		// Usage rides turn_end/message_end too — forward it here, not only
+		// in the default branch below.
+		t.forwardUsage(event)
 		msg, _ := event["message"].(map[string]any)
 		if msg == nil {
 			return false
@@ -359,9 +392,7 @@ func (t *rpcTurn) handleLine(line string, stdin io.Writer) bool {
 		// Per-message usage is the only place the cache breakdown appears.
 		// Accumulate it before falling through to the absolute get_session_stats
 		// checkpoint so resumed sessions carry prior counters forward.
-		if u, ok := extractUsage(event); ok {
-			t.addUsage(u)
-		}
+		t.forwardUsage(event)
 		// Command responses (get_session_stats) carry a data object. Only
 		// attempt a stats parse when one is present, so ordinary events cannot
 		// be misread as stats.

@@ -39,6 +39,12 @@ const (
 	// ever-tokens before it is a stall. Long tool calls are fine (tokens>0);
 	// a never-completed turn is not.
 	zeroTokenStallThreshold = 15 * time.Minute
+	// rpcActivityWindow: a worker whose rpc stream produced an event (turn
+	// usage or extension notification) within this window is considered
+	// active even if tokens_so_far is still 0 — FR-003 closes the zero-token
+	// blind spot, and this guard keeps the classifier from flagging a
+	// healthy streaming session that hasn't completed a turn yet.
+	rpcActivityWindow = 5 * time.Minute
 	// roguePiMinAge: bare-pi processes younger than this are ignored (test
 	// shells, the operator's own tooling).
 	roguePiMinAge = 2 * time.Hour
@@ -71,7 +77,10 @@ type processHygiene struct {
 	rogues []RoguePi
 	// rogueEmitted dedupes rogue_pi_detected events per PID per daemon life.
 	rogueEmitted map[int]bool
-	events       *EventSink
+	// rpcSilentLogged dedupes the rpc-active-but-token-silent info line per
+	// bead: an excluded worker is logged once, never surfaced for kill.
+	rpcSilentLogged map[string]bool
+	events          *EventSink
 }
 
 // detectZeroTokenStalls returns the working rows that match the stall
@@ -79,7 +88,7 @@ type processHygiene struct {
 // Fail-open: registry read errors return nil without poisoning the snapshot.
 func (j *Charon) detectZeroTokenStalls() []registry.WorkerRecord {
 	if j.hygiene == nil {
-		j.hygiene = &processHygiene{rogueEmitted: map[int]bool{}}
+		j.hygiene = &processHygiene{rogueEmitted: map[int]bool{}, rpcSilentLogged: map[string]bool{}}
 	}
 	if j.registryStore == nil {
 		return nil
@@ -92,9 +101,22 @@ func (j *Charon) detectZeroTokenStalls() []registry.WorkerRecord {
 	now := time.Now()
 	var stalls []registry.WorkerRecord
 	for _, r := range rows {
-		if r.TokensSoFar == 0 && now.Sub(r.StartedAt) > zeroTokenStallThreshold {
-			stalls = append(stalls, r)
+		if r.TokensSoFar != 0 || now.Sub(r.StartedAt) <= zeroTokenStallThreshold {
+			continue
 		}
+		// FR-003: rpc activity in the last 5m means the session is streaming
+		// (extension notices or turn events) even though no turn has produced
+		// usage yet. Exclude from kill-stalled-worker surfacing; log once.
+		if !r.LastRpcActivity.IsZero() && now.Sub(r.LastRpcActivity) < rpcActivityWindow {
+			j.hygiene.mu.Lock()
+			if !j.hygiene.rpcSilentLogged[r.BeadID] {
+				log.Printf("[Charon] rpc-active but token-silent: %s", r.BeadID)
+				j.hygiene.rpcSilentLogged[r.BeadID] = true
+			}
+			j.hygiene.mu.Unlock()
+			continue
+		}
+		stalls = append(stalls, r)
 	}
 	j.hygiene.mu.Lock()
 	j.hygiene.stalls = map[string]registry.WorkerRecord{}
@@ -118,7 +140,7 @@ func (j *Charon) detectZeroTokenStalls() []registry.WorkerRecord {
 // Pan digest collector.
 func (j *Charon) ZeroTokenStallReport() []registry.WorkerRecord {
 	if j.hygiene == nil {
-		j.hygiene = &processHygiene{rogueEmitted: map[int]bool{}}
+		j.hygiene = &processHygiene{rogueEmitted: map[int]bool{}, rpcSilentLogged: map[string]bool{}}
 	}
 	j.hygiene.mu.Lock()
 	defer j.hygiene.mu.Unlock()

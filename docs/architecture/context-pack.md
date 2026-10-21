@@ -22,6 +22,8 @@ verified). Schema (`ContextPackVersion = 1`):
   "files": [{"requirement": "CreateShortlink", "path": "shortlinks.go", "confidence": 1.0, "provenance": "mechanical"},
               {"requirement": "Flux capacitor calibration", "path": "flux/cap.go", "confidence": 0.85,
                "symbol": "Calibrate", "anchor_snippet": "func Calibrate() {", "provenance": "agentic"}],
+  "member_digests": [{"id": "chain-1", "digest": "- chain-1: one-line digest for chain member 1"}],
+  "footer": "elided: chain-2, chain-3",
   "provenance": "hydra-context-pack"
 }
 ```
@@ -45,6 +47,35 @@ verified). Schema (`ContextPackVersion = 1`):
     verbatim `anchor_snippet` line in addition to path/confidence.
 - `provenance` — `"hydra-context-pack"` marks packs this daemon wrote; a
   human's hand-written `agent_context` never parses as a pack.
+- `member_digests` — one one-line digest (`"- <id>: <title>"`) per chain
+  member, so a spawned worker sees the chain's shape without re-fetching
+  beads. Subject to the token budget (below).
+- `footer` — after token-budget trimming, lists the elided bead IDs
+  (`"elided: id1, id2, ..."`); empty when nothing was elided.
+
+## Token budget
+
+The pack is written to every chain member, so its size must stay bounded.
+`ApplyPackTokenBudget` estimates the serialized pack's token size as
+`chars / 4` and trims member digests oldest-first until the estimate fits
+`context_pack.max_pack_tokens` (default `DefaultMaxPackTokens` = 40000;
+`0` or unset in yaml = default). Three guarantees:
+
+1. **Oldest-first elision** — digests are cut in original chain order
+   (elided IDs appear in that order in the `footer`).
+2. **The current bead's digest is never elided** — the worker spawning now
+   always sees its own entry even when every other digest is cut.
+3. **Exactly one typed event per elision pass** — `pack_trimmed` (reason
+   `budget`, detail `elided_count=<n> budget=<tokens>`) is emitted once per
+   `pack_created`/`pack_refreshed` write that had to trim; no event when the
+   pack fit.
+
+Config (`hydra.yaml`):
+
+```yaml
+context_pack:
+  max_pack_tokens: 40000   # default; 0/unset = default
+```
 
 ## Agentic scout fallback
 
@@ -139,6 +170,9 @@ context_pack:
 Typed events on the fail-open event stream (never gate the pipeline):
 `pack_created`, `pack_refreshed` (per member write, reason carries the short
 SHA), `pack_miss` (one per dropped anchor, reason `anchor_gone`),
+`pack_trimmed` (one per `pack_created`/`pack_refreshed` write whose member
+digests were token-budget-trimmed; reason `budget`, detail carries
+`elided_count` and `budget`),
 `pack_scout` (one per scout pass — reason `scout_ok`/`scout_failed`, detail
 carries requirement/mapping counts and duration for cost attribution),
 `pack_reservation_offscope` (advisory, reason `off_anchor_reservation`),

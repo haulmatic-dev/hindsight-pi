@@ -6,6 +6,7 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -374,5 +375,153 @@ func mcpMessage(beadID, filePath string) *mcp.Message {
 			"bead_id":   beadID,
 			"file_path": filePath,
 		},
+	}
+}
+
+// packDigest builds one one-line member digest ("- <id>: <title>").
+func packDigest(i int) PackMemberDigest {
+	id := types.BeadID(fmt.Sprintf("member-%d", i+1))
+	return PackMemberDigest{ID: id, Digest: fmt.Sprintf("- %s: one-line digest for member %d", id, i+1)}
+}
+
+// TestApplyPackTokenBudget_120OneLineDigestsNoElisions guards against
+// over-eager trimming: a chain of 120 one-line digests under the default
+// budget must produce a pack with zero elisions.
+func TestApplyPackTokenBudget_120OneLineDigestsNoElisions(t *testing.T) {
+	pack := &ContextPack{Version: ContextPackVersion, Provenance: contextPackProvenance}
+	for i := 0; i < 120; i++ {
+		pack.MemberDigests = append(pack.MemberDigests, packDigest(i))
+	}
+	current := pack.MemberDigests[119].ID
+	elided := ApplyPackTokenBudget(pack, 0, current) // 0 = default budget
+	if len(elided) != 0 {
+		t.Fatalf("elided %d digests under default budget, want 0: %v", len(elided), elided)
+	}
+	if pack.Footer != "" {
+		t.Fatalf("footer set with zero elisions: %q", pack.Footer)
+	}
+	if len(pack.MemberDigests) != 120 {
+		t.Fatalf("member digests = %d, want 120", len(pack.MemberDigests))
+	}
+}
+
+// TestApplyPackTokenBudget_SmallBudgetTrimming pins the trimming contract:
+// oldest-first elision, the footer listing elided bead IDs, and the current
+// bead's own digest surviving.
+func TestApplyPackTokenBudget_SmallBudgetTrimming(t *testing.T) {
+	pack := &ContextPack{Version: ContextPackVersion, Provenance: contextPackProvenance}
+	for i := 0; i < 6; i++ {
+		pack.MemberDigests = append(pack.MemberDigests, packDigest(i))
+	}
+	current := pack.MemberDigests[5].ID
+	elided := ApplyPackTokenBudget(pack, 25, current)
+	if len(elided) == 0 {
+		t.Fatal("expected elisions under a tiny budget")
+	}
+	// Oldest-first: the elided IDs must be a prefix of the original order.
+	for i, id := range elided {
+		if want := packDigest(i).ID; id != string(want) {
+			t.Fatalf("elided[%d] = %s, want %s (oldest-first)", i, id, want)
+		}
+	}
+	if pack.Footer == "" {
+		t.Fatal("footer not set after elision")
+	}
+	wantFooter := "elided: " + strings.Join(elided, ", ")
+	if pack.Footer != wantFooter {
+		t.Fatalf("footer = %q, want %q", pack.Footer, wantFooter)
+	}
+	for _, d := range pack.MemberDigests {
+		if d.ID == current {
+			return // current digest survived
+		}
+	}
+	t.Fatal("current bead's digest was elided")
+}
+
+// TestApplyPackTokenBudget_CurrentNeverElided: a budget so small that even
+// after eliding every other digest the pack still overflows must keep the
+// current bead's digest — trimming stops, it never elides the survivor.
+func TestApplyPackTokenBudget_CurrentNeverElided(t *testing.T) {
+	pack := &ContextPack{Version: ContextPackVersion, Provenance: contextPackProvenance}
+	for i := 0; i < 3; i++ {
+		pack.MemberDigests = append(pack.MemberDigests, packDigest(i))
+	}
+	current := pack.MemberDigests[2].ID
+	elided := ApplyPackTokenBudget(pack, 1, current)
+	if len(elided) != 2 {
+		t.Fatalf("elided = %v, want the 2 non-current digests", elided)
+	}
+	if len(pack.MemberDigests) != 1 || pack.MemberDigests[0].ID != current {
+		t.Fatalf("pack digests = %+v, want only the current bead's", pack.MemberDigests)
+	}
+	if strings.Contains(pack.Footer, string(current)) {
+		t.Fatalf("footer %q must not list the current bead", pack.Footer)
+	}
+}
+
+// TestContextPackConfig_MaxPackTokensDefault pins the config default.
+func TestContextPackConfig_MaxPackTokensDefault(t *testing.T) {
+	if got := (ContextPackConfig{}).MaxPackTokensOrDefault(); got != DefaultMaxPackTokens {
+		t.Fatalf("MaxPackTokensOrDefault() = %d, want %d", got, DefaultMaxPackTokens)
+	}
+	if got := (ContextPackConfig{MaxPackTokens: 1234}).MaxPackTokensOrDefault(); got != 1234 {
+		t.Fatalf("configured MaxPackTokens = %d, want 1234", got)
+	}
+	if DefaultMaxPackTokens != 40000 {
+		t.Fatalf("DefaultMaxPackTokens = %d, want 40000", DefaultMaxPackTokens)
+	}
+}
+
+// TestEnsureContextPack_PackTrimmedEvent drives the real spawn path: a pack
+// over a tiny configured budget elides member digests, emits exactly one
+// pack_trimmed event with elided_count/budget, and the written pack carries
+// the elided footer. The current bead's digest survives.
+func TestEnsureContextPack_PackTrimmedEvent(t *testing.T) {
+	dir := packFixtureRepo(t)
+	mock := newMockBeadsClient()
+	ids := []types.BeadID{"root-1", "member-2", "member-3"}
+	for _, id := range ids {
+		mock.beads[string(id)] = types.Bead{ID: id, Title: "CreateShortlink handler " + string(id)}
+	}
+	s, _ := packTestSpawner(t, mock, ids, dir)
+	s.config.ContextPack.MaxPackTokens = 1 // force trimming
+	bead := mock.beads["member-3"]
+
+	s.ensureContextPack(bead, dir)
+
+	// The written pack on the current bead: current digest present, footer lists the other two.
+	written, err := ParseContextPack(mock.beads["member-3"].AgentContext)
+	if err != nil || written == nil {
+		t.Fatalf("written pack unparseable: %v", err)
+	}
+	if len(written.MemberDigests) != 1 || written.MemberDigests[0].ID != bead.ID {
+		t.Fatalf("written digests = %+v, want only the current bead's", written.MemberDigests)
+	}
+	if written.Footer != "elided: root-1, member-2" {
+		t.Fatalf("footer = %q, want %q", written.Footer, "elided: root-1, member-2")
+	}
+
+	// Exactly one typed pack_trimmed event with the elision count and budget.
+	sinkFile := filepath.Join(s.eventSink.centralDir, time.Now().UTC().Format("2006-01-02")+".jsonl")
+	events, err := ReadEvents(sinkFile)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	var trimmed []Event
+	for _, e := range events {
+		if e.Type == "pack_trimmed" {
+			trimmed = append(trimmed, e)
+		}
+	}
+	if len(trimmed) != 1 {
+		t.Fatalf("pack_trimmed events = %d, want 1: %+v", len(trimmed), events)
+	}
+	e := trimmed[0]
+	if e.Bead != "member-3" {
+		t.Fatalf("event bead = %q, want member-3", e.Bead)
+	}
+	if !strings.Contains(e.Detail, "elided_count=2") || !strings.Contains(e.Detail, "budget=1") {
+		t.Fatalf("event detail = %q, want elided_count=2 and budget=1", e.Detail)
 	}
 }
