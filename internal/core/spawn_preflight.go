@@ -135,13 +135,19 @@ func offendingStorePathsDetail(projectPath string, daemon int) string {
 		}
 		fi, err := e.Info()
 		if err != nil {
+			// Fail open for individual entry info errors.
 			continue
 		}
 		st, ok := fi.Sys().(*syscall.Stat_t)
-		if !ok || int(st.Uid) == daemon {
-			continue
+		if !ok {
+			continue // Not Unix system stat, cannot determine ownership
 		}
-		parts = append(parts, fmt.Sprintf(".beads/%s: uid %d", e.Name(), int(st.Uid)))
+		ownerUID := int(st.Uid)
+		if ownerUID == daemon {
+			continue // Owned by the daemon itself, not foreign
+		}
+		// Found a foreign-owned path, record it.
+		parts = append(parts, fmt.Sprintf(".beads/%s: uid %d", e.Name(), ownerUID))
 	}
 	if len(parts) == 0 {
 		return ""

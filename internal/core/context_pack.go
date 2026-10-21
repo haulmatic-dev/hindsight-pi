@@ -117,6 +117,24 @@ func packTokenEstimate(pack *ContextPack) int {
 	return len(raw) / 4
 }
 
+// nextElidable returns the index of the first member digest that may be
+// elided — any digest other than the current bead's — or -1 when only the
+// current bead's digest remains.
+func nextElidable(digests []PackMemberDigest, current types.BeadID) int {
+	for i, d := range digests {
+		if d.ID != current {
+			return i
+		}
+	}
+	return -1
+}
+
+// elideFooter renders the "elided: id1, id2, ..." footer listing the elided
+// bead IDs in trim order.
+func elideFooter(elided []string) string {
+	return "elided: " + strings.Join(elided, ", ")
+}
+
 // ApplyPackTokenBudget trims member digests oldest-first until the pack's
 // estimated token size (chars/4) fits the budget. The current bead's own
 // digest is never elided. Returns the elided bead IDs in trim order and
@@ -132,13 +150,7 @@ func ApplyPackTokenBudget(pack *ContextPack, budget int, current types.BeadID) [
 	pack.Footer = ""
 	var elided []string
 	for packTokenEstimate(pack) > budget {
-		idx := -1
-		for i, d := range pack.MemberDigests {
-			if d.ID != current {
-				idx = i
-				break
-			}
-		}
+		idx := nextElidable(pack.MemberDigests, current)
 		if idx == -1 {
 			break // only the current bead's digest remains; never elided
 		}
@@ -146,7 +158,7 @@ func ApplyPackTokenBudget(pack *ContextPack, budget int, current types.BeadID) [
 		pack.MemberDigests = append(pack.MemberDigests[:idx], pack.MemberDigests[idx+1:]...)
 	}
 	if len(elided) > 0 {
-		pack.Footer = "elided: " + strings.Join(elided, ", ")
+		pack.Footer = elideFooter(elided)
 	}
 	return elided
 }
