@@ -1,24 +1,15 @@
-# red handoff
+# REFACTOR handoff (hydra-8uw4)
 
 ## What changed (files + one line each)
-- No code changes in this bead. The RED tests and the implementation for
-  "Store-ownership preflight precision" (FR-005) were already landed in
-  commit `110aa7f4` ("Fix store ownership preflight precision (FR-005)"),
-  which is the parent of this worktree's HEAD.
+- internal/core/bead_closer.go: `trackVerificationFingerprint` deduped — label-membership loop replaced with `hasBeadLabel`; fingerprint source selection extracted into `verificationFingerprintSource(reason, stderr)`. No behavior change.
+- CHANGELOG.md: Unreleased/Changed entry describing the refactor.
+- docs/hydra/handoff/refactor-8uw4.md: this handoff (template contract).
 
 ## Verification (commands run + pass/fail)
-- `go test ./internal/core/ -run 'StoreOwnership' -count=1` — PASS (all 6 tests green).
-- Coverage for new preflight code (FR-005):
-  - `storeOwnerUID`: 80.0%
-  - `spawnPreflightStoreOwnership`: 87.5%
-  - `brListProbe`: 100.0%
-- One test (`TestSpawnPreflightStoreOwnership_ForeignOwnerWarnsAndPasses`) is
-  env-gated SKIP in the current container (uid 999 cannot create a
-  foreign-owned store), but the same scenario is covered by
-  `TestStoreOwnershipPreflight_ProbeFailureWarnsWithPaths` (which asserts the
-  warn + typed event on probe failure) and
-  `TestStoreOwnershipPreflight_CapsOffendingPathsAtThree`.
+- `go test ./internal/core/ -run 'TestTrackVerificationFingerprint|TestGetVerificationFingerprint' -count=1` — ok (PASS, 0.041s pre-commit; 0.022s re-verified post-commit).
+- `gofmt -l internal/core/bead_closer.go` — clean.
+- Commit landed as `1e881a2a` ("refactor: dedupe fingerprint label check and extract source selection (hydra-8uw4)").
 
 ## Open edges for the next phase
-- None. Feature is complete and verified in the worktree at HEAD
-  (`03e3e764`).
+- No benchmarks exist for the fingerprint path; no perf regression check needed or run.
+- `getVerificationFingerprint` discards `verificationCommandFor`'s bool — intentional (empty cmd degrades to reason-only fingerprint).
