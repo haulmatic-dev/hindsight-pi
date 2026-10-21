@@ -167,6 +167,7 @@ type Overseer struct {
 
 	// Stale-escalation ager (nil when escalation_ttl <= 0)
 	escalationTTL *EscalationTTLScanner
+	panPromoter   *PanFiledPromoter
 
 	// Stale integration-exhausted park sweeper (nil when disabled)
 	integrationSweep *IntegrationExhaustedSweeper
@@ -444,6 +445,10 @@ func NewOverseer(config *Config) *Overseer {
 	if config.Overseer.EscalationTTL > 0 {
 		o.escalationTTL = NewEscalationTTLScanner(o.beadsClient, o.GetProjects, config.Overseer.EscalationTTL, o.eventSink)
 	}
+	// Retroactive pan-filed promotion: pan-filed beads whose text names a
+	// code change are work, not human triage; the reconciler strips the
+	// label so discovery admits them (see pan_filed_promotion.go).
+	o.panPromoter = NewPanFiledPromoter(o.beadsClient, o.GetProjects, o.eventSink)
 	if config.Overseer.IntegrationExhaustedSweep > 0 {
 		o.integrationSweep = NewIntegrationExhaustedSweeper(o.beadsClient, o.GetProjects, config.Overseer.IntegrationExhaustedSweep, o.eventSink)
 	}

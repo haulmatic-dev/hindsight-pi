@@ -654,7 +654,10 @@ func (o *Overseer) filePanBead(projectPath, beadID, title, description string) e
 				break
 			}
 		}
-		if !isFiled {
+		// Code-change proposals filed WITHOUT the pan-filed label (promotion
+		// routing below) still count against the cap: they are Pan filings
+		// and the cap exists to bound Pan's filing pressure, not the label.
+		if !isFiled && !isCodeChangeProposal(b.Title, b.Description) {
 			continue
 		}
 		openFiled++
@@ -686,12 +689,22 @@ func (o *Overseer) filePanBead(projectPath, beadID, title, description string) e
 		log.Printf("[PanRepair] file-bead %s: cap hit (%d open pan-filed beads, cap %d) in %s — filing suppressed", beadID, openFiled, capVal, projectPath)
 		return fmt.Errorf("file-bead %s: cap reached (%d open pan-filed beads in project, cap %d)", beadID, openFiled, capVal)
 	}
+	labels := []string{pan.FiledLabel}
+	// Promotion path, filing-time shape: a proposal whose text names a hydra
+	// code change is WORK, not human triage — file it as a normal task bead
+	// (no pan-filed label, so discovery and the spawn preflight admit it).
+	// The cap above still applies. Human-triage filings keep the label.
+	routed := "human-triage"
+	if isCodeChangeProposal(title, description) {
+		labels = nil
+		routed = "code-change"
+	}
 	req := types.CreateBeadRequest{
 		Title:       title,
 		Description: description,
 		Type:        "task",
 		Priority:    2,
-		Labels:      []string{pan.FiledLabel},
+		Labels:      labels,
 	}
 	newID, err := o.beadsClient.CreateBead(projectPath, req)
 	if err != nil {
@@ -712,10 +725,10 @@ func (o *Overseer) filePanBead(projectPath, beadID, title, description string) e
 			Project: filepath.Base(projectPath),
 			Bead:    string(newID),
 			Reason:  "pan_filed",
-			Fields:  map[string]any{"source": beadID},
+			Fields:  map[string]any{"source": beadID, "routed": routed},
 		})
 	}
-	log.Printf("[PanRepair] file-bead %s: filed %s in %s", beadID, newID, projectPath)
+	log.Printf("[PanRepair] file-bead %s: filed %s in %s (routed: %s)", beadID, newID, projectPath, routed)
 	return nil
 }
 
