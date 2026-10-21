@@ -305,6 +305,6 @@ func BenchmarkPostCloseSweepVerifyBead(b *testing.B) {
 	)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		s.sweepBead("/proj", fake.beads[0])
+		s.verifyBead(pcProjects("/proj")[0], fake.beads[0])
 	}
 }
