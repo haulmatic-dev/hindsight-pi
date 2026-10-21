@@ -55,7 +55,7 @@ func (c *BeadCloser) emitGateEvent(eventType string, bead *types.Bead, projectPa
 // and runs the shared rejectClose path (reopen / attempt cap / escalate).
 func (c *BeadCloser) rejectViaGate(bead *types.Bead, projectPath, repoName, reason, evidence string) error {
 	c.emitGateEvent(closeGateRejectionEvent, bead, projectPath, repoName, reason, evidence)
-	return c.rejectClose(bead, projectPath, repoName, reason)
+	return c.rejectClose(bead, projectPath, repoName, reason, evidence)
 }
 
 // --- Gate 1: executable acceptance ---

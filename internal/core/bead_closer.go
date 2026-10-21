@@ -2014,8 +2014,3 @@ func (c *BeadCloser) handleVerificationRed(bead *types.Bead, projectPath, repoNa
 		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed", err.Error())
 	}
 }
-		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-flaky")
-	default:
-		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed")
-	}
-}
