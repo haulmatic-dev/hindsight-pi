@@ -721,6 +721,15 @@ type OverseerConfig struct {
 	// staying hidden forever. The hard-park itself is never cleared. 0
 	// disables the sweeper.
 	IntegrationExhaustedSweep time.Duration `yaml:"integration_exhausted_sweep"`
+	// BeadsPermsWatchdog periodically probes every managed project's .beads
+	// store against the multi-user permission convention (beads group, g+rwX,
+	// o-rwx, setgid dir, group-rw issues.jsonl) and repairs drift via the same
+	// onboarding the discovery path uses. When the daemon itself is locked out
+	// (a store owner's raw, un-shimmed `br` rewrote the store 0600 with an
+	// empty ACL mask — 2026-10-15 incident class), the failure is escalated as
+	// a typed `beads_store_locked` event naming the root-side remedy instead
+	// of failing silently. Fail-open; 0 disables the watchdog.
+	BeadsPermsWatchdog time.Duration `yaml:"beads_perms_watchdog"`
 	// PostCloseSweep is the escape-rate regression budget (NFR-001): a
 	// weekly scan that re-runs the declared verification command of beads
 	// closed-completed in the last window. Any bead whose command now exits
@@ -929,6 +938,7 @@ func DefaultConfig() *Config {
 			DefaultRetries:            3,
 			EscalationTTL:             72 * time.Hour,
 			IntegrationExhaustedSweep: 48 * time.Hour,
+			BeadsPermsWatchdog:       time.Minute,
 			PostCloseSweep:            true,
 			PRAgingDays:               PRAgingThresholdDays,
 			WorkerTimeout:             30 * time.Minute,

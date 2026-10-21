@@ -285,3 +285,26 @@ func TestPostCloseSweepStartStopNilSafe(t *testing.T) {
 	s2.Start()
 	s2.Stop()
 }
+
+// BenchmarkPostCloseSweepVerifyBead measures the per-bead sweep decision path
+// (eligibility check + two passing runCommand invocations) against a fake
+// BeadsClient, exercising the sweep's steady-state cost.
+func BenchmarkPostCloseSweepVerifyBead(b *testing.B) {
+	fake := newPCFakeBeads([]types.Bead{{
+		ID:        "pc-bench",
+		Title:     "closed bench bead",
+		Status:    types.StatusClosed,
+		UpdatedAt: time.Now(),
+		Metadata:  map[string]string{"test_command": "true"},
+	}})
+	s := NewPostCloseSweeper(fake,
+		func() []types.Project { return pcProjects("/proj") },
+		nil,
+		func(projectPath, command string) (string, error) { return "ok", nil },
+		nil,
+	)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		s.verifyBead(pcProjects("/proj")[0], fake.beads[0])
+	}
+}
