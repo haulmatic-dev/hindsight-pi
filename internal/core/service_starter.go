@@ -48,6 +48,10 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	if o.escalationTTL != nil {
 		o.escalationTTL.Start()
 	}
+	// Retroactive pan-filed promotion (nil-client inert)
+	if o.panPromoter != nil {
+		o.panPromoter.Start()
+	}
 	if o.integrationSweep != nil {
 		o.integrationSweep.Start()
 	}
@@ -870,6 +874,9 @@ func (s *ServiceStarter) Stop() {
 	}
 	if o.escalationTTL != nil {
 		o.escalationTTL.Stop()
+	}
+	if o.panPromoter != nil {
+		o.panPromoter.Stop()
 	}
 	if o.integrationSweep != nil {
 		o.integrationSweep.Stop()
