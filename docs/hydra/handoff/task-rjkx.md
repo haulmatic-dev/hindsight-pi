@@ -1,18 +1,18 @@
 # discovery handoff (task-rjkx)
 
 ## What changed (files + one line each)
-- cmd/worker/close_hold.go (new): FR-004 bounded close-hold — `closeHoldFor` (done:false + summary triggers hold), `closeHoldCount` (label parser, max suffix), `closeHeldRecord`/`emitCloseHeldEvent` (typed `worker_close_held` JSONL event, fail-open on HYDRA_HOME/write errors), `runCloseHold` (below cap → hold + persist label; at cap 2 → forced close, `forced:true`), `persistCloseHoldLabel` (replaces previous `close-hold-N` via br label add/remove in project cwd).
-- cmd/worker/close_hold_test.go (new): 9 tests — closeHoldFor table (nil/done/done:false-without-summary fail open; done:false+summary holds), closeHoldCount table (malformed/negative suffixes ignored, max taken), closeHeldRecord fields incl. forced:true, emit fail-open (no HYDRA_HOME / bad path), below-cap holds, at-cap forced, nil-verdict never holds, real-br label persistence (skip if br unavailable), replace-label assertion (exactly one close-hold label).
-- cmd/worker/main.go: wiring — close-hold check at both close sites (main close + files+tests close), before `closeBeadFromWorker`.
-- CHANGELOG.md: Unreleased/Fixed entry documenting the bounded hold contract and fail-open paths.
+- docs/hydra/handoff/task-rjkx.md: this handoff (discovery bead for FR-004: ContextPack chain scan terminal exclusion verification; no code change).
+- CHANGELOG.md: Documentation entry under Unreleased pointing at the verification results.
 
-## Verification (commands run + pass/fail)
-- `go build ./...` — PASS.
-- `go test ./cmd/worker/ -run 'CloseHold|PersistCloseHold|EmitCloseHeld' -count=1` — PASS (9/9 incl. real-br integration test).
-- Full suite `go test ./cmd/worker/ -count=1` — PASS (`ok ... 2.713s`, after transient EAGAIN instability earlier in the session settled).
-- Committed as `43b9818` (4 files, +346/−2); verified via `git show --stat HEAD`.
+## Verified findings (FR-001: ContextPack chain scan)
+- Feature ALREADY IMPLEMENTED at HEAD; no code change required. Verified via code inspection + test run:
+  - `internal/core/worker_spawner.go` (`ensureContextPack` region): chain members fetched via `s.beadsClient.GetBead`; terminal members (`b.Status.IsTerminal()`) counted separately in `nonTerminal`; the pack-skip cap compares only `nonTerminal` against `cfg.MaxChainMembersOrDefault()`, so terminal fix-beads cost a fetch but never contribute to cap pressure nor to `MemberDigests`/terms collection.
+  - Cap is config: `internal/core/config.go` `ContextPackConfig.MaxChainMembers` (`yaml:"max_chain_members"`), default `DefaultMaxChainMembers = 50`, accessor `MaxChainMembersOrDefault()` (nil-safe).
+  - RED tests landed locally: `internal/core/context_pack_chain_scan_test.go` (commit `03e3e764`) with 6 tests pinning terminal exclusion, both-counts skip log, config field, nil-safe accessor, log format, marshal.
+- `go test ./internal/core/ -run 'TestContextPack_' -count=1` — PASS 8/8 (all ContextPack tests incl. the 6 chain-scan tests). VERIFIED.
+- `hindsight_search`/CASS: queried twice; no anti-pattern matching this approach; only generic workflow rules returned.
+- graphify-out/graph.json absent in cwd → rg fallback per protocol.
 
 ## Open edges for the next phase
-- `persistCloseHoldLabel` uses PATH-resolved `br`; production worker PATH must include it (same as other br calls).
-- Hold label survives close only on the non-forced path; at cap the forced close removes no labels (bead closes, `close-hold-N` stays on a closed bead — same convention as other end-state labels).
-- EAGAIN transient in this box: CASS bullet `b-mvgi421t-8opfwe` (score 0.9) already documents the environmental intermittent-failure pattern; no code change needed.
+- Commit `03e3e764` (RED tests) is NOT an ancestor of `origin/development` at last successful check — the tests are uncommitted-with-regards-to-upstream; a PR/merge must carry them. Note fork-limit (`EAGAIN`) prevented re-verification after first successful check.
+- Optional GREEN hardening (NOT done, out of scope): terminal beads are still fetched per member (one `br show` each) even though excluded from the cap; could skip fetching beads already known terminal from chain metadata. Low value; current cost is bounded by MaxChainMembers.
