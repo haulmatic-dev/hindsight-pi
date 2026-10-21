@@ -171,9 +171,6 @@ type Overseer struct {
 
 	// Stale integration-exhausted park sweeper (nil when disabled)
 	integrationSweep *IntegrationExhaustedSweeper
-
-	// .beads store-perm watchdog (nil when disabled)
-	beadsPermsWatchdog *BeadsPermsWatchdog
 	panDigestAt      atomic.Int64 // unix-nano of last collectHealthDigest (0 = unknown)
 	evidenceSweep    *ToolHealthEvidenceScanner
 	tokenUsageRollup *TokenUsageRollupJob
@@ -454,9 +451,6 @@ func NewOverseer(config *Config) *Overseer {
 	o.panPromoter = NewPanFiledPromoter(o.beadsClient, o.GetProjects, o.eventSink)
 	if config.Overseer.IntegrationExhaustedSweep > 0 {
 		o.integrationSweep = NewIntegrationExhaustedSweeper(o.beadsClient, o.GetProjects, config.Overseer.IntegrationExhaustedSweep, o.eventSink)
-	}
-	if config.Overseer.BeadsPermsWatchdog > 0 {
-		o.beadsPermsWatchdog = NewBeadsPermsWatchdog(o.GetProjects, config.Overseer.BeadsPermsWatchdog, o.eventSink)
 	}
 	if o.intelligenceHub != nil {
 		evidenceScanner := NewToolHealthEvidenceScanner(o.GetProjects, o.eventSink)

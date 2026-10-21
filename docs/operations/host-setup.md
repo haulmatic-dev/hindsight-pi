@@ -392,26 +392,6 @@ logged (`[MultiUserDiscovery] ... fail-open`) and repaired by the root-run
 onboard sweep instead (`hydra-onboard-sweep` → `hydra-onboard` →
 `hydra-normalize-beads`, see §2).
 
-A dedicated watchdog closes the gap between discovery ticks
-(`overseer.beads_perms_watchdog`, default 1m, 0 disables): every interval it
-stats each managed store and repairs drift via the same onboarding. When the
-daemon is locked out — a store owner ran a raw, un-shimmed `br`, which rewrote
-`issues.jsonl` 0600 with an empty ACL mask (2026-10-15 incident class: every
-daemon `br` call then fails `exit 8` IO_ERROR permission denied until root
-repairs) — the repair cannot be applied by the daemon and a typed
-`beads_store_locked` event is emitted (throttled to once per 10m per store)
-naming the remedy: root-run `packaging/hydra-normalize-beads <repo>` or
-`systemctl restart beads-fixer.service`.
-
-**PATH shadowing:** the shim must win on every PATH that can run `br` —
-daemon unit (it does: `$HYDRA_HOME/bin` is first) AND every human/Pi session.
-A raw beads-rust binary installed ahead of the shim on a user's PATH (e.g.
-`/opt/dev-tools/config/pi/bin/br` must be the shim, never the raw ELF —
-October 2026 regression where the raw binary re-shadowed the shim and re-locked
-stores on owner writes) bypasses the repair entirely; the watchdog event is
-the tripwire for exactly that state. Verify with `which -a br` and
-`head -1 "$(which br)"` (must print the shim's shebang, not an ELF header).
-
 **Verify:** `journalctl -u hydra | grep -E "MultiUserDiscovery|PrefixGuard"` shows
 discovered users, repos, and any prefix overrides.
 

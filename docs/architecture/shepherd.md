@@ -284,20 +284,6 @@ for manual intervention or the Pan retry-quarantine repair. The park itself is
 never cleared, `in_progress` beads are skipped, and beads already carrying
 `needs-human` are left alone (idempotent). Default 48h; 0 disables.
 
-**Beads-store perms watchdog (2026-10-16).** A store owner's raw, un-shimmed
-`br` rewrite recreates `.beads/issues.jsonl` with mode 0600 and an empty ACL
-mask, cancelling every named ACL entry and locking the daemon (uid 999) out of
-the store (`br` exit 8, IO_ERROR permission denied; closes rejected with
-cannot-verify-state, scheduler blind on the project). The
-`BeadsPermsWatchdog` (`overseer.beads_perms_watchdog`, default 1m, 0
-disables) stats each managed store every interval, repairs drift via the
-discovery onboarding, and — when the daemon itself is locked out and cannot
-repair — emits a typed `beads_store_locked` event (throttled to once per 10m
-per store) naming the root-side remedy
-(`packaging/hydra-normalize-beads <repo>` / `beads-fixer.service`). Fail-open
-throughout. See docs/operations/host-setup.md §8 for the PATH-shadowing
-tripwire.
-
 **Escape-rate regression budget (NFR-001, 2026-10-03).** Two halves:
 
 - *Close-path guard.* Every close path that terminates as completed runs the
