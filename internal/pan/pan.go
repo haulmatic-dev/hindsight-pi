@@ -205,6 +205,11 @@ var repairWhitelist = map[string]bool{
 	"clear-hard-park":   true,
 	"clear-escalation":  true,
 	"retry-quarantine":  true,
+	// Process-hygiene kills (2026-10-20 incident): Charon records zero-token
+	// stalls and rogue bare-pi processes; Pan may dispatch the explicit-PID
+	// kill repair (NEVER by PGID — gates share the daemon process group).
+	"kill-stalled-worker": true,
+	"kill-rogue-pi":       true,
 
 	// recover-spawn-cohort is project-scoped but not LLM-invocable yet
 	// (deterministic PrunableWedgeSweep only) — kept out of repairWhitelist
@@ -278,6 +283,16 @@ func isAllowedAction(action string) bool {
 	if allowedActions[registry.CommandKind(action)] {
 		return true
 	}
+	name, ok := parseRepairName(action)
+	if !ok {
+		return false
+	}
+	return repairWhitelist[name]
+}
+
+// IsAllowedRepair reports whether "repair:<name>" is in the Pan repair
+// whitelist. Test seam for the repair vocabulary contract.
+func IsAllowedRepair(action string) bool {
 	name, ok := parseRepairName(action)
 	if !ok {
 		return false
@@ -1488,7 +1503,7 @@ needs a judgment call. For EVERY worker decide exactly one action:
 - "abandon-with-summary": give up gracefully (payload: what was done and what remains)
 - "close_satisfied": the bead's acceptance criteria are already met on the working branch and the worker found nothing to do; close it without a worker. For FIX-AUDIT candidates this closes the redundant fix bead after the satisfied gate re-proves acceptance daemon-side.
 - "file-bead": file an improvement bead for a human to triage (payload: first line = the bead title, remaining lines = the problem description). Use for fleet-level or product-level findings no repair verb covers: shared wedges, push/branch-protection problems, campaign anomalies. Deduplicated per project by signature and capped at 2 open pan-filed beads per project; duplicates are silently skipped.
-- "repair:<name>": execute a whitelisted daemon-side repair (payload ignored). Only for BLOCKED beads with no live worker row. The only valid repair names — the hygiene set — are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park, clear-escalation, retry-quarantine. No other repair:<name> strings exist; if none fit, choose continue, abandon-with-summary, or file-bead.
+- "repair:<name>": execute a whitelisted daemon-side repair (payload ignored). Only for BLOCKED beads with no live worker row. The only valid repair names — the hygiene set — are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park, clear-escalation, retry-quarantine, kill-stalled-worker, kill-rogue-pi. No other repair:<name> strings exist; if none fit, choose continue, abandon-with-summary, or file-bead.
 
 Rescue recipes (hard-won; prefer the repair matching the cause):
 - FIX-AUDIT candidates are OPEN auto-fix beads whose original bead closed as failed; each reason carries the close reason, any recorded verdict, and a re-verification status of the original evidence in the inherited worktree. Judge whether a worker still needs to redo the work:
