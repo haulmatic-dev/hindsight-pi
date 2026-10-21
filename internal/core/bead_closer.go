@@ -1993,21 +1993,27 @@ func (c *BeadCloser) sessionBaseFor(beadID string) string {
 // (code-broken), or comment + escalate. It never edits gates/tests.
 func (c *BeadCloser) handleVerificationRed(bead *types.Bead, projectPath, repoName string, err error) error {
 	if c.gateDoctor == nil {
-		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed")
+		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed", err.Error())
 	}
 	action := c.gateDoctor.Triage(context.Background(), bead.ID.String(), bead.Title, "verification-command", 1, err.Error())
 	switch action.Class {
 	case GateClassEnvironment:
 		// repair + rerun once. We don't auto-rerun to avoid infinite loops in
 		// the shell context, but we label and return a retry rejection.
-		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-environment")
+		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-environment", err.Error())
 	case GateClassCodeBroken:
 		c.gateDoctor.FileFixBead(projectPath, repoName, bead.ID.String(), "verification-command", 1, err.Error())
-		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed")
+		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed", err.Error())
 	case GateClassStaleGate:
 		// comment + escalate, NEVER edit gate
-		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-stale-gate")
+		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-stale-gate", err.Error())
 	case GateClassFlaky:
+		// comment + escalate, NEVER edit gate
+		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-flaky", err.Error())
+	default:
+		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed", err.Error())
+	}
+}
 		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-flaky")
 	default:
 		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed")
