@@ -15,14 +15,18 @@ package core
 // never reach a worker.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/logx"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -109,6 +113,43 @@ func storeOwnerUID(projectPath string) (uid int, missing bool, err error) {
 	return int(st.Uid), false, nil
 }
 
+// maxOffendingStorePaths caps how many foreign-owned paths the preflight
+// warning names (FR-005: name actual offending paths instead of a generic
+// store-wide string).
+const maxOffendingStorePaths = 3
+
+// offendingStorePathsDetail returns " [.beads/x: uid N ...]" naming up to
+// maxOffendingStorePaths paths under <projectPath>/.beads owned by a uid
+// different from the daemon's. Errors are swallowed (fail-open): the
+// generic store-wide detail already carries the diagnosis.
+func offendingStorePathsDetail(projectPath string) string {
+	daemon := daemonUID()
+	storeDir := filepath.Join(projectPath, ".beads")
+	entries, err := os.ReadDir(storeDir)
+	if err != nil {
+		return ""
+	}
+	parts := make([]string, 0, maxOffendingStorePaths)
+	for _, e := range entries {
+		if len(parts) >= maxOffendingStorePaths {
+			break
+		}
+		fi, err := e.Info()
+		if err != nil {
+			continue
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok || int(st.Uid) == daemon {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf(".beads/%s: uid %d", e.Name(), int(st.Uid)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " [offending: " + strings.Join(parts, ", ") + "]"
+}
+
 func (o *Overseer) spawnPreflightStoreOwnership(bead types.Bead, projectPath string) error {
 	if projectPath == "" {
 		return nil
@@ -130,9 +171,37 @@ func (o *Overseer) spawnPreflightStoreOwnership(bead types.Bead, projectPath str
 	// The hydra-6g4u sidecar uid-lock is a WRITE hazard; gating all spawns on
 	// ownership alone was a false-positive sensor. Keep the typed event for
 	// visibility; let real write failures surface at the write site.
-	detail := fmt.Sprintf(".beads store owned by uid %d, daemon runs as uid %d — cross-uid store; writes may hit fsqlite sidecar uid-lock (hydra-6g4u)", uid, daemonUID())
+
+	// Store-ownership preflight precision: run a br probe to see if the
+	// daemon can actually read the foreign store. A successful probe (exit 0)
+	// means cross-uid reads work, so the warning is downgraded to debug-only
+	// (no typed event, no spawn churn). A failing probe keeps today's warn +
+	// event, naming the actual offending paths (up to 3).
+	probeErr := brListProbe(projectPath)
+	detail := fmt.Sprintf(".beads store owned by uid %d, daemon runs as uid %d — cross-uid store; writes may hit fsqlite sidecar uid-lock (hydra-6g4u)%s", uid, daemonUID(), offendingStorePathsDetail(projectPath))
+	if probeErr == nil {
+		logx.Debugf("[Spawn] %s store-ownership preflight (fail-open, spawning): %s", bead.ID, detail)
+		return nil
+	}
 	log.Printf("[Spawn] %s store-ownership preflight WARN (fail-open, spawning): %s", bead.ID, detail)
 	o.emitSpawnPreflightBlocked(projectPath, "spawn_warn_store_ownership", bead, detail)
+	return nil
+}
+
+// brListProbe runs `br list --json --limit 1` inside projectPath to verify the
+// daemon can actually READ the store before warning about cross-uid writes.
+// A successful probe (exit 0) means cross-uid reads work; a failure (or a
+// missing br binary, which is not proof of a broken store) returns the error.
+// The probe is stub-able in tests via a fake `br` on PATH. It fails open by
+// contract: callers treat probe errors as "unverified", never as blockers.
+func brListProbe(projectPath string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "br", "list", "--json", "--limit", "1")
+	cmd.Dir = projectPath
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("br list probe: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
 
