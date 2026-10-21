@@ -168,3 +168,21 @@ func TestGetVerificationFingerprint_IsDeterministicAndCommandSensitive(t *testin
 		t.Fatalf("different reasons must give different fingerprints")
 	}
 }
+
+func TestVerificationFingerprintSource_IgnoresStderr(t *testing.T) {
+	// AC1: the fingerprint is hashed from the classification string (e.g.
+	// "verification-command-failed"), never the literal stderr — same-
+	// classification failures with different output must collide so a repeat
+	// emits verification_substantive.
+	same := verificationFingerprintSource("verification-command-failed", []string{"panic: foo", "exit status 1"})
+	other := verificationFingerprintSource("verification-command-failed", []string{"panic: bar"})
+	if same != "verification-command-failed" {
+		t.Fatalf("fingerprint source must be the classification reason, got %q", same)
+	}
+	if same != other {
+		t.Fatalf("different stderr must not change the fingerprint source: %q vs %q", same, other)
+	}
+	if got := verificationFingerprintSource("timeout", nil); got != "timeout" {
+		t.Fatalf("nil stderr must fall back to reason, got %q", got)
+	}
+}

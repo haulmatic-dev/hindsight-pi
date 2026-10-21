@@ -1811,10 +1811,10 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"verified-close-reject-" + reason}); err != nil {
 			log.Printf("[VerifiedClose] Failed to label %s: %v", beadID, err)
 		}
-		// Fingerprint tracking: sha256(bead_id + verification command + first stderr line).
-		// When a verification command produced stderr the first line is the discriminating
-		// input (same classification string with different stderr must not collide);
-		// rejections without command output fall back to the classification reason.
+		// Fingerprint tracking: sha256(bead_id + verification command + classification
+		// reason). The classification string (e.g. verification-command-failed) is the
+		// discriminating input — same-classification failures with different stderr
+		// MUST collide so the repeat emits verification_substantive.
 		fp := getVerificationFingerprint(bead, verificationFingerprintSource(reason, stderr))
 		err := c.trackVerificationFingerprint(bead, fp, projectPath, repoName)
 		if err != nil {
@@ -1837,7 +1837,7 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 const gateFingerprintLabelPrefix = "gate-fp-"
 
 // getVerificationFingerprint computes sha256(bead_id + verification command +
-// first stderr line) truncated to 8 hex chars.
+// classification reason) truncated to 8 hex chars.
 func getVerificationFingerprint(bead *types.Bead, reason string) string {
 	cmd, _ := verificationCommandFor(bead)
 	h := sha256.Sum256([]byte(string(bead.ID) + cmd + reason))
@@ -1868,13 +1868,14 @@ func (c *BeadCloser) trackVerificationFingerprint(bead *types.Bead, fp, projectP
 	return c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{label})
 }
 
-// verificationFingerprintSource selects the discriminating input for a close-gate
-// rejection fingerprint: the first stderr line when the verification command
-// produced output, else the classification reason.
+// verificationFingerprintSource selects the input hashed into a close-gate
+// rejection fingerprint: always the classification reason string (e.g.
+// "verification-command-failed"), never the literal stderr — same-classification
+// failures with different output must collide so the repeat is detected as
+// verification_substantive. stderr is accepted for call-site stability and
+// deliberately ignored.
 func verificationFingerprintSource(reason string, stderr []string) string {
-	if len(stderr) > 0 && stderr[0] != "" {
-		return firstLine(stderr[0])
-	}
+	_ = stderr
 	return reason
 }
 
