@@ -29,17 +29,17 @@ import (
 // the reconciler bootstrap from hydra/quarantine/* branch scans and
 // reconstruct membership with the registrar's dependents walk.
 type QuarantineReconciler struct {
-	mu             sync.Mutex
-	registryPath   string
-	worktreeMgr    *WorktreeManager
-	reader         *BeadFileReader
-	events         *EventSink
-	projects       func() []types.Project
-	interval       time.Duration
-	maxAttempts    int
-	entries        map[string]*QuarantinedChainEntry
-	stopCh         chan struct{}
-	wg             sync.WaitGroup
+	mu           sync.Mutex
+	registryPath string
+	worktreeMgr  *WorktreeManager
+	reader       *BeadFileReader
+	events       *EventSink
+	projects     func() []types.Project
+	interval     time.Duration
+	maxAttempts  int
+	entries      map[string]*QuarantinedChainEntry
+	stopCh       chan struct{}
+	wg           sync.WaitGroup
 
 	// Revalidation (M1): tainted members get ONE gate rerun per
 	// revalidationCooldown; only a green run scrubs closed-failed. nil gate

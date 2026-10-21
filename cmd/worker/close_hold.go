@@ -89,10 +89,10 @@ func closeHeldRecord(project, beadID string, holdCount int, verdictSummary strin
 		Project: project,
 		Bead:    beadID,
 		Fields: map[string]any{
-			"bead":           beadID,
-			"hold_count":     holdCount,
+			"bead":            beadID,
+			"hold_count":      holdCount,
 			"verdict_summary": verdictSummary,
-			"forced":         forced,
+			"forced":          forced,
 		},
 	}
 }
