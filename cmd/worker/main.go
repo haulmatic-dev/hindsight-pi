@@ -515,7 +515,13 @@ func main() {
 	}
 
 	if exitCode == 0 && result != nil && result.Success {
-		if err := closeBeadFromWorker(bead, projectPath, config.Repo, "completed"); err != nil {
+		// Bounded close-hold (FR-004): a self-reported done:false verdict is an
+		// honest unmet claim — the worker must not close the bead as completed.
+		// Hold the close (emit worker_close_held + close-hold-N label); at the
+		// cap the hold fails open and the close proceeds anyway.
+		if closeHoldFor(result.Verdict) && runCloseHold(bead, projectPath, result.Verdict) {
+			log.Printf("⏸️  Bead %s NOT closed — worker self-reported done:false (close held)", beadID)
+		} else if err := closeBeadFromWorker(bead, projectPath, config.Repo, "completed"); err != nil {
 			log.Printf("[WARN] Failed to close bead from worker (non-fatal): %v", err)
 		} else {
 			log.Printf("✅ Successfully closed bead %s with status: completed", beadID)
@@ -524,7 +530,11 @@ func main() {
 		// Auto-close guard: Pi may have timed out or exited non-zero, but files were
 		// modified and tests pass. Close the bead to prevent infinite retry loops.
 		log.Printf("🛡️  Auto-close guard: Pi exit=%d but work is complete (files modified + tests pass). Closing bead.", exitCode)
-		if err := closeBeadFromWorker(bead, projectPath, config.Repo, "completed"); err != nil {
+		// Bounded close-hold applies here too: files+tests may look complete,
+		// but a done:false verdict means the agent itself says otherwise.
+		if closeHoldFor(result.Verdict) && runCloseHold(bead, projectPath, result.Verdict) {
+			log.Printf("⏸️  Bead %s NOT closed (auto-close guard) — worker self-reported done:false (close held)", beadID)
+		} else if err := closeBeadFromWorker(bead, projectPath, config.Repo, "completed"); err != nil {
 			log.Printf("[WARN] Failed to close bead from worker (non-fatal): %v", err)
 		} else {
 			log.Printf("✅ Successfully closed bead %s with status: completed (auto-close guard)", beadID)
