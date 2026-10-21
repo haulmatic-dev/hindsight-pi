@@ -86,10 +86,26 @@ type processHygiene struct {
 // detectZeroTokenStalls returns the working rows that match the stall
 // signature (tokens_so_far==0, age>15m) and refreshes the digest snapshot.
 // Fail-open: registry read errors return nil without poisoning the snapshot.
-func (j *Charon) detectZeroTokenStalls() []registry.WorkerRecord {
+func (p *processHygiene) logRpcSilent(beadID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.rpcSilentLogged[beadID] {
+		log.Printf("[Charon] rpc-active but token-silent: %s", beadID)
+		p.rpcSilentLogged[beadID] = true
+	}
+}
+
+func (j *Charon) ensureHygiene() {
 	if j.hygiene == nil {
 		j.hygiene = &processHygiene{rogueEmitted: map[int]bool{}, rpcSilentLogged: map[string]bool{}}
 	}
+}
+
+// detectZeroTokenStalls returns the working rows that match the stall
+// signature (tokens_so_far==0, age>15m) and refreshes the digest snapshot.
+// Fail-open: registry read errors return nil without poisoning the snapshot.
+func (j *Charon) detectZeroTokenStalls() []registry.WorkerRecord {
+	j.ensureHygiene()
 	if j.registryStore == nil {
 		return nil
 	}
@@ -101,19 +117,15 @@ func (j *Charon) detectZeroTokenStalls() []registry.WorkerRecord {
 	now := time.Now()
 	var stalls []registry.WorkerRecord
 	for _, r := range rows {
-		if r.TokensSoFar != 0 || now.Sub(r.StartedAt) <= zeroTokenStallThreshold {
+		age := now.Sub(r.StartedAt)
+		if r.TokensSoFar != 0 || age <= zeroTokenStallThreshold {
 			continue
 		}
 		// FR-003: rpc activity in the last 5m means the session is streaming
 		// (extension notices or turn events) even though no turn has produced
 		// usage yet. Exclude from kill-stalled-worker surfacing; log once.
 		if !r.LastRpcActivity.IsZero() && now.Sub(r.LastRpcActivity) < rpcActivityWindow {
-			j.hygiene.mu.Lock()
-			if !j.hygiene.rpcSilentLogged[r.BeadID] {
-				log.Printf("[Charon] rpc-active but token-silent: %s", r.BeadID)
-				j.hygiene.rpcSilentLogged[r.BeadID] = true
-			}
-			j.hygiene.mu.Unlock()
+			j.hygiene.logRpcSilent(r.BeadID)
 			continue
 		}
 		stalls = append(stalls, r)
@@ -125,13 +137,14 @@ func (j *Charon) detectZeroTokenStalls() []registry.WorkerRecord {
 	}
 	j.hygiene.mu.Unlock()
 	for _, r := range stalls {
+		age := now.Sub(r.StartedAt)
 		if j.events != nil {
 			j.events.Emit(Event{Type: "zero_token_stall_detected",
 				Reason: "working-with-zero-ever-tokens",
-				Detail: fmt.Sprintf("worker for bead %s (PID %d) is %v into its run with tokens_so_far=0: the session never completed a turn", r.BeadID, r.PID, now.Sub(r.StartedAt).Round(time.Minute)),
-				Fields: map[string]any{"bead": r.BeadID, "pid": r.PID, "age_minutes": int(now.Sub(r.StartedAt).Minutes())}})
+				Detail: fmt.Sprintf("worker for bead %s (PID %d) is %v into its run with tokens_so_far=0: the session never completed a turn", r.BeadID, r.PID, age.Round(time.Minute)),
+				Fields: map[string]any{"bead": r.BeadID, "pid": r.PID, "age_minutes": int(age.Minutes())}})
 		}
-		log.Printf("[Charon] 🧯 zero-token stall: bead %s (PID %d) working with tokens_so_far=0 for %v", r.BeadID, r.PID, now.Sub(r.StartedAt).Round(time.Minute))
+		log.Printf("[Charon] 🧯 zero-token stall: bead %s (PID %d) working with tokens_so_far=0 for %v", r.BeadID, r.PID, age.Round(time.Minute))
 	}
 	return stalls
 }
@@ -139,9 +152,7 @@ func (j *Charon) detectZeroTokenStalls() []registry.WorkerRecord {
 // ZeroTokenStallReport returns the latest zero-token stall snapshot for the
 // Pan digest collector.
 func (j *Charon) ZeroTokenStallReport() []registry.WorkerRecord {
-	if j.hygiene == nil {
-		j.hygiene = &processHygiene{rogueEmitted: map[int]bool{}, rpcSilentLogged: map[string]bool{}}
-	}
+	j.ensureHygiene()
 	j.hygiene.mu.Lock()
 	defer j.hygiene.mu.Unlock()
 	out := make([]registry.WorkerRecord, 0, len(j.hygiene.stalls))
@@ -156,9 +167,7 @@ func (j *Charon) ZeroTokenStallReport() []registry.WorkerRecord {
 // daemon's process group and a PGID kill would take the daemon down with it),
 // then marks the registry row dead so the bead reopens for respawn.
 func (j *Charon) KillStalledWorker(beadID string) error {
-	if j.hygiene == nil {
-		j.hygiene = &processHygiene{rogueEmitted: map[int]bool{}}
-	}
+	j.ensureHygiene()
 	if j.registryStore == nil {
 		return fmt.Errorf("kill-stalled-worker: no registry store")
 	}
