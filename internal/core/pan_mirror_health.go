@@ -62,6 +62,9 @@ var (
 	mirrorAuditRunner = func(storePath string) (mirroraudit.Report, error) {
 		return mirroraudit.Report{}, errUnavailable
 	}
+	// mirrorWriteProbe probes store write-eligibility for the guarded
+	// auto-resync (FR-3). Inert default: probe succeeds (nil error).
+	mirrorWriteProbe = func(storePath string) error { return nil }
 )
 
 // mirrorHealthSweepDue reports whether the audit sweep is due at now (used

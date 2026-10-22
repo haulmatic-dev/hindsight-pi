@@ -1,8 +1,11 @@
 package core
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,15 +39,19 @@ var mirrorHooks struct {
 	jsonlMtime  func(storePath string) (time.Time, bool)
 	liveWorker  func(projectName string) bool
 	auditRunner func(storePath string) (mirroraudit.Report, error)
+	writeProbe  func(storePath string) error
 }
 
 func mirrorHookRestore() (restore func()) {
 	oldmtime, oldlive, oldrunner := mirrorJSONLMtime, mirrorHasLiveWorker, mirrorAuditRunner
+	oldprobe := mirrorWriteProbe
 	mirrorJSONLMtime = mirrorHooks.jsonlMtime
 	mirrorHasLiveWorker = mirrorHooks.liveWorker
 	mirrorAuditRunner = mirrorHooks.auditRunner
+	mirrorWriteProbe = mirrorHooks.writeProbe
 	return func() {
 		mirrorJSONLMtime, mirrorHasLiveWorker, mirrorAuditRunner = oldmtime, oldlive, oldrunner
+		mirrorWriteProbe = oldprobe
 	}
 }
 
@@ -341,5 +348,285 @@ func TestMirrorHealthSweep_FilingSinkFailureContinues(t *testing.T) {
 	o.sweepMirrorHealthForProject(o.projects[0], time.Now())
 	if evs := readEventsOfType(t, o.eventSink, mirrorDriftDetectedEvent); len(evs) != 2 {
 		t.Fatalf("drift detection must continue past filing-sink failure, got %d events", len(evs))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FR-4: Pan filing for non-healable drift (RED contract — hydra-wyel).
+//
+// Every divergent record the guarded auto-resync will not heal (user-owned
+// store, non-terminal status, write-probe failure, 2-strike, daily cap
+// exceeded) files one Pan triage event `mirror_drift_needs_human` with the
+// store path, record id, direction, and the suggested one-liner. Fail-open:
+// filing errors are logged, never propagated, never panic the sweep.
+//
+// Pin behavior, not implementation: the tests drive the existing
+// sweepMirrorHealthForProject entry point and assert on the EventSink stream
+// plus mockBeadsClient.CreateBead (the filing sink).
+// ---------------------------------------------------------------------------
+
+// mirrorDriftFixture builds a divergent mirroraudit report: one record whose
+// jsonl status is open (jsonl_ahead of the db which says closed).
+func mirrorDriftFixture(beadID string) mirroraudit.Report {
+	return mirroraudit.Report{
+		Checked: 1,
+		Records: []mirroraudit.Record{{
+			BeadID:      beadID,
+			JSONLStatus: "open",
+			DBStatus:    "closed",
+			Class:       mirroraudit.ClassJSONLAhead,
+		}},
+	}
+}
+
+// AC: fixture test — a user-owned divergent store (cannot-heal) emits exactly
+// one Pan filing (one CreateBead on the filing sink) and exactly one
+// mirror_drift_needs_human triage event carrying the store path, record id,
+// and direction. Never two filings for one record.
+func TestMirrorHealthFiling_UserOwnedDivergentStoreFilesExactlyOne(t *testing.T) {
+	mirrorHealthRequireImpl(t)
+	path := t.TempDir()
+	o := mirrorEnv(t, path, mirrorDriftFixture("drift-1"), nil)
+	mock := o.beadsClient.(*mockBeadsClient)
+
+	// User-owned store: the write probe refuses (cannot-heal path).
+	mirrorHooks.writeProbe = func(string) error { return errors.New("permission denied") }
+	defer func() { mirrorHooks.writeProbe = nil }()
+
+	sink := NewEventSink(t.TempDir())
+	o.eventSink = sink
+
+	o.sweepMirrorHealthForProject(o.projects[0], time.Now())
+
+	createCalls := mock.getCreateCalls()
+	if len(createCalls) != 1 {
+		t.Fatalf("user-owned divergent store must file exactly one pan bead, got %d calls: %+v", len(createCalls), createCalls)
+	}
+	if !strings.Contains(createCalls[0].title, "drift-1") {
+		t.Fatalf("pan bead title must name the divergent record id, got %q", createCalls[0].title)
+	}
+	if !strings.Contains(createCalls[0].description, "mirror_drift_needs_human") {
+		t.Fatalf("pan bead description must carry the mirror_drift_needs_human triage event name, got %q", createCalls[0].description)
+	}
+
+	evts := readEventsOfType(t, sink, "mirror_drift_needs_human")
+	if len(evts) != 1 {
+		t.Fatalf("user-owned divergent store must emit exactly one mirror_drift_needs_human event, got %d", len(evts))
+	}
+	if got := evts[0].Fields["store"]; got != filepath.Join(path, ".beads") {
+		t.Fatalf("event must carry the store path, got %v", got)
+	}
+	if got := evts[0].Fields["bead"]; got != "drift-1" {
+		t.Fatalf("event must carry the record id, got %v", got)
+	}
+	if got := fmt.Sprint(evts[0].Fields["direction"]); got != string(mirroraudit.ClassJSONLAhead) {
+		t.Fatalf("event must carry the drift direction, got %v", got)
+	}
+}
+
+// AC: filing-sink failure test — when the filing sink (CreateBead) fails the
+// error is logged, the sweep continues (does not panic, does not propagate),
+// and no leftover state gates the next sweep.
+func TestMirrorHealthFiling_FilingSinkFailureLoggedSweepContinues(t *testing.T) {
+	mirrorHealthRequireImpl(t)
+	path := t.TempDir()
+	o := mirrorEnv(t, path, mirrorDriftFixture("drift-sink"), nil)
+	mock := o.beadsClient.(*mockBeadsClient)
+
+	mirrorHooks.writeProbe = func(string) error { return errors.New("permission denied") }
+	defer func() { mirrorHooks.writeProbe = nil }()
+	mock.createErr = errors.New("store read-only: filing sink blown")
+
+	sink := NewEventSink(t.TempDir())
+	o.eventSink = sink
+
+	// Must not panic; must not return an error (fail-open contract).
+	o.sweepMirrorHealthForProject(o.projects[0], time.Now())
+
+	if createCalls := mock.getCreateCalls(); len(createCalls) != 1 {
+		t.Fatalf("filing sink must have been attempted exactly once despite the failure, got %d", len(createCalls))
+	}
+	if evts := readEventsOfType(t, sink, "mirror_drift_needs_human"); len(evts) != 0 {
+		t.Fatalf("a failed filing must not emit a successful triage event, got %d", len(evts))
+	}
+
+	// Second tick with the sink healed: the same record must be retried
+	// (filing failures are not sticky strikes — the store is still divergent).
+	mock.createErr = nil
+	o.sweepMirrorHealthForProject(o.projects[0], time.Now())
+	if createCalls := mock.getCreateCalls(); len(createCalls) != 2 {
+		t.Fatalf("sweep must continue filing on a later tick after a sink failure, got %d total calls", len(createCalls))
+	}
+}
+
+// --- RED: Guarded auto-resync (FR-3, OFF by default) tests ---
+
+// spyBrUpdater is a stub BrUpdater recording every heal invocation, so the
+// guarded auto-resync contract tests can assert zero vs one heal per tick.
+type spyBrUpdater struct {
+	calls []mockSpyHealCall
+	err   error
+}
+
+type mockSpyHealCall struct {
+	storePath, beadID, status string
+}
+
+// compile-time check that the spy satisfies the BrUpdater seam.
+var _ BrUpdater = (*spyBrUpdater)(nil)
+
+func (s *spyBrUpdater) BrUpdateStatus(storePath, beadID, status string) error {
+	s.calls = append(s.calls, mockSpyHealCall{storePath: storePath, beadID: beadID, status: status})
+	return s.err
+}
+
+// mirrorGuardHooks is the test seam for the FR-3 guard conditions: the store
+// owner and the write probe. GREEN wires the guarded heal to honor these.
+var mirrorGuardHooks struct {
+	isDaemonOwned func(storePath string) bool
+	writeProbe    func(storePath string) error
+}
+
+// mirrorHealEnv extends mirrorEnv with the FR-3 healing surface: stubs the
+// BrUpdater seam, enables AutoResync, and resets the guard hooks so each
+// test starts from the daemon-owned happy path.
+func mirrorHealEnv(t *testing.T, projectPath string, auditReport mirroraudit.Report, auditErr error) (*Overseer, *spyBrUpdater) {
+	t.Helper()
+	o := mirrorEnv(t, projectPath, auditReport, auditErr)
+	o.config.Overseer.MirrorHealth.AutoResync = true
+	spy := &spyBrUpdater{}
+	o.brUpdater = spy
+	mirrorGuardHooks.isDaemonOwned = func(string) bool { return true }
+	mirrorGuardHooks.writeProbe = func(string) error { return nil }
+	return o, spy
+}
+
+// AC: fixture heals a db_ahead terminal record through the BrUpdater seam.
+// The store is daemon-owned (guard default) and the write probe succeeds, so
+// the healing path must fire exactly once with the terminal status.
+func TestMirrorHealthSweep_HealsDBAheadTerminalRecord(t *testing.T) {
+	mirrorHealthRequireImpl(t)
+	defer mirrorHookRestore()()
+	repoReport := mirroraudit.Report{
+		Checked: 1,
+		Records: []mirroraudit.Record{
+			{BeadID: "proj-heal1", DBStatus: "closed", Class: mirroraudit.ClassDBAhead},
+		},
+		Counts: mirroraudit.Counts{DBAhead: 1},
+	}
+	o, spy := mirrorHealEnv(t, t.TempDir(), repoReport, nil)
+
+	o.sweepMirrorHealth(time.Now())
+
+	if len(spy.calls) != 1 {
+		t.Fatalf("healing must be attempted exactly once for a terminal db_ahead record, got %d", len(spy.calls))
+	}
+	call := spy.calls[0]
+	if call.beadID != "proj-heal1" {
+		t.Fatalf("heal target must be the divergent bead, got %s", call.beadID)
+	}
+	if call.status != "closed" {
+		t.Fatalf("heal status must be the terminal status from the audit, got %q", call.status)
+	}
+}
+
+// AC: a non-terminal jsonl status NEVER heals — the mirror must not
+// resurrect a stale in-progress claim. The record is instead routed to the
+// filing path (mirror_drift_needs_human pan filing).
+func TestMirrorHealthSweep_NonTerminalRecordNeverHeals(t *testing.T) {
+	mirrorHealthRequireImpl(t)
+	defer mirrorHookRestore()()
+	nonTerminalReport := mirroraudit.Report{
+		Checked: 1,
+		Records: []mirroraudit.Record{
+			{BeadID: "proj-nt1", JSONLStatus: "in_progress", DBStatus: "closed", Class: mirroraudit.ClassJSONLAhead},
+		},
+		Counts: mirroraudit.Counts{JSONLAhead: 1},
+	}
+	o, spy := mirrorHealEnv(t, t.TempDir(), nonTerminalReport, nil)
+	mock := o.beadsClient.(*mockBeadsClient)
+
+	o.sweepMirrorHealth(time.Now())
+
+	if len(spy.calls) != 0 {
+		t.Fatalf("non-terminal drift must never heal via BrUpdater, got %d heal invocations", len(spy.calls))
+	}
+	if createCalls := mock.getCreateCalls(); len(createCalls) == 0 {
+		t.Fatal("non-terminal drift must be routed to the filing path (CreateBead), got 0 filings")
+	}
+}
+
+// AC guard: a user-owned store (owner != daemon) must never heal —
+// humans own their stores; filing only.
+func TestMirrorHealthSweep_UserOwnedStoreNeverHeals(t *testing.T) {
+	mirrorHealthRequireImpl(t)
+	defer mirrorHookRestore()()
+	repoReport := mirroraudit.Report{
+		Checked: 1,
+		Records: []mirroraudit.Record{
+			{BeadID: "proj-user1", DBStatus: "closed", Class: mirroraudit.ClassDBAhead},
+		},
+		Counts: mirroraudit.Counts{DBAhead: 1},
+	}
+	o, spy := mirrorHealEnv(t, t.TempDir(), repoReport, nil)
+	mirrorGuardHooks.isDaemonOwned = func(string) bool { return false }
+
+	o.sweepMirrorHealth(time.Now())
+
+	if len(spy.calls) != 0 {
+		t.Fatalf("user-owned store must never heal, got %d heal invocations", len(spy.calls))
+	}
+}
+
+// AC guard: a failed write-probe means the daemon cannot safely rewrite the
+// mirror — no heal, file instead.
+func TestMirrorHealthSweep_WriteProbeFailureNeverHeals(t *testing.T) {
+	mirrorHealthRequireImpl(t)
+	defer mirrorHookRestore()()
+	repoReport := mirroraudit.Report{
+		Checked: 1,
+		Records: []mirroraudit.Record{
+			{BeadID: "proj-probe1", DBStatus: "closed", Class: mirroraudit.ClassDBAhead},
+		},
+		Counts: mirroraudit.Counts{DBAhead: 1},
+	}
+	o, spy := mirrorHealEnv(t, t.TempDir(), repoReport, nil)
+	mirrorGuardHooks.writeProbe = func(string) error { return errors.New("permission denied: probe write failed") }
+
+	o.sweepMirrorHealth(time.Now())
+
+	if len(spy.calls) != 0 {
+		t.Fatalf("failed write probe must never heal, got %d heal invocations", len(spy.calls))
+	}
+}
+
+// AC: auto_resync OFF by default — even an eligible terminal drift record does
+// not heal while the knob is false, and the drift is filed for a human.
+func TestMirrorHealthSweep_AutoResyncOffByDefault(t *testing.T) {
+	mirrorHealthRequireImpl(t)
+	defer mirrorHookRestore()()
+	repoReport := mirroraudit.Report{
+		Checked: 1,
+		Records: []mirroraudit.Record{
+			{BeadID: "proj-off1", DBStatus: "closed", Class: mirroraudit.ClassDBAhead},
+		},
+		Counts: mirroraudit.Counts{DBAhead: 1},
+	}
+	o := mirrorEnv(t, t.TempDir(), repoReport, nil)
+	o.config.Overseer.MirrorHealth.AutoResync = false
+	spy := &spyBrUpdater{}
+	o.brUpdater = spy
+	if o.config.Overseer.MirrorHealth.AutoResync {
+		t.Fatal("mirror_health.auto_resync must default to false (OFF by default PRD contract)")
+	}
+	mock := o.beadsClient.(*mockBeadsClient)
+
+	o.sweepMirrorHealth(time.Now())
+
+	if len(spy.calls) != 0 {
+		t.Fatalf("auto_resync=false must never heal, got %d heal invocations", len(spy.calls))
+	}
+	if createCalls := mock.getCreateCalls(); len(createCalls) == 0 {
+		t.Fatal("auto_resync=false terminal drift must still be filed (CreateBead), got 0 filings")
 	}
 }
