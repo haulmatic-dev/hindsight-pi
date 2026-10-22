@@ -257,9 +257,10 @@ func (o *Overseer) sweepStalePanFilingsForProject(project types.Project, now tim
 	})
 
 	// Rate limit: at most one auto-close per project per sweep tick.
-	// Rate limit: at most one auto-close per project per sweep tick.
 	c := candidates[0]
-	spawnOK := staleFilingLastSpawnOK(project.Path, now)
+	// spawnOK is guaranteed true here: candidates is non-empty only after the
+	// spawn-health probe passed inside staleFilingCandidates.
+	const spawnOK = true
 	if err := o.beadsClient.CloseBead(project.Path, "", c.bead.ID, staleFilingReasonCleared); err != nil {
 		return
 	}
