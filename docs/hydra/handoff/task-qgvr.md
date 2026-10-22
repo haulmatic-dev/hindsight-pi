@@ -25,3 +25,17 @@ All three acceptance criteria verified green in this worktree:
 - `dailyHealCount(storePath)` in pan_mirror_health.go returns 0 (TODO(GREEN): wire from ledger) — not an AC blocker.
 - Sweep registration in service_starter.go and `mirror_health.enabled`/`mirror_health.audit_interval` knobs verified by prior beads (defaults true/30m, ledger at $HYDRA_HOME/mirror-health-ledger.json).
 - Commit any untracked files in this worktree before integration (git status showed untracked mirroraudit files in a prior strand).
+# Discovery handoff: hydra-qgvr — Shared audit package (single source of truth)
+
+**Scope:** Fix compile-gate failure in `internal/core/pan_mirror_health.go`.
+
+**Result:** Healing path now routes via `o.beadsClient.UpdateBeadStatus(project.Path, types.BeadID(rec.BeadID), types.BeadStatus(status))` (interface seam at internal/beads/client.go:343). The previously-referenced `o.brUpdater` field was never wired on `*Overseer`.
+
+**Verification:**
+- `go build ./...` — exit 0
+- `go vet ./internal/core/` — clean
+- `go test ./internal/core/` — PASS
+- `go test ./internal/mirroraudit/ -count=1` — PASS (fixture: clean)
+- `go run ./tools/beads-mirror-audit --store /home/ajantha/projects/srv-jobfile/.beads` — clean (49 beads, mirror clean)
+
+**Landing:** commit e210b18 (fix(mirror-health)).
