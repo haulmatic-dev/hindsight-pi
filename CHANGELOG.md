@@ -8,6 +8,10 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 ## [Unreleased]
+
+### Documentation
+
+- docs/discovery/claim-reproof-respawn-6osm.md: FR-002 (Claim re-proof at respawn) discovery — feature absent on this branch; maps each AC to its reuse site (pack base_sha compare, pack_miss event, prespawn probe, VerificationRunner), resolves payload/fingerprint/respawn-scope ambiguities, and pins the `BeadClaims*` test + fail-open contract GREEN must implement.
 - Fixed: Added test coverage for `closeWithHold` in `cmd/worker/close_hold_test.go` to exercise the fall-through path when `HYDRA_DAEMON_GATES` is enabled and done is true, as well as the held path. Coverage for `closeWithHold` improved from 0% to 100%.
 - Refactor: FR-004 close-hold dedupe — new `closeWithHold(bead, projectPath, repoName, reason, verdict)` (cmd/worker/close_hold.go) becomes the single close-with-hold entrypoint; both worker close sites (success path + auto-close guard, cmd/worker/main.go) collapse from duplicated `closeHoldFor && runCloseHold` branches into one call. Behavior identical (held = bead stays open; forced at hold_count==2 closes anyway; nil/malformed verdict fails open). `go build ./...` PASS, `go vet` clean, `go test ./cmd/worker/ -run 'CloseHold' -count=1` PASS. *Authored by a Hydra dogfood run.*
 - Changed: gofmt normalization pass on lingering unformatted files in `cmd/worker/` (`chain_handoff_test.go`, `close_hold.go`, `execution_report_test.go`, `main_test.go`, `turn_economy_test.go`) and `internal/core/` (`gate_runner_test.go`, `quarantine_reconciler.go`, `worker_completion_test.go`); behavior identical, `go build`/`go vet`/narrow `Token|ZeroToken|Stall` suite re-verified green.
