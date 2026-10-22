@@ -113,3 +113,12 @@ func TestInproc_PrintOut(t *testing.T) {
 		t.Fatalf("code=%d out=%q", code, out)
 	}
 }
+
+func TestInproc_ExitCodeFor(t *testing.T) {
+	if got := exitCodeFor(Report{Checked: 3}); got != exitClean {
+		t.Fatalf("clean map: got %d", got)
+	}
+	if got := exitCodeFor(Report{Divergences: []Divergence{{BeadID: "h-1", JSONLStatus: "open", DBStatus: "closed"}}}); got != exitDrift {
+		t.Fatalf("drift map: got %d", got)
+	}
+}
