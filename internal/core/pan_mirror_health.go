@@ -10,6 +10,10 @@ import (
 
 var errUnavailable = errors.New("mirror audit unavailable")
 
+// mirrorDriftNeedsHumanEvent is the FR-4 Pan filing event on non-healable
+// (user-owned) drift; declared so the contract tests compile in RED.
+const mirrorDriftNeedsHumanEvent = "mirror_drift_needs_human"
+
 // MirrorHealth periodic read-only audit sweep (PRD FR-2): every audit_interval
 // the daemon re-derives the beads issues.jsonl mirror vs the br db per
 // registered project store via the FR-1 shared mirroraudit package, emitting

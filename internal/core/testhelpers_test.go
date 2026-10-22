@@ -174,6 +174,13 @@ func (m *mockBeadsClient) getCloseCalls() []mockCloseCall {
 	return append([]mockCloseCall{}, m.closeCalls...)
 }
 
+// getCreateCalls returns recorded CreateBead (pan filing) invocations.
+func (m *mockBeadsClient) getCreateCalls() []mockCreateCall {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]mockCreateCall{}, m.createCalls...)
+}
+
 func (m *mockBeadsClient) UpdateBeadStatus(projectPath string, beadID types.BeadID, status types.BeadStatus) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
