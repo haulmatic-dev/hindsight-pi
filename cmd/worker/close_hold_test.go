@@ -161,3 +161,26 @@ func TestRunCloseHoldNilVerdictNeverHolds(t *testing.T) {
 		t.Errorf("nil verdict must not trigger a hold")
 	}
 }
+
+func TestCloseWithHold_HeldPathReturnsNil(t *testing.T) {
+	// done:false verdict: closeWithHold must hold the close (return nil),
+	// leaving the bead open — it must NOT call the close path.
+	bead := types.Bead{ID: types.BeadID("test-bead"), Project: "test-proj"}
+	v := &Verdict{Done: false, Summary: "one AC unmet"}
+	err := closeWithHold(bead, t.TempDir(), "test-repo", "completed", v)
+	if err != nil {
+		t.Errorf("closeWithHold on held path must return nil (bead stays open), got %v", err)
+	}
+}
+
+func TestCloseWithHold_FallThroughWhenDone(t *testing.T) {
+	// done:true verdict: closeHoldFor returns false, so closeWithHold falls
+	// through to closeBeadFromWorker. HYDRA_DAEMON_GATES=1 makes that path
+	// return nil without touching the real br CLI.
+	t.Setenv("HYDRA_DAEMON_GATES", "1")
+	bead := types.Bead{ID: types.BeadID("test-bead-ft"), Project: "test-proj"}
+	v := &Verdict{Done: true, Summary: "all met"}
+	if err := closeWithHold(bead, t.TempDir(), "test-repo", "completed", v); err != nil {
+		t.Errorf("closeWithHold fall-through path (done verdict) must return nil, got %v", err)
+	}
+}
