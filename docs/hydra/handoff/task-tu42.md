@@ -1,19 +1,18 @@
-# syntax handoff
+# green handoff
 
 ## What changed (files + one line each)
-- none — SYNTAX phase audit found the beads-mirror-audit tool already conforming; no fixes required.
+- internal/core/pan_stale_filing.go: real stale-filing sweep — `sweepStalePanFilings` (interval-gated) + `staleFilingCandidates` + `sweepStalePanFilingsForProject`: pan-filed open/in_progress filings older than 48h whose named cohort has zero still-blocked members and whose project recorded ≥1 successful spawn in last 24h auto-close with reason `stale pan filing: premise cleared (cohort empty, spawns healthy)`; one auto-close per project per tick; typed `pan_filing_stale_closed` event `{bead, project, cohort_named, cohort_now, last_spawn_ok}`; branch-protection reason regex guardrail (never auto-closed, left for human triage).
+- internal/core/overseer.go: probe wiring (`wireStaleFilingProbes`), `noteSpawnSuccessFiling` recording per-project successful spawn from `WorkerSpawner.Spawn`, throttle field `lastStaleFilingSweep`, sweep call in tick.
+- internal/core/pan_stale_filing_test.go: 6 contract tests — eligible in_progress closes first tick, open closes second tick (rate-limit reset), branch-protection never closed, cohort still blocked not closed, no recent spawn not closed, young filing not closed, rate limit + typed event shape.
 
 ## Verification (commands run + pass/fail)
-- grep TODO|FIXME|Placeholder in tools/beads-mirror-audit/ — 0 hits. PASS (re-confirmed turn 4; sole "stub" grep hit is the brRunner seam doc comment, not a placeholder).
-- gofmt -l tools/beads-mirror-audit/ — no output (all formatted). PASS.
-- go vet ./tools/beads-mirror-audit/ — exit 0. PASS.
-- go build ./tools/beads-mirror-audit/ — exit 0 (BUILD_OK). PASS.
-- go test ./tools/beads-mirror-audit/ -count=1 — ok (165.763s). PASS.
+- `go test ./internal/core/ -run 'StaleFiling|PanHealth' -count=1` — PASS, exit 0. All 6 tests: TestStaleFilingSweep_ClosesEligibleInProgressAndOpenFilings, _BranchProtectionReasonNeverClosed, _CohortStillBlockedNotClosed, _NoRecentSpawnSuccessNotClosed, _YoungFilingNotClosed, _RateLimitAndTypedEvent. `ok github.com/haulmatic-dev/hydra/internal/core 0.014s`.
+- `go build ./...` — PASS (rc=0).
+- `go vet ./internal/core/` — PASS, clean.
+- Coverage (`go tool cover -func` on stale-filing run): sweepStalePanFilings 100.0%, staleFilingCandidates 100.0%, sweepStalePanFilingsForProject 77.8%, isPanFiledBead 75.0%. Production-only helpers (noteSpawnSuccessFiling, lastSpawnSuccessFor, hasCohortMember real store branch, filepathBaseForSpawnProbe, pathBase, wireStaleFilingProbes) sit at 0% — test harness intercepts the probe seams (staleFilingListBeads / staleFilingEligible hooks), so the store-backed branches count as open edges, not gaps in the sweep logic itself.
+- Placeholder grep (`// TODO|FIXME|stub|Placeholder` in pan_stale_filing.go + _test.go) — 0 matches.
 
 ## Open edges for the next phase
-- none from syntax audit.
-
-## Green close-out (re-verified 2026-10-22)
-- go test ./tools/beads-mirror-audit/ -count=1 -cover — ok, 71.3% statement coverage (up from 68.1% after refactor). PASS.
-- go build ./tools/beads-mirror-audit/ — BUILD_OK. PASS.
-- Stray untracked `beads-mirror-audit` build binary removed from worktree.
+- 0%-covered helpers above need real-store integration tests if the harness ever stops mirroring the store (e.g. an integration-e2e bead).
+- `noteSpawnSuccessFiling` ledger is in-process; a daemon restart forgets spawn history until the next successful spawn — acceptable (premises take 48h to age anyway).
+- Overseer tick wiring call sites: overseer.go ~132-134 (throttle field), ~571 (wireStaleFilingProbes), ~977-978 (interval-gated sweep) — refactor/relocate if the tick shape changes.
