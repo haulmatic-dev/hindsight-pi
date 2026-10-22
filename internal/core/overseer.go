@@ -132,6 +132,8 @@ type Overseer struct {
 	// Stale-filing sweep throttle (one sweep tick per staleFilingSweepInterval;
 	// internal rate limit is one auto-close per project per sweep tick).
 	lastStaleFilingSweep time.Time
+	// Mirror health sweep throttle.
+	lastMirrorHealthSweep time.Time
 	// These clients remain direct fields until IntelligenceHub fully exposes their APIs.
 	gptCache              *GPTCacheClient                 // GPTCache client for caching
 	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
@@ -977,6 +979,11 @@ func (o *Overseer) tick() error {
 	if time.Since(o.lastStaleFilingSweep) >= staleFilingSweepInterval {
 		o.lastStaleFilingSweep = time.Now()
 		o.sweepStalePanFilings(time.Now())
+	}
+	if o.config != nil && o.config.Overseer.MirrorHealth.Enabled &&
+		time.Since(o.lastMirrorHealthSweep) >= o.config.Overseer.MirrorHealth.Interval {
+		o.lastMirrorHealthSweep = time.Now()
+		o.sweepMirrorHealth(time.Now())
 	}
 	// After scheduling, publish each project's working branch to its remote
 	// (opt-in via output.push). This consolidates completed worktree commits

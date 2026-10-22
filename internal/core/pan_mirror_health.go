@@ -130,7 +130,7 @@ func loadMirrorHealthLedger(path string) (*mirrorHealthLedger, error) {
 
 // persistMirrorHealthLedger writes the ledger (best-effort, fail-open).
 func (o *Overseer) persistMirrorHealthLedger(l *mirrorHealthLedger) {
-	path := filepath.Join(o.hydraHome, ledgerMirrorHealthFilename)
+	path := filepath.Join(os.Getenv("HYDRA_HOME"), ledgerMirrorHealthFilename)
 	data, err := json.Marshal(l)
 	if err != nil {
 		logx.Errorf("mirror-health: ledger marshal: %v", err)
@@ -160,11 +160,11 @@ func (l *mirrorHealthLedger) mirrorHealthLedgerFor(storePath string) *mirrorHeal
 // (fail-open: any error is logged and the sweep continues, never gates
 // scheduling).
 func (o *Overseer) sweepMirrorHealth(now time.Time) {
-	if o.config.MirrorHealth.AuditInterval <= 0 {
+	if o.config != nil && o.config.Overseer.MirrorHealth.Interval <= 0 {
 		// 0 (disabled) or negative -> no sweep.
 		return
 	}
-	ledger, err := loadMirrorHealthLedger(filepath.Join(o.hydraHome, ledgerMirrorHealthFilename))
+	ledger, err := loadMirrorHealthLedger(filepath.Join(os.Getenv("HYDRA_HOME"), ledgerMirrorHealthFilename))
 	if err != nil {
 		logx.Errorf("mirror-health: ledger load: %v", err)
 		// fail-open: continue with a fresh ledger
@@ -198,18 +198,18 @@ func (o *Overseer) sweepMirrorHealthForProject(project types.Project, ledger *mi
 	}
 	rep, err := mirroraudit.Audit(storePath, nil)
 	if err != nil {
-		o.emitEvent(mirrorAuditErrorEvent, map[string]any{
-			"store": storePath,
-			"error": err.Error(),
+		o.eventSink.Emit(Event{
+			Type:   mirrorAuditErrorEvent,
+			Fields: map[string]any{"store": storePath, "error": err.Error()},
 		})
 		return
 	}
 	entry := ledger.mirrorHealthLedgerFor(storePath)
 	entry.LastAudit = mirrorResyncNow()
 	if !rep.Drift() {
-		o.emitEvent(mirrorAuditCleanEvent, map[string]any{
-			"store":   storePath,
-			"checked": rep.Checked,
+		o.eventSink.Emit(Event{
+			Type:   mirrorAuditCleanEvent,
+			Fields: map[string]any{"store": storePath, "checked": rep.Checked},
 		})
 		return
 	}
@@ -217,13 +217,9 @@ func (o *Overseer) sweepMirrorHealthForProject(project types.Project, ledger *mi
 		if rec.Class == mirroraudit.ClassClean {
 			continue
 		}
-		o.emitEvent(mirrorDriftDetectedEvent, map[string]any{
-			"store":   storePath,
-			"bead":    rec.BeadID,
-			"jsonl":   rec.JSONLStatus,
-			"db":      rec.DBStatus,
-			"class":   string(rec.Class),
-			"project": project.Path,
+		o.eventSink.Emit(Event{
+			Type:   mirrorDriftDetectedEvent,
+			Fields: map[string]any{"store": storePath, "bead": rec.BeadID, "jsonl": rec.JSONLStatus, "db": rec.DBStatus, "class": string(rec.Class), "project": project.Path},
 		})
 		entry.DirectionCounts[string(rec.Class)]++
 		o.maybeHealDrift(storePath, rec, entry, ledger, project)
@@ -275,17 +271,15 @@ func (o *Overseer) maybeHealDrift(storePath string, rec mirroraudit.Record, entr
 	}
 	if err := o.brUpdater.BrUpdateStatus(storePath, rec.BeadID, status); err != nil {
 		heal.Strikes++
-		o.emitEvent(mirrorResyncFailedEvent, map[string]any{
-			"store": storePath,
-			"bead":  rec.BeadID,
-			"error": err.Error(),
+		o.eventSink.Emit(Event{
+			Type:   mirrorResyncFailedEvent,
+			Fields: map[string]any{"store": storePath, "bead": rec.BeadID, "error": err.Error()},
 		})
 		return
 	}
-	o.emitEvent(mirrorResyncedEvent, map[string]any{
-		"store":  storePath,
-		"bead":   rec.BeadID,
-		"status": status,
+	o.eventSink.Emit(Event{
+		Type:   mirrorResyncedEvent,
+		Fields: map[string]any{"store": storePath, "bead": rec.BeadID, "status": status},
 	})
 }
 
