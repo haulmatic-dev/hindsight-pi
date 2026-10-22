@@ -12,6 +12,11 @@
 - `gofmt -l cmd/worker/close_hold.go cmd/worker/main.go` — clean (empty).
 - Commit verified via `git show --stat HEAD` (3 files, +22/−12).
 
+## Re-verified (final session, 2026-10-22, wt-hydra-8uw4)
+- `go build ./...` — PASS (empty output, exit 0) on commit 378c39af.
+- `go test ./cmd/worker/ -run 'CloseHold' -count=1` — PASS (`ok github.com/haulmatic-dev/hydra/cmd/worker 0.006s`).
+- `git status --short` — clean; refactor landed as 378c39af on hydra/wt-hydra-8uw4.
+
 ## Open edges for the next phase
 - Behavior identical to pre-refactor: held close still emits `worker_close_held` {bead, hold_count, verdict_summary, forced}; forced at hold_count==2 (maxCloseHolds); nil/malformed verdict fails open (close proceeds as before).
 - No benchmarks exist for the close-hold path; none run (no hot loop).
