@@ -1,16 +1,3 @@
-// beads-mirror-audit compares a br bead store's issues.jsonl mirror against
-// the live store reported by `br`, printing one line per divergence.
-//
-// Usage:
-//
-//	go run ./tools/beads-mirror-audit --store <dir> [--json]
-//
-// Exit codes:
-//
-//	0 - mirror clean (N beads)
-//	1 - divergences found (see output)
-//	2 - audit unavailable (br missing or br failure, or store unreadable) —
-//	fail-open reporting: never blocks, never mutates either store.
 package main
 
 import (
@@ -24,45 +11,35 @@ import (
 	"strings"
 )
 
-// Divergence is one bead whose status differs between the jsonl mirror
-// and the live store.
+// Divergence is one bead whose jsonl status disagrees with the br database.
 type Divergence struct {
 	BeadID      string `json:"bead_id"`
 	JSONLStatus string `json:"jsonl"`
 	DBStatus    string `json:"db"`
 }
 
-// Report is the machine-readable audit result (--json shape).
+// Report is the machine-readable audit summary (--json).
 type Report struct {
 	Divergences []Divergence `json:"divergences"`
 	Checked     int          `json:"checked"`
 }
 
-// exit codes per the contract.
 const (
 	exitClean   = 0
 	exitDrift   = 1
 	exitUnavail = 2
 )
 
-// auditUnavailablePrefix is the fail-open reporting line printed on br
-// absence/failure.
 const auditUnavailablePrefix = "audit unavailable: "
 
-// enforceEnv gates the GREEN-behavior contract tests; set to 1 to fail
-// the suite when the implementation is still missing (RED discipline).
 const enforceEnv = "BEADS_MIRROR_AUDIT_ENFORCE"
 
-// auditImplemented gates the RED-phase skip in the behavior tests; the
-// tool is implemented, so tests no longer skip.
 const auditImplemented = true
 
-// brRunner invokes `br` inside storeDir and returns its stdout. The
-// injected seam exists for tests only; production uses execBr.
+// brRunner is the seam tests overwrite to stub the br CLI.
 var brRunner = execBr
 
-// execBr is the production runner: searches PATH for br with the store as
-// cwd, captures combined stdout, and reports LookPath / Wait errors as-is.
+// execBr runs the real br binary in storeDir.
 func execBr(dir string, args []string) (string, error) {
 	path, err := exec.LookPath("br")
 	if err != nil {
@@ -74,9 +51,8 @@ func execBr(dir string, args []string) (string, error) {
 	return string(out), err
 }
 
-// parseJSONLLine extracts an id and status from one issues.jsonl line.
-// Real stores emit JSON objects; the fixture format uses "id status"
-// tokens. Bare non-JSON lines fall back to whitespace split.
+// parseJSONLLine parses one mirror record. Accepts strict JSON
+// {"id":..,"status":..} and falls back to "<id> <status>" whitespace form.
 func parseJSONLLine(line string) (id, status string, ok bool) {
 	line = strings.TrimSpace(line)
 	if line == "" {
@@ -96,8 +72,7 @@ func parseJSONLLine(line string) (id, status string, ok bool) {
 	return fields[0], fields[1], true
 }
 
-// parseDBList extracts id/status pairs from `br list --json` output
-// (a JSON array of objects carrying id and status).
+// parseDBList decodes `br list --json` output into id→status pairs.
 func parseDBList(out string) ([]Divergence, error) {
 	var recs []struct {
 		ID     string `json:"id"`
@@ -106,15 +81,14 @@ func parseDBList(out string) ([]Divergence, error) {
 	if err := json.Unmarshal([]byte(out), &recs); err != nil {
 		return nil, err
 	}
-	var db []Divergence
+	db := make([]Divergence, 0, len(recs))
 	for _, r := range recs {
 		db = append(db, Divergence{BeadID: r.ID, DBStatus: r.Status})
 	}
 	return db, nil
 }
 
-// readJSONLMirror reads <storeDir>/issues.jsonl and returns checked count
-// plus the id→status mirror. Malformed lines are skipped.
+// readJSONLMirror reads issues.jsonl into an id→status map plus record count.
 func readJSONLMirror(storeDir string) (mirror map[string]string, checked int, err error) {
 	data, err := os.ReadFile(filepath.Join(storeDir, "issues.jsonl"))
 	if err != nil {
@@ -132,9 +106,13 @@ func readJSONLMirror(storeDir string) (mirror map[string]string, checked int, er
 	return mirror, checked, nil
 }
 
-// runAudit compares <storeDir>/issues.jsonl against the live store via br
-// and returns the report plus the process exit code
-// (0 clean / 1 drift / 2 audit-unavailable).
+// divergenceLine formats the one-line human-readable drift record.
+func divergenceLine(d Divergence) string {
+	return fmt.Sprintf("%s jsonl=%s db=%s", d.BeadID, d.JSONLStatus, d.DBStatus)
+}
+
+// runAudit compares the jsonl mirror against the br database for storeDir.
+// Returns the report, the rendered output line(s), and the process exit code.
 func runAudit(storeDir string, jsonOut bool) (Report, string, int) {
 	mirror, checked, err := readJSONLMirror(storeDir)
 	if err != nil {
@@ -152,31 +130,27 @@ func runAudit(storeDir string, jsonOut bool) (Report, string, int) {
 
 	rep := Report{Divergences: []Divergence{}, Checked: checked}
 	var lines []string
+	record := func(d Divergence) {
+		rep.Divergences = append(rep.Divergences, d)
+		lines = append(lines, divergenceLine(d))
+	}
+
+	dbStatus := make(map[string]string, len(db))
 	for _, d := range db {
-		jsonlStatus, ok := mirror[d.BeadID]
+		dbStatus[d.BeadID] = d.DBStatus
+	}
+	for id, dbSt := range dbStatus {
+		jsonlStatus, ok := mirror[id]
 		if !ok {
 			continue
 		}
-		if jsonlStatus != d.DBStatus {
-			div := Divergence{BeadID: d.BeadID, JSONLStatus: jsonlStatus, DBStatus: d.DBStatus}
-			rep.Divergences = append(rep.Divergences, div)
-			lines = append(lines, fmt.Sprintf("%s jsonl=%s db=%s", div.BeadID, div.JSONLStatus, div.DBStatus))
+		if jsonlStatus != dbSt {
+			record(Divergence{BeadID: id, JSONLStatus: jsonlStatus, DBStatus: dbSt})
 		}
 	}
-	// Beads present in the mirror but absent from the live store listing
-	// also count as drift: jsonl status vs db=<missing>.
 	for id, jsonlStatus := range mirror {
-		found := false
-		for _, d := range db {
-			if d.BeadID == id {
-				found = true
-				break
-			}
-		}
-		if !found {
-			div := Divergence{BeadID: id, JSONLStatus: jsonlStatus, DBStatus: ""}
-			rep.Divergences = append(rep.Divergences, div)
-			lines = append(lines, fmt.Sprintf("%s jsonl=%s db=%s", id, jsonlStatus, div.DBStatus))
+		if _, ok := dbStatus[id]; !ok {
+			record(Divergence{BeadID: id, JSONLStatus: jsonlStatus, DBStatus: ""})
 		}
 	}
 
@@ -193,6 +167,7 @@ func runAudit(storeDir string, jsonOut bool) (Report, string, int) {
 	return rep, strings.Join(lines, "\n"), exitDrift
 }
 
+// exitCodeFor maps a report to its contract exit code: 0 clean, 1 drift.
 func exitCodeFor(rep Report) int {
 	if len(rep.Divergences) == 0 {
 		return exitClean
@@ -214,17 +189,11 @@ func main() {
 		os.Exit(exitUnavail)
 	}
 
-	rep, line, code := runAudit(*store, *jsonOut)
-	if code == exitClean && !*jsonOut {
-		fmt.Println(line)
-	} else if code == exitDrift {
-		fmt.Println(line)
-	} else if code == exitUnavail {
-		fmt.Fprintln(os.Stderr, line)
+	_, output, code := runAudit(*store, *jsonOut)
+	if code == exitUnavail {
+		fmt.Fprintln(os.Stderr, output)
 	} else {
-		// jsonOut clean case: still print the JSON report.
-		fmt.Println(line)
+		fmt.Println(output)
 	}
-	_ = rep
 	os.Exit(code)
 }

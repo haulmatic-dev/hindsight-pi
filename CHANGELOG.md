@@ -8,6 +8,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 ## [Unreleased]
+### Changed
+- Refactored `tools/beads-mirror-audit/main.go`: converted the divergence lookup from a nested O(N·M) loop to an id→status map (O(N+M)), extracted the duplicated `<id> jsonl=<s> db=<s>` line formatting into `divergenceLine`, simplified `main`'s output branching, and added doc comments on all exported symbols. Behavior identical; `go test ./tools/beads-mirror-audit/ -count=1` PASS, `gofmt`/`go vet` clean.
 ### Fixed
 - Fixed: Resource monitoring now reads `/proc` natively instead of forking `/bin/sh`/`/bin/bash` — `getProcessCount` walks `/proc` for numeric PIDs and `getProcessLimit` parses `/proc/self/limits` directly, eliminating the fork failure mode (EAGAIN / `fork: retry: Resource temporarily unavailable`) that wedges the daemon exactly when the process ceiling is hit, the very condition the monitor guards against. Behavior identical otherwise. *Authored by a Hydra dogfood run.*
 ### Added
