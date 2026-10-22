@@ -732,6 +732,8 @@ type OverseerConfig struct {
 	RetryDelay         time.Duration            `yaml:"retry_delay"`
 	ResourceMonitoring ResourceMonitoringConfig `yaml:"resource_monitoring"`
 	ChainDetection     ChainDetectionConfig     `yaml:"chain_detection"`
+	// MirrorHealth guards the beads JSONL mirror vs db drift detection.
+	MirrorHealth MirrorHealthConfig `yaml:"mirror_health"`
 	// ConcurrencyGovernor enables AIMD adaptive concurrency limiting.
 	// Disabled by default.
 	ConcurrencyGovernor GovernorConfig `yaml:"concurrency_governor"`
@@ -784,6 +786,20 @@ type ChainDetectionConfig struct {
 	Enabled  bool          `yaml:"enabled"`
 	Interval time.Duration `yaml:"interval"`
 	Timeout  time.Duration `yaml:"timeout"`
+}
+
+// MirrorHealthConfig configures the periodic read-only audit sweep for
+// beads jsonl <-> db mirror drift detection.
+type MirrorHealthConfig struct {
+	// Enabled turns on the periodic audit sweep. Default true (audit-only,
+	// auto-heal is a separate flag).
+	Enabled bool `yaml:"enabled"`
+	// AuditInterval throttles the sweep. 0 disables.
+	Interval time.Duration `yaml:"audit_interval"`
+	// AutoResync opts into FR-3 guarded healing. Default false: the sweep is
+	// audit-only and drift stays visible via events (FR-4 filing runs only
+	// under auto_resync, when a guard blocks healing).
+	AutoResync bool `yaml:"auto_resync"`
 }
 
 // ValidationConfig contains self-healing validation loop settings
@@ -972,6 +988,10 @@ func DefaultConfig() *Config {
 				Interval: 10 * time.Second,
 				Timeout:  10 * time.Minute,
 			},
+			MirrorHealth: MirrorHealthConfig{
+				Enabled:  true,
+				Interval: 30 * time.Minute,
+			},
 		},
 		Validation: ValidationConfig{
 			Enabled:                  true,
@@ -1090,6 +1110,20 @@ func DefaultConfig() *Config {
 		Status: StatusConfig{
 			LogPath: "/var/log/hydra/hydra-error.log",
 		},
+	}
+}
+
+// restoreMirrorHealthDefaults reapplies DefaultConfig's mirror_health defaults
+// when the raw yaml did not set them. LoadConfig copies raw.Overseer over the
+// defaults wholesale, zeroing MirrorHealth, so a config body missing the
+// section would otherwise disable the audit-only sweep.
+func restoreMirrorHealthDefaults(o *OverseerConfig) {
+	if o == nil || o.MirrorHealth != (MirrorHealthConfig{}) {
+		return
+	}
+	o.MirrorHealth = MirrorHealthConfig{
+		Enabled:  true,
+		Interval: 30 * time.Minute,
 	}
 }
 
@@ -1222,6 +1256,7 @@ func LoadConfig(path string) (*Config, error) {
 
 	// Copy non-project fields
 	config.Overseer = raw.Overseer
+	restoreMirrorHealthDefaults(&config.Overseer)
 	config.MCP = raw.MCP
 	config.API = raw.API
 	config.Intelligence = raw.Intelligence
@@ -1304,6 +1339,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 
 	// Copy non-project fields
 	config.Overseer = raw.Overseer
+	restoreMirrorHealthDefaults(&config.Overseer)
 	config.MCP = raw.MCP
 	config.API = raw.API
 	config.Intelligence = raw.Intelligence

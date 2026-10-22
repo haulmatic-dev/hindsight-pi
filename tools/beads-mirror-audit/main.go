@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
+
+	"github.com/haulmatic-dev/hydra/internal/mirroraudit"
 )
 
 // Divergence is one bead whose jsonl status disagrees with the br database.
@@ -51,107 +52,32 @@ func execBr(dir string, args []string) (string, error) {
 	return string(out), err
 }
 
-// parseJSONLLine parses one mirror record. Accepts strict JSON
-// {"id":..,"status":..} and falls back to "<id> <status>" whitespace form.
-func parseJSONLLine(line string) (id, status string, ok bool) {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return "", "", false
-	}
-	var rec struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal([]byte(line), &rec); err == nil && rec.ID != "" {
-		return rec.ID, rec.Status, true
-	}
-	fields := strings.Fields(line)
-	if len(fields) < 2 {
-		return "", "", false
-	}
-	return fields[0], fields[1], true
-}
+// comparer adapts the tool's brRunner seam to mirroraudit.Comparer.
+type comparer struct{}
 
-// parseDBList decodes `br list --json` output into id→status pairs.
-func parseDBList(out string) ([]Divergence, error) {
-	var recs []struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal([]byte(out), &recs); err != nil {
-		return nil, err
-	}
-	db := make([]Divergence, 0, len(recs))
-	for _, r := range recs {
-		db = append(db, Divergence{BeadID: r.ID, DBStatus: r.Status})
-	}
-	return db, nil
-}
-
-// readJSONLMirror reads issues.jsonl into an id→status map plus record count.
-func readJSONLMirror(storeDir string) (mirror map[string]string, checked int, err error) {
-	data, err := os.ReadFile(filepath.Join(storeDir, "issues.jsonl"))
-	if err != nil {
-		return nil, 0, err
-	}
-	mirror = make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		id, status, ok := parseJSONLLine(line)
-		if !ok {
-			continue
-		}
-		mirror[id] = status
-		checked++
-	}
-	return mirror, checked, nil
-}
-
-// divergenceLine formats the one-line human-readable drift record.
-func divergenceLine(d Divergence) string {
-	return fmt.Sprintf("%s jsonl=%s db=%s", d.BeadID, d.JSONLStatus, d.DBStatus)
+func (comparer) BrListJSON(storeDir string) (string, error) {
+	return brRunner(storeDir, []string{"list", "--json", "--all", "--limit", "0"})
 }
 
 // runAudit compares the jsonl mirror against the br database for storeDir.
-// Returns the report, the rendered output line(s), and the process exit code.
+// Single source of comparison truth is mirroraudit; this tool maps its
+// report to the CLI output shape. Returns the report, the rendered output
+// line(s), and the process exit code.
 func runAudit(storeDir string, jsonOut bool) (Report, string, int) {
-	mirror, checked, err := readJSONLMirror(storeDir)
+	shared, err := mirroraudit.Audit(storeDir, comparer{})
 	if err != nil {
 		return Report{}, auditUnavailablePrefix + err.Error(), exitUnavail
 	}
 
-	out, err := brRunner(storeDir, []string{"list", "--json"})
-	if err != nil {
-		return Report{}, auditUnavailablePrefix + err.Error(), exitUnavail
-	}
-	db, err := parseDBList(out)
-	if err != nil {
-		return Report{}, auditUnavailablePrefix + err.Error(), exitUnavail
-	}
-
-	rep := Report{Divergences: []Divergence{}, Checked: checked}
+	rep := Report{Divergences: []Divergence{}, Checked: shared.Checked}
 	var lines []string
-	record := func(d Divergence) {
-		rep.Divergences = append(rep.Divergences, d)
-		lines = append(lines, divergenceLine(d))
-	}
-
-	dbStatus := make(map[string]string, len(db))
-	for _, d := range db {
-		dbStatus[d.BeadID] = d.DBStatus
-	}
-	for id, dbSt := range dbStatus {
-		jsonlStatus, ok := mirror[id]
-		if !ok {
+	for _, rec := range shared.Records {
+		if rec.Class == mirroraudit.ClassClean {
 			continue
 		}
-		if jsonlStatus != dbSt {
-			record(Divergence{BeadID: id, JSONLStatus: jsonlStatus, DBStatus: dbSt})
-		}
-	}
-	for id, jsonlStatus := range mirror {
-		if _, ok := dbStatus[id]; !ok {
-			record(Divergence{BeadID: id, JSONLStatus: jsonlStatus, DBStatus: ""})
-		}
+		d := Divergence{BeadID: rec.BeadID, JSONLStatus: rec.JSONLStatus, DBStatus: rec.DBStatus}
+		rep.Divergences = append(rep.Divergences, d)
+		lines = append(lines, fmt.Sprintf("%s jsonl=%s db=%s", d.BeadID, d.JSONLStatus, d.DBStatus))
 	}
 
 	if jsonOut {
@@ -162,7 +88,7 @@ func runAudit(storeDir string, jsonOut bool) (Report, string, int) {
 		return rep, string(b), exitCodeFor(rep)
 	}
 	if len(lines) == 0 {
-		return rep, fmt.Sprintf("mirror clean (%d beads)", checked), exitClean
+		return rep, fmt.Sprintf("mirror clean (%d beads)", shared.Checked), exitClean
 	}
 	return rep, strings.Join(lines, "\n"), exitDrift
 }

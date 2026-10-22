@@ -20,6 +20,15 @@ type mockBeadsClient struct {
 	closeErr      error
 	closeCalls    []mockCloseCall
 	depAdds       []string
+	createErr     error
+	createCalls   []mockCreateCall
+}
+
+// mockCreateCall tracks CreateBead invocations (pan filing sinks).
+type mockCreateCall struct {
+	projectPath string
+	title       string
+	description string
 }
 
 // mockCloseCall tracks CloseBead invocations for testing
@@ -165,6 +174,13 @@ func (m *mockBeadsClient) getCloseCalls() []mockCloseCall {
 	return append([]mockCloseCall{}, m.closeCalls...)
 }
 
+// getCreateCalls returns recorded CreateBead (pan filing) invocations.
+func (m *mockBeadsClient) getCreateCalls() []mockCreateCall {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]mockCreateCall{}, m.createCalls...)
+}
+
 func (m *mockBeadsClient) UpdateBeadStatus(projectPath string, beadID types.BeadID, status types.BeadStatus) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -180,6 +196,10 @@ func (m *mockBeadsClient) CreateBead(projectPath string, req types.CreateBeadReq
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.createCalls = append(m.createCalls, mockCreateCall{projectPath: projectPath, title: req.Title, description: req.Description})
+	if m.createErr != nil {
+		return "", m.createErr
+	}
 	projectName := filepath.Base(projectPath)
 	beadID := types.BeadID(fmt.Sprintf("%s-fix-%d", projectName, len(m.beads)+1))
 

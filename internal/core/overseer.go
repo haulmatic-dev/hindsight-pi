@@ -78,6 +78,25 @@ type BeadsClient interface {
 	AddDependency(projectPath, repoName string, beadID, dependsOn types.BeadID) error
 }
 
+// beadsBridgeUpdater adapts BeadsClient status updates to the BrUpdater seam
+// (pan_mirror_health.go) so the idempotent heal primitive goes through the
+// same br CLI path every other caller uses.
+type BrUpdater = interface {
+	BrUpdateStatus(storePath, beadID, status string) error
+}
+
+type beadsBridgeUpdater struct {
+	beadsClient BeadsClient
+}
+
+// BrUpdateStatus rewrites the mirror record in storePath to status.
+func (b *beadsBridgeUpdater) BrUpdateStatus(storePath, beadID, status string) error {
+	if b.beadsClient == nil {
+		return fmt.Errorf("beads client unavailable")
+	}
+	return b.beadsClient.UpdateBeadStatus(storePath, types.BeadID(beadID), types.BeadStatus(status))
+}
+
 // Overseer is the main scheduler daemon
 type Overseer struct {
 	// beadSource maps bead ID -> the project path whose store listed it
@@ -132,6 +151,12 @@ type Overseer struct {
 	// Stale-filing sweep throttle (one sweep tick per staleFilingSweepInterval;
 	// internal rate limit is one auto-close per project per sweep tick).
 	lastStaleFilingSweep time.Time
+	// Mirror health sweep throttle.
+	lastMirrorHealthSweep time.Time
+	// brUpdater is the seam for the idempotent heal primitive (`br update <id>
+	// --status <same>`) used by the mirror health sweep (FR-3). Always set by
+	// NewOverseer; tests may stub it.
+	brUpdater BrUpdater
 	// These clients remain direct fields until IntelligenceHub fully exposes their APIs.
 	gptCache              *GPTCacheClient                 // GPTCache client for caching
 	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
@@ -290,11 +315,13 @@ func NewOverseer(config *Config) *Overseer {
 		maxRetries = defaultMaxRetries
 	}
 
+	sharedClient := beads.NewClient()
 	o := &Overseer{
 		config:           config,
 		activeWorkers:    make(map[string]*types.Worker),
 		stateController:  NewStateController(config.Overseer.MaxWorkers, config.Overseer.BeadDiscoveryInterval),
-		beadsClient:      beads.NewClient(),
+		beadsClient:      sharedClient,
+		brUpdater:        &beadsBridgeUpdater{beadsClient: sharedClient},
 		bvClient:         bv.NewClient(),
 		dag:              NewDAG(),
 		completed:        make(map[string]bool),
@@ -977,6 +1004,11 @@ func (o *Overseer) tick() error {
 	if time.Since(o.lastStaleFilingSweep) >= staleFilingSweepInterval {
 		o.lastStaleFilingSweep = time.Now()
 		o.sweepStalePanFilings(time.Now())
+	}
+	if o.config != nil && o.config.Overseer.MirrorHealth.Enabled &&
+		time.Since(o.lastMirrorHealthSweep) >= o.config.Overseer.MirrorHealth.Interval {
+		o.lastMirrorHealthSweep = time.Now()
+		o.sweepMirrorHealth(time.Now())
 	}
 	// After scheduling, publish each project's working branch to its remote
 	// (opt-in via output.push). This consolidates completed worktree commits

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -186,4 +187,48 @@ func TestAudit_ParserAcceptsJSONAndWhitespaceForms(t *testing.T) {
 	if rep.Checked != 2 {
 		t.Fatalf("checked=%d want 2", rep.Checked)
 	}
+}
+
+// Coverage for the production comparer.BrListJSON shell-out path — the
+// package-level execLooking/execCommand seams let us exercise both the
+// lookup failure and the command-success/error branches without a real br.
+func TestComparerBrListJSON_AllPaths(t *testing.T) {
+	origLook, origCmd := execLookPath, execCommand
+	defer func() { execLookPath, execCommand = origLook, origCmd }()
+
+	t.Run("lookpath failure", func(t *testing.T) {
+		execLookPath = func(string) (string, error) { return "", errors.New("not found") }
+		if _, err := (comparer{}).BrListJSON("/tmp"); err == nil {
+			t.Fatal("want error when br binary is not found")
+		}
+	})
+
+	t.Run("command success", func(t *testing.T) {
+		var gotDir, gotArgs string
+		execLookPath = func(string) (string, error) { return "/bin/br", nil }
+		execCommand = func(path string, args []string, dir string) (string, error) {
+			gotDir, gotArgs = dir, strings.Join(args, " ")
+			return `[{"id":"x","status":"open"}]`, nil
+		}
+		out, err := (comparer{}).BrListJSON("/some/store")
+		if err != nil {
+			t.Fatalf("want success, got %v", err)
+		}
+		if gotDir != "/some/store" || gotArgs != "list --json --all --limit 0" {
+			t.Fatalf("bad dir/args observed: %q / %q", gotDir, gotArgs)
+		}
+		if out == "" {
+			t.Fatal("want non-empty output from the seam")
+		}
+	})
+
+	t.Run("command failure", func(t *testing.T) {
+		execLookPath = func(string) (string, error) { return "/bin/br", nil }
+		execCommand = func(path string, args []string, dir string) (string, error) {
+			return "", errors.New("exit status 7")
+		}
+		if _, err := (comparer{}).BrListJSON("/tmp"); err == nil {
+			t.Fatal("want error when br list fails")
+		}
+	})
 }
