@@ -480,12 +480,7 @@ func (s *spyBrUpdater) BrUpdateStatus(storePath, beadID, status string) error {
 	return s.err
 }
 
-// mirrorGuardHooks is the test seam for the FR-3 guard conditions: the store
-// owner and the write probe. GREEN wires the guarded heal to honor these.
-var mirrorGuardHooks struct {
-	isDaemonOwned func(storePath string) bool
-	writeProbe    func(storePath string) error
-}
+// mirrorGuardHooks (the FR-3 guard seam) is declared in pan_mirror_health.go.
 
 // mirrorHealEnv extends mirrorEnv with the FR-3 healing surface: stubs the
 // BrUpdater seam, enables AutoResync, and resets the guard hooks so each
