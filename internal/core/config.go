@@ -732,6 +732,8 @@ type OverseerConfig struct {
 	RetryDelay         time.Duration            `yaml:"retry_delay"`
 	ResourceMonitoring ResourceMonitoringConfig `yaml:"resource_monitoring"`
 	ChainDetection     ChainDetectionConfig     `yaml:"chain_detection"`
+	// MirrorHealth guards the beads JSONL mirror vs db drift detection.
+	MirrorHealth MirrorHealthConfig `yaml:"mirror_health"`
 	// ConcurrencyGovernor enables AIMD adaptive concurrency limiting.
 	// Disabled by default.
 	ConcurrencyGovernor GovernorConfig `yaml:"concurrency_governor"`
@@ -784,6 +786,16 @@ type ChainDetectionConfig struct {
 	Enabled  bool          `yaml:"enabled"`
 	Interval time.Duration `yaml:"interval"`
 	Timeout  time.Duration `yaml:"timeout"`
+}
+
+// MirrorHealthConfig configures the periodic read-only audit sweep for
+// beads jsonl <-> db mirror drift detection.
+type MirrorHealthConfig struct {
+	// Enabled turns on the periodic audit sweep. Default true (audit-only,
+	// auto-heal is a separate flag).
+	Enabled bool `yaml:"enabled"`
+	// AuditInterval throttles the sweep. 0 disables.
+	Interval time.Duration `yaml:"audit_interval"`
 }
 
 // ValidationConfig contains self-healing validation loop settings
@@ -971,6 +983,10 @@ func DefaultConfig() *Config {
 				Enabled:  true,
 				Interval: 10 * time.Second,
 				Timeout:  10 * time.Minute,
+			},
+			MirrorHealth: MirrorHealthConfig{
+				Enabled:  true,
+				Interval: 30 * time.Minute,
 			},
 		},
 		Validation: ValidationConfig{
