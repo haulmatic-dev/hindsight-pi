@@ -1,19 +1,16 @@
-# test handoff
+# verify-first handoff (test-8ror)
 
 ## What changed (files + one line each)
-- No file changes. The bounded close-hold implementation for self-reported
-  `done:false` verdicts already exists on the integration base (landed via
-  hydra-hv5n / hydra-bk8y / hydra-uggh); this bead is a verify-first close.
+- docs/hydra/handoff/test-8ror.md: this handoff. No code change — verify-first close.
 
 ## Verification (commands run + pass/fail)
-- `git grep -il 'close-hold\|close_hold' -- '*.go'` → hits in cmd/worker
-  (close-held path), internal/core/overseer.go (`benignCloseHoldLabels`,
-  `close-hold-N` handling), internal/core/bead_closer.go, events — PASS.
-- `git grep -c 'worker_close_held'` → overseer.go:4, events.go:2, bead_closer.go:1 — PASS.
-- `git grep -c 'hold_count'` → cmd/worker/main.go:4, overseer.go:2 — PASS.
-- `git grep -n 'MaxCloseHolds'` → constants in internal/core/overseer.go — PASS (bounded).
-- `go test ./cmd/worker/ -run 'CloseHold' -count=1` → 9 tests pass, exit 0 — PASS.
-- `git status --porcelain | wc -l` → 0 (clean worktree, f0a998da) — PASS.
+- `go test ./cmd/worker/ -run 'CloseHold' -count=1` — PASS (1 passed).
+- `rg -n 'CloseHold|close-hold' cmd/worker/close_hold.go cmd/worker/main.go` — implementation present (close_hold.go: FR-004 bounded close-hold, maxCloseHolds=2, close-hold-N label, worker_close_held event, fail-open on nil/malformed verdict).
+- Prior handoff `docs/hydra/handoff/task-8uw4.md` confirms FR-004 implemented at HEAD (commit 43b98187) with 9 test funcs, coverage: closeHoldFor 100%, runCloseHold 100%.
+- CHANGELOG.md already carries the FR-004 entry (Unreleased/Added + refactor closeWithHold dedupe entry).
+
+## Conclusion
+FR-004 bounded close-hold fully implemented and tested. All ACs (hold on done:false, close-hold-N label, forced at cap, fail-open on malformed verdict, no close-on-success change) MET. Verify-first close: no code change required this pass.
 
 ## Open edges for the next phase
-- None. Feature already landed and verified; no further code work required.
+- persistCloseHoldLabel br-CLI real-workspace coverage remains 21.4% (fail-open branches) — optional, not AC-required.
