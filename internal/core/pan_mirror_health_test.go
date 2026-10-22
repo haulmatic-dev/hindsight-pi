@@ -285,3 +285,61 @@ func TestMirrorHealthSweep_TypedEvents(t *testing.T) {
 		t.Fatalf("clean store must not emit mirror_drift_detected, got %d", len(evs))
 	}
 }
+
+// FR-4 AC (fixture): a user-owned divergent store files EXACTLY ONE
+// mirror_drift_needs_human Pan event — repeated sweeps never duplicate the
+// filing (signature dedupe exactly-once contract). RED-gated: GREEN wires
+// the filing sink via filePanBead.
+func TestMirrorHealthSweep_UserOwnedDivergentStoreEmitsExactlyOne(t *testing.T) {
+	mirrorHealthRequireImpl(t)
+	path := t.TempDir()
+	driftReport := mirroraudit.Report{
+		StorePath: filepath.Join(path, ".beads"),
+		Checked:   1,
+		Records: []mirroraudit.Record{
+			{BeadID: "bead-drift-1", DBStatus: "open", Class: mirroraudit.ClassDBAhead},
+		},
+		Counts: mirroraudit.Counts{DBAhead: 1},
+	}
+	o := mirrorEnv(t, path, driftReport, nil)
+
+	// First sweep: exactly one filing for the user-owned divergent record.
+	o.sweepMirrorHealthForProject(o.projects[0], time.Now())
+	if evs := readEventsOfType(t, o.eventSink, mirrorDriftNeedsHumanEvent); len(evs) != 1 {
+		t.Fatalf("user-owned divergent store must emit exactly one %s, got %d", mirrorDriftNeedsHumanEvent, len(evs))
+	}
+
+	// Second sweep: repeat must NOT file a second one (exactly-once contract).
+	o.sweepMirrorHealthForProject(o.projects[0], time.Now())
+	if evs := readEventsOfType(t, o.eventSink, mirrorDriftNeedsHumanEvent); len(evs) != 1 {
+		t.Fatalf("repeat sweep must not duplicate the filing, got %d events", len(evs))
+	}
+}
+
+// FR-4 AC (filing-sink failure): a filer error is logged and the sweep
+// continues to other records/stores — no panic, no swallowed sweep.
+func TestMirrorHealthSweep_FilingSinkFailureContinues(t *testing.T) {
+	mirrorHealthRequireImpl(t)
+	path := t.TempDir()
+	driftReport := mirroraudit.Report{
+		StorePath: filepath.Join(path, ".beads"),
+		Checked:   2,
+		Records: []mirroraudit.Record{
+			{BeadID: "bead-drift-sink-1", DBStatus: "open", Class: mirroraudit.ClassDBAhead},
+			{BeadID: "bead-drift-sink-2", DBStatus: "open", Class: mirroraudit.ClassDBAhead},
+		},
+		Counts: mirroraudit.Counts{DBAhead: 2},
+	}
+	o := mirrorEnv(t, path, driftReport, nil)
+	// Filing sink fails: ske material is injected by GREEN via the
+	// filePanBead seam (mock beadsClient returning error on CreateBead).
+	if mock, ok := o.beadsClient.(*mockBeadsClient); ok {
+		mock.createErr = errors.New("filing sink unavailable")
+	}
+
+	// Filing sink error must be logged, never panic; drift events still fire.
+	o.sweepMirrorHealthForProject(o.projects[0], time.Now())
+	if evs := readEventsOfType(t, o.eventSink, mirrorDriftDetectedEvent); len(evs) != 2 {
+		t.Fatalf("drift detection must continue past filing-sink failure, got %d events", len(evs))
+	}
+}
