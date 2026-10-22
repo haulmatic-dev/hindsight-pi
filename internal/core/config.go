@@ -1113,6 +1113,20 @@ func DefaultConfig() *Config {
 	}
 }
 
+// restoreMirrorHealthDefaults reapplies DefaultConfig's mirror_health defaults
+// when the raw yaml did not set them. LoadConfig copies raw.Overseer over the
+// defaults wholesale, zeroing MirrorHealth, so a config body missing the
+// section would otherwise disable the audit-only sweep.
+func restoreMirrorHealthDefaults(o *OverseerConfig) {
+	if o == nil || o.MirrorHealth != (MirrorHealthConfig{}) {
+		return
+	}
+	o.MirrorHealth = MirrorHealthConfig{
+		Enabled:  true,
+		Interval: 30 * time.Minute,
+	}
+}
+
 // ConfigCache provides thread-safe caching for loaded configurations
 type ConfigCache struct {
 	mu          sync.RWMutex
@@ -1242,6 +1256,7 @@ func LoadConfig(path string) (*Config, error) {
 
 	// Copy non-project fields
 	config.Overseer = raw.Overseer
+	restoreMirrorHealthDefaults(&config.Overseer)
 	config.MCP = raw.MCP
 	config.API = raw.API
 	config.Intelligence = raw.Intelligence
@@ -1324,6 +1339,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 
 	// Copy non-project fields
 	config.Overseer = raw.Overseer
+	restoreMirrorHealthDefaults(&config.Overseer)
 	config.MCP = raw.MCP
 	config.API = raw.API
 	config.Intelligence = raw.Intelligence

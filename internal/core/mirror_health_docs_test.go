@@ -125,6 +125,7 @@ func sloFixture(t *testing.T, eventsJSONL string, withStore bool) map[string]str
 func isoNow() string { return time.Now().UTC().Format(time.RFC3339) }
 
 func TestMirrorHealthSLOScript_SyntaxAndHealthyFixture(t *testing.T) {
+	mirrorHealthDocsRequireImpl(t)
 	// bash -n must pass.
 	if out, err := exec.Command("bash", "-n", sloScriptRel).CombinedOutput(); err != nil {
 		t.Fatalf("bash -n %s failed: %v: %s", sloScriptRel, err, out)
@@ -141,6 +142,7 @@ func TestMirrorHealthSLOScript_SyntaxAndHealthyFixture(t *testing.T) {
 }
 
 func TestMirrorHealthSLOScript_HealthyMirrorExitsZero(t *testing.T) {
+	mirrorHealthDocsRequireImpl(t)
 	dir := t.TempDir()
 	proj := filepath.Join(dir, "proj")
 	if err := os.MkdirAll(filepath.Join(proj, ".beads"), 0o755); err != nil {
@@ -173,6 +175,7 @@ func TestMirrorHealthSLOScript_HealthyMirrorExitsZero(t *testing.T) {
 }
 
 func TestMirrorHealthSLOScript_DriftExitsOne(t *testing.T) {
+	mirrorHealthDocsRequireImpl(t)
 	dir := t.TempDir()
 	evts := filepath.Join(dir, "events")
 	if err := os.MkdirAll(evts, 0o755); err != nil {
@@ -196,6 +199,7 @@ func TestMirrorHealthSLOScript_DriftExitsOne(t *testing.T) {
 }
 
 func TestMirrorHealthSLOScript_RegisteredStoreWithoutCleanEventExitsOne(t *testing.T) {
+	mirrorHealthDocsRequireImpl(t)
 	dir := t.TempDir()
 	proj := filepath.Join(dir, "proj")
 	if err := os.MkdirAll(filepath.Join(proj, ".beads"), 0o755); err != nil {
@@ -229,6 +233,7 @@ func TestMirrorHealthSLOScript_RegisteredStoreWithoutCleanEventExitsOne(t *testi
 }
 
 func TestMirrorHealthSLOScript_InfraFailureExitsTwo(t *testing.T) {
+	mirrorHealthDocsRequireImpl(t)
 	dir := t.TempDir()
 	evts := filepath.Join(dir, "events")
 	if err := os.MkdirAll(evts, 0o755); err != nil {
@@ -249,6 +254,7 @@ func TestMirrorHealthSLOScript_InfraFailureExitsTwo(t *testing.T) {
 }
 
 func TestMirrorHealthSLOScript_ReadOnlyNeverMutatesStore(t *testing.T) {
+	mirrorHealthDocsRequireImpl(t)
 	dir := t.TempDir()
 	proj := filepath.Join(dir, "proj")
 	store := filepath.Join(proj, ".beads")
@@ -290,6 +296,7 @@ func TestMirrorHealthSLOScript_ReadOnlyNeverMutatesStore(t *testing.T) {
 }
 
 func TestMirrorHealthDocs_ShepherdNamesAllKnobs(t *testing.T) {
+	mirrorHealthDocsRequireImpl(t)
 	data, err := os.ReadFile(shepherdRel)
 	if err != nil {
 		t.Fatalf("read %s: %v", shepherdRel, err)
@@ -305,6 +312,7 @@ func TestMirrorHealthDocs_ShepherdNamesAllKnobs(t *testing.T) {
 }
 
 func TestMirrorHealthDocs_ShepherdAutoResyncOffByDefault(t *testing.T) {
+	mirrorHealthDocsRequireImpl(t)
 	data, err := os.ReadFile(shepherdRel)
 	if err != nil {
 		t.Fatalf("read %s: %v", shepherdRel, err)
@@ -322,6 +330,7 @@ func TestMirrorHealthDocs_ShepherdAutoResyncOffByDefault(t *testing.T) {
 }
 
 func TestMirrorHealthDocs_AgentsOperatingTableCoversKnobs(t *testing.T) {
+	mirrorHealthDocsRequireImpl(t)
 	data, err := os.ReadFile(agentsRel)
 	if err != nil {
 		t.Fatalf("read %s: %v", agentsRel, err)
@@ -333,6 +342,7 @@ func TestMirrorHealthDocs_AgentsOperatingTableCoversKnobs(t *testing.T) {
 }
 
 func TestMirrorHealthDocs_RunbookPostRepairImportOnlyLine(t *testing.T) {
+	mirrorHealthDocsRequireImpl(t)
 	found := false
 	var missing []string
 	for _, path := range []string{shepherdRel, hostSetupRel} {

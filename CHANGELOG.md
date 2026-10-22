@@ -10,6 +10,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- Added guarded auto-resync defaults for mirror health: config loader now runs `restoreMirrorHealthDefaults` on the Overseer section at both parsing sites in `internal/core/config.go` (ensures the newly introduced `mirror_health` knobs not present in a user's yaml fall back to their zero-value-off defaults instead of being lost during `raw -> config` copying).
 - Added `BrUpdater` seam in `internal/core/overseer.go` (`BeadsUpdater` alias plus `beadsBridgeUpdater` adapting `BeadsClient`) so the mirror-health heal primitive (`br update <id> --status <same>`) routes through the same br CLI path used by every other caller; the new `mirror_health.auto_resync` knob gates guarded healing, defaulting to false (audit-only drift detection).
 
 ### Fixed
