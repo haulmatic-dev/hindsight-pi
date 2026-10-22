@@ -131,13 +131,36 @@ func TestMirrorHealthSLOScript_SyntaxAndHealthyFixture(t *testing.T) {
 		t.Fatalf("bash -n %s failed: %v: %s", sloScriptRel, err, out)
 	}
 
-	env := sloFixture(t,
-		`{"time":"`+isoNow()+`","type":"mirror_audit_clean","fields":{"store":"`+t.TempDir()+`"}}`,
-		true)
+	// Build a self-contained healthy fixture so the event store path matches
+	// the registered store path derived from the fixture config.
+	dir := t.TempDir()
+	proj := filepath.Join(dir, "proj")
+	if err := os.MkdirAll(filepath.Join(proj, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfg := filepath.Join(dir, "hydra.yaml")
+	if err := os.WriteFile(cfg, []byte("projects:\n  list:\n    - name: proj\n      path: "+proj+"\n"), 0o644); err != nil {
+		t.Fatalf("write cfg: %v", err)
+	}
+	evts := filepath.Join(dir, "events")
+	if err := os.MkdirAll(evts, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Clean event for the registered store, now (inside the 24h window).
+	body := `{"time":"` + isoNow() + `","type":"mirror_audit_clean","fields":{"store":"` + proj + `/.beads"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(evts, "f.jsonl"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
 
-	code, out := runSLOScript(t, env)
+	code, out := runSLOScript(t, map[string]string{
+		"HYDRA_EVENTS_DIR": evts,
+		"HYDRA_CONFIG":     cfg,
+	})
 	if code != 0 {
 		t.Fatalf("RED: healthy mirror must exit 0, got %d (%s)", code, out)
+	}
+	if !strings.Contains(out, "SLO-OK") {
+		t.Fatalf("RED: healthy run must print SLO-OK, got %q", out)
 	}
 }
 
