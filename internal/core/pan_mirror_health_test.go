@@ -569,12 +569,18 @@ func TestMirrorHealthSweep_UserOwnedStoreNeverHeals(t *testing.T) {
 		Counts: mirroraudit.Counts{DBAhead: 1},
 	}
 	o, spy := mirrorHealEnv(t, t.TempDir(), repoReport, nil)
+	mock := o.beadsClient.(*mockBeadsClient)
 	mirrorGuardHooks.isDaemonOwned = func(string) bool { return false }
 
 	o.sweepMirrorHealth(time.Now())
 
 	if len(spy.calls) != 0 {
 		t.Fatalf("user-owned store must never heal, got %d heal invocations", len(spy.calls))
+	}
+	// Fail-closed filing path: a record the guard refuses to heal must go to
+	// the human triage queue, never silently dropped.
+	if createCalls := mock.getCreateCalls(); len(createCalls) == 0 {
+		t.Fatal("user-owned store drift must still be filed (CreateBead), got 0 filings")
 	}
 }
 
@@ -591,12 +597,18 @@ func TestMirrorHealthSweep_WriteProbeFailureNeverHeals(t *testing.T) {
 		Counts: mirroraudit.Counts{DBAhead: 1},
 	}
 	o, spy := mirrorHealEnv(t, t.TempDir(), repoReport, nil)
+	mock := o.beadsClient.(*mockBeadsClient)
 	mirrorGuardHooks.writeProbe = func(string) error { return errors.New("permission denied: probe write failed") }
 
 	o.sweepMirrorHealth(time.Now())
 
 	if len(spy.calls) != 0 {
 		t.Fatalf("failed write probe must never heal, got %d heal invocations", len(spy.calls))
+	}
+	// Fail-closed filing path: a record the guard refuses to heal must go to
+	// the human triage queue, never silently dropped.
+	if createCalls := mock.getCreateCalls(); len(createCalls) == 0 {
+		t.Fatal("write-probe-failed drift must still be filed (CreateBead), got 0 filings")
 	}
 }
 
