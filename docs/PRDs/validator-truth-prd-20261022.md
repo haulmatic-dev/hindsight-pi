@@ -113,22 +113,20 @@ Update `CHANGELOG.md` (Added).
 **Type:** fr
 **Priority:** P0
 **System Type:** library
-**Target Files:** `internal/core/validation_service.go`, `internal/core/validation_chain_test.go`
+**Target Files:** `internal/core/validation_chain.go`, `internal/core/validation_chain_test.go`
 **Test Command:** `go test ./internal/core/ -run 'TestTDDChain_' -count=1 -v`
 **Build Command:** `go build ./...`
 **Depends On:** none
 
-Add `findTDDChain(bead types.Bead, projectPath string) (ChainSides, error)` where
-`ChainSides{Red, Green types.Bead; RedLocated, GreenLocated bool}`. It (a) walks
+In a new file, add `findTDDChain(client BeadsClient, bead types.Bead, projectPath string) (ChainSides, error)`
+where `ChainSides{Red, Green types.Bead; RedLocated, GreenLocated bool}`. It (a) walks
 dependencies **transitively** (depth ≤ 8, visited set), (b) classifies RED/GREEN only by
 label (`tdd-red`, `tdd-green`) or exact title prefix (`RED:`, `GREEN:`) — never a
 substring, never `Type` alone, (c) chooses sides by the closing bead's phase: a RED bead
 validates only itself as RED (GREEN not located); a GREEN bead validates itself as GREEN
 plus its nearest RED ancestor; REFACTOR/SYNTAX beads use their nearest GREEN and RED
-ancestors. Keep `findTDDChainBeads` with its current signature as a thin wrapper over
-`findTDDChain` (returning zero values for unlocated sides and an error only when neither
-side is located) so `overseer_chain_validation.go` keeps compiling. Test functions are
-named `TestTDDChain_*`.
+ancestors. This FR does not edit `validation_service.go`; FR-005 switches the service to
+it. Test functions are named `TestTDDChain_*`.
 
 **Acceptance Criteria:**
 - Live-shape fixture: GREEN depends only on RED; REFACTOR depends only on GREEN →
@@ -140,207 +138,221 @@ named `TestTDDChain_*`.
 - The Test Command output lists ≥5 `--- PASS` lines and no `[no tests to run]`;
   `go build ./...` exits 0.
 
-### FR-003: Per-bead evidence and a side-effect-free verdict
+### FR-003: Per-bead evidence and evidence-based chain checks (validation package)
 
 **Type:** fr
 **Priority:** P0
 **System Type:** library
-**Target Files:** `internal/validation/bead_evidence.go`, `internal/validation/bead_evidence_test.go`, `internal/validation/tdd_validator.go`, `internal/validation/tdd_validator_test.go`, `internal/core/validation_service.go`, `internal/core/bead_closer.go`, `internal/core/overseer_chain_validation_test.go`, `internal/core/validation_dedup_test.go`
-**Test Command:** `go test ./internal/validation/ -run 'TestBeadEvidence_|TestTDDValidator_' -count=1 -v && go test ./internal/core/ -run 'TestTDDVerdict_|TestRunTDDValidation' -count=1 -v`
+**Target Files:** `internal/validation/bead_evidence.go`, `internal/validation/bead_evidence_test.go`, `internal/validation/tdd_validator.go`, `internal/validation/tdd_validator_test.go`
+**Test Command:** `go test ./internal/validation/ -run 'TestBeadEvidence_|TestTDDValidator_' -count=1 -v`
 **Build Command:** `go build ./...`
-**Depends On:** FR-001, FR-002
+**Depends On:** FR-001
 
 (a) Add `BeadEvidence(repoRoot, beadID string, includeDirty bool) (Evidence, error)`
-returning the files touched by every commit whose message contains `beadID` as a fixed
-id (`git log --all -E --grep '<regex-escaped beadID>([^[:alnum:]]|$)' --name-only`, so
+returning the files touched by every commit whose message contains the whole bead id
+(`git log --all -E --grep '<regex-escaped beadID>([^[:alnum:]]|$)' --name-only`, so
 `hydra-5e8` never matches `hydra-5e85`), plus — when `includeDirty` — the dirty set of
 `repoRoot` (`git status --porcelain=v1 -z --untracked-files=all`, rename `R old -> new`
-form handled, excluding `.beads/`), and a fingerprint (sha256 over sorted `path:blob-id`). A missing git binary,
-a non-repo directory, or a git error yields empty evidence, never an error that blocks.
-(b) Add `ValidationService.TDDChainVerdict(bead types.Bead, projectPath, evidenceRoot string, includeDirty bool) (Verdict, error)`
-with `Verdict{Located, Passed bool; Gaps []validation.TDDGap; Fingerprint string}`. It
-emits no events, creates no beads and touches no counters. Rules: RED passes when its
-evidence contains ≥1 `beadfiles.IsTestFile` file with a meaningful assertion; GREEN
-passes when its evidence contains ≥1 non-test source file (not `IsTestFile`, not `*.md`,
-not under `docs/`, not `CHANGELOG*`) that is not a stub. `includeDirty` applies only to
-the closing bead, and only when the caller passes true. Declared files (`beadfiles.Resolve`) only scope the stub check and name sibling tests
-(`x.go` → `x_test.go`) — a sibling test counts only if it is present in the bead's
-evidence; a
-declared non-test file is never checked as a test. Declared files present and no
-evidence → one gap naming the bead id and saying `no test file in bead evidence`
-(RED) or `no implementation file in bead evidence` (GREEN); no declared files and no
-evidence → no gap, log `[TDDValidation] <id>: no evidence and no declared targets; side skipped`.
-(c) `TDDChainPasses` becomes a wrapper returning `!Located || Passed`. Add
-`RunTDDValidationAt(bead, projectPath, evidenceRoot string) error`; `RunTDDValidation`
-keeps its signature and wraps it with `evidenceRoot = projectPath` (so
-`overseer_chain_validation.go` compiles unchanged). (d) In `bead_closer.go`, the close
-path that calls `RunTDDValidation` (~line 326) calls `RunTDDValidationAt` with the
-`repoPath` from `resolveEvidenceRepo`, and `verifyTDDChain` resolves the evidence root the
-same way and calls `TDDChainVerdict(..., includeDirty=true)`. (e) Replace `hasMeaningfulAssertions` with a
-case-sensitive pattern list: `t.Run(`, `func Test`, `t.Error`, `t.Fatal`, `assert.`,
-`require.`, `expect(`, `describe(`, `def test_`. Update the two existing core test files
-listed in Target Files to the evidence model; update
+form handled, excluding `.beads/`), and a fingerprint (sha256 over sorted
+`path:blob-id`). A missing git binary, a non-repo directory, or a git error yields empty
+evidence and a nil error. (b) Add `ValidateTDDChainEvidence(in ChainEvidenceInput) TDDResult`
+where the input carries the RED/GREEN beads, their located flags, their `Evidence`, and
+the repo root. Rules: RED passes when its evidence contains ≥1 `beadfiles.IsTestFile`
+file with a meaningful assertion; GREEN passes when its evidence contains ≥1 non-test
+source file (not `IsTestFile`, not `*.md`, not under `docs/`, not `CHANGELOG*`) that is
+not a stub. Declared files (`beadfiles.Resolve`) only scope the stub check and name
+sibling tests (`x.go` → `x_test.go`) — a sibling test counts only if it is present in the
+bead's evidence; a declared non-test file is never checked as a test. Declared files
+present and no evidence → one gap naming the bead id and saying
+`no test file in bead evidence` (RED) or `no implementation file in bead evidence`
+(GREEN); no declared files and no evidence → no gap. An unlocated side produces no gap.
+(c) Replace `hasMeaningfulAssertions` with a case-sensitive pattern list: `t.Run(`,
+`func Test`, `t.Error`, `t.Fatal`, `assert.`, `require.`, `expect(`, `describe(`,
+`def test_`. Keep the existing `ValidateTDDChain` exported for compatibility. Update
 `docs/operations/bead-validation-system.md` and
 `docs/operations/validation-stub-detection.md` (they describe metadata-only
 `target_files`) and `CHANGELOG.md` (Fixed). Test functions are named
-`TestBeadEvidence_*`, `TestTDDValidator_*`, `TestTDDVerdict_*`.
+`TestBeadEvidence_*` and `TestTDDValidator_*`.
 
 **Acceptance Criteria:**
 - `TestBeadEvidence_*` builds a temp git repo: a commit with subject
   `test: x (hydra-ab12)` touching `pkg/a_test.go` is evidence for `hydra-ab12`; a commit
-  whose body has `Bead: hydra-ab12` is too; an unrelated commit is not; a commit mentioning
-  `hydra-ab123` is not evidence for `hydra-ab12`; an uncommitted file appears only with
-  `includeDirty`, including an untracked file inside a new directory; a non-repo dir yields empty evidence and nil error.
-- `TestTDDVerdict_*`: RED bead with empty metadata and `"files": []` whose evidence has a
-  test file containing `t.Run(` → `Located && Passed`, zero red gaps.
-- RED bead declaring `internal/core/service_starter.go` with no evidence → exactly one
-  red gap containing the bead id and `no test file in bead evidence`.
-- No evidence and no declared files → `Passed`, zero gaps.
-- A Go file containing only `import "testing"` and no assertion pattern is not a
-  meaningful test.
-- Both halves of the Test Command list `--- PASS` lines and no `[no tests to run]`;
+  whose body has `Bead: hydra-ab12` is too; an unrelated commit is not; a commit
+  mentioning `hydra-ab123` is not evidence for `hydra-ab12`; an uncommitted file appears
+  only with `includeDirty`, including an untracked file inside a new directory; a
+  non-repo dir yields empty evidence and nil error.
+- `TestTDDValidator_*`: RED with empty metadata and `"files": []` whose evidence has a
+  test file containing `t.Run(` → `RedPassed`, zero red gaps.
+- RED declaring `internal/core/service_starter.go` with no evidence → exactly one red
+  gap containing the bead id and `no test file in bead evidence`.
+- No evidence and no declared files → zero gaps; unlocated side → zero gaps.
+- GREEN whose evidence is only `CHANGELOG.md` and `docs/x.md` → one green gap.
+- A Go file containing only `import "testing"` is not a meaningful test.
+- The Test Command output lists `--- PASS` lines and no `[no tests to run]`;
   `go build ./...` exits 0.
 
-### FR-004: One strike per attempt, only on new evidence
+### FR-004: Separate round counters and the no-new-evidence rule
 
 **Type:** fr
 **Priority:** P0
 **System Type:** library
-**Target Files:** `internal/core/retry_manager.go`, `internal/core/validation_service.go`, `internal/core/validation_rounds_test.go`, `internal/core/overseer_chain_validation_test.go`, `internal/core/validation_retry_test.go`
-**Test Command:** `go test ./internal/core/ -run 'TestValidationRound_|TestValidationRetry|TestRunTDDValidation|TestBeadCloser' -count=1 -v`
+**Target Files:** `internal/core/retry_manager.go`, `internal/core/validation_rounds.go`, `internal/core/validation_rounds_test.go`, `internal/core/validation_retry_test.go`
+**Test Command:** `go test ./internal/core/ -run 'TestValidationRound_|TestValidationRetry' -count=1 -v`
 **Build Command:** `go build ./...`
-**Depends On:** FR-003
+**Depends On:** none
 
 Keep `IncrementValidationRetry` / `GetValidationRetryCount` / `ClearValidationRetry`
-unchanged as the **verified-close** attempt counter (no call-site churn in test files
-this FR does not own). Add separate `TDDRound{Get,Increment,Clear,SetFingerprint,Fingerprint}`
-and `PRDRound{Get,Increment,Clear}` methods with their own maps. `RunTDDValidation` and
-`RunPRDValidation` use only their round methods; the TDD PASS path clears only the TDD
-round; `RetryManager.Clear` clears all three. A TDD round advances only when this pass
-created ≥1 fix bead **or** the verdict fingerprint differs from the one recorded at the
-previous round; otherwise log `[TDDValidation] no new evidence for <id>; round not advanced`.
-Update the strike-accounting section of `docs/architecture/shepherd.md` and
-`CHANGELOG.md` (Fixed). Test functions are named `TestValidationRound_*`.
+unchanged as the **verified-close** attempt counter. Add separate
+`TDDRound{Get,Increment,Clear,SetFingerprint,Fingerprint}` and `PRDRound{Get,Increment,Clear}`
+methods with their own maps; `RetryManager.Clear` clears all three. In the new
+`validation_rounds.go`, add `advanceTDDRound(rm *RetryManager, beadID string, createdFix bool, fingerprint string) (advanced bool)`:
+it increments the TDD round only when `createdFix` is true or `fingerprint` differs from
+the stored one, records the fingerprint, and otherwise logs
+`[TDDValidation] no new evidence for <id>; round not advanced`. FR-005 calls it. Update
+the strike-accounting section of `docs/architecture/shepherd.md` and `CHANGELOG.md`
+(Fixed). Test functions are named `TestValidationRound_*`.
 
 **Acceptance Criteria:**
-- First failing pass creates a fix bead → TDD round 1; second failing pass with the same
-  fingerprint and dedup skipping creation → still 1; a changed fingerprint → 2.
-- `RunTDDValidation` never changes `GetValidationRetryCount`.
+- `advanceTDDRound` with `createdFix=true` → round 1; then `createdFix=false` with the
+  same fingerprint → still 1; then a changed fingerprint → 2.
+- TDD/PRD round methods never change `GetValidationRetryCount`, and vice versa.
 - `RetryManager.Clear` zeroes the verified-close count and both round counts.
-- Test Command output lists `--- PASS` lines and no `[no tests to run]`;
+- The Test Command output lists `--- PASS` lines and no `[no tests to run]`;
   `go build ./...` exits 0.
 
-### FR-005: dep-open requeues without a strike, bounded
+### FR-005: Verdict, shadow mode and close-path wiring in ValidationService
+
+**Type:** fr
+**Priority:** P0
+**System Type:** library
+**Target Files:** `internal/core/validation_service.go`, `internal/core/config.go`, `internal/core/bead_closer.go`, `internal/core/validation_verdict_test.go`, `internal/core/validation_mode_test.go`, `internal/core/overseer_chain_validation_test.go`, `internal/core/validation_dedup_test.go`
+**Test Command:** `go test ./internal/core/ -run 'TestTDDVerdict_|TestValidationMode_|TestRunTDDValidation' -count=1 -v`
+**Build Command:** `go build ./...`
+**Depends On:** FR-002, FR-003, FR-004
+
+(a) Add `ValidationService.TDDChainVerdict(bead types.Bead, projectPath, evidenceRoot string, includeDirty bool) (Verdict, error)`
+with `Verdict{Located, Passed bool; Gaps []validation.TDDGap; Fingerprint string}`, built
+from `findTDDChain` (FR-002), `validation.BeadEvidence` and
+`validation.ValidateTDDChainEvidence` (FR-003). It emits no events, creates no beads and
+touches no counters; `includeDirty` applies only to the closing bead. `findTDDChainBeads`
+keeps its signature as a wrapper over `findTDDChain`. (b) `TDDChainPasses` wraps the
+verdict (`!Located || Passed`). Add `RunTDDValidationAt(bead, projectPath, evidenceRoot string) error`;
+`RunTDDValidation` keeps its signature and wraps it with `evidenceRoot = projectPath`.
+`RunTDDValidationAt` uses `advanceTDDRound` (FR-004) and `RunPRDValidation` uses the PRD
+round methods. (c) In `bead_closer.go`, the close path that calls `RunTDDValidation`
+(~line 326) calls `RunTDDValidationAt` with the `repoPath` from `resolveEvidenceRepo`;
+`verifyTDDChain` resolves the evidence root the same way and calls
+`TDDChainVerdict(..., includeDirty=true)`. (d) Add
+`validation.tdd_validation_mode: off|shadow|enforce` to `config.go`; back-compat when
+unset: `tdd_validation_enabled: true` → `enforce`, `false` → `off`. In `shadow`, the
+service computes the verdict but never rejects, never creates fix beads and never touches
+a counter; it logs `[TDDValidation] SHADOW PASS|FAIL <id>: <gap types>` and emits
+`tdd_validation_shadow`. Readiness: emit `tdd_shadow_ready` once per process when, in a
+rolling 24h window, there are ≥10 shadow verdicts on located chains, ≥1 PASS, and a FAIL
+rate ≤ 20%. Add `ValidationService.SetEventSink(EventSink)` (wired by FR-007). Update the
+two existing test files listed in Target Files to the evidence model; document the mode,
+both events and the shadow→enforce rollout step in
+`docs/operations/bead-validation-system.md`; update `CHANGELOG.md` (Added + Fixed). Test
+functions are named `TestTDDVerdict_*` and `TestValidationMode_*`.
+
+**Acceptance Criteria:**
+- `TestTDDVerdict_*` (temp git repo + fake beads client): RED with `"files": []` whose
+  commit `test: x (hydra-ab12)` adds a `t.Run(` test → `Located && Passed`; a REFACTOR
+  bead whose only dependency is that chain's GREEN still locates RED; `includeDirty=false`
+  ignores an untracked test file that `includeDirty=true` counts.
+- `RunTDDValidation` never changes `GetValidationRetryCount`; a second failing pass with
+  an unchanged fingerprint and no new fix bead leaves the TDD round unchanged.
+- `TestValidationMode_*`: unset mode with `tdd_validation_enabled` true/false →
+  enforce/off; shadow + failing chain → `TDDChainPasses` true, no fix bead, counters
+  unchanged, one `tdd_validation_shadow` event (verdict `FAIL`) on a test sink; enforce +
+  failing chain → false; readiness: 9 verdicts → no event, the 10th qualifying verdict →
+  exactly one `tdd_shadow_ready`, a later verdict → no second event.
+- The Test Command output lists `--- PASS` lines and no `[no tests to run]`;
+  `go build ./...` exits 0.
+
+### FR-006: dep-open requeues without a strike, bounded
 
 **Type:** fr
 **Priority:** P1
 **System Type:** library
-**Target Files:** `internal/core/bead_closer_hard_gates.go`, `internal/core/bead_closer.go`, `internal/core/dep_open_requeue_test.go`, `internal/core/startup_migrations.go`, `internal/core/startup_migrations_test.go`, `internal/core/service_starter.go`
-**Test Command:** `go test ./internal/core/ -run 'TestDepOpen_|TestStartupMigration_|TestCloseDep_' -count=1 -v`
+**Target Files:** `internal/core/bead_closer_hard_gates.go`, `internal/core/dep_open_requeue_test.go`
+**Test Command:** `go test ./internal/core/ -run 'TestDepOpen_|TestCloseDep_' -count=1 -v`
 **Build Command:** `go build ./...`
-**Depends On:** FR-004
+**Depends On:** none
 
-In `gateDependencyOrder`, a chain-member `dep-open` rejection reopens the bead without
-touching the verified-close attempt count and without writing
-`verified-close-reject-attempt-N`; it still returns a non-nil error containing
-`dep-open` (e.g. `verified-close: bead <id> requeued (dep-open)`) so the close is
-aborted. It keeps a durable label `dep-open-requeue-N`
-(replaced each round, removed when the dependency gate next passes) and emits
-`close_requeued_dep_open` with the open dependency ids. At N ≥ 5 it escalates with
-reason `dep-open-stuck`, applying the same label set `rejectClose` uses for escalation
-(`needs-human`, `verified-close-escalated`, `escalated`) so Pan's `clear-escalation`
-handles it. Add an idempotent startup migration (new `startup_migrations.go`, invoked once
-from daemon start in `service_starter.go`; errors are logged and never block startup)
-that removes `verified-close-reject-attempt-*` from beads whose only
-`verified-close-reject-*` reason label is `verified-close-reject-dep-open` and that are
-not `closed-failed`, emitting `migration_dep_open_strikes_cleared` per bead. Add both
-events to the event table in `docs/architecture/shepherd.md`; update `CHANGELOG.md`
-(Fixed). Test functions are named `TestDepOpen_*` and `TestStartupMigration_*`.
+In `gateDependencyOrder`, a chain-member `dep-open` rejection no longer goes through
+`rejectClose`'s attempt ladder: it reopens the bead without touching the verified-close
+attempt count and without writing `verified-close-reject-attempt-N`, and still returns a
+non-nil error containing `dep-open` (e.g. `verified-close: bead <id> requeued (dep-open)`)
+so the close is aborted. It keeps a durable label `dep-open-requeue-N` (replaced each
+round, removed when the dependency gate next passes) and emits `close_requeued_dep_open`
+with the open dependency ids. At N ≥ 5 it escalates with reason `dep-open-stuck`,
+applying the label set `rejectClose` uses for escalation (`needs-human`,
+`verified-close-escalated`, `escalated`) so Pan's `clear-escalation` handles it. Add the
+event to the event table in `docs/architecture/shepherd.md`; update `CHANGELOG.md`
+(Fixed). Test functions are named `TestDepOpen_*`.
 
 **Acceptance Criteria:**
-- Three consecutive dep-open rejections → no `verified-close-reject-attempt-*` label,
-  label `dep-open-requeue-3`, no `escalated`, three `close_requeued_dep_open` events.
+- Three consecutive dep-open rejections → each returns an error containing `dep-open`;
+  no `verified-close-reject-attempt-*` label; label `dep-open-requeue-3`; no `escalated`;
+  three `close_requeued_dep_open` events.
 - Fifth consecutive dep-open → `escalated` + `needs-human` + `verified-close-escalated`,
   reason `dep-open-stuck`.
 - A passing dependency gate removes `dep-open-requeue-*`.
-- Migration removes the attempt label from a bead with only
-  `verified-close-reject-dep-open`; leaves a bead that also has
-  `verified-close-reject-tdd-validation-failed`; a second run is a no-op.
-- Test Command output lists `--- PASS` lines and no `[no tests to run]`;
+- Existing `TestCloseDep_*` tests stay green.
+- The Test Command output lists `--- PASS` lines and no `[no tests to run]`;
   `go build ./...` exits 0.
 
-### FR-006: TDD validation shadow mode with a readiness signal
+### FR-007: Self-clearing TDD fix beads, strike migration, wiring, clear-escalation guard
 
 **Type:** fr
 **Priority:** P1
 **System Type:** library
-**Target Files:** `internal/core/config.go`, `internal/core/validation_service.go`, `internal/core/overseer.go`, `internal/core/validation_mode_test.go`
-**Test Command:** `go test ./internal/core/ -run 'TestValidationMode_' -count=1 -v`
-**Build Command:** `go build ./...`
-**Depends On:** FR-004
-
-Add `validation.tdd_validation_mode: off|shadow|enforce`. Back-compat when unset:
-`tdd_validation_enabled: true` → `enforce`, `false` → `off`. Add
-`ValidationService.SetEventSink` and wire it in `overseer.go` next to
-`o.beadCloser.SetEventSink(events)` (`o.eventSink` is still nil when
-`NewValidationService` runs, and a nil sink silently drops events). In `shadow`, `RunTDDValidation` and `TDDChainPasses` compute the
-verdict but never reject, never create fix beads and never touch any counter; they log
-`[TDDValidation] SHADOW PASS|FAIL <id>: <gap types>` and emit `tdd_validation_shadow`.
-Readiness: emit `tdd_shadow_ready` once per process when, in a rolling 24h window, there
-are ≥10 shadow verdicts on located chains, ≥1 PASS, and a FAIL rate ≤ 20%. Document the
-mode, both events and the shadow→enforce rollout step in
-`docs/operations/bead-validation-system.md`; update `CHANGELOG.md` (Added). Test
-functions are named `TestValidationMode_*`.
-
-**Acceptance Criteria:**
-- Table test: unset mode with `tdd_validation_enabled` true/false → enforce/off.
-- Shadow + failing chain → `TDDChainPasses` true, no fix bead, all round/attempt counts
-  unchanged, one `tdd_validation_shadow` event with verdict `FAIL`.
-- Enforce + failing chain → `TDDChainPasses` false.
-- Readiness: 9 verdicts → no event; the 10th qualifying verdict → exactly one
-  `tdd_shadow_ready`; a later verdict → no second event.
-- Test Command output lists `--- PASS` lines and no `[no tests to run]`;
-  `go build ./...` exits 0.
-
-### FR-007: Deterministic TDD fix-bead sweep, plus the clear-escalation guard
-
-**Type:** fr
-**Priority:** P1
-**System Type:** library
-**Target Files:** `internal/core/pan_tdd_fix_sweep.go`, `internal/core/pan_tdd_fix_sweep_test.go`, `internal/core/fix_audit.go`, `internal/core/overseer.go`, `internal/core/service_starter.go`, `internal/core/clear_escalation_test.go`
-**Test Command:** `go test ./internal/core/ -run 'TestTDDFixSweep_|TestClearEscalation_' -count=1 -v`
+**Target Files:** `internal/core/pan_tdd_fix_sweep.go`, `internal/core/pan_tdd_fix_sweep_test.go`, `internal/core/fix_audit.go`, `internal/core/startup_migrations.go`, `internal/core/startup_migrations_test.go`, `internal/core/overseer.go`, `internal/core/service_starter.go`, `internal/core/clear_escalation_test.go`
+**Test Command:** `go test ./internal/core/ -run 'TestTDDFixSweep_|TestStartupMigration_|TestClearEscalation_|TestFixAudit' -count=1 -v`
 **Build Command:** `go build ./...`
 **Depends On:** FR-005, FR-006
 
 (a) Add a deterministic `sweepTDDFixBeads` (new file; not routed through Pan's LLM
-FIX-AUDIT, whose prompt assumes the original closed as failed; `fix_audit.go` `BuildFixBeads` is
-changed to exclude beads labelled `tdd-validate-round-*`, which today still reach it when
-their type is `fix`). Candidates: open beads labelled `auto-fix`
-+ `tdd-validate-round-*` (any type). For each, read the original from `Original bead: <id>`
-and call `TDDChainVerdict` with `includeDirty=false` (the main checkout's dirty files are
-not evidence for a non-closing bead); close the fix bead with label `premise-cleared` and event
-`autofix_premise_cleared` only when `Located && Passed`, or when the original is
-terminal and not `closed-failed`. Leave untouched when mode is `off`, when the verdict
-is not located, or when a live worker holds the fix bead. The sweep has a
-`liveWorker func(beadID string) bool` field defaulting to
-`o.workerSpawner.HasLiveRegistryWorker`; at most one close per project per run; wired
-on the stale-filing tick in `overseer.go`; fail-open. (b) Extract the `clear-escalation`
-closure into a named method and make its refusal check the **bead's** labels (today
+FIX-AUDIT, whose prompt assumes the original closed as failed). Change `fix_audit.go`
+`BuildFixBeads` to exclude beads labelled `tdd-validate-round-*` (today they still reach
+it when their type is `fix`). Candidates: open beads labelled `auto-fix` +
+`tdd-validate-round-*` (any type). For each, read the original from
+`Original bead: <id>` and call `TDDChainVerdict` with `includeDirty=false` (the main
+checkout's dirty files are not evidence for a non-closing bead); close the fix bead with
+label `premise-cleared` and event `autofix_premise_cleared` only when
+`Located && Passed`, or when the original is terminal and not `closed-failed`. Leave it
+untouched when the mode is `off`, the verdict is not located, or a live worker holds the
+fix bead. The sweep has a `liveWorker func(beadID string) bool` field defaulting to
+`o.workerSpawner.HasLiveRegistryWorker`; at most one close per project per run; wired on
+the stale-filing tick in `overseer.go`; fail-open. (b) Add an idempotent startup
+migration (new `startup_migrations.go`, invoked once from daemon start in
+`service_starter.go`; errors are logged and never block startup) that removes
+`verified-close-reject-attempt-*` from beads whose only `verified-close-reject-*` reason
+label is `verified-close-reject-dep-open` and that are not `closed-failed`, emitting
+`migration_dep_open_strikes_cleared` per bead. (c) In `overseer.go`, call
+`o.validationService.SetEventSink(events)` next to `o.beadCloser.SetEventSink(events)`
+(`o.eventSink` is still nil when `NewValidationService` runs, and a nil sink silently
+drops events). (d) Extract the `clear-escalation` closure in `service_starter.go` into a
+named method and make its refusal check the **bead's** labels (today
 `!escLabels[escalatedLabel]` tests the static map); behavior otherwise unchanged (the
-one-fair-retry contract is preserved). Update `docs/architecture/shepherd.md` and
-`CHANGELOG.md` (Fixed). Test functions are named `TestTDDFixSweep_*` and
-`TestClearEscalation_*`.
+one-fair-retry contract is preserved). Update `docs/architecture/shepherd.md` (sweep,
+migration event, FIX-AUDIT scope) and `CHANGELOG.md` (Added + Fixed). Test functions are
+named `TestTDDFixSweep_*`, `TestStartupMigration_*` and `TestClearEscalation_*`.
 
 **Acceptance Criteria:**
 - Original passes (`Located && Passed`) → fix bead closed with `premise-cleared`, one
   event; a second candidate in the same project waits for the next run.
-- Shadow mode with a failing original → untouched (the verdict, not `TDDChainPasses`,
-  decides).
-- Original `closed-failed` → untouched; not located → untouched; mode `off` → untouched;
-  live worker → untouched.
+- Shadow mode with a failing original → untouched (the verdict decides, not
+  `TDDChainPasses`); original `closed-failed` → untouched; not located → untouched;
+  mode `off` → untouched; live worker → untouched.
+- `BuildFixBeads` excludes a type-`fix` bead labelled `tdd-validate-round-1`.
+- Migration removes the attempt label from a bead with only
+  `verified-close-reject-dep-open`; leaves one that also has
+  `verified-close-reject-tdd-validation-failed`; a second run is a no-op.
 - `clear-escalation` on a bead without `escalated` returns an error containing
   `carries no "escalated" label` and changes no labels; with `escalated` it behaves as today.
-- Test Command output lists `--- PASS` lines and no `[no tests to run]`;
+- The Test Command output lists `--- PASS` lines and no `[no tests to run]`;
   `go build ./...` exits 0.
 
 ## Success Metrics
