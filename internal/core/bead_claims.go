@@ -168,38 +168,47 @@ func (c *beadClaimChecker) checkBeadClaims(beadID string, payload string) bool {
 	}
 	allow := true
 	for _, claim := range claims {
-		claim := claim
-		// A claim without a verify clause is not machine-checkable: it is
-		// tooling failure → unknown → fail open with a typed event.
-		if claim.VerifyCmd == "" {
-			c.emit(beadID, "claim_unknown",
-				fmt.Sprintf("Drift-check: claim %q has no verify clause — unknown", claim.Assertion))
-			continue
-		}
-		out, err := c.run(claim.VerifyCmd, claimVerifyTimeout)
-		switch classifyClaimStatus(out, err) {
-		case claimStatusPass:
-			// claim confirmed at spawn time; nothing to report.
-			continue
-		case claimStatusUnknown:
-			c.emit(beadID, "claim_unknown",
-				fmt.Sprintf("Drift-check: claim %q probe unknown (verify %q): %v",
-					claim.Assertion, claim.VerifyCmd, err))
-		case claimStatusFail:
-			if claim.Hard {
-				c.emit(beadID, "claim_hard_failed",
-					fmt.Sprintf("Drift-check: hard claim %q failed verify %q — %s",
-						claim.Assertion, claim.VerifyCmd, strings.TrimSpace(out)))
-				// hard: fail-closed product gate — refuse the spawn outright.
-				allow = false
-			} else {
-				c.emit(beadID, "claim_soft_failed",
-					fmt.Sprintf("Drift-check: claim %q failed verify %q — %s",
-						claim.Assertion, claim.VerifyCmd, strings.TrimSpace(out)))
-			}
+		if !c.evaluateClaim(beadID, claim) {
+			allow = false
 		}
 	}
 	return allow
+}
+
+// evaluateClaim verifies a single claim and emits its typed event.
+// Returns false only when the claim is hard: and FAILED — the fail-closed
+// product gate that refuses the spawn. All other outcomes (pass, unknown,
+// soft fail) allow the spawn to proceed.
+func (c *beadClaimChecker) evaluateClaim(beadID string, claim BeadClaim) bool {
+	// A claim without a verify clause is not machine-checkable: it is
+	// tooling failure → unknown → fail open with a typed event.
+	if claim.VerifyCmd == "" {
+		c.emit(beadID, "claim_unknown",
+			fmt.Sprintf("Drift-check: claim %q has no verify clause — unknown", claim.Assertion))
+		return true
+	}
+	out, err := c.run(claim.VerifyCmd, claimVerifyTimeout)
+	switch classifyClaimStatus(out, err) {
+	case claimStatusPass:
+		// claim confirmed at spawn time; nothing to report.
+		return true
+	case claimStatusUnknown:
+		c.emit(beadID, "claim_unknown",
+			fmt.Sprintf("Drift-check: claim %q probe unknown (verify %q): %v",
+				claim.Assertion, claim.VerifyCmd, err))
+		return true
+	case claimStatusFail:
+		if claim.Hard {
+			c.emit(beadID, "claim_hard_failed",
+				fmt.Sprintf("Drift-check: hard claim %q failed verify %q — %s",
+					claim.Assertion, claim.VerifyCmd, strings.TrimSpace(out)))
+			return false // hard: fail-closed product gate
+		}
+		c.emit(beadID, "claim_soft_failed",
+			fmt.Sprintf("Drift-check: claim %q failed verify %q — %s",
+				claim.Assertion, claim.VerifyCmd, strings.TrimSpace(out)))
+	}
+	return true
 }
 
 // isClaimToolingFailure classifies probe failures that are the TOOL's fault
