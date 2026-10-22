@@ -9,6 +9,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Documentation
+- RED pin for the single-source-of-truth audit contract: `internal/mirroraudit/single_source_test.go` (untracked until GREEN) pins `tools/beads-mirror-audit` to import the shared `internal/mirroraudit` package and delete its duplicate parser/classifier. Evidence + contract in docs/discovery/mirror-audit-single-source-red.md.
+
 ### Added
 - Daemon mirror-health sweep (`internal/core/pan_mirror_health.go`) now runs through the shared `internal/mirroraudit` package — periodic read-only audit of beads jsonl vs br DB with quiescence/live-worker guards, typed events (`mirror_drift_detected`/`mirror_audit_clean`/`mirror_audit_error`), and ledger at `$HYDRA_HOME/mirror-health-ledger.json`. Added a single-source-of-truth regression test (`internal/mirroraudit/single_source_test.go`) pinning the CLI audit tool to the shared package so classification can never drift. Verified: `go test ./internal/mirroraudit/`, `go build ./...`, and live audit on `srv-jobfile` store (49 beads, mirror clean). *Authored by a Hydra dogfood run.*
 
