@@ -35,8 +35,11 @@ const mirrorDriftNeedsHumanEvent = "mirror_drift_needs_human"
 // drift direction, via CreateBead on the filing sink. Filing errors are logged
 // and never stop the sweep.
 
-// mirrorResyncImplemented===true once the sweep body landed (GREEN, hydra-4mn6 chain).
-const mirrorResyncImplemented = true
+// mirrorResyncImplemented gates the sweep body. It stays false until the
+// mirror-health GREEN chain lands its contract fixes: the RED sweep tests in
+// pan_mirror_health_test.go skip loudly while it is false
+// (MIRROR_HEALTH_ENFORCE=1 fails them) and sweepMirrorHealthForProject is inert.
+const mirrorResyncImplemented = false
 
 // Typed events the audit sweep emits (FR-2 contract).
 const (
@@ -74,18 +77,19 @@ var (
 	mirrorHasLiveWorker = func(projectName string) bool { return false }
 	// mirrorAuditRunner runs the FR-1 mirroraudit.Audit for one store.
 	mirrorAuditRunner = func(storePath string) (mirroraudit.Report, error) {
-		return mirroraudit.Audit(storePath, mirroraudit.Comparer(mirrorauditComparer{}))
+		// nil Comparer selects the shared package's production `br list` shell-out.
+		return mirroraudit.Audit(storePath, nil)
 	}
 	// mirrorWriteProbe probes store write-eligibility for the guarded
 	// auto-resync (FR-3). Inert default: probe succeeds (nil error).
 	mirrorWriteProbe = func(storePath string) error { return nil }
 )
 
-// mirrorauditComparer adapts the shared package's default comparer.
-type mirrorauditComparer struct{}
-
-func (mirrorauditComparer) BrListJSON(storeDir string) (string, error) {
-	return mirroraudit.DefaultComparer.BrListJSON(storeDir)
+// mirrorGuardHooks is the test seam for the FR-3 guard conditions: the store
+// owner and the write probe. nil fields fall back to the production probes.
+var mirrorGuardHooks struct {
+	isDaemonOwned func(storePath string) bool
+	writeProbe    func(storePath string) error
 }
 
 // mirrorHealthSweepDue reports whether the audit sweep is due at now (used
@@ -198,6 +202,9 @@ func mirrorGuardWriteOK(storePath string) bool {
 	if mirrorGuardHooks.writeProbe != nil {
 		return mirrorGuardHooks.writeProbe(storePath) == nil
 	}
+	if mirrorWriteProbe == nil {
+		return true
+	}
 	return mirrorWriteProbe(storePath) == nil
 }
 
@@ -208,13 +215,13 @@ func (o *Overseer) handleMirrorRecord(project types.Project, storePath string, r
 		Type:   mirrorDriftDetectedEvent,
 		Bead:   rec.BeadID,
 		Reason: string(rec.Class),
-		Detail: fmt.Sprintf("mirror drift at %s: %s", storePath, mirroraudit.Diverness(rec).String()),
+		Detail: fmt.Sprintf("mirror drift at %s: %s", storePath, fmt.Sprintf("%s jsonl=%q db=%q", rec.BeadID, rec.JSONLStatus, rec.DBStatus)),
 		Fields: map[string]any{
-			"store":    storePath,
-			"bead":     rec.BeadID,
-			"jsonl":    rec.JSONLStatus,
-			"db":       rec.DBStatus,
-			"class":    string(rec.Class),
+			"store":     storePath,
+			"bead":      rec.BeadID,
+			"jsonl":     rec.JSONLStatus,
+			"db":        rec.DBStatus,
+			"class":     string(rec.Class),
 			"direction": string(rec.Class),
 		},
 	})
@@ -253,7 +260,7 @@ func (o *Overseer) healMirrorRecord(storePath string, rec mirroraudit.Record) er
 			Reason: string(rec.Class),
 			Detail: fmt.Sprintf("auto-resync healed %s to %q in %s", rec.BeadID, rec.DBStatus, storePath),
 			Fields: map[string]any{"store": storePath, "bead": rec.BeadID, "status": rec.DBStatus},
-		}
+		})
 	}
 	return nil
 }
@@ -263,7 +270,7 @@ func (o *Overseer) healMirrorRecord(storePath string, rec mirroraudit.Record) er
 // same record are suppressed by the in-memory ledger (exactly-once).
 func (o *Overseer) fileMirrorDrift(project types.Project, storePath string, rec mirroraudit.Record) {
 	sig := storePath + "|" + rec.BeadID + "|" + string(rec.Class)
-	if seen, ok := mirrorDriftFiledLedger[sig]; ok && now().Sub(seen) < 24*time.Hour {
+	if seen, ok := mirrorDriftFiledLedger[sig]; ok && mirrorNow().Sub(seen) < 24*time.Hour {
 		return
 	}
 	title := fmt.Sprintf("mirror drift: %s (%s) in %s", rec.BeadID, rec.Class, project.Name)
@@ -283,7 +290,7 @@ func (o *Overseer) fileMirrorDrift(project types.Project, storePath string, rec 
 			return
 		}
 	}
-	mirrorDriftFiledLedger[sig] = now()
+	mirrorDriftFiledLedger[sig] = mirrorNow()
 	o.emitMirrorEvent(project, Event{
 		Type:   mirrorDriftNeedsHumanEvent,
 		Bead:   rec.BeadID,
@@ -310,5 +317,3 @@ func (o *Overseer) emitMirrorEvent(project types.Project, ev Event) {
 
 // mirrorNow is a seam for the filing ledger's clock.
 var mirrorNow = func() time.Time { return time.Now() }
-
-// Diverness renders the per-record classification for events.
