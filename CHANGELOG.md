@@ -22,6 +22,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ### Changed
 - Refactored `tools/beads-mirror-audit/main.go`: converted the divergence lookup from a nested O(N·M) loop to an id→status map (O(N+M)), extracted the duplicated `<id> jsonl=<s> db=<s>` line formatting into `divergenceLine`, simplified `main`'s output branching, and added doc comments on all exported symbols. Behavior identical; `go test ./tools/beads-mirror-audit/ -count=1` PASS, `gofmt`/`go vet` clean.
 ### Fixed
+- Fixed `scripts/mirror-health-slo.sh` YAML parsing — the registered-store regex/sed only matched list-dash-prefixed `path:` keys, silently returning 0 stores for the standard `hydra.yaml` shape (`- name: x\n    path: y`); matcher now accepts both `- path:`/indented `path:` and the SLO script was end-to-end verified against a mock store set (SLO-OK rc=0). *Authored by a Hydra dogfood run.*
 - Fixed: Resource monitoring now reads `/proc` natively instead of forking `/bin/sh`/`/bin/bash` — `getProcessCount` walks `/proc` for numeric PIDs and `getProcessLimit` parses `/proc/self/limits` directly, eliminating the fork failure mode (EAGAIN / `fork: retry: Resource temporarily unavailable`) that wedges the daemon exactly when the process ceiling is hit, the very condition the monitor guards against. Behavior identical otherwise. *Authored by a Hydra dogfood run.*
 - Green close-out re-verification done for task-tu42, docs accuracy ensured.
 ### Added

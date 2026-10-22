@@ -120,6 +120,23 @@ Config (`validation.agent_verifier`): `enabled` (default false), `min_score`,
 `classes`, `max_diff_bytes` (32KB), `timeout_seconds` (300), `provider`,
 `model`, `pi_path`.
 
+## 1b. Mirror health SLO check — `scripts/mirror-health-slo.sh`
+
+After any direct-sqlite / emergency store repair, verify the mirror is clean
+before trusting file-based reports
+(`docs/PRDs/mirror-health-prd-20261022.md` runbook line):
+
+```sh
+scripts/mirror-health-slo.sh
+```
+
+Read-only; never opens, repairs, or mutates stores. Exits 0 iff the daemon
+event stream (`$HYDRA_EVENTS_DIR`, default `/opt/dev-tools/var/hydra/.hydra-events`)
+shows **0 `mirror_drift_detected`** events in the last 24h **AND** at least one
+`mirror_audit_clean` event per registered store in the same window. Window
+override: `MIRROR_SLO_MAX_AGE_HOURS`. Infrastructure failures (missing tools,
+unreadable event dir) exit 2 — fail-closed: a breach is a signal, not a blocker.
+
 ## 2. Close verdicts & quarantine (A1) — `bead_closer.go`, `worktree_manager.go`, `chain_completion_*.go`
 
 Orphan recovery (Charon) treats a bead whose close is running daemon gates as alive: the artifact-first gate marker (`$HYDRA_HOME/gates/<project>/<bead>/<gate>.json` with `status=running`, live writer PID, started <45m ago) is written BEFORE the per-project gate lock is taken, so a close queued behind a long sibling gate (`go test ./...`) no longer looks orphaned and gets respawned mid-close (hydra-kf2t 2026-09-27, hydra-mo66 2026-10-06). The fleet digest applies the same probe (`GateCloseInProgress`) when counting `orphanclaims`, so mid-close beads do not re-fire the P0 "orphaned claims" campaign anomaly (hydra 2026-10-06, 6 phantom orphans). Gate artifacts record the gate child's PID, not the daemon's — a daemon-PID marker stays "alive" while the daemon lives and could never be finalized as interrupted.
