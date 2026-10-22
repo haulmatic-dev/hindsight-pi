@@ -9,6 +9,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Daemon mirror-health sweep (`internal/core/pan_mirror_health.go`) now runs through the shared `internal/mirroraudit` package — periodic read-only audit of beads jsonl vs br DB with quiescence/live-worker guards, typed events (`mirror_drift_detected`/`mirror_audit_clean`/`mirror_audit_error`), and ledger at `$HYDRA_HOME/mirror-health-ledger.json`. Added a single-source-of-truth regression test (`internal/mirroraudit/single_source_test.go`) pinning the CLI audit tool to the shared package so classification can never drift. Verified: `go test ./internal/mirroraudit/`, `go build ./...`, and live audit on `srv-jobfile` store (49 beads, mirror clean). *Authored by a Hydra dogfood run.*
+
 ### Documentation
 - Discovery: FR-002 periodic read-only mirror audit sweep (docs/discovery/mirror-health-fr2-discovery.md) — design modeled on `internal/core/pan_stale_filing.go`, config knobs `mirror_health.enabled` / `mirror_health.audit_interval` (default 30m, 0 disables), guards (jsonl mtime < 2m quiescence skip, live-worker skip), ledger at `$HYDRA_HOME/mirror-health-ledger.json`, typed events `mirror_drift_detected` / `mirror_audit_clean` / `mirror_audit_error`, AC mapping + RED test plan. No code change (discovery bead).
 - Added mirror-health SLO check (`scripts/mirror-health-slo.sh`) and shepherd docs — operator now has a one-command post-repair verification for beads jsonl/db drift (0 `mirror_drift_detected` and ≥1 `mirror_audit_clean` per store in the last 24h), documented in `docs/architecture/shepherd.md` §1b.
