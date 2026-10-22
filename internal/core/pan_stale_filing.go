@@ -187,6 +187,50 @@ func (o *Overseer) sweepStalePanFilings(now time.Time) {
 	}
 }
 
+// staleFilingCandidate is one pan-filed filing whose named-cohort premise is
+// demonstrably cleared and is therefore eligible for auto-close this tick.
+type staleFilingCandidate struct {
+	bead   types.Bead
+	cohort string
+}
+
+// staleFilingCandidates filters stale pan-filed filings whose named-cohort
+// premise is demonstrably cleared. Probe order: spawn health (once per
+// project, before the loop) → pan-filed label → open/in_progress → age →
+// closed-ledger → human-triage-only reason → named cohort → cohort-membership
+// probe (cached per cohort, so a store read happens at most once per distinct
+// cohort per sweep).
+func staleFilingCandidates(project types.Project, beads []types.Bead, now time.Time) []staleFilingCandidate {
+	if !staleFilingLastSpawnOK(project.Path, now) {
+		return nil
+	}
+	blockedCache := map[string]bool{}
+	cohortBlocked := func(cohort string) bool {
+		if b, ok := blockedCache[cohort]; ok {
+			return b
+		}
+		b := staleFilingCohortBlocked(project.Path, cohort)
+		blockedCache[cohort] = b
+		return b
+	}
+	var candidates []staleFilingCandidate
+	for _, b := range beads {
+		if !isPanFiledBead(b) ||
+			(b.Status != types.StatusOpen && b.Status != types.StatusInProgress) ||
+			!staleFilingIsOld(b, now) ||
+			staleFilingAlreadyClosed(string(b.ID), now) ||
+			branchProtectionReasonRe.MatchString(b.Description) {
+			continue
+		}
+		cohort := staleFilingCohortNamed(b)
+		if cohort == "" || cohortBlocked(cohort) {
+			continue
+		}
+		candidates = append(candidates, staleFilingCandidate{bead: b, cohort: cohort})
+	}
+	return candidates
+}
+
 // sweepStalePanFilingsForProject inspects one project's pan-filed beads.
 func (o *Overseer) sweepStalePanFilingsForProject(project types.Project, now time.Time) {
 	if o.beadsClient == nil {
@@ -199,42 +243,7 @@ func (o *Overseer) sweepStalePanFilingsForProject(project types.Project, now tim
 		// cohort/spawn probes fail-closed already guarantees.
 		return
 	}
-
-	// Eligible candidates: pan-filed, open or in_progress, old enough, reason
-	// not human-triage-only, premise a named cohort claim, premise cleared.
-	type candidate struct {
-		bead   types.Bead
-		cohort string
-	}
-	var candidates []candidate
-	for _, b := range beads {
-		if !isPanFiledBead(b) {
-			continue
-		}
-		if b.Status != types.StatusOpen && b.Status != types.StatusInProgress {
-			continue
-		}
-		if !staleFilingIsOld(b, now) {
-			continue
-		}
-		if staleFilingAlreadyClosed(string(b.ID), now) {
-			continue
-		}
-		if branchProtectionReasonRe.MatchString(b.Description) {
-			continue
-		}
-		cohort := staleFilingCohortNamed(b)
-		if cohort == "" {
-			continue
-		}
-		if staleFilingCohortBlocked(project.Path, cohort) {
-			continue
-		}
-		if !staleFilingLastSpawnOK(project.Path, now) {
-			continue
-		}
-		candidates = append(candidates, candidate{bead: b, cohort: cohort})
-	}
+	candidates := staleFilingCandidates(project, beads, now)
 	if len(candidates) == 0 {
 		return
 	}
@@ -247,6 +256,7 @@ func (o *Overseer) sweepStalePanFilingsForProject(project types.Project, now tim
 		return candidates[i].bead.ID < candidates[j].bead.ID
 	})
 
+	// Rate limit: at most one auto-close per project per sweep tick.
 	// Rate limit: at most one auto-close per project per sweep tick.
 	c := candidates[0]
 	spawnOK := staleFilingLastSpawnOK(project.Path, now)
