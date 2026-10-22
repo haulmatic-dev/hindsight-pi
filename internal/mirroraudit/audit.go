@@ -40,10 +40,10 @@ const (
 
 // Report is the audit result for one store.
 type Report struct {
-	StorePath string  `json:"store_path"`
-	Checked   int     `json:"checked"`
+	StorePath string   `json:"store_path"`
+	Checked   int      `json:"checked"`
 	Records   []Record `json:"records"`
-	Counts    Counts  `json:"counts"`
+	Counts    Counts   `json:"counts"`
 }
 
 // Counts summarizes the report by class.
