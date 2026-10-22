@@ -129,6 +129,9 @@ type Overseer struct {
 	// for the hard-park reconciler (hysteresis x2 before clearing labels).
 	hardParkProbes        map[string]int
 	lastHardParkReconcile time.Time
+	// Stale-filing sweep throttle (one sweep tick per staleFilingSweepInterval;
+	// internal rate limit is one auto-close per project per sweep tick).
+	lastStaleFilingSweep time.Time
 	// These clients remain direct fields until IntelligenceHub fully exposes their APIs.
 	gptCache              *GPTCacheClient                 // GPTCache client for caching
 	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
@@ -563,6 +566,9 @@ func NewOverseer(config *Config) *Overseer {
 	if o.escalationTTL != nil {
 		o.escalationTTL.SetLiveWorkerFunc(o.workerSpawner.HasLiveRegistryWorker)
 	}
+	// Stale-filing sweep production probes (spawn-success telemetry + bead
+	// store reads; see pan_stale_filing.go).
+	wireStaleFilingProbes(o)
 
 	// Session-file resume pilot (Self-heal recovery A): quality-gated resume
 	// of Pi sessions after infra-class orphan deaths.
@@ -966,6 +972,12 @@ func (o *Overseer) tick() error {
 	// Fail-open: clear stale worktree-unavailable hard-park labels when the
 	// worktree probe has recovered for two consecutive ticks.
 	o.reconcileHardParks()
+	// Stale-filing sweep: re-verify spawn-wedge/cohort pan filings whose
+	// premise may have cleared (fail-open, throttled).
+	if time.Since(o.lastStaleFilingSweep) >= staleFilingSweepInterval {
+		o.lastStaleFilingSweep = time.Now()
+		o.sweepStalePanFilings(time.Now())
+	}
 	// After scheduling, publish each project's working branch to its remote
 	// (opt-in via output.push). This consolidates completed worktree commits
 	// onto the working branch and pushes with the project owner's PAT, so by
@@ -1573,7 +1585,14 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 	if o.prespawnCloseIfGreen(bead) {
 		return nil
 	}
-	return o.workerSpawner.Spawn(bead)
+	err := o.workerSpawner.Spawn(bead)
+	if err == nil {
+		// Successful spawn telemetry for the stale-filing premise probe
+		// (probe (c): project spawned healthy within the window).
+		noteSpawnSuccessFiling(bead.Project, time.Now())
+		return nil
+	}
+	return err
 }
 
 // emitSpawnSuppressedClosed writes a structured event when a spawn is aborted
