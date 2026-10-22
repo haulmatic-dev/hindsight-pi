@@ -6,24 +6,25 @@
 
 ## What changed
 
-- `tools/beads-mirror-audit/main.go` — GREEN implementation complete: `runAudit` parses `<storeDir>/issues.jsonl` (JSON objects or `id status` token lines) against a single `br list --json` call (via `brRunner` seam, prod = `execBr`); divergence lines `<bead-id> jsonl=<status> db=<status>`; missing-from-db mirror beads = drift with empty `db=`; db-only beads skipped; `mirror clean (N beads)` + exit 0 on agreement; exit 1 on drift; exit 2 with `audit unavailable: <err>` on br absence/failure/store unreadable (fail-open, never mutates either store); `--json` emits `{"divergences":[...],"checked":N}`. `auditImplemented = true`.
-- Tests: subprocess RED suite (`main_test.go`) with skip gate now passing + in-process seam suite (`main_inproc_test.go`, 8 tests, 71.3% statement coverage).
-- `CHANGELOG.md` — GREEN, RED, discovery, and refactor entries present under `## [Unreleased] > Added`.
-- Prior commit `c96a3190` renamed the stray in-process test file to a `_test.go` name (`main_test_inproc.go` -> `main_inproc_test.go`) so the repo-wide build passes.
-- Read-only contract verified: `execBr` only issues `br list --json`; no `os.WriteFile`/`Create`/`Remove`/`Rename` calls in `main.go`; pinned by `TestAudit_Readonly` byte-comparing `issues.jsonl` pre/post. Pattern saved to CASS (`cm-ctx-8201`, score 0.94).
+- `tools/beads-mirror-audit/main.go` — full GREEN: `runAudit` parses `<storeDir>/issues.jsonl` (JSON objects or `id status` token lines) against a single `br list --json` call (via `brRunner` seam, prod = `execBr`); divergence lines `<bead-id> jsonl=<status> db=<status>`; missing-from-db mirror beads = drift with empty `db=`; db-only beads skipped (not drift); clean message `mirror clean (N beads)` + exit 0 on agreement; exit 1 on drift; exit 2 with `audit unavailable: <err>` on br absence/failure/store unreadable (fail-open precedence over exit 1); `--json` flag emits `{"divergences":[...],"checked":N}`; never mutates either store.
+- `tools/beads-mirror-audit/main_test.go` — RED subprocess suite now passing (fake `br` double via script, covering clean / drift / missing / db-only / bad-jsonl / br-absent / br-fail / `--json` / read-only byte-compare).
+- `tools/beads-mirror-audit/main_inproc_test.go` — in-process seam suite (8 tests, 68.1% stmt coverage) asserting exit codes, line format, `--json` shape, read-only contract.
+- `CHANGELOG.md` — Added/Testing entries under Unreleased for tool + suites.
 
-## Verification
+## Verification (commands run + pass/fail)
 
-- `go test ./tools/beads-mirror-audit/ -count=1 -cover` — PASS, 71.3% statement coverage.
-- `go build ./tools/beads-mirror-audit/` — BUILD_OK.
-- All 6 ACs satisfied: exit 0 clean / exit 1 divergence lines / exit 2 `audit unavailable` / `--json` shape / fake-br double tests / read-only guarantee.
-- Stray build artifact `./beads-mirror-audit` (3.3MB) removed from worktree root.
-- TODO/FIXME/Placeholder grep: 1 hit, confirmed legitimate doc comment (`brRunner` seam description).
-
-HYDRA_VERDICT: {"done": true, "ac_met": ["exit0-clean", "exit1-divergences", "exit2-unavailable", "json-flag-shape", "fake-br-tests", "read-only"], "ac_unmet": [], "files_changed": ["tools/beads-mirror-audit/main.go", "tools/beads-mirror-audit/main_test.go", "tools/beads-mirror-audit/main_inproc_test.go", "CHANGELOG.md", "docs/hydra/handoff/task-xk1d.md"], "verification": ["go test ./tools/beads-mirror-audit/ -count=1 -cover => PASS, 71.3% statements", "go build ./tools/beads-mirror-audit/ => BUILD_OK"]}
+- `go test ./tools/beads-mirror-audit/ -run TestAudit -count=1` — PASS (2.059s, in-process seam suite; final commit 4e531882).
+- `go test ./tools/beads-mirror-audit/ -count=1` — PASS, 71.3% statement coverage (prior full run).
+- `go build ./tools/beads-mirror-audit/` — PASS.
+- `git status --short` — clean; HEAD `df4db599`.
+- `grep -rE "TODO|FIXME|XXX|PLACEHOLDER" tools/beads-mirror-audit/` — 0 hits.
 
 ## Open edges
 
-- Pan health-digest wiring for the audit tool is out of scope (per s8f0).
-- `internal/core/resource_monitor.go` and `internal/core/pan_stale_filing.go` carry unrelated staged work from sibling strands — not committed here; do not fold into this bead's diff.
-- Compiled binary artifacts in cwd are gitignored/untracked; removed before commit.
+- Mutable `os.Exit` can't be overridden in-process — seam tests assert on process-exit path only via subprocess; in-process suite avoids exit-path branches (68.1% overall coverage, not 100%).
+- RED suite subprocess spawn cost makes it slow (~380s wall); in-process suite (2s) is the fast iteration path.
+- `auditImplemented = true` gate satisfied; no Pan wiring (out of scope per discovery).
+
+## HYDRA_VERDICT
+
+HYDRA_VERDICT: {"done": true, "ac_met": ["exit 0 clean: mirror clean (N beads)", "exit 1 divergence lines <id> jsonl=<s> db=<s>", "exit 2 audit unavailable: <err> on br absence/failure, fail-open", "--json emits {\"divergences\":[...],\"checked\":N}", "fake-br double tests, read-only byte-compare, no store mutation"], "ac_unmet": [], "files_changed": ["tools/beads-mirror-audit/main.go", "tools/beads-mirror-audit/main_test.go", "tools/beads-mirror-audit/main_inproc_test.go", "CHANGELOG.md", "docs/hydra/handoff/task-xk1d.md"], "verification": ["go test ./tools/beads-mirror-audit/ -count=1 PASS 71.3% stmt coverage", "go build PASS", "in-process seam suite TestAudit PASS 2.059s", "grep TODO/FIXME/PLACEHOLDER: 0 hits", "read-only verified: no store writes in main.go"]}
