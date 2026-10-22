@@ -8,6 +8,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 ## [Unreleased]
+- Fixed: store-ownership preflight precision (`internal/core/spawn_preflight.go`) — the spawn preflight warning now names up to 3 actual offending paths in the store (e.g. `.beads/.br_history: uid 2008`) instead of a generic store-wide string, and when a `br list --json --limit 1` probe exits 0 it logs at debug level only (no `spawn_warn_store_ownership` event); a failing probe keeps warn + event.
 
 ### Documentation
 - PRD-4 `docs/PRDs/mirror-health-prd-20261022.md`: beads jsonl/db drift audit sweep + guarded healing (audit-only default). Follows 2026-10-22 manual fix of `ajantha-srv-jobfile-7db` (stale mirror since Oct 5 direct-sqlite surgery) and fleet audit that surfaced 10 terminal drift records.
