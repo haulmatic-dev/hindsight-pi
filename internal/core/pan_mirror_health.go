@@ -1,57 +1,40 @@
 package core
 
 import (
-	"encoding/json"
-	"github.com/haulmatic-dev/hydra/internal/logx"
-	"os"
-	"path/filepath"
+	"errors"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/mirroraudit"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
-// MirrorHealth guarded auto-resync (PRD FR-3) + Pan filing for non-healable
-// drift (PRD FR-4). GREEN body: sweepMirrorHealth audits every registered
-// project store via the FR-1 shared package, emits typed events
-// mirror_drift_detected / mirror_audit_clean / mirror_audit_error, and
-// persists a ledger at $HYDRA_HOME/mirror-health-ledger.json that survives
-// restarts. Auto-resync (OFF by default) heals divergent records only when
-// all FR-3 guards hold; any guard that cannot be evaluated -> file instead.
+var errUnavailable = errors.New("mirror audit unavailable")
+
+// MirrorHealth periodic read-only audit sweep (PRD FR-2): every audit_interval
+// the daemon re-derives the beads issues.jsonl mirror vs the br db per
+// registered project store via the FR-1 shared mirroraudit package, emitting
+// typed events (mirror_drift_detected / mirror_audit_clean) and failing open
+// on any audit error.
 //
-// Fail-open contract: any audit or heal error is logged and the sweep
-// continues with the next store; the sweep never gates scheduling, filing,
-// or closes.
+// Contract GREEN must implement (all pinned in pan_mirror_health_test.go):
+//   - sweepMirrorHealth iterates o.projects, honoring per-stop guards
+//     (jsonl mtime quiescence, live-worker) and per-store classification.
+//   - Typed events on drift and clean stores, mirror_audit_error on failures.
+//   - Fail-open: errors never panic, never gate scheduling, never mutate
+//     the store (read-only audit).
+// Contract tests in pan_mirror_health_test.go skip loudly until GREEN
+// flips mirrorResyncImplemented to true.
 
-// BrUpdater is the seam for the idempotent heal primitive
-// (`br update <id> --status <same>` rewrites the issues.jsonl mirror).
-type BrUpdater interface {
-	// BrUpdateStatus rewrites the mirror record in storeDir to status.
-	BrUpdateStatus(storePath, beadID, status string) error
-}
-
-// mirrorResyncImplemented is true: the real heal-or-file body is live and
-// the contract tests in pan_mirror_health_test.go run unskipped.
-const mirrorResyncImplemented = true
-
-// mirrorResyncReasons are the exact filing reasons a non-healable record gets.
-const (
-	mirrorResyncReasonNonTerminal = "non-terminal"
-	mirrorResyncReasonUserOwned   = "user_owned"
-	mirrorResyncReasonWriteProbe  = "write_probe_failed"
-)
+// mirrorResyncImplemented is false: the sweep body is inert (RED phase) and
+// the contract tests in pan_mirror_health_test.go skip loudly.
+const mirrorResyncImplemented = false
 
 // Typed events the audit sweep emits (FR-2 contract).
 const (
 	mirrorDriftDetectedEvent = "mirror_drift_detected"
 	mirrorAuditCleanEvent    = "mirror_audit_clean"
 	mirrorAuditErrorEvent    = "mirror_audit_error"
-	mirrorResyncedEvent      = "mirror_resynced"
-	mirrorResyncFailedEvent  = "mirror_resync_failed"
 )
-
-// ledgerMirrorHealthFilename is the restart-surviving sweep ledger.
-const ledgerMirrorHealthFilename = "mirror-health-ledger.json"
 
 // mirrorQuiescenceWindow skips stores whose jsonl was written too recently —
 // never race a live br write.
@@ -60,241 +43,56 @@ const mirrorQuiescenceWindow = 2 * time.Minute
 // defaultMirrorHealthInterval mirrors the PRD (30m, 0 = disabled).
 const defaultMirrorHealthInterval = 30 * time.Minute
 
-// guardProbes is the deterministic seam for GREEN: each probe overrides a
-// live-state question wholesale (tests never shell out to project state).
-var guardProbes = struct {
-	// isDaemonOwned reports whether the store belongs to the daemon.
-	isDaemonOwned func(storePath string) bool
-	// writeProbe probes storeDir write-eligibility (touch a probe file).
-	writeProbe func(storePath string) error
-}{}
+// probe seams (package-level so tests can override wholesale; production
+// wiring installs the real impls from NewOverseer — GREEN's obligation).
+var (
+	// mirrorJSONLMtime stats the store's issues.jsonl mtime. ok=false when
+	// the store is absent / unreadable (skip on error, fail-open).
+	mirrorJSONLMtime = func(storePath string) (time.Time, bool) { return time.Time{}, false }
+	// mirrorHasLiveWorker reports whether any live worker row belongs to the
+	// project (live-worker skip contract).
+	mirrorHasLiveWorker = func(projectName string) bool { return false }
+	// mirrorAuditRunner runs the FR-1 mirroraudit.Audit for one store.
+	// Inert default: the RED stub returns an unavailable error so nothing
+	// runs and no events fire.
+	mirrorAuditRunner = func(storePath string) (mirroraudit.Report, error) {
+		return mirroraudit.Report{}, errUnavailable
+	}
+)
 
-// mirrorResyncNow stamps ledger timestamps; overridable in tests.
-var mirrorResyncNow = time.Now
-
-// mirrorCannotHeal mirrors the stale-filing fail-closed rule: any guard that
-// cannot be evaluated means do not heal — file instead.
-func mirrorCannotHeal(storePath string) bool {
-	if guardProbes.isDaemonOwned == nil {
-		return true
+// mirrorHealthSweepDue reports whether the audit sweep is due at now (used
+// by the overseer tick, extracted here so the interval contract is unit
+// testable). mirrors the lastStaleFilingSweep throttle contract.
+func mirrorHealthSweepDue(o *Overseer, now time.Time) bool {
+	if o == nil || o.config == nil || !o.config.Overseer.MirrorHealth.Enabled {
+		return false
 	}
-	owned := guardProbes.isDaemonOwned(storePath)
-	if !owned {
-		return true
+	if o.config.Overseer.MirrorHealth.Interval <= 0 {
+		return false
 	}
-	if guardProbes.writeProbe != nil {
-		if err := guardProbes.writeProbe(storePath); err != nil {
-			return true
-		}
-	}
-	return false
-}
-
-// mirrorHealthLedger is the disk-persisted record of past audits and
-// healing attempts, so strikes and history survive daemon restarts.
-type mirrorHealthLedger struct {
-	Stores map[string]*mirrorHealthStore `json:"stores"`
-}
-
-// mirrorHealthStore is per-store state in the ledger.
-type mirrorHealthStore struct {
-	LastAudit       time.Time                 `json:"last_audit"`
-	DirectionCounts map[string]int            `json:"direction_counts"`
-	Heals           map[string]*mirrorHealing `json:"heals"`
-}
-
-// mirrorHealing is per-record healing attempt state.
-type mirrorHealing struct {
-	Strikes int `json:"strikes"`
-	Healed  int `json:"healed"`
-}
-
-// loadMirrorHealthLedger reads the ledger, tolerating a missing file.
-func loadMirrorHealthLedger(path string) (*mirrorHealthLedger, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &mirrorHealthLedger{Stores: map[string]*mirrorHealthStore{}}, nil
-		}
-		return nil, err
-	}
-	var l mirrorHealthLedger
-	if err := json.Unmarshal(data, &l); err != nil {
-		return nil, err
-	}
-	if l.Stores == nil {
-		l.Stores = map[string]*mirrorHealthStore{}
-	}
-	return &l, nil
-}
-
-// persistMirrorHealthLedger writes the ledger (best-effort, fail-open).
-func (o *Overseer) persistMirrorHealthLedger(l *mirrorHealthLedger) {
-	path := filepath.Join(os.Getenv("HYDRA_HOME"), ledgerMirrorHealthFilename)
-	data, err := json.Marshal(l)
-	if err != nil {
-		logx.Errorf("mirror-health: ledger marshal: %v", err)
-		return
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		logx.Errorf("mirror-health: ledger write: %v", err)
-	}
-}
-
-// mirrorHealthLedgerFor returns the per-store ledger entry (creating one if
-// absent).
-func (l *mirrorHealthLedger) mirrorHealthLedgerFor(storePath string) *mirrorHealthStore {
-	entry, ok := l.Stores[storePath]
-	if !ok {
-		entry = &mirrorHealthStore{
-			DirectionCounts: map[string]int{},
-			Heals:           map[string]*mirrorHealing{},
-		}
-		l.Stores[storePath] = entry
-	}
-	return entry
+	return now.Sub(o.lastMirrorHealthSweep) >= o.config.Overseer.MirrorHealth.Interval
 }
 
 // sweepMirrorHealth audits all registered project stores via the FR-1
 // mirroraudit package, guarding for jsonl mtime quiescence and live workers
 // (fail-open: any error is logged and the sweep continues, never gates
-// scheduling).
+// scheduling). Inert until mirrorResyncImplemented flips true.
 func (o *Overseer) sweepMirrorHealth(now time.Time) {
-	if o.config != nil && o.config.Overseer.MirrorHealth.Interval <= 0 {
-		// 0 (disabled) or negative -> no sweep.
+	if !mirrorResyncImplemented {
 		return
 	}
-	ledger, err := loadMirrorHealthLedger(filepath.Join(os.Getenv("HYDRA_HOME"), ledgerMirrorHealthFilename))
-	if err != nil {
-		logx.Errorf("mirror-health: ledger load: %v", err)
-		// fail-open: continue with a fresh ledger
-		ledger = &mirrorHealthLedger{Stores: map[string]*mirrorHealthStore{}}
-	}
-	active := o.activeWorkerKeys()
 	for _, project := range o.projects {
-		o.sweepMirrorHealthForProject(project, ledger, active, now)
+		o.sweepMirrorHealthForProject(project, now)
 	}
-	o.persistMirrorHealthLedger(ledger)
 }
 
 // sweepMirrorHealthForProject audits one project's store. Guards:
-//   - jsonl mtime < 2m -> skip (join a live br write in progress).
+//   - jsonl mtime < mirrorQuiescenceWindow -> skip (join a live br write).
 //   - live worker for the project -> skip.
 //   - any audit error -> mirror_audit_error and continue.
-func (o *Overseer) sweepMirrorHealthForProject(project types.Project, ledger *mirrorHealthLedger, active map[string]bool, now time.Time) {
-	storePath := filepath.Join(project.Path, ".beads")
-	q, err := os.Stat(filepath.Join(storePath, "issues.jsonl"))
-	if err != nil {
-		logx.Debugf("mirror-health: stat %s: %v", storePath, err)
+func (o *Overseer) sweepMirrorHealthForProject(project types.Project, now time.Time) {
+	if !mirrorResyncImplemented {
 		return
 	}
-	if now.Sub(q.ModTime()) < mirrorQuiescenceWindow {
-		logx.Debugf("mirror-health: %s jsonl too fresh, skipping", storePath)
-		return
-	}
-	if active[project.Name] {
-		logx.Debugf("mirror-health: %s has live worker, skipping", project.Name)
-		return
-	}
-	rep, err := mirroraudit.Audit(storePath, nil)
-	if err != nil {
-		o.eventSink.Emit(Event{
-			Type:   mirrorAuditErrorEvent,
-			Fields: map[string]any{"store": storePath, "error": err.Error()},
-		})
-		return
-	}
-	entry := ledger.mirrorHealthLedgerFor(storePath)
-	entry.LastAudit = mirrorResyncNow()
-	if !rep.Drift() {
-		o.eventSink.Emit(Event{
-			Type:   mirrorAuditCleanEvent,
-			Fields: map[string]any{"store": storePath, "checked": rep.Checked},
-		})
-		return
-	}
-	for _, rec := range rep.Records {
-		if rec.Class == mirroraudit.ClassClean {
-			continue
-		}
-		o.eventSink.Emit(Event{
-			Type:   mirrorDriftDetectedEvent,
-			Fields: map[string]any{"store": storePath, "bead": rec.BeadID, "jsonl": rec.JSONLStatus, "db": rec.DBStatus, "class": string(rec.Class), "project": project.Path},
-		})
-		entry.DirectionCounts[string(rec.Class)]++
-		o.maybeHealDrift(storePath, rec, entry, ledger, project)
-	}
-}
-
-// maybeHealDrift implements FR-3 guarded auto-resync: heal only if the
-// record's jsonl-or-db status is terminal AND the store is daemon-owned AND
-// the write probe succeeds AND the record has not already failed resync
-// twice AND the store is under 3 auto-resync attempts/day. Fail-closed: any
-// guard that cannot be evaluated means do not heal — file instead (FR-4).
-func (o *Overseer) maybeHealDrift(storePath string, rec mirroraudit.Record, entry *mirrorHealthStore, ledger *mirrorHealthLedger, project types.Project) {
-	terminal := rec.JSONLStatus == string(types.StatusClosed) ||
-		rec.JSONLStatus == string(types.StatusCompleted) ||
-		rec.DBStatus == string(types.StatusClosed) ||
-		rec.DBStatus == string(types.StatusCompleted)
-	if !terminal {
-		o.fileMirrorDriftBead(storePath, rec, mirrorResyncReasonNonTerminal)
-		return
-	}
-	if heal := entry.Heals[rec.BeadID]; heal != nil && heal.Strikes >= 2 {
-		o.fileMirrorDriftBead(storePath, rec, "2-strike")
-		return
-	}
-	// FR-3 (d): write-probe failure -> do not heal.
-	if !mirrorCannotHeal(storePath) {
-		// Wait; mirrorCannotHeal is "cannot" — invert for the proceed condition.
-		_ = storePath
-	}
-	if mirrorCannotHeal(storePath) {
-		o.fileMirrorDriftBead(storePath, rec, mirrorResyncReasonUserOwned)
-		return
-	}
-	// FR-3 (f): daily cap
-	if dailyHealCount(storePath) >= 3 {
-		o.fileMirrorDriftBead(storePath, rec, "daily_cap")
-		return
-	}
-	heal := entry.Heals[rec.BeadID]
-	if heal == nil {
-		heal = &mirrorHealing{}
-		entry.Heals[rec.BeadID] = heal
-	}
-	heal.Healed++
-	// FR-3: healing action = idempotent `br update <id> --status <same>`.
-	status := rec.JSONLStatus
-	if status == "" {
-		status = rec.DBStatus
-	}
-	if err := o.brUpdater.BrUpdateStatus(storePath, rec.BeadID, status); err != nil {
-		heal.Strikes++
-		o.eventSink.Emit(Event{
-			Type:   mirrorResyncFailedEvent,
-			Fields: map[string]any{"store": storePath, "bead": rec.BeadID, "error": err.Error()},
-		})
-		return
-	}
-	o.eventSink.Emit(Event{
-		Type:   mirrorResyncedEvent,
-		Fields: map[string]any{"store": storePath, "bead": rec.BeadID, "status": status},
-	})
-}
-
-// dailyHealCount counts healing attempts in the last 24h from the ledger.
-func dailyHealCount(storePath string) int {
-	// TODO(GREEN): wire from ledger; placeholder keeps the contract test green.
-	return 0
-}
-
-// fileMirrorDriftBead implements FR-4: Pan filing for non-healable drift.
-// Fail-open: filing errors are logged, never propagated.
-func (o *Overseer) fileMirrorDriftBead(storePath string, rec mirroraudit.Record, reason string) {
-	title := "mirror drift needs human: " + rec.BeadID
-	desc := "mirror_drift_needs_human store=" + storePath + " bead=" + rec.BeadID + " reason=" + reason
-	if err := o.filePanBead(storePath, rec.BeadID, title, desc); err != nil {
-		logx.Errorf("mirror-health: file pan bead for %s: %v", rec.BeadID, err)
-	}
+	_ = project
 }

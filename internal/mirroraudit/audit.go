@@ -15,6 +15,7 @@ package mirroraudit
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,7 +72,7 @@ func (comparer) BrListJSON(storeDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return execCommand(path, []string{"list", "--json"}, storeDir)
+	return execCommand(path, []string{"list", "--json", "--all", "--limit", "0"}, storeDir)
 }
 
 // Audit classifies each record in the jsonl mirror vs br db for storeDir,
@@ -104,11 +105,8 @@ func Audit(storePath string, c Comparer) (Report, error) {
 	if err != nil {
 		return rep, err
 	}
-	dbRecs := []struct {
-		ID     string   `json:"id"`
-		Status string   `json:"status"`
-	}{}
-	if err := json.Unmarshal([]byte(out), &dbRecs); err != nil {
+	dbRecs, err := parseBrList(out)
+	if err != nil {
 		return rep, err
 	}
 	dbStatus := make(map[string]string, len(dbRecs))
@@ -136,6 +134,29 @@ func Audit(storePath string, c Comparer) (Report, error) {
 		}
 	}
 	return rep, nil
+}
+
+type brRec struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+// parseBrList accepts both `br list --json` shapes: a bare array of
+// records or the envelope object {"issues":[...],"total":N} used by
+// newer br versions.
+func parseBrList(out string) ([]brRec, error) {
+	var recs []brRec
+	if err := json.Unmarshal([]byte(out), &recs); err == nil {
+		return recs, nil
+	}
+	var env struct {
+		Issues []brRec `json:"issues"`
+	}
+	json.Unmarshal([]byte(out), &env)
+	if env.Issues == nil {
+		return nil, fmt.Errorf("unrecognized br list --json shape")
+	}
+	return env.Issues, nil
 }
 
 func (r *Report) add(rec Record) {

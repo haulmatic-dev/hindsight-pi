@@ -796,6 +796,10 @@ type MirrorHealthConfig struct {
 	Enabled bool `yaml:"enabled"`
 	// AuditInterval throttles the sweep. 0 disables.
 	Interval time.Duration `yaml:"audit_interval"`
+	// AutoResync opts into FR-3 guarded healing. Default false: the sweep is
+	// audit-only and drift stays visible via events (FR-4 filing runs only
+	// under auto_resync, when a guard blocks healing).
+	AutoResync bool `yaml:"auto_resync"`
 }
 
 // ValidationConfig contains self-healing validation loop settings

@@ -56,7 +56,7 @@ func execBr(dir string, args []string) (string, error) {
 type comparer struct{}
 
 func (comparer) BrListJSON(storeDir string) (string, error) {
-	return brRunner(storeDir, []string{"list", "--json"})
+	return brRunner(storeDir, []string{"list", "--json", "--all", "--limit", "0"})
 }
 
 // runAudit compares the jsonl mirror against the br database for storeDir.

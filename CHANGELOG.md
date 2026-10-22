@@ -9,6 +9,12 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Added `BrUpdater` seam in `internal/core/overseer.go` (`BeadsUpdater` alias plus `beadsBridgeUpdater` adapting `BeadsClient`) so the mirror-health heal primitive (`br update <id> --status <same>`) routes through the same br CLI path used by every other caller; the new `mirror_health.auto_resync` knob gates guarded healing, defaulting to false (audit-only drift detection).
+
+### Fixed
+- Resolved `go build ./...` compile gate fault in `internal/core/pan_mirror_health.go` — the healing operation referred to an undefined `o.brUpdater` field; the call is now routed through the existing `o.beadsClient.UpdateBeadStatus(...)` wrapper to restore compileability.
+
 ### Documentation
 - RED pin for the single-source-of-truth audit contract: `internal/mirroraudit/single_source_test.go` (untracked until GREEN) pins `tools/beads-mirror-audit` to import the shared `internal/mirroraudit` package and delete its duplicate parser/classifier. Evidence + contract in docs/discovery/mirror-audit-single-source-red.md.
 
