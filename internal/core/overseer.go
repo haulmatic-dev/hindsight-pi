@@ -1565,6 +1565,9 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 	if err := o.spawnPreflightPublishIdentity(bead, projectPath); err != nil {
 		return err
 	}
+	if err := o.spawnPreflightBeadClaims(bead, projectPath); err != nil {
+		return err
+	}
 
 	// Pre-spawn gate probe: a bead whose scoped gates already pass on main
 	// closes at zero token cost instead of looping a worker through

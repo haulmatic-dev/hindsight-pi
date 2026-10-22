@@ -206,7 +206,7 @@ func (o *Overseer) spawnPreflightStoreOwnership(bead types.Bead, projectPath str
 // daemon can actually READ the store before warning about cross-uid writes.
 // A successful probe (exit 0) means cross-uid reads work; a failure (or a
 // missing br binary, which is not proof of a broken store) returns the error.
-// The probe is stub-able in tests via a fake `br` on PATH. It fails open by
+// Tests can substitute a fake `br` on PATH for this probe. It fails open by
 // contract: callers treat probe errors as "unverified", never as blockers.
 func brListProbe(projectPath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -244,6 +244,28 @@ func (o *Overseer) spawnPreflightPublishIdentity(bead types.Bead, projectPath st
 	o.emitSpawnPreflightBlocked(projectPath, "spawn_blocked_identity_missing", bead, err.Error())
 	return &SpawnSuppressedError{BeadID: bead.ID.String(),
 		Reason: "owner publish identity unresolved (auto-resumes when PAT lands)"}
+}
+
+// spawnPreflightBeadClaims runs the deterministic payload drift-check on the
+// bead description. Claims are parsed from the machine-checkable claim
+// convention in the description; a `hard:` claim that fails its verify
+// refuses the spawn (fail-closed product gate), a soft claim failure only
+// warns via a typed event. Zero claims is a no-op (backward compatible).
+// Probe tooling failures (timeout, shell-not-found) are classified unknown
+// and fail open.
+func (o *Overseer) spawnPreflightBeadClaims(bead types.Bead, projectPath string) error {
+	var sink *EventSink
+	if o.beadCloser != nil {
+		sink = o.beadCloser.events
+	}
+	checker := newBeadClaimChecker(sink, nil)
+	if checker.checkBeadClaims(bead.ID.String(), bead.Description) {
+		return nil
+	}
+	return &SpawnSuppressedError{
+		BeadID: bead.ID.String(),
+		Reason: "hard claim failed: payload drift-check refused spawn",
+	}
 }
 
 // spawnPreflightGitAccess blocks the spawn funnel when the daemon user

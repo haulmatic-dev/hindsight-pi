@@ -1,7 +1,9 @@
 package core
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +120,7 @@ func TestCheckBeadClaims(t *testing.T) {
 		payload    string
 		runnerOut  string
 		runnerErr  bool
+		runnerTo   bool
 		wantAllow  bool
 		wantEvents []string
 	}{
@@ -162,6 +165,7 @@ func TestCheckBeadClaims(t *testing.T) {
 			payload:    "hard: claim: a (verify: sleep 30)",
 			runnerOut:  "",
 			runnerErr:  true,
+			runnerTo:   true,
 			wantAllow:  true,
 			wantEvents: []string{"claim_unknown"},
 		},
@@ -181,9 +185,16 @@ func TestCheckBeadClaims(t *testing.T) {
 			events = nil
 			var gotCmds []string
 			var gotTimeout time.Duration
+			claimEventRecorder = func(evType string) {
+				events = append(events, evType)
+			}
+			defer func() { claimEventRecorder = nil }()
 			runner := func(cmd string, timeout time.Duration) (string, error) {
 				gotCmds = append(gotCmds, cmd)
 				gotTimeout = timeout
+				if tc.runnerTo {
+					return tc.runnerOut, fmt.Errorf("claim verify did not finish within %s: %w", timeout, context.DeadlineExceeded)
+				}
 				if tc.runnerErr {
 					return tc.runnerOut, errors.New("exit status 1")
 				}
