@@ -76,6 +76,12 @@ func (s *EventSink) Emit(ev Event) Event {
 	if s == nil {
 		return ev
 	}
+	if s.now == nil {
+		// Zero-value sink (e.g. constructed in tests as &EventSink{}): neutral
+		// stub — nothing is persisted anywhere.
+		s.now = func() time.Time { return time.Time{} }
+		s.centralDir = ""
+	}
 	if ev.Time == "" {
 		ev.Time = s.now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
 	}
