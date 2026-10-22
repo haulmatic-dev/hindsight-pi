@@ -8,6 +8,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 ## [Unreleased]
+### Fixed
+- Fixed: Resource monitoring now reads `/proc` natively instead of forking `/bin/sh`/`/bin/bash` — `getProcessCount` walks `/proc` for numeric PIDs and `getProcessLimit` parses `/proc/self/limits` directly, eliminating the fork failure mode (EAGAIN / `fork: retry: Resource temporarily unavailable`) that wedges the daemon exactly when the process ceiling is hit, the very condition the monitor guards against. Behavior identical otherwise. *Authored by a Hydra dogfood run.*
 ### Added
 - GREEN: tools/beads-mirror-audit implemented — `--store <dir>` parses `<dir>/issues.jsonl` (JSON or `id status` token lines) against a single `br list --json` call, prints `<id> jsonl=<status> db=<status>` per divergence (missing-from-db counts as drift, db-only beads skipped), `mirror clean (N beads)` on agreement, `--json` emits `{divergences,checked}`, exit 0/1/2 with `audit unavailable: <err>` fail-open reporting; read-only. Plus in-process test file (main_inproc_test.go) driving the `brRunner` seam for 68.1% statement coverage.
 - GREEN: Stale-filing sweep runs on overseer tick and auto-closes `pan-filed` beads whose spawn-wedge/cohort premise has demonstrably cleared (filing older than 48h, cohort empty, spawn healthy in last 24h) — at most one per project per tick with `pan_filing_stale_closed` event; branch-protection reasons stay human-triage-only.

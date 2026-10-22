@@ -197,48 +197,52 @@ func (rm *ResourceMonitor) getMemoryUsage() (float64, error) {
 	return mem, nil
 }
 
-// getProcessCount returns the current number of processes running
+// getProcessCount returns the current number of processes running.
+// /proc is read natively (no subprocess): at the process ceiling itself,
+// sh/ls/grep/wc cannot fork and the probe would fail open — exactly the
+// `fork/exec ... resource temporarily unavailable` wedge this guard exists
+// to prevent (hydra-s8f0). /proc works without any fork.
 func (rm *ResourceMonitor) getProcessCount() (int, error) {
-	var cmd *exec.Cmd
-
-	if runtime.GOOS == "darwin" {
-		// macOS: count processes using ps
-		cmd = exec.Command("sh", "-c", "ps ax | wc -l")
-	} else {
-		// Linux: count processes in /proc
-		cmd = exec.Command("sh", "-c", "ls /proc | grep -E '^[0-9]+$' | wc -l")
-	}
-
-	output, err := cmd.Output()
+	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return 0, fmt.Errorf("failed to get process count: %w", err)
 	}
-
-	countStr := strings.TrimSpace(string(output))
-	count, err := strconv.Atoi(countStr)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse process count '%s': %w", countStr, err)
+	count := 0
+	for _, e := range entries {
+		if _, perr := strconv.Atoi(e.Name()); perr == nil {
+			count++
+		}
 	}
-
 	return count, nil
 }
 
-// getProcessLimit returns the maximum number of processes allowed (ulimit -u)
+// getProcessLimit returns the maximum number of processes allowed.
+// /proc/self/limits is read natively (no subprocess) — same EAGAIN rationale
+// as getProcessCount.
 func (rm *ResourceMonitor) getProcessLimit() (int, error) {
-	// ulimit is a shell builtin — must invoke via bash (sh/dash may not support -u)
-	cmd := exec.Command("bash", "-c", "ulimit -u")
-	output, err := cmd.Output()
+	data, err := os.ReadFile("/proc/self/limits")
 	if err != nil {
 		return 0, fmt.Errorf("failed to get process limit: %w", err)
 	}
 
-	limitStr := strings.TrimSpace(string(output))
-	limit, err := strconv.Atoi(limitStr)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse process limit '%s': %w", limitStr, err)
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "Max processes") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			return 0, fmt.Errorf("failed to parse process limit: malformed line %q", line)
+		}
+		if fields[3] == "unlimited" {
+			return -1, nil
+		}
+		limit, err := strconv.Atoi(fields[3])
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse process limit '%s': %w", fields[3], err)
+		}
+		return limit, nil
 	}
-
-	return limit, nil
+	return 0, fmt.Errorf("failed to parse process limit: no Max processes line in /proc/self/limits")
 }
 
 // CanSpawnWorker checks if system resources allow spawning a new worker
