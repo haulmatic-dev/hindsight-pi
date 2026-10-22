@@ -20,6 +20,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 - Fixed `br list --json` shape handling: newer `br` versions return an `{"issues":[...],"total":N}` envelope instead of a bare array; `mirroraudit.parseBrList` now accepts both. The audit comparers (shared package and `tools/beads-mirror-audit`) also pass `--all --limit 0` so closed beads are included — without it live stores reported false drift (49 closed beads classified `jsonl_ahead`).
 
 ### Documentation
+- FR-4 discovery for Pan filing on non-healable drift: contract decisions pinned in docs/discovery/mirror-health-fr4-discovery.md (filing sink = beadsClient.CreateBead, exactly-once per record via the pan_stale_filing ledger pattern, fail-open events, FR-3 guard classification consumed from the shared decision point), with the write-probe seam landed on the heal path. RED contract tests + notes in internal/core/pan_mirror_health_test.go (FR-4 block) and the handoff in docs/hydra/handoff/discovery-wyel.md.
 - RED pin for the single-source-of-truth audit contract: `internal/mirroraudit/single_source_test.go` (untracked until GREEN) pins `tools/beads-mirror-audit` to import the shared `internal/mirroraudit` package and delete its duplicate parser/classifier. Evidence + contract in docs/discovery/mirror-audit-single-source-red.md.
 
 ### Added
