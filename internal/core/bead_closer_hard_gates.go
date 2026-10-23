@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -176,6 +177,7 @@ func isChainTitle(title string) bool {
 // (fail-closed on fetch errors), and warns-only for singletons.
 func (c *BeadCloser) gateDependencyOrder(bead *types.Bead, projectPath, repoName string) error {
 	if len(bead.Dependencies) == 0 || c.beadsClient == nil {
+		c.clearDepOpenRequeueLabels(bead, projectPath, repoName)
 		return nil
 	}
 	var openDeps []string
@@ -190,6 +192,7 @@ func (c *BeadCloser) gateDependencyOrder(bead *types.Bead, projectPath, repoName
 		}
 	}
 	if len(openDeps) == 0 {
+		c.clearDepOpenRequeueLabels(bead, projectPath, repoName)
 		return nil
 	}
 	evidence := fmt.Sprintf("bead %s has open dependencies: %s", bead.ID, strings.Join(openDeps, ", "))
@@ -200,5 +203,99 @@ func (c *BeadCloser) gateDependencyOrder(bead *types.Bead, projectPath, repoName
 		return nil
 	}
 	c.emitGateEvent(closeDepOpenEvent, bead, projectPath, repoName, "dep-open", evidence)
-	return c.rejectClose(bead, projectPath, repoName, "dep-open")
+	return c.requeueDepOpen(bead, projectPath, repoName, evidence)
+}
+
+// depOpenRequeueLabelPrefix is the durable counter of consecutive dep-open
+// requeues (dep-open-requeue-N); depOpenMaxRequeues is the rejection on which
+// the bead escalates instead of requeueing.
+const (
+	depOpenRequeueLabelPrefix = "dep-open-requeue-"
+	depOpenMaxRequeues        = 5
+)
+
+// depOpenRequeueCount returns the highest N among dep-open-requeue-N labels.
+func depOpenRequeueCount(labels []string) int {
+	n := 0
+	for _, l := range labels {
+		if s, ok := strings.CutPrefix(l, depOpenRequeueLabelPrefix); ok {
+			if v, err := strconv.Atoi(s); err == nil && v > n {
+				n = v
+			}
+		}
+	}
+	return n
+}
+
+// depOpenLabels returns the bead's labels as stored, falling back to the
+// in-memory copy when the store read fails. The second result is the fresh
+// bead (nil when unavailable).
+func (c *BeadCloser) depOpenLabels(bead *types.Bead, projectPath, repoName string) ([]string, *types.Bead) {
+	if c.beadsClient != nil {
+		if f, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID); err == nil && f != nil {
+			return f.Labels, f
+		}
+	}
+	return bead.Labels, nil
+}
+
+// clearDepOpenRequeueLabels removes every dep-open-requeue-* label once the
+// dependency gate passes, so the bound counts consecutive rejections only.
+func (c *BeadCloser) clearDepOpenRequeueLabels(bead *types.Bead, projectPath, repoName string) {
+	if c.beadsClient == nil {
+		return
+	}
+	labels, _ := c.depOpenLabels(bead, projectPath, repoName)
+	var stale []string
+	for _, l := range labels {
+		if strings.HasPrefix(l, depOpenRequeueLabelPrefix) {
+			stale = append(stale, l)
+		}
+	}
+	if len(stale) == 0 {
+		return
+	}
+	if err := c.beadsClient.RemoveBeadLabels(projectPath, repoName, bead.ID, stale); err != nil {
+		log.Printf("[CloseGate] Failed to clear %s* labels on %s: %v", depOpenRequeueLabelPrefix, bead.ID, err)
+	}
+}
+
+// requeueDepOpen reopens a chain member that closed before its dependencies
+// without taking a verification strike. The requeue count is a durable label;
+// the depOpenMaxRequeues-th consecutive rejection escalates to a human.
+func (c *BeadCloser) requeueDepOpen(bead *types.Bead, projectPath, repoName, evidence string) error {
+	beadID := string(bead.ID)
+	labels, fresh := c.depOpenLabels(bead, projectPath, repoName)
+	if fresh != nil && fresh.Status.IsTerminal() {
+		log.Printf("[CloseGate] Bead %s already terminal (%s); skipping dep-open requeue", beadID, fresh.Status)
+		return nil
+	}
+	n := depOpenRequeueCount(labels) + 1
+
+	if n >= depOpenMaxRequeues {
+		log.Printf("[CloseGate] Bead %s dep-open %d consecutive times; escalating to human", beadID, n)
+		if c.beadsClient != nil {
+			if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"needs-human", "verified-close-escalated", escalatedLabel}); err != nil {
+				log.Printf("[CloseGate] Failed to label %s for escalation: %v", beadID, err)
+			}
+		}
+		c.events.EmitRepo(projectPath, Event{Type: "bead.escalated", Project: repoName,
+			Bead: beadID, Reason: "dep-open",
+			Detail: fmt.Sprintf("dep-open rejected %d consecutive times (%s); escalated to human, bead left in_progress", n, evidence),
+			Fields: map[string]any{"attempts": n, "max_requeues": depOpenMaxRequeues, "correlation_id": SensorCorrelation("verified-close", beadID), "outcome": "escalated"}})
+		return fmt.Errorf("verified-close: bead %s escalated after %d consecutive dep-open rejections (%s)", beadID, n, evidence)
+	}
+
+	log.Printf("[CloseGate] Bead %s dep-open requeue %d/%d — reopening without a strike", beadID, n, depOpenMaxRequeues)
+	if c.beadsClient != nil {
+		if err := c.beadsClient.UpdateBeadStatus(projectPath, bead.ID, types.StatusOpen); err != nil {
+			log.Printf("[CloseGate] Failed to reopen %s: %v", beadID, err)
+		}
+		c.clearDepOpenRequeueLabels(bead, projectPath, repoName)
+		label := fmt.Sprintf("%s%d", depOpenRequeueLabelPrefix, n)
+		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{label}); err != nil {
+			log.Printf("[CloseGate] Failed to label %s with %q: %v", beadID, label, err)
+		}
+	}
+	return fmt.Errorf("verified-close: bead %s rejected (dep-open): requeued %d/%d without a strike (%s)", beadID, n, depOpenMaxRequeues, evidence)
 }
