@@ -1,28 +1,13 @@
-# green handoff
+# refactor handoff
 
 ## What changed (files + one line each)
-- internal/beadfiles/resolve.go: full resolution logic — explicit `go`/`jsonl` extension dispatch, glob fallback for unknown extensions (README.md→README.docs), `hydra-<id>.jsonl` description blocks parsed from the default store, `resolveWorkspace` walks `docs/` + `docs/hydra/handoff/` subdirs (1 level deep) to find `task-<bead>.md` handles (PRP/workspace), idempotent with or without stale `<bead>.md` files, invalidates `~/.beads/*.lock` (removed files only) to let stale lock errors clear, `--only-<bead>`-style `remaining_targets` duplicate suppression.
-- internal/beadfiles/resolve_test.go: 34 resolver tests including 6 context-mode regression tests.
-- Docs unchanged (docs maintained in PRP file).
+- internal/beadfiles/resolve.go: named package vars (`metadataKeys`, `testFileSuffixes`, `filesLinePrefixes`) replace inline slices; `contextJSONFiles` split into `contextJSONBlock` (fence scan) + JSON decode. Behavior identical.
+- CHANGELOG.md: Unreleased/Changed entry.
 
 ## Verification (commands run + pass/fail)
-
-```
-$ go test ./internal/beadfiles/ -count=1
-ok  	github.com/victor-software-house/hydra/internal/beadfiles	0.095s
-```
-
-All 34 resolver tests PASS. `go vet ./internal/beadfiles/` clean. `gofmt -l .` clean in repo root.
+- BEFORE: `go test ./internal/beadfiles/ -run 'TestResolve_|TestIsTestFile_' -count=1` — ok.
+- AFTER: same with -v — 34 `--- PASS` lines (parents + subtests), 0 fail; `go test ./internal/beadfiles/` ok; `go vet` and `gofmt -l` clean; `go build ./internal/beadfiles/` ok.
+- No benchmarks exist for this package.
 
 ## Open edges for the next phase
-- None — resolve.is.go behaviour complete. See PRP file for design rationale.
-
----
-# red handoff (backfill — file was missing during red run)
-
-RED phase ran under prior session; handoff file not created. RED/GREEN separation was verified in green run:
-- solveBead (hydra-vmk6) passed to `resolve` invocation scripts show all `TestResolve_*` asset definitions; dispatch + description-JSON-only + README.docs rename cases were proven via green tests before any refactoring touched resolve.go.
-- No RED artifacts present in tree (expected — RED phase likely committed under another branch/commit not visible in current history).
-
-## Open edges for the next phase
-- None. Phase is closed by green verification above.
+- No adopters yet; adoption of `Resolve` in internal/core is a later bead.
