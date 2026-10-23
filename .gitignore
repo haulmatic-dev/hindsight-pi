@@ -94,3 +94,4 @@ tools/pi-rpc/pi-rpc-linux
 graphify-out/
 .hydra-events/
 graphify-out
+.pi-subagents/
