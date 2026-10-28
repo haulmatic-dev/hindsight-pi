@@ -289,6 +289,14 @@ and modifying each file (test-writing, refactors, migrations). Estimate
    the ratchet/config entry and run the module-wide gate ONCE. Module-wide
    numbers move only here.
 
+**Density-weighted slicing** (ordering rule, learned 2026-10 from
+srv-data-harbour: file-class slices left `services/` at 43% while `dto/` sat
+at 95%): order and size slices by risk density — complexity × churn × branch
+load — not by file class. Services, workflows, algorithms and high-branch
+files come FIRST and get their own slices; dto/type/constant boilerplate comes
+last, is batched, or is excluded via the config's ignore list. A module may
+never satisfy its threshold by averaging dense files against boilerplate.
+
 **Exotic-environment separation:** work requiring test infrastructure the repo
 has not used before (e.g. Temporal `TestWorkflowEnvironment`, a DB harness)
 gets its own FR with an in-repo exemplar pointer (`grep -rl <pattern> src/`),
@@ -442,6 +450,28 @@ compiler injects this literal into the agent prompt to prevent paraphrase drift.
 on a correct implementation and (b) fail on a plausible incorrect implementation.
 If a buggy version of the code could satisfy all ACs, the ACs are underspecified.
 Coverage percentage is a proxy metric — fault detection is the real criterion.
+
+**Testing doctrine** (mandatory for FRs that add or modify logic):
+
+1. **Per-FR scoped coverage, enforced at GREEN — never end-loaded.** Every
+   logic-bearing FR carries an AC asserting coverage on **its own Target
+   Files**, executed by the chain's own verification command (e.g. `jest
+   --coverage --collectCoverageFrom=<targets>` thresholds on the touched
+   files; `go test -coverprofile` with per-package function coverage). A
+   campaign-final verification gate may RE-assert but never be the first
+   place coverage is measured. Enforcement lag is how srv-data-harbour ended
+   with 584 per-file breaches discovered only at the terminal FR
+   (2026-10-22).
+2. **No aggregate or averaged thresholds.** An AC may not say "overall / All
+   files / average ≥ X%" or let one module's surplus cover another's deficit.
+   Every threshold names its exact scope (file, directory, or path key) and
+   its semantics marker: `**per-file: true**` (a glob key — jest applies it
+   per matching FILE) or `**aggregate: true**` (a directory/global key).
+   Globs without markers fail PRD lint (`R10-coverage-semantics`).
+3. **Depth scales with density.** Hotspots (high branch/complexity/churn)
+   carry higher, branch-focused bars (e.g. ≥85 with branches ≥ the statements
+   bar); trivial code may sit under a lower bar or the exclusion list. State
+   the tier per Target File group when the campaign's bar varies.
 
 ---
 

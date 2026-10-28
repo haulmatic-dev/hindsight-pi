@@ -73,6 +73,23 @@ this tool emits (or a human writes) MUST:
 - State the verification commands the worker must run (narrow test first,
   then broad).
 
+## Coverage Doctrine Routing (2026-10-28)
+
+When an FR mentions coverage thresholds, ratchets, or a test:cov-style gate:
+
+1. **Scoped over end-loaded** — if the FR's AC measures coverage on its own
+   Target Files, keep it in the FR's TDD chain (the RED/GREEN verification
+   command runs it). Only campaign-final re-assertion gates become
+   `nfr-verification` beads; they are never the FIRST place coverage is
+   measured.
+2. **Semantics markers** — glob-style coverage keys (`**`) in ACs must carry
+   `**per-file: true**` or `**aggregate: true**`; unmarked globs are flagged
+   for the author (PRD lint rule `R10-coverage-semantics`).
+3. **Density ordering** — for multi-slice campaigns, emit slices in the PRD's
+   stated risk order; if the PRD gives none, order by declared hotspot tier
+   (services/workflows/algorithms before dto/types/constants) and put a note
+   in each slice bead's description naming its tier.
+
 ## Lifetime-Fit Sizing (hard rule, measured 2026-09)
 
 A bead must fit one worker lifetime: ≈150–200 turns. Whole-module beads
