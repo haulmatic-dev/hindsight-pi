@@ -266,9 +266,49 @@ func (g *DependencyGraph) Reset() {
 // re-blocked dependent IDs; a no-op returns nil with a nil error. Rolling back
 // a bead that is not completed, or rolling back the same completion twice, is
 // a no-op (idempotent).
-//
-// RED stub: the GREEN phase implements the re-blocking.
 func (g *DependencyGraph) RollbackReleases(beadID string) ([]string, error) {
-	_, _ = beadID, g
-	return nil, nil
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	return g.dag.RollbackReleases(beadID)
+}
+
+// RollbackReleases reverts the releases granted by id's completion: every
+// dependent whose InDegree was decremented to zero by that completion and is
+// still open gets its InDegree restored, so it returns to the blocked set.
+// Dependents still blocked by another open dependency (InDegree > 0), already
+// terminal, or already re-blocked by an earlier rollback are untouched —
+// which makes the rollback idempotent. A non-completed bead is a no-op.
+// Returns the re-blocked dependent IDs in edge order; empty when nothing was
+// re-blocked.
+func (d *DAG) RollbackReleases(id string) ([]string, error) {
+	node, exists := d.nodes[id]
+	if !exists {
+		return nil, fmt.Errorf("%w: %s", ErrNodeNotFound, id)
+	}
+
+	// Only a completed bead has granted releases to revert.
+	if node.Bead.Status != types.StatusCompleted {
+		return nil, nil
+	}
+
+	rolledBack := make([]string, 0)
+	for _, dependentID := range node.OutEdges {
+		dependent, ok := d.nodes[dependentID]
+		if !ok {
+			continue // Skip if dependent no longer exists
+		}
+		// "Released by this completion" = InDegree decremented to zero and the
+		// dependent is still open. Everything else (never released, terminal,
+		// or already re-blocked by a prior rollback) stays as it is.
+		if dependent.InDegree != 0 || dependent.Bead.Status != types.StatusOpen {
+			continue
+		}
+		dependent.InDegree++
+		rolledBack = append(rolledBack, dependentID)
+	}
+	if len(rolledBack) == 0 {
+		return nil, nil
+	}
+	return rolledBack, nil
 }
