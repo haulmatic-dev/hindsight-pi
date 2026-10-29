@@ -9,6 +9,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Added: RED contract suite for per-bead evidence and evidence-based chain checks (FR-003, validator-truth PRD) — `internal/validation/bead_evidence_test.go` pins `BeadEvidence` (whole-word bead-id commit grep, dirty set only with `includeDirty`, non-repo fail-open, deterministic sha256 fingerprint) and `internal/validation/tdd_validator_test.go` pins `ValidateTDDChainEvidence` (RED needs a test file with a case-sensitive meaningful assertion, GREEN needs a non-docs non-stub implementation file, declared-files-no-evidence gaps, unlocated sides produce no gaps). Inert stubs in `bead_evidence.go` keep the package compiling; tests skip loudly pre-GREEN and fail under `BEAD_EVIDENCE_ENFORCE=1`. *Authored by a Hydra dogfood run.*
+
 ### Fixed
 - Fixed: `processHygiene.logRpcSilent` nil-map panic — hygiene is constructed at four sites and only `ensureHygiene` initialized `rpcSilentLogged`, so an rpc-active/token-silent worker crashed the daemon (4 restarts 2026-10-29). Lazy-init under the existing mutex makes every construction site safe.
 - Fixed: dep-open close rejections no longer take a verification strike (`internal/core/bead_closer_hard_gates.go`) — a chain member closed before its dependency is reopened and requeued, bounded by a durable `dep-open-requeue-N` label; the fifth consecutive rejection escalates (`escalated` + `needs-human` + `verified-close-escalated`), and a passing dependency gate clears the counter, so ordering races no longer exhaust `validation.max_rounds`. *Authored by a Hydra dogfood run.*
