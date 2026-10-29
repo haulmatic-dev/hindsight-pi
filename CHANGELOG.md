@@ -10,6 +10,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Added
+- Added: dependent-release rollback on rejected close (`internal/core/build_dependency_graph.go`, `internal/core/worker_lifecycle.go`) — `DependencyGraph.RollbackReleases`/`DAG.RollbackReleases` re-block dependents released by a completion (predicate `InDegree==0 && StatusOpen`, mirroring `MarkCompleted` release semantics, so rollback is idempotent), and `RollbackReleasedDependents` wraps it fail-open on graph errors, emitting exactly one `release_rolled_back` event (`reason=close_rejected`) with the re-blocked count when a close is rejected and dependents were released. GREEN for the hydra-63bh RED contract tests (7/7 PASS). *Authored by a Hydra dogfood run.*
 - Added: RED contract suite for per-bead evidence and evidence-based chain checks (FR-003, validator-truth PRD) — `internal/validation/bead_evidence_test.go` pins `BeadEvidence` (whole-word bead-id commit grep, dirty set only with `includeDirty`, non-repo fail-open, deterministic sha256 fingerprint) and `internal/validation/tdd_validator_test.go` pins `ValidateTDDChainEvidence` (RED needs a test file with a case-sensitive meaningful assertion, GREEN needs a non-docs non-stub implementation file, declared-files-no-evidence gaps, unlocated sides produce no gaps). Inert stubs in `bead_evidence.go` keep the package compiling; tests skip loudly pre-GREEN and fail under `BEAD_EVIDENCE_ENFORCE=1`. *Authored by a Hydra dogfood run.*
 
 ### Fixed
