@@ -148,9 +148,34 @@ func setupWorkerCompletionTest(t *testing.T) (*Overseer, *enhancedMockBeadsClien
 	initGitRepoAt(t, multiRoot, "backend")
 	initGitRepoAt(t, multiRoot, "frontend")
 
+	// Deterministic close evidence: verified-close requires at least one
+	// changed file in the evidence repo (status scan; the committed-evidence
+	// probe fails open — fixture repos have no origin upstream). Upstream
+	// this was satisfied only by the graphify indexer's async `graphify
+	// update` dropping untracked files into the repos mid-test (and after
+	// it — the TempDir RemoveAll race that disabling graphify fixes), so
+	// the evidence is now written explicitly, before any close.
+	writeCloseEvidence := func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "close-evidence.txt"), []byte("close evidence\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCloseEvidence(repo)
+	writeCloseEvidence(filepath.Join(multiRoot, "backend"))
+	writeCloseEvidence(filepath.Join(multiRoot, "frontend"))
+
 	config := DefaultConfig()
 	config.Overseer.MaxWorkers = 4
 	config.Overseer.DefaultRetries = 3
+	// These tests assert worker-completion behavior, not the intelligence
+	// layer. DefaultConfig enables graphify, and closeBead fires
+	// QueueRepoIndexing -> Refresh, whose goroutine writes graphify-out/ into
+	// the test's TempDir AFTER the test body returns and races TempDir's
+	// RemoveAll cleanup ("unlinkat ...: directory not empty" flake in
+	// TestWorkerCompletion_ConcurrentCompletions). The indexer is only
+	// constructed when Graphify.Enabled, so disable it here; the hub itself
+	// stays non-nil and every consumer nil-checks GraphifyIndexer().
+	config.Intelligence.Graphify.Enabled = false
 
 	overseer := NewOverseer(config)
 
