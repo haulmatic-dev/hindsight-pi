@@ -1927,44 +1927,10 @@ func durableRejectAttempts(labels []string) int {
 // label written by rejectClose (one label per round, replaced each round).
 const closeRejectAttemptPrefix = "verified-close-reject-attempt-"
 
-// beadTargetFiles extracts a bead's declared target files so the diff
-// check can be scoped. It reads Metadata["files"] then Metadata["target_files"]
-// then a "Files:" line in the description. Returns nil when none are declared
-// (caller then checks the whole repo).
-func beadTargetFiles(bead *types.Bead) []string {
-	if bead == nil {
-		return nil
-	}
-	if bead.Metadata != nil {
-		// Workers and validators populate different keys; reconcile both
-		// so the close-path gate never misses declared targets.
-		for _, key := range []string{"files", "target_files"} {
-			if v, ok := bead.Metadata[key]; ok && strings.TrimSpace(v) != "" {
-				return splitFileList(v)
-			}
-		}
-	}
-	for _, line := range strings.Split(bead.Description, "\n") {
-		l := strings.TrimSpace(line)
-		if strings.HasPrefix(strings.ToLower(l), "files:") {
-			return splitFileList(l[len("files:"):])
-		}
-	}
-	return nil
-}
-
-func splitFileList(s string) []string {
-	var out []string
-	for _, p := range strings.FieldsFunc(s, func(r rune) bool {
-		return r == ',' || r == ';' || r == ' ' || r == '\t'
-	}) {
-		p = strings.TrimSpace(p)
-		if p != "" && !strings.EqualFold(p, "TBD") {
-			out = append(out, p)
-		}
-	}
-	return out
-}
+// beadTargetFiles moved to beadfiles_adoption.go: the close path resolves
+// target files through the shared internal/beadfiles resolver (plus
+// sibling-test expansion) so validator-side and close-side lists cannot
+// drift.
 
 // SetSourceIndex wires the bead->store provenance index (index consulted
 // after the worker's own ProjectPath, before config name matching).
