@@ -9,6 +9,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Fixed
+- Fixed: worktree reconciler no longer removes live worktrees during long LLM turns — the 30-minute idle floor was raised to 6 hours (single-lane providers make workers think 30m+ between writes; 69 `[Registry] FATAL: worktree` worker deaths on 2026-10-29). Registry-keyed liveness fix is beaded separately.
+
 ### Added
 - Added: RED contract suite for per-bead evidence and evidence-based chain checks (FR-003, validator-truth PRD) — `internal/validation/bead_evidence_test.go` pins `BeadEvidence` (whole-word bead-id commit grep, dirty set only with `includeDirty`, non-repo fail-open, deterministic sha256 fingerprint) and `internal/validation/tdd_validator_test.go` pins `ValidateTDDChainEvidence` (RED needs a test file with a case-sensitive meaningful assertion, GREEN needs a non-docs non-stub implementation file, declared-files-no-evidence gaps, unlocated sides produce no gaps). Inert stubs in `bead_evidence.go` keep the package compiling; tests skip loudly pre-GREEN and fail under `BEAD_EVIDENCE_ENFORCE=1`. *Authored by a Hydra dogfood run.*
 

@@ -96,7 +96,9 @@ func TestReconcileOrphanedWorktrees_SkipsRecentlyActive(t *testing.T) {
 func backdateWorktree(t *testing.T, m *WorktreeManager, projectPath, key string) {
 	t.Helper()
 	wt := m.worktreePath(projectPath, key)
-	old := time.Now().Add(-time.Hour)
+	// Age past whatever the current floor is (constant-agnostic: the floor
+	// has been raised before, 2026-10-29, and a hardcoded delta broke here).
+	old := time.Now().Add(-reconcileMinIdle - time.Minute)
 	err := filepath.WalkDir(wt, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
