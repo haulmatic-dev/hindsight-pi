@@ -21,6 +21,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 - Fixed: store-ownership preflight precision (`internal/core/spawn_preflight.go`) — the spawn preflight warning now names up to 3 actual offending paths in the store (e.g. `.beads/.br_history: uid 2008`) instead of a generic store-wide string, and when a `br list --json --limit 1` probe exits 0 it logs at debug level only (no `spawn_warn_store_ownership` event); a failing probe keeps warn + event.
 
 ### Changed
+- Refactor dependent-release rollback (`internal/core/build_dependency_graph.go`, `internal/core/worker_lifecycle.go`, `internal/core/dag_rollback_test.go`) — the "released by this completion" predicate extracted into `releasedByCompletion`, the rollback event constants and nil-safe `emitReleaseRolledBack` helper replace inline emission in `RollbackReleasedDependents`, the DAG rollback no longer pre-allocates an empty slice, and the test readiness/blocked helpers dedupe into `dagRollbackBeadInList`. Behavior identical; `TestDagRollback_` 5/5 PASS before and after. *Authored by a Hydra dogfood run.*
 - Refactor `internal/beadfiles/resolve.go`: precedence keys, test-file suffixes and files-line prefixes hoisted to named package vars; `## Context` json-block scan split out of `contextJSONFiles` into `contextJSONBlock`. Behavior unchanged; no new parser.
 
 ### Added

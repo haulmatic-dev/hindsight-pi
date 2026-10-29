@@ -64,9 +64,10 @@ func dagRollbackEventCount(t *testing.T, sink *EventSink) int {
 	return n
 }
 
-func dagRollbackIsReady(t *testing.T, g *DependencyGraph, beadID string) bool {
+// dagRollbackBeadInList reports whether beadID appears in list.
+func dagRollbackBeadInList(t *testing.T, list []types.Bead, beadID string) bool {
 	t.Helper()
-	for _, b := range g.GetReadyBeads() {
+	for _, b := range list {
 		if string(b.ID) == beadID {
 			return true
 		}
@@ -74,14 +75,14 @@ func dagRollbackIsReady(t *testing.T, g *DependencyGraph, beadID string) bool {
 	return false
 }
 
+func dagRollbackIsReady(t *testing.T, g *DependencyGraph, beadID string) bool {
+	t.Helper()
+	return dagRollbackBeadInList(t, g.GetReadyBeads(), beadID)
+}
+
 func dagRollbackIsBlocked(t *testing.T, g *DependencyGraph, beadID string) bool {
 	t.Helper()
-	for _, b := range g.GetBlockedBeads() {
-		if string(b.ID) == beadID {
-			return true
-		}
-	}
-	return false
+	return dagRollbackBeadInList(t, g.GetBlockedBeads(), beadID)
 }
 
 // TestDagRollback_CompletionReleasesDependent: worker completion of B marks B

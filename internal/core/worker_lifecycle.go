@@ -413,6 +413,14 @@ func isDependencyError(err error) bool {
 // under DAG_ROLLBACK_ENFORCE=1 (mirrors BEAD_CLAIMS_ENFORCE / STALE_FILING_ENFORCE).
 const dagRollbackImplemented = true
 
+const (
+	// releaseRolledBackEventType is the typed event emitted when a rejected
+	// close re-blocks dependents its completion had released.
+	releaseRolledBackEventType = "release_rolled_back"
+	// rollbackReasonCloseRejected records why the rollback fired.
+	rollbackReasonCloseRejected = "close_rejected"
+)
+
 // RollbackReleasedDependents reverts the dependent releases granted by beadID's
 // completion after its close was rejected: every dependent the completion had
 // released is re-blocked, and exactly one typed "release_rolled_back" event is
@@ -430,15 +438,23 @@ func RollbackReleasedDependents(g *DependencyGraph, sink *EventSink, project, be
 	if len(rolledBack) == 0 {
 		return nil
 	}
-	if sink != nil {
-		sink.Emit(Event{
-			Type:    "release_rolled_back",
-			Project: project,
-			Bead:    beadID,
-			Reason:  "close_rejected",
-			Detail:  fmt.Sprintf("close of %s rejected; %d released dependent(s) re-blocked", beadID, len(rolledBack)),
-			Fields:  map[string]any{"rolled_back": rolledBack},
-		})
-	}
+	emitReleaseRolledBack(sink, project, beadID, rolledBack)
 	return rolledBack
+}
+
+// emitReleaseRolledBack emits the typed rollback event for a rejected close
+// that re-blocked released dependents. Nil-sink safe: a missing sink skips
+// emission without failing the rollback.
+func emitReleaseRolledBack(sink *EventSink, project, beadID string, rolledBack []string) {
+	if sink == nil {
+		return
+	}
+	sink.Emit(Event{
+		Type:    releaseRolledBackEventType,
+		Project: project,
+		Bead:    beadID,
+		Reason:  rollbackReasonCloseRejected,
+		Detail:  fmt.Sprintf("close of %s rejected; %d released dependent(s) re-blocked", beadID, len(rolledBack)),
+		Fields:  map[string]any{"rolled_back": rolledBack},
+	})
 }
