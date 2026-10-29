@@ -171,6 +171,8 @@ func (c *BeadCloser) gateQuarantineContradiction(bead *types.Bead, projectPath, 
 // starts with one is a chain member and closes hard on open dependencies.
 var chainTitlePrefixes = []string{"RED:", "GREEN:", "REFACTOR:", "SYNTAX:"}
 
+// isChainTitle reports whether the bead title marks a TDD-chain phase member
+// (RED:/GREEN:/REFACTOR:/SYNTAX:), which gates hard on open dependencies.
 func isChainTitle(title string) bool {
 	for _, p := range chainTitlePrefixes {
 		if strings.HasPrefix(title, p) {
