@@ -411,7 +411,7 @@ func isDependencyError(err error) bool {
 // dagRollbackImplemented gates the RED contract tests in dag_rollback_test.go:
 // tests skip loudly while the rollback contract is unimplemented, and fail
 // under DAG_ROLLBACK_ENFORCE=1 (mirrors BEAD_CLAIMS_ENFORCE / STALE_FILING_ENFORCE).
-const dagRollbackImplemented = false
+const dagRollbackImplemented = true
 
 // RollbackReleasedDependents reverts the dependent releases granted by beadID's
 // completion after its close was rejected: every dependent the completion had
@@ -419,10 +419,26 @@ const dagRollbackImplemented = false
 // emitted when at least one dependent was re-blocked. A bead with no released
 // dependents, or a rollback applied twice, emits nothing and re-locks nothing.
 // Returns the re-blocked dependent IDs in edge order; empty when nothing was
-// re-blocked.
-//
-// RED stub: the GREEN phase implements this over DependencyGraph.RollbackReleases.
+// re-blocked. Fail-open: a graph error is logged and reported as no rollback
+// (the event stream must never gate the pipeline).
 func RollbackReleasedDependents(g *DependencyGraph, sink *EventSink, project, beadID string) []string {
-	_, _, _, _ = g, sink, project, beadID
-	return nil
+	rolledBack, err := g.RollbackReleases(beadID)
+	if err != nil {
+		log.Printf("[DAGRollback] rollback of releases for %s failed: %v", beadID, err)
+		return nil
+	}
+	if len(rolledBack) == 0 {
+		return nil
+	}
+	if sink != nil {
+		sink.Emit(Event{
+			Type:    "release_rolled_back",
+			Project: project,
+			Bead:    beadID,
+			Reason:  "close_rejected",
+			Detail:  fmt.Sprintf("close of %s rejected; %d released dependent(s) re-blocked", beadID, len(rolledBack)),
+			Fields:  map[string]any{"rolled_back": rolledBack},
+		})
+	}
+	return rolledBack
 }
