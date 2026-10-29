@@ -8,6 +8,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 ## [Unreleased]
+
+### Fixed
+- Fixed: `processHygiene.logRpcSilent` nil-map panic — hygiene is constructed at four sites and only `ensureHygiene` initialized `rpcSilentLogged`, so an rpc-active/token-silent worker crashed the daemon (4 restarts 2026-10-29). Lazy-init under the existing mutex makes every construction site safe.
 - Fixed: dep-open close rejections no longer take a verification strike (`internal/core/bead_closer_hard_gates.go`) — a chain member closed before its dependency is reopened and requeued, bounded by a durable `dep-open-requeue-N` label; the fifth consecutive rejection escalates (`escalated` + `needs-human` + `verified-close-escalated`), and a passing dependency gate clears the counter, so ordering races no longer exhaust `validation.max_rounds`. *Authored by a Hydra dogfood run.*
 - Fixed: store-ownership preflight precision (`internal/core/spawn_preflight.go`) — the spawn preflight warning now names up to 3 actual offending paths in the store (e.g. `.beads/.br_history: uid 2008`) instead of a generic store-wide string, and when a `br list --json --limit 1` probe exits 0 it logs at debug level only (no `spawn_warn_store_ownership` event); a failing probe keeps warn + event.
 

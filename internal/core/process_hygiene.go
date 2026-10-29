@@ -89,6 +89,14 @@ type processHygiene struct {
 func (p *processHygiene) logRpcSilent(beadID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Lazy init: hygiene is constructed at four sites and all but
+	// ensureHygiene (:100) pre-date rpcSilentLogged — a nil map here
+	// panicked the daemon whenever an rpc-active, token-silent worker
+	// was detected (2026-10-29, 4 crashes). Init on first use is safe
+	// under p.mu and makes every construction site correct.
+	if p.rpcSilentLogged == nil {
+		p.rpcSilentLogged = map[string]bool{}
+	}
 	if !p.rpcSilentLogged[beadID] {
 		log.Printf("[Charon] rpc-active but token-silent: %s", beadID)
 		p.rpcSilentLogged[beadID] = true
