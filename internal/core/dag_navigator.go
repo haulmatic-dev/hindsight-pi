@@ -98,6 +98,12 @@ func (n *DAGNavigator) GetReadyBeads(completed map[string]bool) []types.Bead {
 			// Human gates are never worker-executed, whatever their status.
 			continue
 		}
+		if campaignParkGateActive(node.Bead.Labels) {
+			// Campaign-wide park (hydra-gcip): the PARK-GATE label hard-parks
+			// every member of a parked campaign; the unpark sweep removes it
+			// and readiness is restored.
+			continue
+		}
 		if hasBeadLabel(node.Bead.Labels, escalatedLabel) {
 			// Escalated beads are parked for a human; never hand them to a
 			// worker even if a stale status/label refresh made them look ready.
