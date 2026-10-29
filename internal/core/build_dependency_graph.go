@@ -257,3 +257,18 @@ func (g *DependencyGraph) Reset() {
 	g.dag = NewDAG()
 	g.beadsByID = make(map[string]types.Bead)
 }
+
+// RollbackReleases reverts the releases granted by beadID's completion: every
+// dependent of beadID that had been released by that completion (InDegree
+// decremented to zero while still open) is re-blocked, returning the graph to
+// its pre-completion readiness. Dependents that were never released (still
+// blocked by another open dependency) are left untouched. Returns the
+// re-blocked dependent IDs; a no-op returns nil with a nil error. Rolling back
+// a bead that is not completed, or rolling back the same completion twice, is
+// a no-op (idempotent).
+//
+// RED stub: the GREEN phase implements the re-blocking.
+func (g *DependencyGraph) RollbackReleases(beadID string) ([]string, error) {
+	_, _ = beadID, g
+	return nil, nil
+}
