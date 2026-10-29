@@ -128,9 +128,17 @@ func (c *BeadCloser) gateExecutableAcceptance(bead *types.Bead, projectPath, rep
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err == nil {
+		c.clearInfraRejectLabels(bead, projectPath, repoName)
 		return nil
 	}
+	exitCode := gateExitCode(err)
 	log.Printf("[CloseGate] bead %s verification command failed (exit err %v): %s", bead.ID, err, strings.TrimSpace(string(out)))
+	// Environment-shaped failures (missing tool/dependency, external kill) are
+	// infra, not project faults: reopen without a verification strike, and
+	// escalate only after infraMaxRejections consecutive infra rejections.
+	if isInfraGateFailure(exitCode, string(out)) {
+		return c.rejectInfraGate(bead, projectPath, repoName, cmdStr, dir, exitCode, string(out))
+	}
 	return c.rejectViaGate(bead, projectPath, repoName, "verification-failed",
 		fmt.Sprintf("verification command %q failed in %s; verbatim output: %s", cmdStr, dir, strings.TrimSpace(string(out))))
 }
