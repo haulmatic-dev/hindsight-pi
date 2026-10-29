@@ -278,7 +278,7 @@ func TestCampaignPark_GateBlockedBeadNotReady(t *testing.T) {
 
 	// Closing the PARK-GATE removes labels and restores readiness.
 	gated.Labels = nil
-	if err := dag.AddNode(gated); err == nil {
+	if err := dag.AddNode(gated); err != nil {
 		// AddNode rejects duplicates; update through the node instead.
 		if node, ok := dag.GetNode(string(gated.ID)); ok {
 			node.Bead.Labels = nil

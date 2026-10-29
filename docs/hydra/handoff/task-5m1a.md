@@ -30,6 +30,11 @@ The implementation edits landed via other beads' commits (shared-tree `git add` 
 - RED tests: `0e23eaf4` / `f8026ba4` (hydra-63bh).
 This bead's own commit carries only the CHANGELOG entry + this handoff doc.
 
+## Gate-fix addendum (hydra-5m1a daemon gate round 2)
+
+- Gate FAIL root cause was NOT the rollback code: `TestCampaignPark_GateBlockedBeadNotReady` (task-4ovt GREEN, uncommitted in this shared worktree at gate time) — the RED test's label-removal fallback was gated on `err == nil` from `dag.AddNode(gated)`, but `AddNode` rejects duplicates (`ErrNodeAlreadyExists`, dag.go:124), so the fallback `node.Bead.Labels = nil` never ran and the readiness-restore half was unreachable. Fixed the inverted condition to `err != nil`, matching the test's own comment. `internal/core/campaign_park_test.go` is outside this bead's target files — one-character correctness fix to unblock the shared gate, implementation untouched (verdict attribution: test defect, not impl defect).
+- Re-verified: `TestCampaignPark_|TestDagRollback_` via test binary — 14 `--- PASS`, final `PASS`, exit 0; `go vet ./internal/core/` clean.
+
 ## Open edges for the next phase
 
 - Full `DAG_ROLLBACK_ENFORCE=1` run and repo-wide `go vet ./...`/`go test ./...` left to the daemon gate (budget: narrow selector run 2/3 used).
