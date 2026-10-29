@@ -68,11 +68,9 @@ func resetCampaignParkLeakLedger() {
 // wrote (attach on parked, strip on unpark). Membership is bead.Project ==
 // key: a campaign-2 bead that merely depends on a campaign-1 member is NOT a
 // member and is never labelled by this sweep. Terminal members (completed,
-// closed, failed) are skipped in both directions. The parked sweep is
-// idempotent: members already carrying the gate are not rewritten; an
-// in_progress member emits exactly one campaign_park_leak per bead lifetime
-// (once-per-bead ledger). A nil list seam or listing error is returned to
-// the caller, which fails open (never gates the pipeline on sweep health).
+// closed, failed) are skipped in both directions. A nil list seam or listing
+// error is returned to the caller, which fails open (never gates the
+// pipeline on sweep health).
 func sweepCampaignParkLabels(projectPath, repoName, key string, parked bool) (int, error) {
 	if campaignParkListBeads == nil {
 		// No store plumbing installed: fail open, nothing to sweep.
@@ -82,37 +80,56 @@ func sweepCampaignParkLabels(projectPath, repoName, key string, parked bool) (in
 	if err != nil {
 		return 0, err
 	}
+	apply := campaignParkGateBead
+	if !parked {
+		apply = campaignParkUngateBead
+	}
 	changed := 0
 	for _, bead := range beads {
 		if !campaignParkMember(bead, key) || bead.Status.IsTerminal() {
 			continue
 		}
-		if parked {
-			if campaignParkGateActive(bead.Labels) {
-				continue // already gated: idempotent re-sweep
-			}
-			if campaignParkApplyLabels != nil {
-				if err := campaignParkApplyLabels(projectPath, repoName, bead.ID, []string{campaignParkGateLabel}); err != nil {
-					return changed, err
-				}
-			}
+		wrote, err := apply(projectPath, repoName, bead)
+		if err != nil {
+			return changed, err
+		}
+		if wrote {
 			changed++
-			if bead.Status == types.StatusInProgress {
-				campaignParkNoteLeak(bead)
-			}
-			continue
 		}
-		// Unpark: strip the gate from every non-terminal member so readiness
-		// is restored even when the listing no longer shows the label (the
-		// removal itself is idempotent at the store level).
-		if campaignParkRemoveLabels != nil {
-			if err := campaignParkRemoveLabels(projectPath, repoName, bead.ID, []string{campaignParkGateLabel}); err != nil {
-				return changed, err
-			}
-		}
-		changed++
 	}
 	return changed, nil
+}
+
+// campaignParkGateBead attaches the park-gate to one member. Idempotent:
+// a member already carrying the gate is not rewritten. An in_progress member
+// emits exactly one campaign_park_leak per bead lifetime (once-per-bead
+// ledger). Returns whether the sweep wrote the gate.
+func campaignParkGateBead(projectPath, repoName string, bead types.Bead) (bool, error) {
+	if campaignParkGateActive(bead.Labels) {
+		return false, nil // already gated: idempotent re-sweep
+	}
+	if campaignParkApplyLabels != nil {
+		if err := campaignParkApplyLabels(projectPath, repoName, bead.ID, []string{campaignParkGateLabel}); err != nil {
+			return false, err
+		}
+	}
+	if bead.Status == types.StatusInProgress {
+		campaignParkNoteLeak(bead)
+	}
+	return true, nil
+}
+
+// campaignParkUngateBead strips the gate from one member so readiness is
+// restored even when the listing no longer shows the label (the removal
+// itself is idempotent at the store level). Returns whether the sweep
+// wrote the removal.
+func campaignParkUngateBead(projectPath, repoName string, bead types.Bead) (bool, error) {
+	if campaignParkRemoveLabels != nil {
+		if err := campaignParkRemoveLabels(projectPath, repoName, bead.ID, []string{campaignParkGateLabel}); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // campaignParkNoteLeak emits campaign_park_leak for an in_progress member at
