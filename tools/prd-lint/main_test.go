@@ -381,3 +381,106 @@ func TestSystemTypeLint(t *testing.T) {
 		}
 	}
 }
+
+// coverage-threshold semantics rule (RED phase — hydra-74mf).
+//
+// The rule under test: a requirement whose Acceptance Criteria state a
+// coverage threshold over a file glob (e.g. "coverage >= 80% for `tools/**`")
+// must also carry an explicit coverage-exemption marker when it does not
+// intend to be gated by that threshold. A block that names a coverage
+// threshold on a glob without the marker yields a coverage-threshold
+// warning violation. Blocks that never mention coverage are unaffected.
+//
+// RED gating: the rule is not implemented yet (GREEN's job), so by default
+// these tests skip loudly to keep `go test ./...` green for the daemon
+// gate. Setting PRDLINT_COVERAGE_THRESHOLD_ENFORCE=1 turns them into hard
+// assertions, and the enforced run is expected to FAIL against the current
+// code — that failure is the RED evidence.
+const coverageThresholdEnforceEnv = "PRDLINT_COVERAGE_THRESHOLD_ENFORCE"
+
+func requireCoverageThresholdEnforced(t *testing.T) {
+	t.Helper()
+	if os.Getenv(coverageThresholdEnforceEnv) == "" {
+		t.Skipf("coverage-threshold rule not implemented yet (RED); set %s=1 to enforce and observe the expected RED failure", coverageThresholdEnforceEnv)
+	}
+}
+
+func isCoverageThresholdWarning(v Violation) bool {
+	return strings.Contains(strings.ToLower(v.Rule), "coverage-threshold") ||
+		strings.Contains(strings.ToLower(v.Message), "coverage-threshold")
+}
+
+func coverageThresholdFixturePRD() string {
+	return minimalValidPRD() + `
+
+## FR-COV: Coverage threshold reporting
+
+**Type:** fr
+**Priority:** P1
+**Target Files:** ` + "`tools/prd-lint/main.go`" + `
+**Acceptance Criteria:**
+- ` + "`go test ./... -cover` reports coverage >= 80% for glob `tools/**`" + `
+`
+}
+
+func TestCoverageThresholdLint_GlobThresholdCriterionWithoutMarkerWarns(t *testing.T) {
+	requireCoverageThresholdEnforced(t)
+
+	result := lintContent("test.md", coverageThresholdFixturePRD())
+	if result.Passed {
+		t.Fatalf("expected the glob coverage-threshold criterion without an exemption marker to produce a coverage-threshold warning, got a clean pass")
+	}
+	found := false
+	for _, v := range result.Violations {
+		if !isCoverageThresholdWarning(v) {
+			continue
+		}
+		found = true
+		if v.ID != "FR-COV" {
+			t.Errorf("coverage-threshold warning should point at FR-COV, got ID %q", v.ID)
+		}
+		if v.Line == 0 {
+			t.Errorf("coverage-threshold warning must carry a line number")
+		}
+		if strings.TrimSpace(v.Message) == "" {
+			t.Errorf("coverage-threshold warning must carry a message")
+		}
+	}
+	if !found {
+		t.Fatalf("expected a coverage-threshold warning mentioning the threshold semantics for FR-COV, got violations: %v", result.Violations)
+	}
+}
+
+func TestCoverageThresholdLint_NonCoverageCriteriaUnaffected(t *testing.T) {
+	requireCoverageThresholdEnforced(t)
+
+	// Regression fixture: no block mentions coverage, so no
+	// coverage-threshold warning may appear.
+	result := lintContent("test.md", minimalValidPRD())
+	for _, v := range result.Violations {
+		if isCoverageThresholdWarning(v) {
+			t.Errorf("non-coverage criterion must not trigger a coverage-threshold warning, got %+v", v)
+		}
+	}
+	if !result.Passed {
+		t.Fatalf("expected the coverage-free regression fixture to stay clean, got violations: %v", result.Violations)
+	}
+
+	// Same fixture with the exemption marker present: the marker suppresses
+	// the warning, so the glob-threshold block lints clean.
+	marked := strings.Replace(
+		coverageThresholdFixturePRD(),
+		"## FR-COV: Coverage threshold reporting",
+		"<!-- coverage-threshold: exempt -->\n\n## FR-COV: Coverage threshold reporting",
+		1,
+	)
+	markedResult := lintContent("test.md", marked)
+	for _, v := range markedResult.Violations {
+		if isCoverageThresholdWarning(v) {
+			t.Errorf("explicit exemption marker must suppress the coverage-threshold warning, got %+v", v)
+		}
+	}
+	if !markedResult.Passed {
+		t.Fatalf("expected the marked fixture to pass cleanly, got violations: %v", markedResult.Violations)
+	}
+}
