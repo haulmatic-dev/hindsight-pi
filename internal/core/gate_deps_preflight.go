@@ -37,17 +37,35 @@ const depsPreflightImplemented = true
 // after any install, then runs command via run and returns its output
 // verbatim.
 func gateDepsPreflight(worktreePath string, command string, run func(dir, command string) (string, error)) (string, error) {
-	if fileExists(filepath.Join(worktreePath, "package.json")) &&
-		!dirExists(filepath.Join(worktreePath, "node_modules")) {
-		manager, _ := detectNodeManager(worktreePath)
-		if _, err := run(worktreePath, manager+" install"); err != nil {
-			return "", fmt.Errorf("dependency install (%s install) failed in %s: %w", manager, worktreePath, err)
-		}
-		if dirty := worktreeDirtyAfterInstall(worktreePath); dirty != "" {
-			return "", fmt.Errorf("dependency install left worktree %s dirty (tree-clean guard); verification command not run; git status --porcelain: %s", worktreePath, dirty)
+	if depsInstallRequired(worktreePath) {
+		if err := installNodeDeps(worktreePath, run); err != nil {
+			return "", err
 		}
 	}
 	return run(worktreePath, command)
+}
+
+// depsInstallRequired reports whether the worktree carries a package manifest
+// without an installed node_modules directory — the one shape that needs a
+// dependency install before the verification command can run.
+func depsInstallRequired(worktreePath string) bool {
+	return fileExists(filepath.Join(worktreePath, "package.json")) &&
+		!dirExists(filepath.Join(worktreePath, "node_modules"))
+}
+
+// installNodeDeps runs the lockfile-detected package manager's install
+// command in the worktree, then enforces the tree-clean guard: an install
+// that leaves tracked files dirty is a failure, and the verification command
+// must not run.
+func installNodeDeps(worktreePath string, run func(dir, command string) (string, error)) error {
+	manager, _ := detectNodeManager(worktreePath)
+	if _, err := run(worktreePath, manager+" install"); err != nil {
+		return fmt.Errorf("dependency install (%s install) failed in %s: %w", manager, worktreePath, err)
+	}
+	if dirty := worktreeDirtyAfterInstall(worktreePath); dirty != "" {
+		return fmt.Errorf("dependency install left worktree %s dirty (tree-clean guard); verification command not run; git status --porcelain: %s", worktreePath, dirty)
+	}
+	return nil
 }
 
 // worktreeDirtyAfterInstall reports non-empty `git status --porcelain` output
