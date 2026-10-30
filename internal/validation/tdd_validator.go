@@ -19,10 +19,10 @@ type TDDGap struct {
 
 // TDDValidationResult represents the outcome of TDD chain validation
 type TDDValidationResult struct {
-	Passed    bool
-	RedPassed bool
+	Passed      bool
+	RedPassed   bool
 	GreenPassed bool
-	Gaps      []TDDGap
+	Gaps        []TDDGap
 }
 
 // TDDValidator validates TDD chain beads (RED, GREEN, REFACTOR)
@@ -236,16 +236,26 @@ func (v *TDDValidator) extractTargetFiles(bead types.Bead, projectPath string) [
 	return files
 }
 
-func (v *TDDValidator) hasMeaningfulAssertions(content string) bool {
-	// Simple heuristic: check for common assertion patterns
-	assertionPatterns := []string{
-		"assert", "require", "expect", "t.Run", "Test",
-	}
-	lowerContent := strings.ToLower(content)
+// assertionPatterns are the CASE-SENSITIVE assertion probes used by
+// hasMeaningfulAssertions (validator-truth FR-003). Case sensitivity is the
+// point: `// T.RUN(` prose, `ASSERT.Equal` in a comment, and a bare
+// `import "testing"` must never read as a meaningful test.
+var assertionPatterns = []string{
+	"func Test", "t.Run(", "t.Error(", "t.Fatal(",
+	"assert.", "require.", "expect(", "describe(", "def test_",
+}
+
+// meaningfulAssertions reports whether content contains at least one
+// case-sensitive assertion pattern.
+func meaningfulAssertions(content string) bool {
 	for _, pattern := range assertionPatterns {
-		if strings.Contains(lowerContent, pattern) {
+		if strings.Contains(content, pattern) {
 			return true
 		}
 	}
 	return false
+}
+
+func (v *TDDValidator) hasMeaningfulAssertions(content string) bool {
+	return meaningfulAssertions(content)
 }
