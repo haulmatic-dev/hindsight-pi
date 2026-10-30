@@ -607,6 +607,9 @@ func (s *Scheduler) Tick() error {
 		// in the registry (2026-09-21).
 		if o.campaignParked(bead) {
 			log.Printf("⏸️  Skipping retry of bead %s: campaign parked (Pan)", bead.ID)
+			// Make the park durable at the bead level: attach the PARK-GATE
+			// label to every non-terminal member (hydra-gcip).
+			o.campaignParkSweepBead(&bead)
 			continue
 		}
 
@@ -866,6 +869,7 @@ func (s *Scheduler) SpawnWorkersForNodes(nodes []*Node, maxSlots int) int {
 		// Campaign park: Pan may have frozen the whole project campaign.
 		if o.campaignParked(node.Bead) {
 			log.Printf("⏸️  Skipping bead %s: campaign parked (Pan)", node.Bead.ID)
+			o.campaignParkSweepBead(&node.Bead)
 			continue
 		}
 		if !s.ShouldSpawnWorker(node) {

@@ -18,10 +18,11 @@ func TestBeadTargetFiles(t *testing.T) {
 		bead types.Bead
 		want int
 	}{
-		{"metadata files", types.Bead{Metadata: map[string]string{"files": "a.go, b.go"}}, 2},
-		{"metadata target_files", types.Bead{Metadata: map[string]string{"target_files": "x/a.go, x/b.go"}}, 2},
-		{"metadata files takes precedence", types.Bead{Metadata: map[string]string{"files": "a.go", "target_files": "x/a.go"}}, 1},
-		{"description", types.Bead{Description: "Do X\nFiles: internal/x.go internal/y.go\nmore text"}, 2},
+		// Post FR-006: every .go impl file gains its sibling test.
+		{"metadata files", types.Bead{Metadata: map[string]string{"files": "a.go, b.go"}}, 4},
+		{"metadata target_files", types.Bead{Metadata: map[string]string{"target_files": "x/a.go, x/b.go"}}, 4},
+		{"metadata files takes precedence", types.Bead{Metadata: map[string]string{"files": "a.go", "target_files": "x/a.go"}}, 2},
+		{"description", types.Bead{Description: "Do X\nFiles: internal/x.go internal/y.go\nmore text"}, 4},
 		{"tbd-ignored", types.Bead{Description: "Files: TBD"}, 0},
 		{"none", types.Bead{Description: "no files declared here"}, 0},
 	}

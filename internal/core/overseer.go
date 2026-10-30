@@ -596,6 +596,8 @@ func NewOverseer(config *Config) *Overseer {
 	// Stale-filing sweep production probes (spawn-success telemetry + bead
 	// store reads; see pan_stale_filing.go).
 	wireStaleFilingProbes(o)
+	// Campaign park label sweep production plumbing (see campaign_park.go).
+	wireCampaignParkSweep(o)
 
 	// Session-file resume pilot (Self-heal recovery A): quality-gated resume
 	// of Pi sessions after infra-class orphan deaths.
@@ -1827,6 +1829,7 @@ func (o *Overseer) spawnWorkersForNodes(nodes []*Node, maxSlots int) int {
 		}
 		if o.campaignParked(node.Bead) {
 			log.Printf("⏸️  Skipping bead %s: campaign parked (Pan)", node.Bead.ID)
+			o.campaignParkSweepBead(&node.Bead)
 			continue
 		}
 		if !o.shouldSpawnWorker(node) {

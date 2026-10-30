@@ -292,23 +292,26 @@ func (d *DAG) RollbackReleases(id string) ([]string, error) {
 		return nil, nil
 	}
 
-	rolledBack := make([]string, 0)
+	var rolledBack []string
 	for _, dependentID := range node.OutEdges {
 		dependent, ok := d.nodes[dependentID]
 		if !ok {
 			continue // Skip if dependent no longer exists
 		}
-		// "Released by this completion" = InDegree decremented to zero and the
-		// dependent is still open. Everything else (never released, terminal,
-		// or already re-blocked by a prior rollback) stays as it is.
-		if dependent.InDegree != 0 || dependent.Bead.Status != types.StatusOpen {
+		if !releasedByCompletion(dependent) {
 			continue
 		}
 		dependent.InDegree++
 		rolledBack = append(rolledBack, dependentID)
 	}
-	if len(rolledBack) == 0 {
-		return nil, nil
-	}
 	return rolledBack, nil
+}
+
+// releasedByCompletion reports whether a dependent was released by a bead's
+// completion and can still be re-blocked: its InDegree was decremented to
+// zero and the dependent itself is still open. Never-released, terminal, or
+// already re-blocked dependents return false, which is what makes rollback
+// idempotent.
+func releasedByCompletion(node *Node) bool {
+	return node.InDegree == 0 && node.Bead.Status == types.StatusOpen
 }

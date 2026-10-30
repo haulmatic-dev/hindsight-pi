@@ -68,11 +68,13 @@ func isInfraGateFailure(exitCode int, output string) bool {
 	return exitCode == 127
 }
 
-// infraRejectCount returns the highest N among infra-reject-N labels.
-func infraRejectCount(labels []string) int {
+// maxLabelCount returns the highest N among "<prefix>N" labels (0 when none
+// match). It is the durable consecutive-rejection counter shared by the
+// infra-gate (infra-reject-N) and dep-open requeue (dep-open-requeue-N) paths.
+func maxLabelCount(labels []string, prefix string) int {
 	n := 0
 	for _, l := range labels {
-		if s, ok := strings.CutPrefix(l, infraRejectLabelPrefix); ok {
+		if s, ok := strings.CutPrefix(l, prefix); ok {
 			if v, err := strconv.Atoi(s); err == nil && v > n {
 				n = v
 			}
@@ -81,10 +83,10 @@ func infraRejectCount(labels []string) int {
 	return n
 }
 
-// infraLabels returns the bead's labels as stored, falling back to the
+// currentLabels returns the bead's labels as stored, falling back to the
 // in-memory copy when the store read fails. The second result is the fresh
 // bead (nil when unavailable).
-func (c *BeadCloser) infraLabels(bead *types.Bead, projectPath, repoName string) ([]string, *types.Bead) {
+func (c *BeadCloser) currentLabels(bead *types.Bead, projectPath, repoName string) ([]string, *types.Bead) {
 	if c.beadsClient != nil {
 		if f, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID); err == nil && f != nil {
 			return f.Labels, f
@@ -93,17 +95,17 @@ func (c *BeadCloser) infraLabels(bead *types.Bead, projectPath, repoName string)
 	return bead.Labels, nil
 }
 
-// clearInfraRejectLabels removes every infra-reject-* label once the
-// verification command passes, so the counter counts consecutive rejections
-// only.
-func (c *BeadCloser) clearInfraRejectLabels(bead *types.Bead, projectPath, repoName string) {
+// clearCounterLabels removes every "<prefix>*" label once its gate passes
+// (verification command success, dependency gate pass), so the counter counts
+// consecutive rejections only.
+func (c *BeadCloser) clearCounterLabels(bead *types.Bead, projectPath, repoName, prefix string) {
 	if c.beadsClient == nil {
 		return
 	}
-	labels, _ := c.infraLabels(bead, projectPath, repoName)
+	labels, _ := c.currentLabels(bead, projectPath, repoName)
 	var stale []string
 	for _, l := range labels {
-		if strings.HasPrefix(l, infraRejectLabelPrefix) {
+		if strings.HasPrefix(l, prefix) {
 			stale = append(stale, l)
 		}
 	}
@@ -111,7 +113,7 @@ func (c *BeadCloser) clearInfraRejectLabels(bead *types.Bead, projectPath, repoN
 		return
 	}
 	if err := c.beadsClient.RemoveBeadLabels(projectPath, repoName, bead.ID, stale); err != nil {
-		log.Printf("[CloseGate] Failed to clear %s* labels on %s: %v", infraRejectLabelPrefix, bead.ID, err)
+		log.Printf("[CloseGate] Failed to clear %s* labels on %s: %v", prefix, bead.ID, err)
 	}
 }
 
@@ -127,12 +129,12 @@ func (c *BeadCloser) rejectInfraGate(bead *types.Bead, projectPath, repoName, cm
 		cmdStr, dir, exitCode, strings.TrimSpace(output))
 	c.emitGateEvent(closeGateRejectionEvent, bead, projectPath, repoName, infraRejectionReason, evidence)
 
-	labels, fresh := c.infraLabels(bead, projectPath, repoName)
+	labels, fresh := c.currentLabels(bead, projectPath, repoName)
 	if fresh != nil && fresh.Status.IsTerminal() {
 		log.Printf("[CloseGate] Bead %s already terminal (%s); skipping infra rejection", beadID, fresh.Status)
 		return nil
 	}
-	n := infraRejectCount(labels) + 1
+	n := maxLabelCount(labels, infraRejectLabelPrefix) + 1
 
 	if n >= infraMaxRejections {
 		log.Printf("[CloseGate] Bead %s infra-rejected %d consecutive times; escalating to human", beadID, n)
@@ -154,7 +156,7 @@ func (c *BeadCloser) rejectInfraGate(bead *types.Bead, projectPath, repoName, cm
 		if err := c.beadsClient.UpdateBeadStatus(projectPath, bead.ID, types.StatusOpen); err != nil {
 			log.Printf("[CloseGate] Failed to reopen %s: %v", beadID, err)
 		}
-		c.clearInfraRejectLabels(bead, projectPath, repoName)
+		c.clearCounterLabels(bead, projectPath, repoName, infraRejectLabelPrefix)
 		label := fmt.Sprintf("%s%d", infraRejectLabelPrefix, n)
 		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{label}); err != nil {
 			log.Printf("[CloseGate] Failed to label %s with %q: %v", beadID, label, err)
