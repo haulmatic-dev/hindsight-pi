@@ -110,6 +110,10 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 		fmt.Sprintf("HYDRA_RETRY_COUNT=%d", retryCount),
 		fmt.Sprintf("HYDRA_BEAD_TITLE=%s", bead.Title),
 		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
+		// Worktree scratch dir (outside the worktree tree; pruned with the
+		// worktree) — tools like mongodb-memory-server (MONGOMS_TMPDIR-style)
+		// write scratch artifacts where teardown pruning can find them.
+		fmt.Sprintf("%s=%s", scratchEnvVar, worktreeScratchDirFor(projectPath, string(bead.ID))),
 	)
 
 	// Daemon registry API: workers self-report state and poll shepherd

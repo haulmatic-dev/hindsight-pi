@@ -304,6 +304,7 @@ func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error
 	}
 	m.provisionSiblingDeps(projectPath)
 	m.provisionGraphifyOut(projectPath, wtPath)
+	m.scaffoldScratch(projectPath, wtPath, key)
 	return wtPath, nil
 }
 
@@ -325,16 +326,50 @@ const (
 )
 
 // scratchScaffoldingImplemented gates the scratch contract tests: false =
-// RED (tests skip loudly; SCRATCH_ENFORCE=1 fails them), flip to true in
-// GREEN when scaffolding/pruning/export are wired.
-var scratchScaffoldingImplemented = false
+// RED (tests skip loudly; SCRATCH_ENFORCE=1 fails them), true = GREEN
+// (scaffolding/pruning/export are wired).
+var scratchScaffoldingImplemented = true
 
-// scratchDirFor returns the canonical scratch directory for a chain key:
-// <worktreeRoot(projectPath)>/.scratch/<sanitized key> — always OUTSIDE the
-// worktree dir itself. Pure path derivation; creating and pruning the dir is
-// the (not yet implemented) feature under contract.
-func (m *WorktreeManager) scratchDirFor(projectPath, key string) string {
+// worktreeScratchDirFor returns the canonical scratch directory for a chain
+// key: <worktreeRoot(projectPath)>/.scratch/<sanitized key> — always OUTSIDE
+// the worktree dir itself. Package-level so the worker env builder exports
+// the exact same path the manager scaffolds and prunes.
+func worktreeScratchDirFor(projectPath, key string) string {
 	return filepath.Join(worktreeRoot(projectPath), scratchDirName, sanitizeKey(key))
+}
+
+// scratchDirFor returns the canonical scratch directory for a chain key.
+func (m *WorktreeManager) scratchDirFor(projectPath, key string) string {
+	return worktreeScratchDirFor(projectPath, key)
+}
+
+// scaffoldScratch creates the chain's scratch dir (outside the worktree
+// tree) and injects the `.scratch/` ignore line into the worktree .gitignore
+// so scratch-relative writes never leak into git status. Fail-open: scratch
+// is a convenience surface, never a reason to fail worktree creation.
+func (m *WorktreeManager) scaffoldScratch(projectPath, wtPath, key string) {
+	scratch := worktreeScratchDirFor(projectPath, key)
+	if err := os.MkdirAll(scratch, 0o755); err != nil {
+		log.Printf("[Worktree] scratch: mkdir %s for %s: %v", scratch, key, err)
+		return
+	}
+	ensureGitignoreLine(filepath.Join(wtPath, ".gitignore"), scratchDirName+"/")
+	// The scaffolded .gitignore itself is hydra infrastructure, not bead
+	// evidence: hide the untracked file from git status via the repo-local
+	// exclude so close-evidence scope gates and WIP detection never flag it.
+	// Tracked .gitignore files are unaffected (exclude hides untracked paths
+	// only). Fail-open like every other scaffolding step.
+	ensureGitignoreLine(filepath.Join(projectPath, ".git", "info", "exclude"), ".gitignore")
+}
+
+// pruneScratch removes a chain's scratch dir. Called from every teardown
+// path (Remove/Integrate* via removeWorktreeAndBranchName,
+// QuarantineBranchAndRemove, CleanupStaleWorktrees) so nothing is left
+// behind. Fail-open.
+func (m *WorktreeManager) pruneScratch(projectPath, key string) {
+	if err := os.RemoveAll(worktreeScratchDirFor(projectPath, key)); err != nil {
+		log.Printf("[Worktree] scratch: remove for %s: %v", key, err)
+	}
 }
 
 // provisionGraphifyOut links the main checkout's graphify-out directory into
@@ -872,6 +907,7 @@ func (m *WorktreeManager) removeWorktreeAndBranchName(projectPath, key, branch s
 	}
 	_, _ = gitOut(projectPath, "branch", "-D", branch)
 	_, _ = gitOut(projectPath, "worktree", "prune")
+	m.pruneScratch(projectPath, key)
 }
 
 // beadsOnlyConflict reports whether every unmerged path in a failed merge
@@ -1034,6 +1070,7 @@ func (m *WorktreeManager) QuarantineBranchAndRemove(projectPath, key, branch str
 	}
 	_, _ = gitOut(projectPath, "branch", "-D", branch)
 	_, _ = gitOut(projectPath, "worktree", "prune")
+	m.pruneScratch(projectPath, key)
 	return qBranch, nil
 }
 
@@ -1089,6 +1126,11 @@ func CleanupStaleWorktrees(maxAge time.Duration, activeKeys map[string]bool, eve
 			if !e.IsDir() || activeKeys[e.Name()] {
 				continue
 			}
+			// The per-project scratch root lives under the worktree dir but is
+			// not a worktree — never treat it as a junk/partial worktree dir.
+			if e.Name() == scratchDirName {
+				continue
+			}
 			wt := filepath.Join(projDir, e.Name())
 			gitFile := filepath.Join(wt, ".git")
 			info, err := os.Stat(gitFile)
@@ -1134,6 +1176,9 @@ func CleanupStaleWorktrees(maxAge time.Duration, activeKeys map[string]bool, eve
 				log.Printf("[WorktreeGC] remove %s: %v", wt, err)
 				continue
 			}
+			// The scratch dir is fresh by design (never aged with the worktree),
+			// so only an explicit prune tied to the worktree teardown removes it.
+			_ = os.RemoveAll(filepath.Join(projDir, scratchDirName, e.Name()))
 			removed++
 		}
 	}
@@ -1296,7 +1341,44 @@ func isForeignWorktree(wtPath string) bool {
 
 func worktreeClean(wtPath string) bool {
 	out, err := gitOut(wtPath, "status", "--porcelain")
-	return err == nil && strings.TrimSpace(out) == ""
+	if err != nil {
+		return false
+	}
+	s := strings.TrimSpace(out)
+	if s == "" {
+		return true
+	}
+	// An untracked .gitignore whose only lines are hydra scaffold ignores is
+	// daemon infrastructure (scratch scaffolding, graphify symlink ignore),
+	// not worker output — it must not block the reuse-reset, or every
+	// scaffolded worktree would stay pinned to a stale base on respawn.
+	if s != "?? .gitignore" && !strings.HasSuffix(s, "\n?? .gitignore") {
+		return false
+	}
+	return scaffoldIgnoreOnly(filepath.Join(wtPath, ".gitignore"))
+}
+
+// scaffoldIgnoreLines are the ignore lines hydra itself injects into a
+// worktree .gitignore (scratch scaffolding, graphify symlink ignore).
+var scaffoldIgnoreLines = map[string]bool{".scratch/": true, "graphify-out/": true, "graphify-out": true}
+
+// scaffoldIgnoreOnly reports whether the ignore file's meaningful lines are
+// all hydra scaffold lines.
+func scaffoldIgnoreOnly(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !scaffoldIgnoreLines[line] {
+			return false
+		}
+	}
+	return true
 }
 
 // autoCommitDirtyMain turns a dirty main checkout into a janitorial commit.
