@@ -9,6 +9,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Changed
+- Changed: `internal/core/validation_service.go` refactor (bead hydra-oend, behavior-preserving) — the duplicated TDD-validator construction (RunTDDValidation + TDDChainPasses) extracted into `newTDDValidator()`, the duplicated retry-round/cap-default logic (RunTDDValidation + RunPRDValidation) into `validationRounds()` with `defaultValidationRounds` const, the within-run fix-bead dedup append into `recordCreatedFix()`, and the RED/GREEN dependency role check into `isTDDRole()`. Log lines, event shapes, and close-path behavior byte-identical. *Authored by a Hydra dogfood run.*
+
 ### Fixed
 - Fixed: worktree reconciler no longer removes live worktrees during long LLM turns — the 30-minute idle floor was raised to 6 hours (single-lane providers make workers think 30m+ between writes; 69 `[Registry] FATAL: worktree` worker deaths on 2026-10-29). Registry-keyed liveness fix is beaded separately.
 
