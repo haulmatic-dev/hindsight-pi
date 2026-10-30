@@ -6,39 +6,93 @@
 // (src/src/.tmp-jest/**, src/.jest-cache/**, src/.tmp/jest-cache/, root
 // .tmp-* files), while real source files with "cache" in their names
 // (thread-cache.service.ts and friends) must never be touched.
-//
-// RED-phase inert stub: the contract tests in junksig_test.go skip loudly
-// until the GREEN phase lands the real matcher (const flag below, enforced
-// under JUNKSIG_ENFORCE=1).
 package junksig
 
-// junksigImplemented gates the RED-phase contract tests. It stays false
-// until GREEN implements the matcher, so `go test ./...` stays green for
-// the daemon gate (tests skip loudly) while JUNKSIG_ENFORCE=1 makes every
-// contract test fail loudly — proving RED detects the missing feature.
-const junksigImplemented = false
+import (
+	"path/filepath"
+	"strings"
+)
+
+// junksigImplemented gates the RED-phase contract tests. GREEN flipped it
+// to true: the matcher below is real and every TestJunksig_* contract test
+// now runs (and passes) in the default daemon gate.
+const junksigImplemented = true
+
+// ignoreLinePrefix is the gitignore idiom that matches a basename pattern at
+// ANY depth (including the repo root): a leading "**/" component matches
+// zero or more directories, so "**/.tmp*" covers both ".tmp-cov-full.txt"
+// at the root and "src/.tmp2/jest/worker.js" deep in the tree.
+const ignoreLinePrefix = "**/"
 
 // IsJunkPath reports whether p is a junk artifact path.
 //
 // Contract (pinned by TestJunksig_* in junksig_test.go): structural
-// signatures only — any path segment starting with ".tmp" (.tmp, .tmp-jest,
-// .tmp2 …), the directory segment ".jest-cache", basenames with the
-// "haste-map-" or "jest-transform-cache-" prefix, the exact basename
-// ".hydra-preflight-ok", and everything under the root ".pi/task-breakdown/"
-// tree. Real source files whose names merely contain "cache" or ".tmp" as a
-// suffix (thread-cache.service.ts, template.tmp) must NOT match.
+// signatures only, evaluated per path segment (the basename counts as the
+// last segment) — never substrings:
 //
-// RED stub: inert, always false.
+//   - any segment starting with ".tmp" (.tmp, .tmp-jest, .tmp2, .tmpz, and
+//     root scratch files like .tmp-cov-full.txt);
+//   - the directory segment ".jest-cache" exactly;
+//   - basenames starting with "haste-map-" or "jest-transform-cache-";
+//   - the exact basename ".hydra-preflight-ok" at any depth;
+//   - everything strictly under a ".pi/task-breakdown/" tree.
+//
+// Real source files whose names merely contain "cache" or carry ".tmp" as a
+// suffix (thread-cache.service.ts, template.tmp, snapshot.tmp.png) must NOT
+// match. jest's default coverage/ output dir is deliberately NOT a
+// signature (accepted residual — some repos commit coverage artifacts);
+// coverage routing is handled by scratch guidance, not this gate.
 func IsJunkPath(p string) bool {
-	_ = p
+	if p == "" {
+		return false
+	}
+	segs := strings.Split(filepath.ToSlash(p), "/")
+	for i, s := range segs {
+		if s == "" {
+			continue
+		}
+		// ".tmp" segment prefix: .tmp, .tmp-jest, .tmp2, … and .tmp-* files.
+		if strings.HasPrefix(s, ".tmp") {
+			return true
+		}
+		// jest cache dir, exact segment.
+		if s == ".jest-cache" {
+			return true
+		}
+		// haste/jest-transform cache entry basenames, exact prefixes.
+		if strings.HasPrefix(s, "haste-map-") || strings.HasPrefix(s, "jest-transform-cache-") {
+			return true
+		}
+		// hydra preflight marker, exact basename at any depth.
+		if s == ".hydra-preflight-ok" {
+			return true
+		}
+		// pi task-breakdown scratch tree: ".pi/task-breakdown/<anything>".
+		if s == ".pi" && i+1 < len(segs) && segs[i+1] == "task-breakdown" && len(segs) > i+2 {
+			return true
+		}
+	}
 	return false
 }
 
 // IgnorePatterns returns the .gitignore lines exactly equivalent to
 // IsJunkPath: for every path p, git check-ignore must ignore p if and only
-// if IsJunkPath(p) is true (pinned by TestJunksig_IgnorePatternsReproduceMatcher).
+// if IsJunkPath(p) is true (pinned by TestJunksig_IgnorePatternsReproduceMatcher
+// in a hermetic repo with GIT_CONFIG_GLOBAL/SYSTEM=/dev/null).
 //
-// RED stub: empty.
+// Every line is a bare add (no negations, no blanks), and the "**/" prefix
+// makes each basename signature depth-independent — which is what makes the
+// lines survive directory renames the same way the matcher does.
 func IgnorePatterns() []string {
-	return nil
+	return []string{
+		ignoreLinePrefix + ".tmp*",
+		ignoreLinePrefix + ".jest-cache",
+		ignoreLinePrefix + "haste-map-*",
+		ignoreLinePrefix + "jest-transform-cache-*",
+		ignoreLinePrefix + ".hydra-preflight-ok",
+		// "everything strictly under the tree": "/**" matches any depth
+		// below, never the ".pi/task-breakdown" dir itself — mirroring the
+		// matcher, which requires a segment after task-breakdown.
+		ignoreLinePrefix + ".pi/task-breakdown/**",
+	}
 }
