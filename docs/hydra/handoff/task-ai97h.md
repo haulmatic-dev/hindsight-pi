@@ -1,3 +1,31 @@
+# red handoff (task-ai97h)
+
+## What changed (files + one line each)
+- internal/core/worktree_manager_scratch_test.go (new): RED contract tests for scratch scaffolding — `TestScratch_DirCreatedOutsideTree` (EnsureWorktree scaffolds the scratch dir outside the worktree tree + injects literal `.scratch/` line into the worktree .gitignore), `TestScratch_PruneSites` (subtests per teardown path: `Remove`, `QuarantineBranchAndRemove`, `CleanupStaleWorktrees` — scratch exists pre-teardown as precondition, gone after; GC path backdates the worktree's files so the scratch prune must be explicit, not junk-dir cleanup), `TestScratch_EnvExported` (`WorkerEnvBuilder.Build` output contains `HYDRA_SCRATCH_DIR=<scratchDirFor(projectPath, bead.ID)>`). Gated on `scratchRequireImpl` — skip loudly by default, `SCRATCH_ENFORCE=1` fails them.
+- internal/core/worktree_manager.go: inert RED stub — consts `scratchEnvVar` ("HYDRA_SCRATCH_DIR") + `scratchDirName` (".scratch"), gate var `scratchScaffoldingImplemented = false`, pure path derivation `(*WorktreeManager).scratchDirFor(projectPath, key)` = `<worktreeRoot>/.scratch/<sanitized key>`. Enough surface for the package to compile; zero behavior (no creation, no ignore injection, no pruning, no env export).
+- CHANGELOG.md: Added entry under Unreleased.
+
+## Verification (commands run + pass/fail)
+- `go test ./internal/core/ -run 'TestScratch' -count=1 -v` — PASS, exit 0: `--- PASS: TestScratch_PruneSites` wrapper + all 5 leaf tests `--- SKIP` loudly with "RED: scratch scaffolding contract not yet implemented (worktree scratch dir + .gitignore injection + teardown pruning + HYDRA_SCRATCH_DIR export)"; no `[no tests to run]`; `ok github.com/haulmatic-dev/hydra/internal/core 0.393s`.
+- `SCRATCH_ENFORCE=1 go test ./internal/core/ -run 'TestScratch' -count=1 -v` — FAIL, exit 1 — RED confirmed, every pinned test fails for the RIGHT reason (missing feature, same message above): `--- FAIL: TestScratch_DirCreatedOutsideTree`, `--- FAIL: TestScratch_PruneSites` (3/3 subtests), `--- FAIL: TestScratch_EnvExported`.
+- `go vet ./internal/core/` — PASS (clean).
+- `gofmt -l` on both touched files — clean.
+
+## Contract GREEN must implement (pinned API)
+- EnsureWorktree: create `scratchDirFor(projectPath, key)` dir on creation; append `.scratch/` to the worktree `.gitignore` (mirror the `ensureGitignoreLine` dual-spelling pattern from provisionGraphifyOut if desired — test pins only the literal `.scratch/` line).
+- Prune sites (all three): `removeWorktreeAndBranchName` (Remove path), `QuarantineBranchAndRemove`, `CleanupStaleWorktrees` — remove `scratchDirFor(projectPath, key)` with the worktree; scratch must be gone even when FRESH (younger than the GC window).
+- `WorkerEnvBuilder.Build`: append `scratchEnvVar=<scratchDirFor(projectPath, string(bead.ID))>` (key = full bead ID, note `types.BeadID` needs the `string()` conversion).
+- Flip `scratchScaffoldingImplemented = true`.
+- worker_spawner.go / cmd/worker/main.go (target files): expected GREEN wiring sites for the env export if Build cannot derive it internally — no RED-phase change was needed there (both compile untouched).
+
+## Open edges for the next phase
+- `scratchDirFor` is derived from `worktreeRoot(projectPath)`, so it reads HYDRA_HOME at call time — env export and dir creation must resolve under the same HYDRA_HOME (worker and daemon share $HYDRA_HOME on live hosts; tests set t.Setenv where GC isolation matters).
+- CleanupStaleWorktrees' junk-dir branch (no .git file, older than maxAge → RemoveAll) is an independent backstop for long-abandoned scratch dirs; do not rely on it for the pinned contract (fresh scratch must be pruned by the explicit teardown path).
+
+---
+
+# PRIOR PASS (same bead hydra-ai97h, junksig chain) — preserved handoff from the earlier strand on this branch (commit 3e5897fb; junksig CHANGELOG entry above is its record)
+
 # red handoff (hydra-ai97h)
 
 ## What changed (files + one line each)

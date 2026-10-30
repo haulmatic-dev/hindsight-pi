@@ -307,6 +307,36 @@ func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error
 	return wtPath, nil
 }
 
+// --- Worktree scratch scaffolding (RED phase: contract pinned, feature not
+// yet implemented) ---
+//
+// Every chain worktree gets a scratch directory OUTSIDE the worktree tree —
+// tools like mongodb-memory-server write scratch artifacts (MONGOMS_TMPDIR
+// style) that must never land inside the worktree diff or survive teardown.
+// EnsureWorktree scaffolds the dir and injects the `.scratch/` ignore line,
+// every teardown path prunes it, and the worker env builder exports its path
+// as HYDRA_SCRATCH_DIR (see worktree_manager_scratch_test.go).
+const (
+	// scratchEnvVar is the worker-env variable carrying the scratch dir path.
+	scratchEnvVar = "HYDRA_SCRATCH_DIR"
+
+	// scratchDirName is the per-project scratch root under the worktree root.
+	scratchDirName = ".scratch"
+)
+
+// scratchScaffoldingImplemented gates the scratch contract tests: false =
+// RED (tests skip loudly; SCRATCH_ENFORCE=1 fails them), flip to true in
+// GREEN when scaffolding/pruning/export are wired.
+var scratchScaffoldingImplemented = false
+
+// scratchDirFor returns the canonical scratch directory for a chain key:
+// <worktreeRoot(projectPath)>/.scratch/<sanitized key> — always OUTSIDE the
+// worktree dir itself. Pure path derivation; creating and pruning the dir is
+// the (not yet implemented) feature under contract.
+func (m *WorktreeManager) scratchDirFor(projectPath, key string) string {
+	return filepath.Join(worktreeRoot(projectPath), scratchDirName, sanitizeKey(key))
+}
+
 // provisionGraphifyOut links the main checkout's graphify-out directory into
 // a newly created worktree so graphify output (graph.json) indexed in the
 // main checkout is visible in the worktree without re-indexing. The symlink
