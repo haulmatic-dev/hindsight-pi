@@ -487,6 +487,11 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				if bead == nil {
 					return fmt.Errorf("clear-escalation: %s not found", beadID)
 				}
+				// FR-004: a pending spec decision (spec-infeasible without
+				// spec-decided:<x>) must not be wiped by an automated reset.
+				if refusal := clearEscalationRefusalFor(*bead); refusal != "" {
+					return fmt.Errorf("%s", refusal)
+				}
 				var toClear []string
 				escLabels := map[string]bool{escalatedLabel: true, "needs-human": true, "verified-close-escalated": true}
 				for _, lbl := range bead.Labels {

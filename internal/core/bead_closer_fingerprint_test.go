@@ -53,9 +53,9 @@ func TestTrackVerificationFingerprint_FirstOccurrence_AddsLabel(t *testing.T) {
 	}
 
 	stored := mockBeads.beads[string(bead.ID)]
-	want := gateFingerprintLabelPrefix + "deadbeef"
+	want := gateFingerprintLabelPrefix + "deadbeef-1"
 	if len(stored.Labels) != 1 || stored.Labels[0] != want {
-		t.Fatalf("expected exactly one label %q on the bead, got %v", want, stored.Labels)
+		t.Fatalf("expected exactly one counted label %q on the bead, got %v", want, stored.Labels)
 	}
 	if events := readVerificationSubstantiveEvents(t, sink.centralDir); len(events) != 0 {
 		t.Fatalf("first occurrence must not emit verification_substantive, got %d event(s): %v", len(events), events)
@@ -91,8 +91,8 @@ func TestTrackVerificationFingerprint_Repeat_EmitsSubstantiveEvent(t *testing.T)
 	}
 
 	stored := mockBeads.beads[string(bead.ID)]
-	if len(stored.Labels) != 1 || stored.Labels[0] != label {
-		t.Fatalf("repeat occurrence must not duplicate the gate-fp label, got %v", stored.Labels)
+	if len(stored.Labels) != 2 || stored.Labels[0] != label || stored.Labels[1] != gateFingerprintLabelPrefix+"cafe1234-2" {
+		t.Fatalf("repeat occurrence must append the counted label gate-fp-cafe1234-2, got %v", stored.Labels)
 	}
 }
 
@@ -113,8 +113,8 @@ func TestTrackVerificationFingerprint_DifferentFingerprint_GetsOwnLabel(t *testi
 	if len(stored.Labels) != 2 {
 		t.Fatalf("expected 2 labels after new fingerprint, got %v", stored.Labels)
 	}
-	if !containsLabel(stored.Labels, "gate-fp-22222222") {
-		t.Fatalf("expected new label gate-fp-22222222, got %v", stored.Labels)
+	if !containsLabel(stored.Labels, "gate-fp-22222222-1") {
+		t.Fatalf("expected new counted label gate-fp-22222222-1, got %v", stored.Labels)
 	}
 	if events := readVerificationSubstantiveEvents(t, sink.centralDir); len(events) != 0 {
 		t.Fatalf("a different fingerprint must not emit verification_substantive, got %d", len(events))

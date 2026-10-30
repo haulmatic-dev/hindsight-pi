@@ -243,6 +243,13 @@ func (o *Overseer) sweepStalePanFilingsForProject(project types.Project, now tim
 		// cohort/spawn probes fail-closed already guarantees.
 		return
 	}
+	// FR-004: every listed bead is also evaluated for spec-infeasibility.
+	// Runs regardless of the pan spawn-probe gate below: a spec-infeasible
+	// bead files a decision packet even while it is not pan-filed. Fail-open
+	// per bead (decisionPacketCheck logs and returns on faults).
+	for _, b := range beads {
+		o.decisionPacketCheck(project, b, now)
+	}
 	candidates := staleFilingCandidates(project, beads, now)
 	if len(candidates) == 0 {
 		return

@@ -134,7 +134,7 @@ func TestDecisionPacket_ThreeWorkRejectionsFilePacket(t *testing.T) {
 		t.Errorf("payload must carry verbatim gate output capped at %d bytes, got %d bytes",
 			decisionPacketMaxGateOutputBytes, len(out))
 	}
-	ms, ok := ev.Fields["measurements"].(map[string]string)
+	ms, ok := ev.Fields["measurements"].(map[string]any)
 	if !ok || len(ms) < 1 {
 		t.Errorf("payload must carry ≥1 measurement parsed from the gate output, got %T %v",
 			ev.Fields["measurements"], ev.Fields["measurements"])
