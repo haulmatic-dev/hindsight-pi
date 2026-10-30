@@ -1844,28 +1844,55 @@ func getVerificationFingerprint(bead *types.Bead, reason string) string {
 	return hex.EncodeToString(h[:])[:8]
 }
 
-// trackVerificationFingerprint records the rejection fingerprint as a durable
-// gate-fp-<first8> label. When the same fingerprint repeats on the same bead,
-// it emits a typed verification_substantive event instead of re-labelling.
+// trackVerificationFingerprint records the rejection fingerprint durably as
+// a counted gate-fp-<fp8>-<N> label (N replaced each round — a new label is
+// appended because br label add is append-only; readers take the max N).
+// A bare gate-fp-<fp8> label predates the counted form and counts as 1.
+// The first sighting writes N=1; each repeat emits a typed
+// verification_substantive event (count = new N) and appends the next N.
 func (c *BeadCloser) trackVerificationFingerprint(bead *types.Bead, fp, projectPath, repoName string) error {
 	if c.beadsClient == nil {
 		return nil
 	}
-	label := gateFingerprintLabelPrefix + fp
-	if hasBeadLabel(bead.Labels, label) {
-		c.events.EmitRepo(projectPath, Event{
-			Type:    "verification_substantive",
-			Project: repoName,
-			Bead:    string(bead.ID),
-			Fields: map[string]any{
-				"bead":        string(bead.ID),
-				"fingerprint": fp,
-				"count":       2,
-			},
-		})
-		return nil
+	count := gateFingerprintCount(bead.Labels, fp)
+	if count == 0 {
+		return c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID,
+			[]string{gateFingerprintLabelPrefix + fp + "-1"})
 	}
-	return c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{label})
+	next := count + 1
+	c.events.EmitRepo(projectPath, Event{
+		Type:    "verification_substantive",
+		Project: repoName,
+		Bead:    string(bead.ID),
+		Fields: map[string]any{
+			"bead":        string(bead.ID),
+			"fingerprint": fp,
+			"count":       next,
+		},
+	})
+	return c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID,
+		[]string{gateFingerprintLabelPrefix + fp + "-" + strconv.Itoa(next)})
+}
+
+// gateFingerprintCount returns the durable rejection count recorded for fp
+// among the bead's labels: the highest N among gate-fp-<fp8>-<N> labels;
+// a bare gate-fp-<fp8> label counts as 1; absent counts as 0.
+func gateFingerprintCount(labels []string, fp string) int {
+	max := 0
+	for _, l := range labels {
+		if l == gateFingerprintLabelPrefix+fp {
+			if max < 1 {
+				max = 1
+			}
+			continue
+		}
+		if m := gateFingerprintCountedRe.FindStringSubmatch(l); m != nil && m[1] == fp {
+			if n, err := strconv.Atoi(m[2]); err == nil && n > max {
+				max = n
+			}
+		}
+	}
+	return max
 }
 
 // verificationFingerprintSource selects the input hashed into a close-gate
