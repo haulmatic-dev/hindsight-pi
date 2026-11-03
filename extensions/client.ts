@@ -60,11 +60,29 @@ const authHeaders = (apiKey?: string): Record<string, string> => ({
   ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
 });
 
+// 2026-11-03: fail-open timeout — the Oct 20 fleet-killer was this fetch
+// hanging indefinitely when hindsight-api degraded, blocking every pi
+// worker's startup. 5s cap, then log and continue without hindsight.
+const CONNECT_TIMEOUT_MS = 5_000;
+
+const withTimeout = <T>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`[hindsight-pi] ${label} timed out after ${ms}ms (API degraded — continuing without hindsight)`)), ms)
+    ),
+  ]);
+};
+
 const apiGet = async (baseUrl: string, apiKey: string | undefined, path: string): Promise<any | null> => {
-  const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
-    method: "GET",
-    headers: authHeaders(apiKey),
-  });
+  const response = await withTimeout(
+    fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
+      method: "GET",
+      headers: authHeaders(apiKey),
+    }),
+    CONNECT_TIMEOUT_MS,
+    `GET ${path}`
+  );
   if (!response.ok) {
     if (response.status === 404) return null;
     throw new Error(`GET ${path} failed: ${response.status} ${response.statusText}`);

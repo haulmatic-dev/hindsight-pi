@@ -110,7 +110,7 @@ export default function hindsightMemory(pi: ExtensionAPI): void {
   const initialize = (ctx: { cwd: string; ui: { setStatus(id: string, text: string): void; notify(message: string, level?: string): void } }) => {
     initializing = (async () => {
       try {
-        clearHandles();
+                clearHandles();
         clearCachedContext();
         turnCount = 0;
         lastContextTurn = 0;
@@ -128,7 +128,7 @@ export default function hindsightMemory(pi: ExtensionAPI): void {
         setHookStat("sessionStart", { firedAt: new Date().toISOString(), result: "ok" });
 
         const config = await resolveConfig(ctx.cwd);
-        if (!config.enabled) {
+                if (!config.enabled) {
           setStatus(ctx, "off");
           setHookStat("sessionStart", { firedAt: new Date().toISOString(), result: "skipped", detail: "disabled" });
           return;
@@ -143,10 +143,20 @@ export default function hindsightMemory(pi: ExtensionAPI): void {
             fullText: summary.fullText,
           });
         });
-        const handles = await bootstrap(config, ctx.cwd);
+        // 2026-11-03: fail-open — if bootstrap takes >5s (API degraded or
+        // unreachable), log and continue without hindsight. The Oct 20
+        // fleet-killer was this await hanging indefinitely when hindsight-api
+        // degraded, freezing every pi worker at startup.
+        const BOOTSTRAP_TIMEOUT_MS = 5_000;
+                const handles = await Promise.race([
+          bootstrap(config, ctx.cwd),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`[hindsight-pi] bootstrap timed out after ${BOOTSTRAP_TIMEOUT_MS}ms — continuing without hindsight (fail-open)`)), BOOTSTRAP_TIMEOUT_MS)
+          ),
+        ]);
         pi.setSessionName(deriveWorkspaceSessionName(ctx.cwd));
         setHookStat("sessionStart", { firedAt: new Date().toISOString(), result: "ok", detail: `bank=${handles.bankId}` });
-        setStatus(ctx, "connected");
+                setStatus(ctx, "connected");
       } catch (error) {
         console.error("[hindsight-pi] initialization failed:", error instanceof Error ? error.message : error);
         setHookStat("sessionStart", { firedAt: new Date().toISOString(), result: "failed", detail: error instanceof Error ? error.message : String(error) });
