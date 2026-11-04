@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/skillinducer"
 	"gopkg.in/yaml.v3"
 )
 
@@ -582,6 +583,13 @@ type IntelligenceConfig struct {
 	Patterns              PatternConfig               `yaml:"patterns"`
 	CollectiveUnconscious CollectiveUnconsciousConfig `yaml:"collective_unconscious"`
 	Hindsight             HindsightConfig             `yaml:"hindsight"`
+
+	// SkillInduction mines successful worker execution transcripts
+	// ($TMPDIR/hydra-executions, written by cmd/worker) into candidate Pi
+	// skills under a staging dir, for human PR review — never directly into
+	// the shared Pi config. Disabled by default. See the skillinducer package
+	// for the full contract. (Skills module of ScholarEvolve, arXiv:2609.40169.)
+	SkillInduction skillinducer.Config `yaml:"skill_induction"`
 }
 
 // GraphifyConfig controls the code knowledge graph that replaces llm-tldr as the

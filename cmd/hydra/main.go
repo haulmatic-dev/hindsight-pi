@@ -158,6 +158,13 @@ func main() {
 		return
 	}
 
+	// Subcommand fast path: `hydra induce-skills` runs one skill-induction
+	// pass over worker execution records and exits (staging-only output).
+	if pos := flag.Args(); len(pos) > 0 && pos[0] == "induce-skills" {
+		runInduceSkillsSubcommand(*configPath)
+		return
+	}
+
 	// Configure leveled logging (HYDRA_LOG_LEVEL: debug|info|warn|error).
 	logx.Init()
 	if *debug {
@@ -270,6 +277,9 @@ func main() {
 			log.Printf("Config watcher started: %s", *configPath)
 		}
 	}
+
+	// Start skill induction loop (no-op unless intelligence.skill_induction.enabled)
+	startSkillInductionLoop(ctx, config)
 
 	// Start overseer (blocking)
 	if err := overseer.Start(ctx); err != nil {
