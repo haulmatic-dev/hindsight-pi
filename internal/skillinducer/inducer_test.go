@@ -357,6 +357,8 @@ func TestParseInduction(t *testing.T) {
 	}{
 		{"plain", `{"has_skill": true, "name": "x", "description": "d"}`, false, true},
 		{"fenced", "```json\n{\"has_skill\": true, \"name\": \"x\"}\n```", false, true},
+		{"think block", "<think>the transcript mentions {not json} and braces galore</think>\n\n{\"has_skill\": false, \"reason\": \"r\"}", false, false},
+		{"think only, no json", "<think>all reasoning, no answer</think>", true, false},
 		{"prose wrapped", `Here is the verdict: {"has_skill": false, "reason": "one-off"} hope this helps`, false, false},
 		{"empty", "", true, false},
 		{"no json", "the transcript showed nothing special", true, false},
