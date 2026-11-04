@@ -60,11 +60,18 @@ func buildUserPrompt(rec *ExecutionRecord, maxChars int) string {
 }
 
 // parseInduction extracts the JSON verdict from an LLM response, tolerating
-// markdown fences and surrounding prose.
+// markdown fences, surrounding prose, and inline <think>…</think> reasoning
+// (MiniMax-M2.7 and other hybrid-reasoning models emit reasoning in content
+// before the answer — observed live 2026-11-04: "no JSON object in response"
+// on 7/10 calls until the think block is stripped).
 func parseInduction(resp string) (*induction, error) {
 	resp = strings.TrimSpace(resp)
 	if resp == "" {
 		return nil, fmt.Errorf("empty LLM response")
+	}
+	// Drop everything up to and including the last </think> close tag.
+	if idx := strings.LastIndex(resp, "</think>"); idx >= 0 {
+		resp = strings.TrimSpace(resp[idx+len("</think>"):])
 	}
 	// Strip a fenced block if present.
 	if i := strings.Index(resp, "```"); i >= 0 {
