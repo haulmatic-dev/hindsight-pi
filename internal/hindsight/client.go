@@ -326,7 +326,7 @@ func (c *Client) Search(query, beadType string, limit int) (*SearchResponse, err
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 
-	url := fmt.Sprintf("%s/v1/default/banks/hydra/memories/recall", c.baseURL)
+	url := fmt.Sprintf("%s/v1/default/banks/%s/memories/recall", c.baseURL, BankID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -469,7 +469,7 @@ func (c *Client) Retain(memory *ExecutionMemory) (*RetentionResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 
-	url := fmt.Sprintf("%s/v1/default/banks/hydra/memories", c.baseURL)
+	url := fmt.Sprintf("%s/v1/default/banks/%s/memories", c.baseURL, BankID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, &ClientError{
