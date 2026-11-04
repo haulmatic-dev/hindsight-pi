@@ -164,6 +164,20 @@ intelligence:
     retain_unsettled_beads: 1000
     min_settlement_checks: 3
 
+  # Skill induction — Mine successful worker execution transcripts into
+  # candidate Pi skills (staged in $HYDRA_HOME/skill-candidates; promotion to
+  # the shared library is a human PR — hydra never writes the shared config).
+  # `hydra induce-skills` runs one manual pass regardless of `enabled`.
+  skill_induction:
+    enabled: false
+    interval: 6h
+    model: kimi-k2              # required when enabled
+    provider: kimi              # or openai + base_url pointing at a router
+    api_key_env: KIMI_API_KEY
+    max_processed_per_run: 10   # LLM-call cap per pass
+    max_candidates_per_run: 3   # candidate cap per pass
+    similarity_threshold: 0.6   # Jaccard dedup bar vs existing skills
+
 # ------------------------------------------------------------------------------
 # VALIDATION — Self-healing validation loops (TDD + PRD)
 # ------------------------------------------------------------------------------

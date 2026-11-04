@@ -9,6 +9,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Added
+- Added: skill induction from worker executions (`internal/skillinducer/`, knobs `intelligence.skill_induction.*`, `hydra induce-skills` subcommand) — mines successful worker execution transcripts (`$TMPDIR/hydra-executions`) into candidate Pi skills via one OpenAI-compatible LLM call per transcript (kimi by default), deduped by Jaccard token similarity against the shared skill library and prior candidates, staged under `$HYDRA_HOME/skill-candidates` with SKILL.md + provenance metadata. Never writes the shared Pi config — promotion stays a human-reviewed PR (`manage_config: false` doctrine). Skills module of ScholarEvolve (arXiv:2609.40169). Disabled by default; daemon loop fail-open on missing key/model. Docs: `docs/operations/configuration-guide-20260309.md` §intelligence.skill_induction.
+
 ### Changed
 - Changed: `internal/core/validation_service.go` refactor (bead hydra-oend, behavior-preserving) — the duplicated TDD-validator construction (RunTDDValidation + TDDChainPasses) extracted into `newTDDValidator()`, the duplicated retry-round/cap-default logic (RunTDDValidation + RunPRDValidation) into `validationRounds()` with `defaultValidationRounds` const, the within-run fix-bead dedup append into `recordCreatedFix()`, and the RED/GREEN dependency role check into `isTDDRole()`. Log lines, event shapes, and close-path behavior byte-identical. *Authored by a Hydra dogfood run.*
 
