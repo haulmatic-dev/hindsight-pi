@@ -73,9 +73,12 @@ func parseInduction(resp string) (*induction, error) {
 	if idx := strings.LastIndex(resp, "</think>"); idx >= 0 {
 		resp = strings.TrimSpace(resp[idx+len("</think>"):])
 	}
-	// Strip a fenced block if present.
-	if i := strings.Index(resp, "```"); i >= 0 {
-		rest := resp[i+len("```"):]
+	// Strip a fenced block only when the response IS one — a fence inside
+	// the JSON body (body_markdown legitimately contains ``` code blocks)
+	// must not be treated as wrapping. Observed live: valid verdicts destroyed
+	// to "no JSON object" when the induced skill body had fenced code.
+	if strings.HasPrefix(resp, "```") {
+		rest := resp[len("```"):]
 		if j := strings.Index(rest, "```"); j >= 0 {
 			resp = rest[:j]
 		}
