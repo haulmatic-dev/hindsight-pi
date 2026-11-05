@@ -82,6 +82,15 @@ type SearchRequest struct {
 	// zero memories and silently empties every recall; see the regression note
 	// on Search. Leave unset unless you are filtering by a value from that list.
 	Types []string `json:"types,omitempty"`
+
+	// PreferObservations drops any raw fact (world/experience) that an
+	// observation in THIS result set was consolidated from, backfilling the
+	// freed slots with next results. After the 2026-11-04/05 backlog burn the
+	// bank's duplicated clusters exist as (observation + N superseded raws);
+	// without this flag recall serves all N copies. Scoped to the result set,
+	// so a raw whose observation was not retrieved still serves — no
+	// information cliff.
+	PreferObservations bool `json:"prefer_observations,omitempty"`
 }
 
 // SearchResponse represents the response from Hindsight search
@@ -314,9 +323,10 @@ func (c *Client) Search(query, beadType string, limit int) (*SearchResponse, err
 	// learning loop, silently off. beadType still shapes the query text in
 	// SearchByBead, which is where it belongs.
 	reqBody := SearchRequest{
-		Query:     query,
-		MaxTokens: c.maxTokens,
-		Budget:    c.budget,
+		Query:              query,
+		MaxTokens:          c.maxTokens,
+		Budget:             c.budget,
+		PreferObservations: true,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
