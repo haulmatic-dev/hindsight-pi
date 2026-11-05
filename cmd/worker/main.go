@@ -2297,7 +2297,7 @@ const fixPreImplGuidance = "PRE-IMPLEMENTATION CROSS-VERIFICATION (before writin
 // beads AND feature beads (a claim not in the diff is a lie even when tests
 // pass — the #85 silent-no-op class).
 const preCloseGuidance = "PRE-CLOSE CROSS-VERIFICATION (before HYDRA_VERDICT done):\n" +
-	"B1. Re-run the ORIGINAL reproduction against your final worktree — it must now pass; quote the before/after.\n" +
+	"B1. Re-run the ORIGINAL reproduction against your final worktree (narrowest failing test, not full suite) — it must now pass; quote the before/after.\n" +
 	"B2. Inspect your own diff (git diff origin/<base>...HEAD --stat, spot-read the hunks): every change your verdict/summary claims must be literally IN the diff. A claim not in the diff is a lie even when tests pass.\n" +
 	"B3. Map each acceptance criterion to at least one executed check (test run, command output); list any AC you could NOT verify as NOT VERIFIED.\n"
 
@@ -2316,11 +2316,11 @@ func phaseGuidance(bead types.Bead) string {
 		return "GREEN-phase discipline:\n" +
 			"- You are the implementer: EDIT the target files now. Ending this task with only a plan or analysis is a failure — the close gate rejects tasks that changed nothing.\n" +
 			"- Implement the MINIMUM that makes the failing tests pass. No speculative abstractions, no extra options, no gold-plating.\n" +
-			"- Run the tests and quote the passing output.\n" +
+			"- Run the narrowest test that proves your change works and quote the passing output.\n" +
 			"- If a test itself looks wrong, say so explicitly in your summary instead of contorting the implementation to satisfy it."
 	case strings.HasPrefix(title, "REFACTOR:"):
 		return "REFACTOR-phase discipline:\n" +
-			"- Behavior must not change. Run the tests BEFORE and AFTER your change; quote both outputs.\n" +
+			"- Behavior must not change. Run the narrowest test BEFORE and AFTER your change; quote both outputs.\n" +
 			"- Improve names, structure, and duplication only.\n" +
 			"- If you find a real bug, do NOT fix it here: record it with `cm add` and finish the refactor unchanged."
 	case strings.HasPrefix(title, "FIX:") || strings.EqualFold(bead.Type, "fix") || strings.EqualFold(bead.Type, "bug"):
@@ -2375,7 +2375,6 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 		piConfig = piConfigs[0]
 	}
 	budget := piConfig.turnBudget()
-	reminderCadence := piConfig.reminderCadence()
 
 	var promptParts []string
 
@@ -2420,20 +2419,17 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 		"TURN ECONOMY: every turn re-sends the entire conversation to the model — turns are the cost multiplier.\n"+
 			"- Batch independent tool calls in the same message (multiple reads, one search+read pair, etc.).\n"+
 			"- Prefer one comprehensive command over a probe sequence (e.g. one script that gathers everything over five separate calls).\n"+
-			"- Do NOT re-run the full test suite between micro-edits: run the narrowest failing test until it passes, then the full suite ONCE at the end.\n"+
+			"- Do NOT re-run the full test suite between micro-edits: run the narrowest failing test until it passes. The daemon runs the full suite after you finish.\n"+
 			"- Read files at the offsets you need instead of re-reading whole files.")
 
 	// Turn horizon (2026-08-22): the economy block says turns are expensive
 	// but implies infinite runway; 200-turn grinds (20M tokens) resulted. An
 	// explicit budget makes the model pace itself and converts wandering
 	// into an early honest unmet verdict instead of a grind to the wall.
-	reminderPhrase := "every turn"
-	if reminderCadence > 1 {
-		reminderPhrase = fmt.Sprintf("every %d turns", reminderCadence)
-	}
+
 
 	promptParts = append(promptParts,
-		fmt.Sprintf("TURN BUDGET: plan for ~%d turns total. Track your own count. If you pass %d without the narrow test green: stop exploring, commit whatever progress exists, and emit HYDRA_VERDICT with done:false and your findings — an honest unmet verdict is a good outcome; grinding without convergence is not. When running tests, pipe output through tail (`... 2>&1 | tail -30`) — full test output floods the context every turn. You will receive a non-binding \"You have used N of ~%d turns\" reminder %s.", budget, budget, budget, reminderPhrase))
+		fmt.Sprintf("TURN BUDGET: plan for ~%d turns total. Track your own count. If you pass %d without the narrow test green: stop exploring, commit whatever progress exists, and emit HYDRA_VERDICT with done:false and your findings — an honest unmet verdict is a good outcome; grinding without convergence is not. When running tests, pipe output through tail (`... 2>&1 | tail -30`) — full test output floods the context every turn. Track your own count — no automated reminder will arrive mid-run.", budget, budget))
 
 	// Daemon-owned gates (FR-002): when the project delegates verification to
 	// the daemon, the prompt redirects the agent away from suite babysitting.
@@ -2441,7 +2437,7 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 		promptParts = append(promptParts,
 			"VERIFICATION OWNERSHIP: the daemon runs the project's test/lint/build gates after you finish and re-verifies on every completion. Do NOT run the full test suite or coverage commands yourself — fix code, run only the narrowest test that proves your change, and end your turn. If a previous gate failed, its parsed summary and raw log path are in this bead's description; start from that evidence.")
 		promptParts = append(promptParts,
-			"VERIFY LOOP BUDGET: the daemon runs the gate commands after you finish; during your run, each full gate command may be executed at most 3 times (once RED, once GREEN, once final). Between edits, use the cheapest scoped check your project skills name (e.g. a single-suite run or a typecheck), never the full suite.")
+			"Between edits, use the cheapest scoped check your project skills name (e.g. a single-suite run or a typecheck) — the same rule as TURN ECONOMY above. This is your VERIFY LOOP BUDGET.")
 	}
 
 	// Closure protocol (PRD worker-park-and-resume Part 3): the turn does not
@@ -2450,9 +2446,10 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 	promptParts = append(promptParts,
 		`CLOSURE PROTOCOL: end your final message with exactly one verdict block.
 When done:
-HYDRA_VERDICT: {"done": true, "ac_met": [...], "ac_unmet": [], "files_changed": [...], "verification": [{"cmd": "...", "result": "..."}]}
+HYDRA_VERDICT: {"done": true, "summary": "brief outcome — include one of docs-only | superseded | chain-deferred-to-root here if your diff is empty", "ac_met": [...], "ac_unmet": [], "files_changed": [...], "verification": [{"cmd": "...", "result": "..."}]}
 When you cannot complete it:
 HYDRA_VERDICT: {"done": false, "summary": "what was done and what remains"}
+An empty diff is accepted ONLY with done:true and a summary containing exactly one of: docs-only (you changed only docs), superseded (the work already exists upstream), chain-deferred-to-root (integration deferred). Otherwise the bead reopens.
 A turn ending without this block is treated as unfinished and you will be re-prompted.`)
 
 	// Chain handoff: the next phase of the chain reads this bead's outcome
@@ -2499,7 +2496,7 @@ A turn ending without this block is treated as unfinished and you will be re-pro
 		promptParts = append(promptParts,
 			fmt.Sprintf("CODE DISCOVERY (mandatory): run `graphify query %q --budget 2000` BEFORE exploring files.", keywords),
 			"- If graphify-out/graph.json is missing in cwd, fall back to `rg`.",
-			"- Reuse the existing target-file parsing; do not add a second parser.")
+			"- Prefer the bead's declared Files:/metadata target files over re-deriving targets by parsing descriptions.")
 	}
 
 	// Anti-consultant guard: implementation-type beads must produce file
