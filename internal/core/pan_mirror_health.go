@@ -39,7 +39,7 @@ const mirrorDriftNeedsHumanEvent = "mirror_drift_needs_human"
 // mirror-health GREEN chain lands its contract fixes: the RED sweep tests in
 // pan_mirror_health_test.go skip loudly while it is false
 // (MIRROR_HEALTH_ENFORCE=1 fails them) and sweepMirrorHealthForProject is inert.
-const mirrorResyncImplemented = false
+const mirrorResyncImplemented = true
 
 // Typed events the audit sweep emits (FR-2 contract).
 const (
@@ -226,7 +226,7 @@ func (o *Overseer) handleMirrorRecord(project types.Project, storePath string, r
 		},
 	})
 
-	healable := daemonOwned && writeOK && mirrorTerminalStatus(rec) && rec.DBStatus != ""
+	healable := daemonOwned && writeOK && mirrorTerminalStatus(rec) && rec.DBStatus != "" && rec.Class == mirroraudit.ClassDBAhead
 	if o.config.Overseer.MirrorHealth.AutoResync && healable {
 		if err := o.healMirrorRecord(storePath, rec); err == nil {
 			return
@@ -239,7 +239,8 @@ func (o *Overseer) handleMirrorRecord(project types.Project, storePath string, r
 
 // mirrorTerminalStatus reports whether the db status is terminal; only a
 // terminal db_ahead record heals, never a non-terminal one (resurrecting a
-// stale in-progress claim is forbidden).
+// stale in-progress claim is forbidden) and never a jsonl_ahead one (the
+// divergence is in the jsonl, not the db).
 func mirrorTerminalStatus(rec mirroraudit.Record) bool {
 	return rec.DBStatus == string(types.StatusClosed) || rec.DBStatus == string(types.StatusCompleted) ||
 		rec.DBStatus == string(types.StatusFailed)
