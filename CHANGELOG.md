@@ -9,6 +9,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Fixed
+- Updated stale `TestVerdictRetainer_RetainPOSTsOnce` bank-path expectation to `hindsight.BankID` (`coding-brain`) — the BankID refactor (`1e74202f`) missed this test literal, failing the suite gate.
+
 ### Changed
 - Refactored spec-infeasible decision packets (FR-004): the duplicated gate-fp label parsing shared by `gateFingerprintRejectionCount` and `dominantGateFingerprint` extracted into one `gateFingerprintCounts(labels)` helper; dropped dead parameters (`now`, `cmd`) from `decisionPacketCheck`/`decisionPacketMeasurements`. Behavior identical; all 5 `TestDecisionPacket_*` contract tests pass unchanged.
 
