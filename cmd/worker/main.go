@@ -2433,7 +2433,6 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 	// explicit budget makes the model pace itself and converts wandering
 	// into an early honest unmet verdict instead of a grind to the wall.
 
-
 	promptParts = append(promptParts,
 		fmt.Sprintf("TURN BUDGET: plan for ~%d turns total. Track your own count. If you pass %d without the narrow test green: stop exploring, commit whatever progress exists, and emit HYDRA_VERDICT with done:false and your findings — an honest unmet verdict is a good outcome; grinding without convergence is not. When running tests, pipe output through tail (`... 2>&1 | tail -30`) — full test output floods the context every turn. Track your own count — no automated reminder will arrive mid-run.", budget, budget))
 

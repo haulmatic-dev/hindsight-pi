@@ -8,8 +8,10 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 ## [Unreleased]
+- Changed: gofmt drift removed in `cmd/worker/main.go` (bead hydra-ai97h SYNTAX verify, task-y44dc) — duplicate blank line before the turn-budget prompt assembly; build/vet/`TestScratch` re-verified green. *Authored by a Hydra dogfood run.*
 
-- Documentation: SYNTAX handoff for junk signature package (task-p3mqz) — verify-only, package already conformant (10/10 tests, build/vet/gofmt clean).
+- Added: FR-003 close-time junk gate GREEN (`internal/core/gate_junk.go`) — committed junk auto-dropped once per bead generation (`git rm --cached` + single removal commit + FR-001 gitignore injection, files kept on disk), staged-only junk unstaged without a commit, and a durable `junk-drop-N` label counter so a third re-committed junk generation hard-rejects with the distinct `junk-artifacts` reason/label, never touching the escalation ladder. Git probe failures stay fail-open.
+- Documentation: SYNTAX handoff for junk signature package (task-p3mqz) — verify-only, package already conformant (10/10 tests, build/vet/gofmt clean). SYNTAX handoff for junk signature package (task-p3mqz) — verify-only, package already conformant (10/10 tests, build/vet/gofmt clean).
 
 
 ### Documentation
