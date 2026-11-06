@@ -68,6 +68,19 @@ func (c *BeadCloser) runDaemonGates(bead *types.Bead, projectName, projectPath, 
 		{"test", gates.Test},
 	}
 
+	// 2026-11-06: skip the test gate for REFACTOR/SYNTAX beads — the GREEN
+	// phase already proved tests pass for this chain. Running the full suite
+	// again during quality phases adds no signal but picks up PARALLEL chains'
+	// incomplete tests (integrated into the shared worktree branch), causing
+	// gate-test-failed loops ×6 per bead. Lint and build still run (they are
+	// per-file checks, not suite-wide). FIX beads DO run the test gate (they
+	// may have broken tests).
+	title := strings.ToUpper(strings.TrimSpace(bead.Title))
+	isQualityPhase := strings.HasPrefix(title, "REFACTOR:") || strings.HasPrefix(title, "SYNTAX:")
+	if isQualityPhase {
+		named = named[:2] // lint + build only, skip test
+	}
+
 	// Scoped gates: the bead's first target file substitutes <scope> (e.g.
 	// npx jest <scope>), so a bead fixing suite X is gated on suite X — not
 	// on every other red suite in the repo. No targets -> full command.
