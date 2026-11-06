@@ -45,14 +45,21 @@ var mirrorHooks struct {
 func mirrorHookRestore() (restore func()) {
 	oldmtime, oldlive, oldrunner := mirrorJSONLMtime, mirrorHasLiveWorker, mirrorAuditRunner
 	oldprobe := mirrorWriteProbe
-	mirrorJSONLMtime = mirrorHooks.jsonlMtime
-	mirrorHasLiveWorker = mirrorHooks.liveWorker
-	mirrorAuditRunner = mirrorHooks.auditRunner
-	mirrorWriteProbe = mirrorHooks.writeProbe
+	applyMirrorHooks()
 	return func() {
 		mirrorJSONLMtime, mirrorHasLiveWorker, mirrorAuditRunner = oldmtime, oldlive, oldrunner
 		mirrorWriteProbe = oldprobe
 	}
+}
+
+// applyMirrorHooks re-applies the mirrorHooks staging struct to the package
+// seam vars. Tests that override a hook AFTER mirrorEnv must call this; the
+// staging struct is not live.
+func applyMirrorHooks() {
+	mirrorJSONLMtime = mirrorHooks.jsonlMtime
+	mirrorHasLiveWorker = mirrorHooks.liveWorker
+	mirrorAuditRunner = mirrorHooks.auditRunner
+	mirrorWriteProbe = mirrorHooks.writeProbe
 }
 
 // mirrorEnv builds a test Overseer around one project and wires the probe
@@ -208,6 +215,7 @@ func TestMirrorHealthSweep_MtimeQuiescenceSkip(t *testing.T) {
 	o := mirrorEnv(t, path, mirroraudit.Report{}, nil)
 	// Hook returns a FRESH mtime (within the 2m quiescence window).
 	mirrorHooks.jsonlMtime = func(string) (time.Time, bool) { return time.Now().Add(-30 * time.Second), true }
+	applyMirrorHooks()
 
 	sink := NewEventSink(t.TempDir())
 	o.eventSink = sink
@@ -229,6 +237,7 @@ func TestMirrorHealthSweep_LiveWorkerSkip(t *testing.T) {
 	path := t.TempDir()
 	o := mirrorEnv(t, path, mirroraudit.Report{}, nil)
 	mirrorHooks.liveWorker = func(string) bool { return true }
+	applyMirrorHooks()
 
 	sink := NewEventSink(t.TempDir())
 	o.eventSink = sink
@@ -269,6 +278,8 @@ func TestMirrorHealthSweep_TypedEvents(t *testing.T) {
 	o := mirrorEnv(t, path, mirroraudit.Report{}, nil)
 
 	// Drift store: one divergent record.
+	mirrorHooks.auditRunner = func(string) (mirroraudit.Report, error) { return mirrorDriftFixture("typdrift"), nil }
+	applyMirrorHooks()
 	o.eventSink = NewEventSink(t.TempDir())
 	o.sweepMirrorHealthForProject(o.projects[0], time.Now())
 	if evs := readEventsOfType(t, o.eventSink, mirrorDriftDetectedEvent); len(evs) != 1 {
@@ -283,6 +294,7 @@ func TestMirrorHealthSweep_TypedEvents(t *testing.T) {
 	mirrorHooks.auditRunner = func(string) (mirroraudit.Report, error) {
 		return mirroraudit.Report{}, nil
 	}
+	applyMirrorHooks()
 	o.eventSink = NewEventSink(t.TempDir())
 	o.sweepMirrorHealthForProject(o.projects[0], time.Now())
 	if evs := readEventsOfType(t, o.eventSink, mirrorAuditCleanEvent); len(evs) != 1 {
@@ -376,6 +388,7 @@ func mirrorDriftFixture(beadID string) mirroraudit.Report {
 			DBStatus:    "closed",
 			Class:       mirroraudit.ClassJSONLAhead,
 		}},
+		Counts: mirroraudit.Counts{JSONLAhead: 1},
 	}
 }
 
@@ -392,6 +405,7 @@ func TestMirrorHealthFiling_UserOwnedDivergentStoreFilesExactlyOne(t *testing.T)
 	// User-owned store: the write probe refuses (cannot-heal path).
 	mirrorHooks.writeProbe = func(string) error { return errors.New("permission denied") }
 	defer func() { mirrorHooks.writeProbe = nil }()
+	applyMirrorHooks()
 
 	sink := NewEventSink(t.TempDir())
 	o.eventSink = sink
@@ -436,6 +450,7 @@ func TestMirrorHealthFiling_FilingSinkFailureLoggedSweepContinues(t *testing.T) 
 	mirrorHooks.writeProbe = func(string) error { return errors.New("permission denied") }
 	defer func() { mirrorHooks.writeProbe = nil }()
 	mock.createErr = errors.New("store read-only: filing sink blown")
+	applyMirrorHooks()
 
 	sink := NewEventSink(t.TempDir())
 	o.eventSink = sink
