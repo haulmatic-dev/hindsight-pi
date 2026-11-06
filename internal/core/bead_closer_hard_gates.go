@@ -36,6 +36,9 @@ func (c *BeadCloser) runCloseHardGates(bead *types.Bead, projectPath, repoName, 
 	if err := c.gateQuarantineContradiction(bead, projectPath, repoName); err != nil {
 		return err
 	}
+	if err := c.gateJunkArtifacts(bead, projectPath, repoName, worktreePath); err != nil { // FR-003 close-time junk gate
+		return err
+	}
 	return c.gateDependencyOrder(bead, projectPath, repoName)
 }
 
