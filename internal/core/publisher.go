@@ -159,6 +159,21 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 		AppendActivity(projectPath, "publish", "skipped publish: branch tip already merged into origin base")
 		return false, "already integrated"
 	}
+	// 2c. Junk guard (hydra-ai97h): refuse to push branches whose committed
+	// diff contains junk-signature paths. Fail closed with a bounded
+	// ladder — after publishJunkMaxBlocks consecutive blocks the escalated
+	// reason stops retry churn. Probe failures fail open and never block a
+	// healthy publish.
+	if publishJunkImplemented {
+		if blocked, reason := publishJunkGuard(projectPath); blocked {
+			publishEvents.EmitRepo(projectPath, Event{Type: publishJunkGuardRefusedEvent, Project: filepath.Base(projectPath),
+				Reason: reason,
+				Detail: "publish refused by junk guard",
+				Fields: map[string]any{"reason": reason, "branch": branch, "project_path": projectPath}})
+			AppendActivity(projectPath, "publish", "skipped publish: junk guard blocked ("+reason+")")
+			return false, reason
+		}
+	}
 	publishEvents.EmitRepo(projectPath, Event{Type: "publish_push_attempted", Project: filepath.Base(projectPath),
 		Detail: "publisher attempting to land " + branch + " on origin",
 		Fields: map[string]any{"branch": branch, "pr_merge": prMerge, "project_path": projectPath}})
