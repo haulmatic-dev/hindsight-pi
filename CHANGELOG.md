@@ -9,6 +9,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Documentation
+- Junk signature package (`internal/junksig`) SYNTAX round verified: 10/10 tests PASS, build/vet/gofmt clean, exported APIs documented — no edits required.
+
 ### Added
 - Added: skill induction from worker executions (`internal/skillinducer/`, knobs `intelligence.skill_induction.*`, `hydra induce-skills` subcommand) — mines successful worker execution transcripts (`$TMPDIR/hydra-executions`) into candidate Pi skills via one OpenAI-compatible LLM call per transcript (kimi by default), deduped by Jaccard token similarity against the shared skill library and prior candidates, staged under `$HYDRA_HOME/skill-candidates` with SKILL.md + provenance metadata. Never writes the shared Pi config — promotion stays a human-reviewed PR (`manage_config: false` doctrine). Skills module of ScholarEvolve (arXiv:2609.40169). Disabled by default; daemon loop fail-open on missing key/model. Docs: `docs/operations/configuration-guide-20260309.md` §intelligence.skill_induction.
 
