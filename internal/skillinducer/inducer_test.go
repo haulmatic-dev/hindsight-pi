@@ -92,11 +92,11 @@ func newInducer(t *testing.T, cfg Config, p LLMProvider) *Inducer {
 func TestRunOnce_InducesCandidate(t *testing.T) {
 	cfg, execDir, candDir := testSetup(t)
 	writeRecord(t, execDir, "bead-1-20260101-000000.json", ExecutionRecord{
-		BeadID:   "bead-1",
-		Success:  true,
+		BeadID:    "bead-1",
+		Success:   true,
 		AgentType: "pi",
-		Turns:    12,
-		Output:   strings.Repeat("did the thing carefully ", 500),
+		Turns:     12,
+		Output:    strings.Repeat("did the thing carefully ", 500),
 	})
 
 	p := &mockProvider{resp: func(int) (string, error) {
@@ -385,12 +385,12 @@ func TestParseInduction(t *testing.T) {
 
 func TestNormalizeSkillName(t *testing.T) {
 	cases := map[string]string{
-		"Jest Retry Hygiene":   "jest-retry-hygiene",
-		"  spaced -- out  ":    "spaced-out",
-		"weird!@#chars&*":      "weird-chars",
-		"UPPER_CASE_NAME":      "upper-case-name",
-		"ab":                   "", // too short
-		"!!!":                  "", // nothing left
+		"Jest Retry Hygiene":     "jest-retry-hygiene",
+		"  spaced -- out  ":      "spaced-out",
+		"weird!@#chars&*":        "weird-chars",
+		"UPPER_CASE_NAME":        "upper-case-name",
+		"ab":                     "",                      // too short
+		"!!!":                    "",                      // nothing left
 		strings.Repeat("a", 100): strings.Repeat("a", 64), // capped at 64
 	}
 	for in, want := range cases {
