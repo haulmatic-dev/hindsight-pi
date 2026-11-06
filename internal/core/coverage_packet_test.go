@@ -27,9 +27,9 @@ func TestCoveragePacket_FromMeasurements_Empty(t *testing.T) {
 
 func TestCoveragePacket_FromMeasurements_PopulatesFields(t *testing.T) {
 	in := map[string]string{
-		"all_files":  "85.5 90.1",
-		"src/a.go":   "50.0 60.1",
-		"src/b.go":   "95.1 92.3",
+		"all_files": "85.5 90.1",
+		"src/a.go":  "50.0 60.1",
+		"src/b.go":  "95.1 92.3",
 	}
 	got := FromMeasurements(in)
 
@@ -83,8 +83,8 @@ func TestCoveragePacket_SplitRow_Variants(t *testing.T) {
 
 func TestCoveragePacket_ParsePercent_Variants(t *testing.T) {
 	tests := []struct {
-		in  string
-		want float64
+		in    string
+		want  float64
 		isNaN bool
 	}{
 		{"80", 80, false},
