@@ -24,6 +24,37 @@ const junksigImplemented = true
 // at the root and "src/.tmp2/jest/worker.js" deep in the tree.
 const ignoreLinePrefix = "**/"
 
+// junkExactSegments are signatures matched by exact segment equality.
+var junkExactSegments = map[string]bool{
+	".jest-cache":         true, // jest cache dir
+	".hydra-preflight-ok": true, // hydra preflight marker, any depth
+}
+
+// junkSegmentPrefixes are signatures matched as a segment (or basename)
+// prefix — structural prefix, never a substring anywhere in the name.
+var junkSegmentPrefixes = []string{
+	".tmp",                  // scratch segments: .tmp, .tmp-jest, .tmp2, .tmp-* files
+	"haste-map-",            // haste cache entry basenames
+	"jest-transform-cache-", // jest-transform cache entry basenames
+}
+
+// isJunkSegment reports whether the segment at index i of segs matches a
+// junk signature, including the two-segment ".pi/task-breakdown/<anything>"
+// tree rule (which needs lookahead into the next segments).
+func isJunkSegment(segs []string, i int) bool {
+	s := segs[i]
+	for _, prefix := range junkSegmentPrefixes {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	if junkExactSegments[s] {
+		return true
+	}
+	// pi task-breakdown scratch tree: ".pi/task-breakdown/<anything>".
+	return s == ".pi" && i+1 < len(segs) && segs[i+1] == "task-breakdown" && len(segs) > i+2
+}
+
 // IsJunkPath reports whether p is a junk artifact path.
 //
 // Contract (pinned by TestJunksig_* in junksig_test.go): structural
@@ -48,27 +79,7 @@ func IsJunkPath(p string) bool {
 	}
 	segs := strings.Split(filepath.ToSlash(p), "/")
 	for i, s := range segs {
-		if s == "" {
-			continue
-		}
-		// ".tmp" segment prefix: .tmp, .tmp-jest, .tmp2, … and .tmp-* files.
-		if strings.HasPrefix(s, ".tmp") {
-			return true
-		}
-		// jest cache dir, exact segment.
-		if s == ".jest-cache" {
-			return true
-		}
-		// haste/jest-transform cache entry basenames, exact prefixes.
-		if strings.HasPrefix(s, "haste-map-") || strings.HasPrefix(s, "jest-transform-cache-") {
-			return true
-		}
-		// hydra preflight marker, exact basename at any depth.
-		if s == ".hydra-preflight-ok" {
-			return true
-		}
-		// pi task-breakdown scratch tree: ".pi/task-breakdown/<anything>".
-		if s == ".pi" && i+1 < len(segs) && segs[i+1] == "task-breakdown" && len(segs) > i+2 {
+		if s != "" && isJunkSegment(segs, i) {
 			return true
 		}
 	}
