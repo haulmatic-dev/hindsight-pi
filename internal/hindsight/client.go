@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -81,6 +82,15 @@ type SearchRequest struct {
 	// zero memories and silently empties every recall; see the regression note
 	// on Search. Leave unset unless you are filtering by a value from that list.
 	Types []string `json:"types,omitempty"`
+
+	// PreferObservations drops any raw fact (world/experience) that an
+	// observation in THIS result set was consolidated from, backfilling the
+	// freed slots with next results. After the 2026-11-04/05 backlog burn the
+	// bank's duplicated clusters exist as (observation + N superseded raws);
+	// without this flag recall serves all N copies. Scoped to the result set,
+	// so a raw whose observation was not retrieved still serves — no
+	// information cliff.
+	PreferObservations bool `json:"prefer_observations,omitempty"`
 }
 
 // SearchResponse represents the response from Hindsight search
@@ -313,9 +323,10 @@ func (c *Client) Search(query, beadType string, limit int) (*SearchResponse, err
 	// learning loop, silently off. beadType still shapes the query text in
 	// SearchByBead, which is where it belongs.
 	reqBody := SearchRequest{
-		Query:     query,
-		MaxTokens: c.maxTokens,
-		Budget:    c.budget,
+		Query:              query,
+		MaxTokens:          c.maxTokens,
+		Budget:             c.budget,
+		PreferObservations: true,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -326,7 +337,7 @@ func (c *Client) Search(query, beadType string, limit int) (*SearchResponse, err
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 
-	url := fmt.Sprintf("%s/v1/default/banks/hydra/memories/recall", c.baseURL)
+	url := fmt.Sprintf("%s/v1/default/banks/%s/memories/recall", c.baseURL, BankID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -469,7 +480,7 @@ func (c *Client) Retain(memory *ExecutionMemory) (*RetentionResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 
-	url := fmt.Sprintf("%s/v1/default/banks/hydra/memories", c.baseURL)
+	url := fmt.Sprintf("%s/v1/default/banks/%s/memories", c.baseURL, BankID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, &ClientError{
@@ -771,4 +782,99 @@ func getString(m map[string]interface{}, key string) string {
 		return val
 	}
 	return ""
+}
+
+// MentalModel is a bank mental model: an LLM-synthesized living summary of
+// the bank's memories for a fixed source_query, auto-refreshed after
+// consolidation when its trigger is set. Empty Content means never refreshed.
+type MentalModel struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Content string `json:"content"`
+}
+
+// mentalModelsResponse mirrors GET /v1/default/banks/{bank}/mental-models.
+type mentalModelsResponse struct {
+	Items []MentalModel `json:"items"`
+	Total int           `json:"total"`
+}
+
+// GetMentalModels lists the bank's mental models (cheap list read, no LLM).
+// NOTE: the LIST endpoint projects `content` (and `trigger`) as empty — real
+// content only comes from the per-model DETAIL endpoint — so this fetches the
+// detail for each listed model (a handful of ~50ms GETs, still no LLM).
+// Models with genuinely empty content (never refreshed) are filtered out.
+func (c *Client) GetMentalModels(ctx context.Context) ([]MentalModel, error) {
+	if !c.IsEnabled() {
+		return nil, nil
+	}
+
+	url := fmt.Sprintf("%s/v1/default/banks/%s/mental-models", c.baseURL, BankID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create mental models request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mental models request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read mental models response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mental models request returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var parsed mentalModelsResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("failed to parse mental models response: %w", err)
+	}
+
+	models := make([]MentalModel, 0, len(parsed.Items))
+	for _, m := range parsed.Items {
+		detail, err := c.getMentalModelDetail(ctx, m.ID)
+		if err != nil {
+			// fail-open per model: one bad detail must not drop the rest
+				models = append(models, m) // keep whatever the list knew (likely empty content)
+				continue
+			}
+		if strings.TrimSpace(detail.Content) != "" {
+			models = append(models, detail)
+		}
+	}
+	return models, nil
+}
+
+// getMentalModelDetail fetches one model with its full content.
+func (c *Client) getMentalModelDetail(ctx context.Context, id string) (MentalModel, error) {
+	url := fmt.Sprintf("%s/v1/default/banks/%s/mental-models/%s", c.baseURL, BankID, id)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return MentalModel{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return MentalModel{}, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return MentalModel{}, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return MentalModel{}, fmt.Errorf("detail %s returned %d", id, resp.StatusCode)
+	}
+	var m MentalModel
+	if err := json.Unmarshal(body, &m); err != nil {
+		return MentalModel{}, err
+	}
+	return m, nil
 }

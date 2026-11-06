@@ -2145,6 +2145,12 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 	envVars = append(envVars, fmt.Sprintf("HYDRA_AGENT_TYPE=%s", bead.Type))
 	envVars = append(envVars, fmt.Sprintf("HYDRA_BEAD_TYPE=%s", bead.Type))
 
+	// Recall once per session, not per turn: the daemon already pre-queries
+	// Hindsight once per bead (hindsightContextFuture), so the hindsight-pi
+	// extension's every-turn recall is redundant for workers and costs an API
+	// round-trip (~1-4.6s) per agent turn on long beads.
+	envVars = append(envVars, "HINDSIGHT_INJECTION_FREQUENCY=first-turn")
+
 	cmd.Env = envVars
 
 	// Report the session id to the daemon so a replacement worker can resume it.
@@ -2545,6 +2551,27 @@ A turn ending without this block is treated as unfinished and you will be re-pro
 		}
 	}
 
+	// Mental models: living summaries of the bank (validation patterns,
+	// scheduling rules, tooling conventions). Cached server-side and refreshed
+	// after consolidation, so this is stable guidance, not raw recall. Total
+	// budget capped the same way as memories — deterministic order, content
+	// hash rank — so prompts stay byte-stable for the pi provider cache.
+	if hindsightContext != nil && len(hindsightContext.MentalModels) > 0 {
+		modelContents := make([]string, 0, len(hindsightContext.MentalModels))
+		for _, mm := range hindsightContext.MentalModels {
+			modelContents = append(modelContents, truncateString(mm.Name+": "+mm.Content, 700))
+		}
+		promptParts = append(promptParts, "\nKnown mental models (distilled project knowledge, deterministic order):")
+		total := 0
+		for _, c := range stableByContentHash(modelContents) {
+			if total+len(c) > 4000 {
+				break
+			}
+			promptParts = append(promptParts, "- "+c)
+			total += len(c)
+		}
+	}
+
 	// Distilled institutional rules, injected deterministically (the agent is
 	// also told to query CASS itself, but that instruction is skippable).
 	// Same story as memories: CASS relevance scores shift between calls, so
@@ -2715,6 +2742,16 @@ func queryHindsightForContext(
 	} else {
 		log.Println("ℹ️ No relevant memories found in Hindsight")
 		streamLog(mcpClient, "info", "No relevant memories found in Hindsight")
+	}
+
+	// Mental models: cheap list read (no LLM); fail-open. Injected into the
+	// pi prompt by buildPiPrompt. Models with empty content (never refreshed)
+	// are filtered out client-side.
+	if models, err := hindsightClient.GetMentalModels(ctx); err != nil {
+		log.Printf("ℹ️ Mental models unavailable (fail-open): %v", err)
+	} else if len(models) > 0 {
+		enrichment.MentalModels = models
+		log.Printf("🧠 %d mental models attached", len(models))
 	}
 
 	return enrichment
