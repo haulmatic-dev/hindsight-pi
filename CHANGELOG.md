@@ -9,6 +9,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+- Documentation: SYNTAX handoff for junk signature package (task-p3mqz) — verify-only, package already conformant (10/10 tests, build/vet/gofmt clean).
+
+
 ### Documentation
 - Junk signature package (`internal/junksig`) SYNTAX round verified: 10/10 tests PASS, build/vet/gofmt clean, exported APIs documented — no edits required.
 
