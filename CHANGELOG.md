@@ -19,8 +19,21 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ### Documentation
 - Junk signature package (`internal/junksig`) SYNTAX round verified: 10/10 tests PASS, build/vet/gofmt clean, exported APIs documented — no edits required.
 
+### Fixed
+- Updated stale `TestVerdictRetainer_RetainPOSTsOnce` bank-path expectation to `hindsight.BankID` (`coding-brain`) — the BankID refactor (`1e74202f`) missed this test literal, failing the suite gate.
+
+### Changed
+- Refactored spec-infeasible decision packets (FR-004): the duplicated gate-fp label parsing shared by `gateFingerprintRejectionCount` and `dominantGateFingerprint` extracted into one `gateFingerprintCounts(labels)` helper; dropped dead parameters (`now`, `cmd`) from `decisionPacketCheck`/`decisionPacketMeasurements`. Behavior identical; all 5 `TestDecisionPacket_*` contract tests pass unchanged.
+
+### Documentation
+- SYNTAX verification for the prd-lint coverage-threshold rule (R10): build/vet/gofmt clean, both `TestCoverageThresholdLint_*` contract tests pass, no placeholders or missing doc comments in `tools/prd-lint`. Note: `TestCreatePrdProducerContract` fails on SKILL.md §3.1a text drift — pre-existing on origin/development, unrelated to R10.
+
+### Changed
+- Refactored prd-lint coverage-threshold rule: R10 check extracted into a named `coverageThreshold(b reqBlock)` predicate with exemption-marker helper `isExemptMarker` and doc comments on the marker-binding semantics in `parseBlocks`; the coverage-threshold contract tests now run unconditionally (stale RED skip gate `PRDLINT_COVERAGE_THRESHOLD_ENFORCE` removed post-GREEN). No behavior change.
+
 ### Added
 - Added: RED contract suite for the FR-003 close-time junk gate (`internal/core/gate_junk_test.go`, wired as an inert gate in `runCloseHardGates` via `internal/core/gate_junk.go`): committed `.tmp-jest` junk auto-dropped once (removal commit, file off index, kept on disk), staged-only junk unstaged without a commit, re-offense after two drops rejected with the distinct `junk-artifacts` reason/label (escalation ladder untouched), real source paths and non-junk off-scope edits never hit the gate. Gated on `GATE_JUNK_ENFORCE=1` per the established RED pattern.
+- Added: prd-lint coverage-threshold semantics rule R10 (`tools/prd-lint/main.go`) — a requirement block whose Acceptance Criteria state a coverage threshold (e.g. "coverage >= 80% for glob `tools/**`") without a preceding `<!-- coverage-threshold: exempt -->` marker now yields a `coverage-threshold` warning violation (R10, block ID, heading line). Marker suppresses; non-coverage blocks unaffected. GREEN implementation for RED tests `TestCoverageThresholdLint_*` (bead hydra-74mf).
 - Added: skill induction from worker executions (`internal/skillinducer/`, knobs `intelligence.skill_induction.*`, `hydra induce-skills` subcommand) — mines successful worker execution transcripts (`$TMPDIR/hydra-executions`) into candidate Pi skills via one OpenAI-compatible LLM call per transcript (kimi by default), deduped by Jaccard token similarity against the shared skill library and prior candidates, staged under `$HYDRA_HOME/skill-candidates` with SKILL.md + provenance metadata. Never writes the shared Pi config — promotion stays a human-reviewed PR (`manage_config: false` doctrine). Skills module of ScholarEvolve (arXiv:2609.40169). Disabled by default; daemon loop fail-open on missing key/model. Docs: `docs/operations/configuration-guide-20260309.md` §intelligence.skill_induction.
 
 ### Changed

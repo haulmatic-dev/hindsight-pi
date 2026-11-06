@@ -95,3 +95,4 @@ graphify-out/
 .hydra-events/
 graphify-out
 .pi-subagents/
+.scratch/

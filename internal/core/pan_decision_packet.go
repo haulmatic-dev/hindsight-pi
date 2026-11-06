@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
@@ -78,17 +77,29 @@ var (
 // gate-fp-<fp8>-<N> written by trackVerificationFingerprint.
 var gateFingerprintCountedRe = regexp.MustCompile(`^gate-fp-([0-9a-f]{8})-(\d+)$`)
 
+// gateFingerprintCounts maps each counted gate-fingerprint to the highest
+// consecutive-rejection count recorded for it (gate-fp-<fp8>-3 → {fp8: 3}).
+func gateFingerprintCounts(labels []string) map[string]int {
+	counts := map[string]int{}
+	for _, l := range labels {
+		if m := gateFingerprintCountedRe.FindStringSubmatch(l); m != nil {
+			if n, err := strconv.Atoi(m[2]); err == nil && n > counts[m[1]] {
+				counts[m[1]] = n
+			}
+		}
+	}
+	return counts
+}
+
 // gateFingerprintRejectionCount returns the durable rejection count for the
 // bead: the highest N among its gate-fp-<fp8>-N labels. A bare
 // gate-fp-<fp8> label (written before the counted form existed) counts as
 // 1 round, not 0.
 func gateFingerprintRejectionCount(labels []string) int {
 	max := 0
-	for _, l := range labels {
-		if m := gateFingerprintCountedRe.FindStringSubmatch(l); m != nil {
-			if n, err := strconv.Atoi(m[2]); err == nil && n > max {
-				max = n
-			}
+	for _, n := range gateFingerprintCounts(labels) {
+		if n > max {
+			max = n
 		}
 	}
 	return max
@@ -98,11 +109,9 @@ func gateFingerprintRejectionCount(labels []string) int {
 // on the bead (the counted label with the highest N), or "" when none.
 func dominantGateFingerprint(labels []string) string {
 	best, bestN := "", 0
-	for _, l := range labels {
-		if m := gateFingerprintCountedRe.FindStringSubmatch(l); m != nil {
-			if n, err := strconv.Atoi(m[2]); err == nil && n > bestN {
-				bestN, best = n, m[1]
-			}
+	for fp, n := range gateFingerprintCounts(labels) {
+		if n > bestN {
+			bestN, best = n, fp
 		}
 	}
 	return best
@@ -157,8 +166,7 @@ func clearEscalationRefusalFor(b types.Bead) string {
 // verbatim gate output for the decision_request payload (for jest: the
 // "All files" coverage row and the count of per-path rows, i.e. the paths
 // breaching the gate). Nil when nothing measurable is present.
-func decisionPacketMeasurements(cmd, output string) map[string]string {
-	_ = cmd
+func decisionPacketMeasurements(output string) map[string]string {
 	if output == "" {
 		return nil
 	}
@@ -205,11 +213,10 @@ func decisionPacketMeasurements(cmd, output string) map[string]string {
 // spec-infeasible and files exactly one decision_request event. Fail-open:
 // every probe and the label write degrade to "no packet" without breaking
 // the sweep.
-func (o *Overseer) decisionPacketCheck(project types.Project, b types.Bead, now time.Time) {
+func (o *Overseer) decisionPacketCheck(project types.Project, b types.Bead) {
 	if o.beadsClient == nil || o.eventSink == nil {
 		return
 	}
-	_ = now
 	// Any status change is a human/automation decision of another kind: it
 	// ends the candidacy without a packet.
 	if b.Status.IsTerminal() {
@@ -256,7 +263,7 @@ func (o *Overseer) decisionPacketCheck(project types.Project, b types.Bead, now 
 		"fingerprint": fp,
 		"gate_output": output,
 	}
-	if ms := decisionPacketMeasurements(cmd, output); ms != nil {
+	if ms := decisionPacketMeasurements(output); ms != nil {
 		fields["measurements"] = ms
 	}
 
