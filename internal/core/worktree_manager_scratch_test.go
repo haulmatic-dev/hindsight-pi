@@ -61,7 +61,7 @@ func TestScratch_DirCreatedOutsideTree(t *testing.T) {
 		t.Fatalf("EnsureWorktree: %v", err)
 	}
 
-	scratch := m.scratchDirFor(proj, key)
+	scratch := worktreeScratchDirFor(proj, key)
 	scratchRequireImpl(t)
 
 	fi, err := os.Stat(scratch)
@@ -95,6 +95,19 @@ func TestScratch_DirCreatedOutsideTree(t *testing.T) {
 	}
 }
 
+// requireScaffoldedScratch asserts the scratch dir for (proj, key) exists
+// after EnsureWorktree — the precondition every prune-site test needs before
+// teardown.
+func requireScaffoldedScratch(t *testing.T, m *WorktreeManager, proj, key string) string {
+	t.Helper()
+	scratchRequireImpl(t)
+	scratch := worktreeScratchDirFor(proj, key)
+	if _, err := os.Stat(scratch); err != nil {
+		t.Fatalf("precondition: scratch dir %s must exist before teardown (EnsureWorktree must scaffold it): %v", scratch, err)
+	}
+	return scratch
+}
+
 // TestScratch_PruneSites: every teardown path removes the scratch dir and
 // leaves nothing behind.
 func TestScratch_PruneSites(t *testing.T) {
@@ -126,11 +139,7 @@ func TestScratch_PruneSites(t *testing.T) {
 		if _, err := m.EnsureWorktree(proj, key); err != nil {
 			t.Fatalf("EnsureWorktree: %v", err)
 		}
-		scratch := m.scratchDirFor(proj, key)
-		scratchRequireImpl(t)
-		if _, err := os.Stat(scratch); err != nil {
-			t.Fatalf("precondition: scratch dir %s must exist before teardown (EnsureWorktree must scaffold it): %v", scratch, err)
-		}
+		scratch := requireScaffoldedScratch(t, m, proj, key)
 		m.Remove(proj, key)
 		if _, err := os.Stat(scratch); !os.IsNotExist(err) {
 			t.Fatalf("Remove left the scratch dir behind at %s (stat err %v) — teardown must prune the scratch dir", scratch, err)
@@ -144,11 +153,7 @@ func TestScratch_PruneSites(t *testing.T) {
 		if _, err := m.EnsureWorktree(proj, key); err != nil {
 			t.Fatalf("EnsureWorktree: %v", err)
 		}
-		scratch := m.scratchDirFor(proj, key)
-		scratchRequireImpl(t)
-		if _, err := os.Stat(scratch); err != nil {
-			t.Fatalf("precondition: scratch dir %s must exist before teardown (EnsureWorktree must scaffold it): %v", scratch, err)
-		}
+		scratch := requireScaffoldedScratch(t, m, proj, key)
 		if _, err := m.QuarantineBranchAndRemove(proj, key, m.BranchName(key)); err != nil {
 			t.Fatalf("QuarantineBranchAndRemove: %v", err)
 		}
@@ -167,11 +172,7 @@ func TestScratch_PruneSites(t *testing.T) {
 		if err != nil {
 			t.Fatalf("EnsureWorktree: %v", err)
 		}
-		scratch := m.scratchDirFor(proj, key)
-		scratchRequireImpl(t)
-		if _, err := os.Stat(scratch); err != nil {
-			t.Fatalf("precondition: scratch dir %s must exist before teardown (EnsureWorktree must scaffold it): %v", scratch, err)
-		}
+		scratch := requireScaffoldedScratch(t, m, proj, key)
 		ageWorktree(t, wt, time.Now().Add(-2*time.Hour))
 
 		removed := CleanupStaleWorktrees(time.Minute, map[string]bool{}, nil)
@@ -193,7 +194,8 @@ func TestScratch_PruneSites(t *testing.T) {
 // TestScratch_EnvExported: the worker env builder output contains the scratch
 // env var, pointing at the chain's scratch dir.
 func TestScratch_EnvExported(t *testing.T) {
-	proj := t.TempDir() // path-only contract; no git repo needed
+	proj := t.TempDir()                 // path-only contract; no git repo needed
+	t.Setenv("HYDRA_HOME", t.TempDir()) // worktreeRoot derives from $HYDRA_HOME — isolate from the host
 	bead := types.Bead{ID: "scratch-env-1", Project: "p", Title: "scratch env"}
 
 	b := NewWorkerEnvBuilder(DefaultConfig())
@@ -201,20 +203,18 @@ func TestScratch_EnvExported(t *testing.T) {
 
 	scratchRequireImpl(t)
 
-	m := NewWorktreeManager()
-	want := m.scratchDirFor(proj, string(bead.ID))
+	want := worktreeScratchDirFor(proj, string(bead.ID))
 
-	found := ""
+	// Match the exact computed entry rather than the first %s= line: the
+	// env builder legitimately starts from the parent environment, so when
+	// the worker process itself already carries an inherited %s the slice
+	// contains both — the builder appends the up-to-date computed value and
+	// os/exec's duplicate handling keeps the last one.
+	wantEntry := scratchEnvVar + "=" + want
 	for _, e := range env {
-		if strings.HasPrefix(e, scratchEnvVar+"=") {
-			found = e
-			break
+		if e == wantEntry {
+			return
 		}
 	}
-	if found == "" {
-		t.Fatalf("worker env missing %s — env builder must export the worktree scratch dir (tools like mongodb-memory-server write scratch artifacts via MONGOMS_TMPDIR-style paths)", scratchEnvVar)
-	}
-	if got := strings.TrimPrefix(found, scratchEnvVar+"="); got != want {
-		t.Fatalf("%s=%s, want %s", scratchEnvVar, got, want)
-	}
+	t.Fatalf("worker env missing %s — env builder must export the worktree scratch dir (tools like mongodb-memory-server write scratch artifacts via MONGOMS_TMPDIR-style paths)", scratchEnvVar)
 }

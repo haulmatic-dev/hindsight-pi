@@ -338,11 +338,6 @@ func worktreeScratchDirFor(projectPath, key string) string {
 	return filepath.Join(worktreeRoot(projectPath), scratchDirName, sanitizeKey(key))
 }
 
-// scratchDirFor returns the canonical scratch directory for a chain key.
-func (m *WorktreeManager) scratchDirFor(projectPath, key string) string {
-	return worktreeScratchDirFor(projectPath, key)
-}
-
 // scaffoldScratch creates the chain's scratch dir (outside the worktree
 // tree) and injects the `.scratch/` ignore line into the worktree .gitignore
 // so scratch-relative writes never leak into git status. Fail-open: scratch
