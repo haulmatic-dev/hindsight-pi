@@ -51,6 +51,11 @@ func publishJunkRemoteCommits(t *testing.T, bare string) []string {
 	t.Helper()
 	out, err := exec.Command("git", "-C", bare, "log", "--oneline", "--").CombinedOutput()
 	if err != nil {
+		// An empty bare remote (unborn HEAD) is a legitimate "nothing ever
+		// pushed" state — exactly what AC1 expects after a blocked publish.
+		if strings.Contains(string(out), "does not have any commits yet") {
+			return nil
+		}
 		t.Fatalf("read remote log: %v\n%s", err, out)
 	}
 	var lines []string
@@ -62,11 +67,11 @@ func publishJunkRemoteCommits(t *testing.T, bare string) []string {
 	return lines
 }
 
-// TestPublishJunkGuard_JunkBranchNoPushOneEvent pins AC1: a branch whose
+// TestPublisherJunk_Guard_JunkBranchNoPushOneEvent pins AC1: a branch whose
 // diff contains one junk path (here .jest-cache/jx) must not be pushed —
 // the publish is skipped with a visible, junk-naming reason and exactly one
 // publish_junk_blocked event; the bare remote stays empty.
-func TestPublishJunkGuard_JunkBranchNoPushOneEvent(t *testing.T) {
+func TestPublisherJunk_Guard_JunkBranchNoPushOneEvent(t *testing.T) {
 	publishJunkRequireImpl(t)
 	_, repo, bare := publishJunkFixture(t)
 	writeAndCommit(t, repo, ".jest-cache/jx", "junk\n")
@@ -105,12 +110,12 @@ func TestPublishJunkGuard_JunkBranchNoPushOneEvent(t *testing.T) {
 	}
 }
 
-// TestPublishJunkGuard_ThirdConsecutiveBlockStopsRetries pins AC2: the
+// TestPublisherJunk_Guard_ThirdConsecutiveBlockStopsRetries pins AC2: the
 // consecutive-block counter is per project; after publishJunkMaxBlocks
 // consecutive blocks the guard switches to the escalated reason (the
 // publish backoff loop must stop retrying and surface to a human), and the
 // guard stays blocked after that.
-func TestPublishJunkGuard_ThirdConsecutiveBlockStopsRetries(t *testing.T) {
+func TestPublisherJunk_Guard_ThirdConsecutiveBlockStopsRetries(t *testing.T) {
 	publishJunkRequireImpl(t)
 	project := t.TempDir()
 	origProbe := publishJunkDiffProbe
@@ -136,17 +141,19 @@ func TestPublishJunkGuard_ThirdConsecutiveBlockStopsRetries(t *testing.T) {
 	if reason != publishJunkEscalatedReason {
 		t.Fatalf("after %d consecutive blocks reason=%q, want %q", publishJunkMaxBlocks, reason, publishJunkEscalatedReason)
 	}
-	// Other projects are unaffected by this project's counter.
-	if b, _ := publishJunkGuard(project + "-other"); b {
-		t.Fatal("counter must be per-project")
+	// Other projects are unaffected by this project's counter: the guard may
+	// still (correctly) refuse a junk diff for them, but their budget must be
+	// fresh — the plain reason, never this project's escalated state.
+	if _, reason := publishJunkGuard(project + "-other"); reason != publishJunkReason {
+		t.Fatalf("counter must be per-project: other project reason=%q, want fresh %q", reason, publishJunkReason)
 	}
 }
 
-// TestPublishJunkGuard_ThreadCacheChangesPush pins AC3: a branch containing
+// TestPublisherJunk_Guard_ThreadCacheChangesPush pins AC3: a branch containing
 // only thread-cache.service.ts changes (a known non-junk path) must push —
 // the default production probe classifies the real committed diff and
 // nothing in it is junk.
-func TestPublishJunkGuard_ThreadCacheChangesPush(t *testing.T) {
+func TestPublisherJunk_Guard_ThreadCacheChangesPush(t *testing.T) {
 	publishJunkRequireImpl(t)
 	_, repo, bare := publishJunkFixture(t)
 	writeAndCommit(t, repo, "src/modules/agent/services/conversation/thread-cache.service.ts", "export class ThreadCache {}\n")
@@ -170,12 +177,12 @@ func TestPublishJunkGuard_ThreadCacheChangesPush(t *testing.T) {
 	}
 }
 
-// TestPublishJunkGuard_JunkRemovedPublishProceeds pins AC4: after a block,
+// TestPublisherJunk_Guard_JunkRemovedPublishProceeds pins AC4: after a block,
 // once the junk is gone from the branch (probe returns nothing) the guard
 // allows the publish, resets the counter, and a subsequent single block
 // reports the plain (non-escalated) reason — a fixed branch gets a fresh
 // guard budget instead of an inherited escalated state.
-func TestPublishJunkGuard_JunkRemovedPublishProceeds(t *testing.T) {
+func TestPublisherJunk_Guard_JunkRemovedPublishProceeds(t *testing.T) {
 	publishJunkRequireImpl(t)
 	project := "/proj/fix-junk"
 	origProbe := publishJunkDiffProbe
@@ -203,11 +210,11 @@ func TestPublishJunkGuard_JunkRemovedPublishProceeds(t *testing.T) {
 	}
 }
 
-// TestPublishJunkGuard_CleanPathFailOpenCoverage is unconditional (not
+// TestPublisherJunk_Guard_CleanPathFailOpenCoverage is unconditional (not
 // require-gated): gives the guard wiring measurable coverage on a junk-free
 // project in both RED (inert stub) and GREEN (real guard) states. Also
 // pins that a probe tooling failure fails open (never blocks a publish).
-func TestPublishJunkGuard_CleanPathFailOpenCoverage(t *testing.T) {
+func TestPublisherJunk_Guard_CleanPathFailOpenCoverage(t *testing.T) {
 	origProbe := publishJunkDiffProbe
 	defer func() { publishJunkDiffProbe = origProbe }()
 	resetPublishJunkBlocks("/proj/failopen")
@@ -222,11 +229,11 @@ func TestPublishJunkGuard_CleanPathFailOpenCoverage(t *testing.T) {
 	}
 }
 
-// TestPublishRepo_JunkGuardEventBounded pins the event-budget half of AC2:
+// TestPublisherJunk_RepoGuardEventBounded pins the event-budget half of AC2:
 // repeated publish ticks against a persistently junk branch emit at most
 // publishJunkMaxBlocks publish_junk_blocked events (the escalated state
 // stops the visible-event churn).
-func TestPublishRepo_JunkGuardEventBounded(t *testing.T) {
+func TestPublisherJunk_RepoGuardEventBounded(t *testing.T) {
 	publishJunkRequireImpl(t)
 	_, repo, _ := publishJunkFixture(t)
 	writeAndCommit(t, repo, ".jest-cache/deep", "junk\n")
