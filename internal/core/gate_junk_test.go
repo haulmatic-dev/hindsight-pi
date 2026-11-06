@@ -104,6 +104,31 @@ func junkGateCloserFor(t *testing.T, repo string) (*BeadCloser, *mockBeadsClient
 	return hardGateCloser(t, hardGateConfig(3), repo)
 }
 
+// --- wiring smoke: inert/fail-open path covered with or without a real gate
+
+func TestGateJunk_CleanWorktreeFailOpenCoverage(t *testing.T) {
+	// Unconditional (not require-gated): exercises the gate entry point on a
+	// clean worktree in both RED (inert stub) and GREEN (real gate, clean set
+	// → pass). Gives the wiring + fail-open branch measurable coverage.
+	repo := initGitRepo(t)
+	writeAndCommit(t, repo, "src/thread-cache/service.ts", "export class ThreadCache {}\n")
+
+	c, _, sinkDir := junkGateCloserFor(t, repo)
+	bead := &types.Bead{
+		ID:          "proj-junk0",
+		Title:       "GREEN: Implement thread cache",
+		Project:     filepath.Base(repo),
+		Status:      types.StatusInProgress,
+		Description: "chain work",
+	}
+	if err := c.gateJunkArtifacts(bead, repo, "", repo); err != nil {
+		t.Fatalf("clean worktree must pass the junk gate fail-open: %v", err)
+	}
+	for _, ev := range readEventsOfType(t, NewEventSink(sinkDir), junkDropEventType) {
+		t.Errorf("no close_gate_junk_dropped event expected on a clean worktree, got: %+v", ev)
+	}
+}
+
 // --- AC1: committed junk is auto-dropped exactly once, close proceeds ---
 
 func TestGateJunk_CommittedJunkDroppedOnceCloseProceeds(t *testing.T) {
