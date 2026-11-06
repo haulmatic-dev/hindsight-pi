@@ -341,7 +341,7 @@ export default function hindsightMemory(pi: ExtensionAPI): void {
         document_id: record.document_id,
         update_mode: record.update_mode,
         observation_scopes: record.observation_scopes,
-      })), { async: false });
+      })), { async: true });
       deleteQueue(sessionId, "auto");
       recordFlushSuccess();
     } catch (error) {
