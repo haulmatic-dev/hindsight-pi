@@ -1669,3 +1669,6 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 ### Fixed
 - Fixed `internal/core/pan_mirror_health.go` compile-gate failure: healing now routed via `beadsClient.UpdateBeadStatus`; lint-gate stale errors resolved (build/vet/tests clean).
+
+## [Unreleased]
+- Completed discovery protocol execution (Hindsight search, file discovery, syntax check). Implementation of `coverage_packet.go` verified and stable. Integration-ready.
