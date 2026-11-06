@@ -9,7 +9,11 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Changed
+- Refactored prd-lint coverage-threshold rule: R10 check extracted into a named `coverageThreshold(b reqBlock)` predicate with exemption-marker helper `isExemptMarker` and doc comments on the marker-binding semantics in `parseBlocks`; the coverage-threshold contract tests now run unconditionally (stale RED skip gate `PRDLINT_COVERAGE_THRESHOLD_ENFORCE` removed post-GREEN). No behavior change.
+
 ### Added
+- Added: prd-lint coverage-threshold semantics rule R10 (`tools/prd-lint/main.go`) — a requirement block whose Acceptance Criteria state a coverage threshold (e.g. "coverage >= 80% for glob `tools/**`") without a preceding `<!-- coverage-threshold: exempt -->` marker now yields a `coverage-threshold` warning violation (R10, block ID, heading line). Marker suppresses; non-coverage blocks unaffected. GREEN implementation for RED tests `TestCoverageThresholdLint_*` (bead hydra-74mf).
 - Added: skill induction from worker executions (`internal/skillinducer/`, knobs `intelligence.skill_induction.*`, `hydra induce-skills` subcommand) — mines successful worker execution transcripts (`$TMPDIR/hydra-executions`) into candidate Pi skills via one OpenAI-compatible LLM call per transcript (kimi by default), deduped by Jaccard token similarity against the shared skill library and prior candidates, staged under `$HYDRA_HOME/skill-candidates` with SKILL.md + provenance metadata. Never writes the shared Pi config — promotion stays a human-reviewed PR (`manage_config: false` doctrine). Skills module of ScholarEvolve (arXiv:2609.40169). Disabled by default; daemon loop fail-open on missing key/model. Docs: `docs/operations/configuration-guide-20260309.md` §intelligence.skill_induction.
 
 ### Changed

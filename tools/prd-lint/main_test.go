@@ -392,19 +392,10 @@ func TestSystemTypeLint(t *testing.T) {
 // warning violation. Blocks that never mention coverage are unaffected.
 //
 // RED gating: the rule is not implemented yet (GREEN's job), so by default
-// these tests skip loudly to keep `go test ./...` green for the daemon
-// gate. Setting PRDLINT_COVERAGE_THRESHOLD_ENFORCE=1 turns them into hard
-// assertions, and the enforced run is expected to FAIL against the current
-// code — that failure is the RED evidence.
-const coverageThresholdEnforceEnv = "PRDLINT_COVERAGE_THRESHOLD_ENFORCE"
-
-func requireCoverageThresholdEnforced(t *testing.T) {
-	t.Helper()
-	if os.Getenv(coverageThresholdEnforceEnv) == "" {
-		t.Skipf("coverage-threshold rule not implemented yet (RED); set %s=1 to enforce and observe the expected RED failure", coverageThresholdEnforceEnv)
-	}
-}
-
+// These tests pin the R10-coverage-threshold rule: a block stating a
+// coverage percentage threshold without a `<!-- coverage-threshold:
+// exempt -->` marker must warn, non-coverage blocks must stay clean, and
+// the marker must suppress the warning.
 func isCoverageThresholdWarning(v Violation) bool {
 	return strings.Contains(strings.ToLower(v.Rule), "coverage-threshold") ||
 		strings.Contains(strings.ToLower(v.Message), "coverage-threshold")
@@ -424,8 +415,6 @@ func coverageThresholdFixturePRD() string {
 }
 
 func TestCoverageThresholdLint_GlobThresholdCriterionWithoutMarkerWarns(t *testing.T) {
-	requireCoverageThresholdEnforced(t)
-
 	result := lintContent("test.md", coverageThresholdFixturePRD())
 	if result.Passed {
 		t.Fatalf("expected the glob coverage-threshold criterion without an exemption marker to produce a coverage-threshold warning, got a clean pass")
@@ -452,8 +441,6 @@ func TestCoverageThresholdLint_GlobThresholdCriterionWithoutMarkerWarns(t *testi
 }
 
 func TestCoverageThresholdLint_NonCoverageCriteriaUnaffected(t *testing.T) {
-	requireCoverageThresholdEnforced(t)
-
 	// Regression fixture: no block mentions coverage, so no
 	// coverage-threshold warning may appear.
 	result := lintContent("test.md", minimalValidPRD())
