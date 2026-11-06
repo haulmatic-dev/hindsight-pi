@@ -95,6 +95,25 @@ func (c *BeadCloser) runDaemonGates(bead *types.Bead, projectName, projectPath, 
 			Bead: bead.ID.String(), Reason: g.name,
 			Fields: map[string]any{"status": a.Status, "exit_code": a.ExitCode}})
 		if a.Status != GateStatusPassed {
+			// 2026-11-06: foreign-failure attribution — with parallel PRD chains
+			// sharing the worktree branch, a failing test from ANOTHER chain
+			// must not block THIS bead's close (the 6× gate-test-failed loop
+			// burned ~300M tokens). Parse the failing test packages from the
+			// gate output; if none intersect this bead's changed files, the
+			// failure is foreign — log, label, and let the close proceed.
+			if g.name == "test" {
+				if c.isForeignTestFailure(bead, worktreePath, a) {
+					log.Printf("[DaemonGates] %s gate test: FAILED but all failing packages are foreign to this bead's changes — allowing close (foreign failure)", bead.ID)
+					c.events.EmitRepo(projectPath, Event{Type: "gate_test_foreign_failure", Project: repoName,
+						Bead: bead.ID.String(), Reason: "foreign-test-failure",
+						Detail: fmt.Sprintf("gate test failed but no failing test intersects bead %s changed files", bead.ID),
+						Fields: map[string]any{"exit_code": a.ExitCode}})
+					if c.beadsClient != nil {
+						_ = c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"gate-test-foreign-failure"})
+					}
+					continue // proceed to next gate (or close)
+				}
+			}
 			c.annotateGateFailure(bead, projectPath, repoName, g.name, a)
 			return c.rejectClose(bead, projectPath, repoName, "gate-"+g.name+"-failed", a.Summary)
 		}
@@ -124,6 +143,106 @@ func (c *BeadCloser) runDaemonGates(bead *types.Bead, projectName, projectPath, 
 		log.Printf("[DaemonGates] %s coverage-truth passed (exit %d)", bead.ID, a.ExitCode)
 	}
 	return nil
+}
+
+// isForeignTestFailure reports whether all failing test packages in the gate
+// output are outside this bead's changed files. With parallel PRD chains
+// sharing a worktree branch, a RED bead's tests land on the branch mid-campaign
+// and block unrelated chains' REFACTOR/SYNTAX closes. This function parses
+// `go test` output for FAIL lines, extracts failing package paths, and checks
+// whether ANY of them intersect the bead's own diff (chain worktree vs base).
+// True = all failures are foreign → the close should proceed.
+func (c *BeadCloser) isForeignTestFailure(bead *types.Bead, worktreePath string, artifact GateArtifact) bool {
+	// Parse failing packages from the raw output (go test prints
+	// "FAIL\t<package-path>\t<duration>" lines and "--- FAIL: <TestName>" lines)
+	failingPkgs := parseFailingGoPackages(artifact.Summary + "\n" + string(artifact.RawLog))
+	if len(failingPkgs) == 0 {
+		return false // can't parse → assume not foreign (fail-closed)
+	}
+
+	// Get this bead's changed files (from worktree diff vs base)
+	changed, err := c.changedFilePaths(worktreePath)
+	if err != nil || len(changed) == 0 {
+		return false // can't determine changes → assume not foreign
+	}
+
+	// Map changed files to their directories; a failing package matches if
+	// any changed file is in the failing package's directory tree.
+	for _, pkg := range failingPkgs {
+		pkgDir := goPackageToDir(pkg)
+		for _, f := range changed {
+			if strings.HasPrefix(f, pkgDir) {
+				return false // this bead changed a file in a failing package
+			}
+		}
+	}
+	return true // all failing packages are outside this bead's changes
+}
+
+// parseFailingGoPackages extracts package paths from `go test` output.
+// Looks for lines like: "FAIL\tgithub.com/user/repo/pkg/sub\t1.234s"
+func parseFailingGoPackages(output string) []string {
+	var pkgs []string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "FAIL") && strings.Contains(line, "\t") {
+			parts := strings.Split(line, "\t")
+			if len(parts) >= 2 {
+				pkg := strings.TrimSpace(parts[1])
+				if pkg != "" && !strings.HasPrefix(pkg, "[") {
+					pkgs = append(pkgs, pkg)
+				}
+			}
+		}
+	}
+	return pkgs
+}
+
+// goPackageToDir converts a Go import path to a directory path.
+// "github.com/user/repo/internal/core" → "internal/core"
+func goPackageToDir(pkg string) string {
+	// Strip the module prefix (everything up to and including the repo name).
+	// The module path is like "github.com/haulmatic-dev/hydra" — take the
+	// part after the last path segment that matches the repo root.
+	parts := strings.Split(pkg, "/")
+	if len(parts) < 3 {
+		return pkg
+	}
+	// Find the segment that is a known top-level dir (cmd, internal, pkg, tools)
+	for i, p := range parts {
+		if p == "cmd" || p == "internal" || p == "pkg" || p == "tools" {
+			return strings.Join(parts[i:], "/")
+		}
+	}
+	return pkg
+}
+
+// changedFilePaths returns the repo-relative paths of files changed in the
+// worktree relative to its merge-base with the base branch.
+func (c *BeadCloser) changedFilePaths(worktreePath string) ([]string, error) {
+	if worktreePath == "" {
+		return nil, fmt.Errorf("empty worktree path")
+	}
+	// Find the merge-base with the default branch (development for hydra)
+	base, err := gitOut(worktreePath, "merge-base", "HEAD", "origin/development")
+	if err != nil {
+		// Try development without origin/ prefix
+		base, err = gitOut(worktreePath, "merge-base", "HEAD", "development")
+		if err != nil {
+			return nil, fmt.Errorf("merge-base: %w", err)
+		}
+	}
+	out, err := gitOut(worktreePath, "diff", "--name-only", strings.TrimSpace(base)+"...HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("diff: %w", err)
+	}
+	var files []string
+	for _, f := range strings.Split(strings.TrimSpace(out), "\n") {
+		if f = strings.TrimSpace(f); f != "" {
+			files = append(files, f)
+		}
+	}
+	return files, nil
 }
 
 // annotateGateFailure hands the retry worker the evidence: parsed summary +
