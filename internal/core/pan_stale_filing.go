@@ -248,7 +248,7 @@ func (o *Overseer) sweepStalePanFilingsForProject(project types.Project, now tim
 	// bead files a decision packet even while it is not pan-filed. Fail-open
 	// per bead (decisionPacketCheck logs and returns on faults).
 	for _, b := range beads {
-		o.decisionPacketCheck(project, b, now)
+		o.decisionPacketCheck(project, b)
 	}
 	candidates := staleFilingCandidates(project, beads, now)
 	if len(candidates) == 0 {

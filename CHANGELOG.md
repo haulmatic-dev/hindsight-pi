@@ -9,6 +9,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Changed
+- Refactored spec-infeasible decision packets (FR-004): the duplicated gate-fp label parsing shared by `gateFingerprintRejectionCount` and `dominantGateFingerprint` extracted into one `gateFingerprintCounts(labels)` helper; dropped dead parameters (`now`, `cmd`) from `decisionPacketCheck`/`decisionPacketMeasurements`. Behavior identical; all 5 `TestDecisionPacket_*` contract tests pass unchanged.
+
 ### Documentation
 - SYNTAX verification for the prd-lint coverage-threshold rule (R10): build/vet/gofmt clean, both `TestCoverageThresholdLint_*` contract tests pass, no placeholders or missing doc comments in `tools/prd-lint`. Note: `TestCreatePrdProducerContract` fails on SKILL.md §3.1a text drift — pre-existing on origin/development, unrelated to R10.
 
