@@ -1,14 +1,13 @@
 package core
 
 import (
-	"os"
+	"math"
+	"strconv"
 	"strings"
 )
 
 // DefaultCoverageBar is the default threshold for coverage percentage.
 const DefaultCoverageBar = 80.0
-
-var coveragePacketEnforce = os.Getenv("COVERAGE_PACKET_ENFORCE") == "1"
 
 // CoveragePacket represents a parsed coverage table from a gate output.
 // It holds the summary row ("All files"), per-file rows, metric names,
@@ -30,17 +29,20 @@ func NewCoveragePacket() *CoveragePacket {
 }
 
 // FromMeasurements builds a CoveragePacket from a map of measurements.
+// The "all_files" key is consumed into AllFilesRow; every other entry
+// becomes a per-file row keyed by path.
 func FromMeasurements(ms map[string]string) *CoveragePacket {
-	if !coveragePacketEnforce {
-		return nil
-	}
 	if ms == nil {
 		return nil
 	}
 	p := NewCoveragePacket()
 	if all, ok := ms["all_files"]; ok {
-		p.AllFilesRow = strings.Fields(all)
+		p.AllFilesRow = splitRow(all)
 		delete(ms, "all_files")
+	}
+	p.MetricNames = make([]string, len(p.AllFilesRow))
+	for i := range p.MetricNames {
+		p.MetricNames[i] = "metric_" + strconv.Itoa(i)
 	}
 	for path, row := range ms {
 		p.FileRows[path] = splitRow(row)
@@ -48,27 +50,97 @@ func FromMeasurements(ms map[string]string) *CoveragePacket {
 	return p
 }
 
-// splitRow splits a row string by separators (spaces, commas, tabs).
+// splitRow splits a row string on spaces, commas and tabs.
 func splitRow(s string) []string {
-	return strings.FieldsFunc(s, func(r rune) bool {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
 		return r == ' ' || r == ',' || r == '\t'
 	})
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
 }
 
-// parsePercent parses a percentage string like "80" or "80.5%".
+// nan returns IEEE NaN for "not a percentage cell".
+func nan() float64 {
+	return math.NaN()
+}
+
+// isNaN reports whether f is NaN.
+func isNaN(f float64) bool {
+	return f != f
+}
+
+// parsePercent parses a percentage string like "80", "80.5" or "80%".
+// Unparseable values (empty, non-numeric) return NaN, which callers must
+// treat as "not a percentage cell".
 func parsePercent(s string) float64 {
-	_ = s
-	return 0.0
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, "%")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nan()
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nan()
+	}
+	return f
 }
 
-// BelowBarCount counts the number of files with at least one metric below the bar.
+// effectiveBar returns the packet bar, falling back to the default when
+// the configured bar is zero or negative.
+func (p *CoveragePacket) effectiveBar() float64 {
+	if p != nil && p.Bar > 0 {
+		return p.Bar
+	}
+	return DefaultCoverageBar
+}
+
+// BelowBarCount counts the number of files with at least one metric below
+// the bar. Non-percentage cells count as a breach. A nil packet counts 0.
 func (p *CoveragePacket) BelowBarCount() int {
-	return 0
+	if p == nil {
+		return 0
+	}
+	bar := p.effectiveBar()
+	count := 0
+	for _, row := range p.FileRows {
+		for _, cell := range row {
+			v := parsePercent(cell)
+			if isNaN(v) || v < bar {
+				count++
+				break
+			}
+		}
+	}
+	return count
 }
 
-// WorstFilePerMetric returns a map of metrics to file path with the lowest percentage.
+// WorstFilePerMetric returns, for each metric index ("metric_N"), the file
+// path with the lowest percentage for that metric. NaN cells are ignored.
+// A nil packet returns an empty map.
 func (p *CoveragePacket) WorstFilePerMetric() map[string]string {
-	return map[string]string{}
+	worst := map[string]string{}
+	if p == nil {
+		return worst
+	}
+	worstVal := map[string]float64{}
+	for path, row := range p.FileRows {
+		for i, cell := range row {
+			v := parsePercent(cell)
+			if isNaN(v) {
+				continue
+			}
+			key := "metric_" + strconv.Itoa(i)
+			w, ok := worstVal[key]
+			if !ok || v < w {
+				worstVal[key] = v
+				worst[key] = path
+			}
+		}
+	}
+	return worst
 }
 
 // SetBar sets the passing bar.
