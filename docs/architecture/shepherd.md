@@ -82,6 +82,8 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `zero_token_stall_detected` | Charon found a worker with state=working, tokens_so_far=0 and age>15m — the session never completed a turn (fresh heartbeats alone made the 2026-10-20 stall invisible); surfaced to the Pan digest with the `kill-stalled-worker` repair | `bead`, `pid`, `age_minutes` |
 | `rogue_pi_detected` | Charon found a `pi` process outside hydra.service, untracked, older than 2h — nothing owns it (live fixture: bare-pi interactive launch burning a core through every daemon restart); surfaced to the Pan digest with the `kill-rogue-pi` repair, deduped per PID | `pid`, `cmdline`, `cgroup`, `age_minutes` |
 | `publish_pr_waiting` | tier policy left an integration PR open awaiting human merge; emitted once per branch tip (later ticks skip while the tip is unchanged). Replaces the `publish_push_rejected`/`pr_merge_failed` noise that routine waiting generated | `pr_url`, `branch` |
+| `close_gate_junk_dropped` | FR-003 close-time junk gate auto-dropped junk artifacts once (committed junk removed from the index with a single removal commit, files kept on disk and FR-001 ignore lines injected; staged-only junk unstaged) and the close proceeds | paths verbatim (≤50) |
+| `close_gate_rejected` (reason `junk-artifacts` / `verification-failed` / `closed-vs-quarantined` / `dep-open`) | close-time hard gates in `runCloseHardGates` rejected a close: junk re-committed after two auto-drops (distinct `junk-artifacts` reason/label, escalation ladder untouched), a failing verification command (`verification-failed`), a still-quarantined worktree (`closed-vs-quarantined`), or an open dependency (`dep-open`) | gate evidence in `Detail` |
 
 Read programmatically with `ReadEvents(path)` (torn-line tolerant; a missing
 file is an empty stream, not an error).
@@ -136,6 +138,8 @@ shows **0 `mirror_drift_detected`** events in the last 24h **AND** at least one
 `mirror_audit_clean` event per registered store in the same window. Window
 override: `MIRROR_SLO_MAX_AGE_HOURS`. Infrastructure failures (missing tools,
 unreadable event dir) exit 2 — fail-closed: a breach is a signal, not a blocker.
+
+FR-003 close-time junk gate (`gate_junk.go`): the close evaluates the junk changed set — committed paths at HEAD unioned with staged paths, classified by `internal/junksig` structural signatures — and auto-drops junk once per bead generation (committed: `git rm --cached` + single removal commit + ignore-line injection, file kept on disk; staged-only: unstaged, no commit, the removal commit would die on a clean tree). A durable `junk-drop-N` label counts drops; after 2 drops, a further re-committed junk generation is rejected with the distinct `junk-artifacts` reason/label — never overloaded onto the off-scope warn ladder, which stays warn-only. Every git probe failure is fail-open.
 
 ## 2. Close verdicts & quarantine (A1) — `bead_closer.go`, `worktree_manager.go`, `chain_completion_*.go`
 

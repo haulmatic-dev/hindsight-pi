@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -38,10 +39,26 @@ func junkGit(t *testing.T, repo string, args ...string) {
 	}
 }
 
+// junkCommitPaths stages (--force, because the FR-001 ignore lines from an
+// earlier drop may already ignore the very junk paths being re-committed)
+// and commits the given paths — the caller must have created them on disk
+// or `git add` dies with exit 128 "pathspec did not match".
 func junkCommitPaths(t *testing.T, repo string, paths ...string) {
 	t.Helper()
-	junkGit(t, repo, append([]string{"add"}, paths...)...)
+	junkGit(t, repo, append([]string{"add", "--force"}, paths...)...)
 	junkGit(t, repo, "commit", "-q", "-m", "chain work")
+}
+
+// junkWrite creates (or rewrites) path on disk inside repo.
+func junkWrite(t *testing.T, repo, path, content string) {
+	t.Helper()
+	full := filepath.Join(repo, path)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // junkOnDiskFile returns the on-disk content of path inside repo.
@@ -93,12 +110,15 @@ func junkCommitCount(t *testing.T, repo string) int {
 	if err != nil {
 		t.Fatalf("git rev-list --count HEAD: %v", err)
 	}
-	return len(strings.Fields(string(out)))
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatalf("git rev-list --count HEAD: unparsable %q", out)
+	}
+	return n
 }
 
-// junkGateFixtureBead returns a close-candidate bead whose changed set
-// consists of the extra reportFiles the caller commits on top of the fixture
-// repo's initial real commit.
+// junkGateCloserFor returns a BeadCloser (with its mock client and event
+// sink dir) scoped to repo for the junk-gate contract tests.
 func junkGateCloserFor(t *testing.T, repo string) (*BeadCloser, *mockBeadsClient, string) {
 	t.Helper()
 	return hardGateCloser(t, hardGateConfig(3), repo)
@@ -144,9 +164,11 @@ func TestGateJunk_CommittedJunkDroppedOnceCloseProceeds(t *testing.T) {
 		Status:      types.StatusInProgress,
 		Description: "chain work\n**Verification Command:**\n```\nexit 0\n```\n",
 	}
-	before := junkCommitCount(t, repo)
-
+	junkWrite(t, repo, ".tmp-jest/x", "junk")
 	junkCommitPaths(t, repo, ".tmp-jest/x", "src/thread-cache/service.ts")
+	// Counted from the fixture's own junk commit: everything on top of it
+	// must be exactly the gate's single removal commit.
+	before := junkCommitCount(t, repo)
 
 	if err := c.runCloseHardGates(bead, repo, "", repo); err != nil {
 		t.Fatalf("committed junk path must be auto-dropped once and let the close proceed: %v", err)
@@ -225,17 +247,25 @@ func TestGateJunk_ReAddedAfterTwoDropsRejectsJunkArtifacts(t *testing.T) {
 		Status:      types.StatusInProgress,
 		Description: "chain work",
 	}
+	// The drop counter persists through br labels — the mock store must know
+	// the bead or UpdateBeadLabels silently drops the junk-drop-N labels.
+	mock.beads["proj-junk3"] = *bead
 
-	// Two junk generations already auto-dropped by the gate:
+	// Two junk generations already auto-dropped by the gate. The junk files
+	// must exist on disk (git add needs a matching pathspec) and the add is
+	// forced because earlier drops will have put .tmp-jest/* in .gitignore.
+	junkWrite(t, repo, ".tmp-jest/first", "1")
 	junkCommitPaths(t, repo, ".tmp-jest/first")
 	if err := c.gateJunkArtifacts(bead, repo, "", repo); err != nil {
 		t.Fatalf("first junk drop must pass through: %v", err)
 	}
+	junkWrite(t, repo, ".tmp-jest/second", "2")
 	junkCommitPaths(t, repo, ".tmp-jest/second")
 	if err := c.gateJunkArtifacts(bead, repo, "", repo); err != nil {
 		t.Fatalf("second junk drop must still pass through: %v", err)
 	}
 	// ...and the junk is re-added / re-committed again on the third retry.
+	junkWrite(t, repo, ".tmp-jest/third", "3")
 	junkCommitPaths(t, repo, ".tmp-jest/third")
 
 	err := c.gateJunkArtifacts(bead, repo, "", repo)
@@ -276,6 +306,7 @@ func TestGateJunk_ThreadCacheServiceFileNotTouched(t *testing.T) {
 		Status:      types.StatusInProgress,
 		Description: "chain work",
 	}
+	junkWrite(t, repo, "src/modules/agent/services/conversation/thread-cache.service.ts", "// changed in the chain\n")
 	junkCommitPaths(t, repo, "src/modules/agent/services/conversation/thread-cache.service.ts")
 
 	if err := c.runCloseHardGates(bead, repo, "", repo); err != nil {
@@ -303,6 +334,7 @@ func TestGateJunk_NonJunkOffScopeWarnOnlyNoRejection(t *testing.T) {
 		Status:      types.StatusInProgress,
 		Description: "chain work\n**Target Files:** src/thread-cache/service.ts",
 	}
+	junkWrite(t, repo, "README.md", "# project\n")
 	junkCommitPaths(t, repo, "README.md")
 
 	if err := c.runCloseHardGates(bead, repo, "", repo); err != nil {
