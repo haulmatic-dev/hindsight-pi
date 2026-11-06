@@ -42,12 +42,18 @@ func FromMeasurements(ms map[string]string) *CoveragePacket {
 	}
 	p.MetricNames = make([]string, len(p.AllFilesRow))
 	for i := range p.MetricNames {
-		p.MetricNames[i] = "metric_" + strconv.Itoa(i)
+		p.MetricNames[i] = metricName(i)
 	}
 	for path, row := range ms {
 		p.FileRows[path] = splitRow(row)
 	}
 	return p
+}
+
+// metricName returns the stable key used for coverage metric columns,
+// derived from the zero-based column index (e.g. "metric_0").
+func metricName(i int) string {
+	return "metric_" + strconv.Itoa(i)
 }
 
 // splitRow splits a row string on spaces, commas and tabs.
@@ -97,6 +103,14 @@ func (p *CoveragePacket) effectiveBar() float64 {
 	return DefaultCoverageBar
 }
 
+// isBreachingCell reports whether a single coverage cell violates the bar.
+// A cell that is not a valid percentage (NaN) counts as a breach to avoid
+// silently ignoring malformed measurements.
+func isBreachingCell(cell string, bar float64) bool {
+	v := parsePercent(cell)
+	return isNaN(v) || v < bar
+}
+
 // BelowBarCount counts the number of files with at least one metric below
 // the bar. Non-percentage cells count as a breach. A nil packet counts 0.
 func (p *CoveragePacket) BelowBarCount() int {
@@ -106,15 +120,20 @@ func (p *CoveragePacket) BelowBarCount() int {
 	bar := p.effectiveBar()
 	count := 0
 	for _, row := range p.FileRows {
-		for _, cell := range row {
-			v := parsePercent(cell)
-			if isNaN(v) || v < bar {
-				count++
-				break
-			}
+		if anyCellBreaches(row, bar) {
+			count++
 		}
 	}
 	return count
+}
+
+func anyCellBreaches(row []string, bar float64) bool {
+	for _, cell := range row {
+		if isBreachingCell(cell, bar) {
+			return true
+		}
+	}
+	return false
 }
 
 // WorstFilePerMetric returns, for each metric index ("metric_N"), the file
@@ -132,7 +151,7 @@ func (p *CoveragePacket) WorstFilePerMetric() map[string]string {
 			if isNaN(v) {
 				continue
 			}
-			key := "metric_" + strconv.Itoa(i)
+			key := metricName(i)
 			w, ok := worstVal[key]
 			if !ok || v < w {
 				worstVal[key] = v
