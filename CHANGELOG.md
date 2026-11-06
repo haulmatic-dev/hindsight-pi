@@ -9,6 +9,9 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Documentation
+- SYNTAX verification for the prd-lint coverage-threshold rule (R10): build/vet/gofmt clean, both `TestCoverageThresholdLint_*` contract tests pass, no placeholders or missing doc comments in `tools/prd-lint`. Note: `TestCreatePrdProducerContract` fails on SKILL.md §3.1a text drift — pre-existing on origin/development, unrelated to R10.
+
 ### Changed
 - Refactored prd-lint coverage-threshold rule: R10 check extracted into a named `coverageThreshold(b reqBlock)` predicate with exemption-marker helper `isExemptMarker` and doc comments on the marker-binding semantics in `parseBlocks`; the coverage-threshold contract tests now run unconditionally (stale RED skip gate `PRDLINT_COVERAGE_THRESHOLD_ENFORCE` removed post-GREEN). No behavior change.
 
