@@ -166,7 +166,7 @@ only when no stronger one is present:
 3. **System Type enum** — the PRD-level `**System Type:** backend-api | web-app
    | cli-tool | library | full-stack` supplies the default pattern for the
    whole document (backend vs. frontend surface rules).
-4. **tdd_chain** — when no stronger signal applies, the requirement falls back
+4. tdd_chain — when no stronger signal applies, the requirement falls back
    to the standard TDD chain (RED → GREEN → REFACTOR → SYNTAX).
 
 > Keep the four levels in this exact order: the analyzer mirrors it, and the
