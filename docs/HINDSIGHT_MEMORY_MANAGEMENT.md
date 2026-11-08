@@ -1,3 +1,5 @@
+> **DEPRECATED (2026-11-08):** this guide predates the unified memory system. GPU claims below are wrong for this host (no GPU; embeddings/reranker run CPU-only). Current truth: `docs/operations/memory-system.md` (architecture, pipelines, quality harness) and the infra repo `services/hindsight/` (config + runbooks).
+
 # Hindsight Memory Management Guide
 
 ## Overview

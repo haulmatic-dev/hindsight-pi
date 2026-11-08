@@ -29,11 +29,11 @@ import (
 // reconcileMinIdle is the age floor for the reconciler: a worktree whose
 // contents changed within this window is treated as live and skipped.
 // 2026-10-29 emergency raise 30m -> 6h: with a single-lane provider the fleet's
-	// workers think for >30m between worktree writes; the reconciler was
-	// integrating+removing their live (read-only-pending) worktrees at each
-	// hourly sweep — 69 `[Registry] FATAL: worktree` worker deaths in one day.
-	// Proper fix (registry-keyed liveness, not mtimes) is beaded separately.
-	const reconcileMinIdle = 6 * time.Hour
+// workers think for >30m between worktree writes; the reconciler was
+// integrating+removing their live (read-only-pending) worktrees at each
+// hourly sweep — 69 `[Registry] FATAL: worktree` worker deaths in one day.
+// Proper fix (registry-keyed liveness, not mtimes) is beaded separately.
+const reconcileMinIdle = 6 * time.Hour
 
 func ReconcileOrphanedWorktrees(m *WorktreeManager, projectPath string, activeKeys map[string]bool, isTerminal func(key string) bool, events *EventSink) (integrated int, conflicts int) {
 	// Not a git repo — nothing to reconcile.

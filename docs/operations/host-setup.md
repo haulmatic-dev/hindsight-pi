@@ -568,27 +568,17 @@ sqlite3 -json /opt/dev-tools/var/hydra/.hydra/registry.db \
 ## 14. Hindsight memory service (operational state)
 
 The fleet's memory backend (`hindsight-api` 0.10.1, `hindsight.service`, port 8888,
-Postgres `hindsight` DB — 29 GB) is configured as code in the **infra repo**,
-`services/hindsight/`:
+Postgres `hindsight` DB — 29 GB) is documented end-to-end in
+**`docs/operations/memory-system.md`** (architecture, pipelines, quality harness,
+history). Server-side config is code in the infra repo (`services/hindsight/`:
+bank-config.json + idempotent apply + burn-kill runbook; golden queries, cass-sync
+timers installed).
 
-- `bank-config.json` + `apply-bank-config.sh` — desired config for the shared
-  `coding-brain` bank (retain/reflect missions, auto-consolidation, batch 32,
-  round 500). Idempotent; **bank config is process-cached — restart the service
-  to apply**.
-- `systemd/memory.conf` — canonical `MemoryMax=2G` drop-in (replaces the old
-  two-file 12G/2G last-wins scheme).
-- README runbook — consolidation-burn watch thresholds, the burn **kill
-  procedure** (config flags cannot stop an active chain; the SQL halt in the
-  runbook can), and bulk-import guidance.
-
-Layout facts (2026-11-04): daemon+workers+pi extension all write the single
-`coding-brain` bank (`internal/hindsight/client.go` `BankID`); the daemon-side
-fix lives on branch `fix/hindsight-bank-id` — **push is blocked on a PAT**, as
-is the hindsight-pi fork's timeout fix (`fix/hindsight-0.10-bank-profile`).
-Until both land on origin, each fix exists only on this host.
-
-Backups: none exist yet (no cron/timer/tooling) — see the backup plan task;
-until then the 29 GB Postgres DB is single-copy.
+State highlights (2026-11-08): single `coding-brain` bank (split-brain `hydra`
+bank merged then deleted); consolidation + `prefer_observations` live; worker
+recall is first-turn + mental-model injected; PAT unblocked, all campaign PRs
+merged. **The 29 GB Postgres bank is still single-copy — GCS backup is the
+outstanding dependency (bucket + SA key).**
 
 ## 15. Known time/skew note
 

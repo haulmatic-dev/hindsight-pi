@@ -1,3 +1,5 @@
+> **DEPRECATED (2026-11-08):** this guide predates the unified memory system. Superseded by the memory-system architecture and config-as-code. Current truth: `docs/operations/memory-system.md` (architecture, pipelines, quality harness) and the infra repo `services/hindsight/` (config + runbooks).
+
 # Hindsight Memory Optimization Guide
 
 ## Overview
