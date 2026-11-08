@@ -868,11 +868,7 @@ merged:
 	// returns the typed ErrQuarantineSuiteGateBlocked so callers keep the
 	// quarantine without string sniffing, and nothing lands on the
 	// checkout. Nil gate fails open.
-	gate := m.SuiteGate
-	if gate == nil {
-		gate = defaultWorktreeSuiteGate
-	}
-	if gate != nil {
+	if gate := m.suiteGate(); gate != nil {
 		if gerr := gate(projectPath, scratchPath, key); gerr != nil {
 			return fmt.Errorf("chain suite gate: %v: %w", gerr, ErrQuarantineSuiteGateBlocked)
 		}
@@ -902,6 +898,16 @@ merged:
 		log.Printf("[Worktree] integrate %s: overlapping uncommitted WIP — advanced %s to %s by ref update (WIP preserved on disk)", branch, headBranch, short)
 	}
 	return nil
+}
+
+// suiteGate resolves the effective suite gate: the per-instance gate when
+// set (tests inject one), else the package-level daemon-wide default. A nil
+// result means no gate is configured and integration fails open.
+func (m *WorktreeManager) suiteGate() func(projectPath, worktreePath, key string) error {
+	if m.SuiteGate != nil {
+		return m.SuiteGate
+	}
+	return defaultWorktreeSuiteGate
 }
 
 // IntegrateAndRemove merges the chain's branch into the working branch,

@@ -808,6 +808,7 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				filepath.Join(home, "quarantined-chains.json"),
 				o.worktreeManager, o.beadFileReader, o.eventSink,
 				func() []types.Project { return o.projects })
+			wireScarScrubHooks(o) // FR-001 completion-time scar scrub hooks
 			o.quarantineReconciler.SetRevalidation(
 				o.beadCloser.RunVerificationGateForRevalidation,
 				func(pp string, id types.BeadID, l []string) error {
