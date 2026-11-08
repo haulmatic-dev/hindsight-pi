@@ -89,6 +89,16 @@ func claimTestBead(desc string) types.Bead {
 }
 
 var claimsOkLabelRe = regexp.MustCompile(`^claims-ok-[0-9a-f]{8}$`)
+
+// seedClaimBead builds the fixture bead and registers it with the mock
+// store so durable label writes are readable back via GetBead (mirrors
+// real br, where the bead always exists in the store).
+func seedClaimBead(o *Overseer, desc string) types.Bead {
+	bead := claimTestBead(desc)
+	o.beadsClient.(*mockBeadsClient).addBead(bead)
+	return bead
+}
+
 var claimsOkAtRe = regexp.MustCompile(`^claims-ok-at-\d+$`)
 
 func labelsOf(o *Overseer, id types.BeadID) []string {
@@ -128,7 +138,7 @@ func TestClaimCache_PassOnFirstSpawnWritesLabels(t *testing.T) {
 	setProbe(nil)
 	setClaimHeadProbe(t, func(string) (string, error) { return "head-1", nil })
 
-	bead := claimTestBead("claim: tests pass (verify: echo t1)")
+	bead := seedClaimBead(o, "claim: tests pass (verify: echo t1)")
 	if err := o.spawnPreflightBeadClaims(bead, t.TempDir()); err != nil {
 		t.Fatalf("spawn should proceed after full pass: %v", err)
 	}
@@ -158,7 +168,7 @@ func TestClaimCache_WarmCacheSameBaseSHA_ReusesWithoutProbes(t *testing.T) {
 	setProbe(nil)
 	setClaimHeadProbe(t, func(string) (string, error) { return "head-1", nil })
 
-	bead := claimTestBead("claim: tests pass (verify: echo t2)")
+	bead := seedClaimBead(o, "claim: tests pass (verify: echo t2)")
 	if err := o.spawnPreflightBeadClaims(bead, t.TempDir()); err != nil {
 		t.Fatalf("first spawn failed: %v", err)
 	}
@@ -182,14 +192,14 @@ func TestClaimCache_WarmCacheSameBaseSHA_ReusesWithoutProbes(t *testing.T) {
 
 // 3. Changed base_sha → full re-proof: probes run again and the cache is
 // refreshed (new claims-ok-at timestamp).
-func TestClaimCache_ChangedBaseSHA_RepoofsAndRefreshesCache(t *testing.T) {
+func TestClaimCache_ChangedBaseSHA_ReproofsAndRefreshesCache(t *testing.T) {
 	claimCacheImplementedGate(t)
 	o, _, probes, setProbe := claimCacheHarness(t)
 	setProbe(nil)
 	head := "head-1"
 	setClaimHeadProbe(t, func(string) (string, error) { return head, nil })
 
-	bead := claimTestBead("claim: tests pass (verify: echo t3)")
+	bead := seedClaimBead(o, "claim: tests pass (verify: echo t3)")
 	if err := o.spawnPreflightBeadClaims(bead, t.TempDir()); err != nil {
 		t.Fatalf("first spawn failed: %v", err)
 	}
@@ -232,7 +242,7 @@ func TestClaimCache_Reproof_BrokenClaimDropped(t *testing.T) {
 	setClaimHeadProbe(t, func(string) (string, error) { return head, nil })
 
 	desc := "claim: lint clean (verify: echo lint-ok)"
-	bead := claimTestBead(desc)
+	bead := seedClaimBead(o, desc)
 	if err := o.spawnPreflightBeadClaims(bead, t.TempDir()); err != nil {
 		t.Fatalf("first spawn failed: %v", err)
 	}
@@ -268,7 +278,7 @@ func TestClaimCache_Reproof_BrokenHardClaimRefusesSpawn(t *testing.T) {
 	head := "head-1"
 	setClaimHeadProbe(t, func(string) (string, error) { return head, nil })
 
-	bead := claimTestBead("hard: claim: disk ok (verify: echo disk-ok)")
+	bead := seedClaimBead(o, "hard: claim: disk ok (verify: echo disk-ok)")
 	if err := o.spawnPreflightBeadClaims(bead, t.TempDir()); err != nil {
 		t.Fatalf("first spawn failed: %v", err)
 	}
@@ -298,7 +308,7 @@ func TestClaimCache_UnknownNeverCached(t *testing.T) {
 	})
 	setClaimHeadProbe(t, func(string) (string, error) { return "head-1", nil })
 
-	bead := claimTestBead("claim: unknown-ish (verify: sleep 5)")
+	bead := seedClaimBead(o, "claim: unknown-ish (verify: sleep 5)")
 	if err := o.spawnPreflightBeadClaims(bead, t.TempDir()); err != nil {
 		t.Fatalf("unknown failures fail open: %v", err)
 	}
@@ -318,7 +328,7 @@ func TestClaimCache_FailedClaimsNeverCached(t *testing.T) {
 	})
 	setClaimHeadProbe(t, func(string) (string, error) { return "head-1", nil })
 
-	bead := claimTestBead("claim: always broken (verify: false)")
+	bead := seedClaimBead(o, "claim: always broken (verify: false)")
 	if err := o.spawnPreflightBeadClaims(bead, t.TempDir()); err != nil {
 		t.Fatalf("soft claim failure must not refuse spawn: %v", err)
 	}
