@@ -8,6 +8,10 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 ## [Unreleased]
+- Documentation: FR-003 discovery (hydra-ew18) — brownfield subagent enrichment contract pinned in docs/discovery/brownfield-enrichment-discovery-ew18.md: detached text-mode subagent (not rpc), brownfield trigger via `git cat-file -e <base>:<path>` + `ResolveIntegrationBase`, anti-laundering gate in the emitter, budget reuses `context_pack.max_pack_tokens`, injection rides the existing `loadChainContext` handoff path. Flags 5 adjudication items (loader 1500-char cap vs 40k budget, per-bead memoization, worktree prerequisite, AC line-number drift, remote-less base semantics). *Authored by a Hydra dogfood run.*
+
+### Added
+- RED-phase `tools/turn-report` contract suite (`main_test.go` + inert stub `main.go`): 8 enforce-gated tests (`TURN_REPORT_ENFORCE`, skip loudly by default) pinning the turn distribution extractor + budget calibration contract — per-phase p25/p50/p75/p90/max percentiles (nearest-rank over sorted worker_turns counts), suggested `turn_budgets:` yaml emitted as COMMENT lines only (value = round-up-to-10 of the phase p90, never written to config), zero-events → `insufficient data: N events` exit 0 (fail-open), drift warning when a phase sample < 20, --days window filtering, and worker_turns-only type filtering. Phase field parsed from event `fields.phase`, default `unspecified`. GREEN implements `run()` against this contract. *Authored by a Hydra dogfood run.*
 
 ### Fixed
 - RED-phase close-gate loop: RED beads were rejected by the daemon test gate for having failing tests "as designed" (the TDD RED contract), burning ~2M tokens per retry cycle and wedging beads for 11h+ until Pan's repairEfficacy capped out. The gate now implements the inverse RED check: the bead's own test files among the failing packages = contract satisfied = close allowed; tests that pass (or foreign-only failures) = contract violated = rejected with `gate-test-red-passed`.
