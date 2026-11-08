@@ -219,6 +219,17 @@ func (r *stateReporter) SetRpcActivity() {
 	r.mu.Unlock()
 }
 
+// SetTurns updates the reported agent-turn count (rpc turn_end events) so
+// the registry shows turns_so_far alongside tokens_so_far (FR-004).
+func (r *stateReporter) SetTurns(n int64) {
+	if !r.Enabled() {
+		return
+	}
+	r.mu.Lock()
+	r.rep.TurnsSoFar = n
+	r.mu.Unlock()
+}
+
 // SetSessionID updates the reported pi session id.
 func (r *stateReporter) SetSessionID(id string) {
 	if !r.Enabled() {

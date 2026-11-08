@@ -561,6 +561,11 @@ func main() {
 	log.Printf("✅ Worker completed for bead: %s (status: %s, duration: %v, attempts: %d)",
 		beadID, status, duration, attempts)
 
+	// Turn telemetry (FR-004): emit the typed worker_turns event on every
+	// worker exit — success AND failure — with {bead, turns, phase, outcome}.
+	emitWorkerTurnsEvent(os.Getenv("HYDRA_HOME"), os.Getenv("HYDRA_PROJECT"), string(beadID),
+		sessionTurns(), deriveBeadPhase(bead.Title), status)
+
 	// Report terminal state before exiting so the daemon registry reflects
 	// the outcome even if the scheduler misses the process exit.
 	reporter.Stop(exitCode)

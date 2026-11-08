@@ -450,3 +450,21 @@ func TestReapGhosts(t *testing.T) {
 		t.Errorf("ghost's queued commands must be reaped too, got %d", len(cmds))
 	}
 }
+
+func TestUpsertWorker_TurnsSoFarPersisted(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.UpsertWorker(WorkerRecord{BeadID: "b-turns", PID: 1, PGID: 1, StartedAt: time.Now(), LastHeartbeat: time.Now(), State: StateWorking, TurnsSoFar: 12}); err != nil {
+		t.Fatal(err)
+	}
+	rec, ok, err := s.GetWorker("b-turns")
+	if err != nil || !ok {
+		t.Fatalf("get worker: ok=%v err=%v", ok, err)
+	}
+	if rec.TurnsSoFar != 12 {
+		t.Fatalf("TurnsSoFar = %d, want 12", rec.TurnsSoFar)
+	}
+}

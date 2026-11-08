@@ -127,7 +127,9 @@ func TestTurnTelemetry_CloseSuccessEmitsWorkerTurnsEvent(t *testing.T) {
 	if line.Bead != "hydra-tt01" || line.Project != "proj-turns" {
 		t.Fatalf("bead=%q project=%q, want hydra-tt01/proj-turns", line.Bead, line.Project)
 	}
-	if line.Fields["turns"] != 7 {
+	// json.Unmarshal into any yields float64 for numbers — compare in that
+	// domain.
+	if line.Fields["turns"] != float64(7) {
 		t.Fatalf("turns = %v, want 7", line.Fields["turns"])
 	}
 	if line.Fields["phase"] != "green" {
