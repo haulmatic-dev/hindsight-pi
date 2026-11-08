@@ -3,6 +3,7 @@ package skillinducer
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,10 +147,34 @@ func jaccard(a, b map[string]struct{}) float64 {
 	return float64(inter) / float64(union)
 }
 
+// containment returns |A∩B| / min(|A|,|B|): how much of the smaller token
+// set is covered by the larger. Variant-name sprawl ("verify-first-close" vs
+// "verify-first-close-in-shared-worktree") scores low on Jaccard (3/6) but
+// 1.0 on containment — live 2026-11-08: 30+ same-family variants survived
+// Jaccard-only dedup and needed a manual consolidation pass.
+func containment(a, b map[string]struct{}) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	inter := 0
+	for t := range a {
+		if _, ok := b[t]; ok {
+			inter++
+		}
+	}
+	min := len(a)
+	if len(b) < min {
+		min = len(b)
+	}
+	return float64(inter) / float64(min)
+}
+
 // isDuplicate compares a candidate (normalized name + description) against
-// the skill index. It returns the best score and the closest entry. A name
-// token-set match counts as a near-certain duplicate (>= 1.0 threshold
-// comparison uses the combined text score; exact name equality short-circuits).
+// the skill index. It returns the best score and the closest entry. The
+// score mirrors the consolidation pass: max(nameScore, 0.6*name+0.4*all)
+// where nameScore = max(Jaccard, 0.9*containment) over name tokens — so both
+// exact renames and variant-name sprawl of an existing skill register as
+// duplicates. Exact name equality short-circuits at 1.0.
 func isDuplicate(name, description string, idx []skillIndexEntry) (float64, skillIndexEntry) {
 	best := 0.0
 	var bestEntry skillIndexEntry
@@ -159,10 +184,10 @@ func isDuplicate(name, description string, idx []skillIndexEntry) (float64, skil
 		if e.Name == name {
 			return 1.0, e
 		}
-		score := jaccard(candAllTokens, tokenize(e.Name+" "+e.Description))
-		if nameScore := jaccard(candNameTokens, tokenize(e.Name)); nameScore > score {
-			score = nameScore
-		}
+		eNameTokens := tokenize(e.Name)
+		nameScore := math.Max(jaccard(candNameTokens, eNameTokens), 0.9*containment(candNameTokens, eNameTokens))
+		allScore := jaccard(candAllTokens, tokenize(e.Name+" "+e.Description))
+		score := math.Max(nameScore, 0.6*nameScore+0.4*allScore)
 		if score > best {
 			best = score
 			bestEntry = e
