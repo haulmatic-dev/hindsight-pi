@@ -1819,6 +1819,9 @@ func (c *BeadCloser) checkTargetScope(bead *types.Bead, projectPath, repoName st
 
 	paths := targetlessWarningPaths(changed)
 	if len(paths) > 0 {
+		if mode == "block" {
+			return c.rejectClose(bead, projectPath, repoName, "non-allowlisted changes on target-less bead: "+strings.Join(paths, ", "))
+		}
 		log.Printf("[ScopeGate] bead %s declared no Target Files but changed non-allowlisted paths: %v", bead.ID, paths)
 	}
 	return nil
