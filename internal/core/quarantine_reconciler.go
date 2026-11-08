@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -50,6 +51,12 @@ type QuarantineReconciler struct {
 	revalidateGate func(bead *types.Bead, projectPath, worktreePath string) (passed, ran bool)
 	removeLabels   func(projectPath string, beadID types.BeadID, labels []string) error
 	addLabels      func(projectPath string, beadID types.BeadID, labels []string) error
+
+	// Unverifiable-scar exit (RED seam): classified revalidation surface.
+	// All inert until GREEN flips unverifiableImplemented.
+	classifiedGate   func(bead *types.Bead, projectPath, worktreePath string) RevalidateVerdict
+	classifiedRemove func(projectPath string, beadID types.BeadID, labels []string) error
+	classifiedAdd    func(projectPath string, beadID types.BeadID, labels []string) error
 }
 
 // revalidationCooldown bounds gate reruns per quarantine entry: a coverage
@@ -67,14 +74,22 @@ func (r *QuarantineReconciler) SetRevalidation(gate func(bead *types.Bead, proje
 
 // QuarantinedChainEntry is one recorded quarantine.
 type QuarantinedChainEntry struct {
-	ProjectPath       string    `json:"project_path"`
-	RepoName          string    `json:"repo_name"`
-	Key               string    `json:"key"`    // chain key (root bead ID string)
-	Branch            string    `json:"branch"` // hydra/quarantine/<key>
-	MemberIDs         []string  `json:"member_ids"`
-	QuarantinedAt     time.Time `json:"quarantined_at"`
-	IntegrateAttempts int       `json:"integrate_attempts"`
-	LastRevalidation  time.Time `json:"last_revalidation,omitempty"`
+	ProjectPath string   `json:"project_path"`
+	RepoName    string   `json:"repo_name"`
+	Key         string   `json:"key"`    // chain key (root bead ID string)
+	Branch      string   `json:"branch"` // hydra/quarantine/<key>
+	MemberIDs   []string `json:"member_ids"`
+	// RanFalseStreaks tracks consecutive no-command revalidation outcomes per
+	// member (unverifiable-scar exit, RED seam — GREEN fills the counter and
+	// persists it through this same registry file).
+	RanFalseStreaks   map[string]int `json:"ran_false_streaks,omitempty"`
+	QuarantinedAt     time.Time      `json:"quarantined_at"`
+	IntegrateAttempts int            `json:"integrate_attempts"`
+	LastRevalidation  time.Time      `json:"last_revalidation,omitempty"`
+	// Status carries the quarantine-registry scrub state (scrub-in-progress
+	// when a completion callback handed the chain to the scrub goroutine so
+	// a restarted daemon can recover it); empty in normal entries.
+	Status string `json:"status,omitempty"`
 }
 
 // NewQuarantineReconciler builds the reconciler. registryPath is
@@ -285,6 +300,18 @@ func (r *QuarantineReconciler) reconcileEntryLocked(e *QuarantinedChainEntry) {
 
 	if err := r.worktreeMgr.IntegrateBranch(e.ProjectPath, e.Key, e.Branch); err != nil {
 		e.IntegrateAttempts++
+		// Suite gate blocked (typed error — no string sniffing): keep the
+		// quarantine branch + entry and emit exactly one
+		// quarantine_suite_gate_blocked event naming the chain.
+		if errors.Is(err, ErrQuarantineSuiteGateBlocked) {
+			log.Printf("[QuarantineReconciler] chain %s: re-integrate blocked by suite gate (attempt %d/%d) — quarantine kept", e.Key, e.IntegrateAttempts, r.maxAttempts)
+			if r.events != nil {
+				r.events.EmitRepo(e.ProjectPath, Event{Type: "quarantine_suite_gate_blocked",
+					Bead: e.Key, Reason: "suite_gate_failed",
+					Fields: map[string]any{"branch": e.Branch, "attempt": e.IntegrateAttempts, "error": fmt.Sprint(err)}})
+			}
+			return
+		}
 		log.Printf("[QuarantineReconciler] chain %s: re-integrate failed (attempt %d/%d): %v", e.Key, e.IntegrateAttempts, r.maxAttempts, err)
 		if r.events != nil {
 			r.events.EmitRepo(e.ProjectPath, Event{Type: "chain_reintegrate_failed",

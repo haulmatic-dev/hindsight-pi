@@ -27,8 +27,11 @@ const suiteGateMoveEnforceEnv = "SUITE_GATE_MOVE_ENFORCE"
 
 func suiteGateMoveRequireImpl(t *testing.T) {
 	t.Helper()
-	if os.Getenv(suiteGateMoveEnforceEnv) != "1" {
-		t.Skipf("RED: suite-gate-in-IntegrateBranch contract not yet implemented (set %s=1 to fail)", suiteGateMoveEnforceEnv)
+	// GREEN: contract implemented in IntegrateBranch; gate kept as a
+	// canary — SUITE_GATE_MOVE_ENFORCE=0 will skip so a pre-GREEN checkout
+	// can still lint green, but default (unset) runs the tests.
+	if os.Getenv(suiteGateMoveEnforceEnv) == "0" {
+		t.Skipf("suite-gate-in-IntegrateBranch contract skipped by %s=0", suiteGateMoveEnforceEnv)
 	}
 }
 
