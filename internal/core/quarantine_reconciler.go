@@ -52,8 +52,9 @@ type QuarantineReconciler struct {
 	removeLabels   func(projectPath string, beadID types.BeadID, labels []string) error
 	addLabels      func(projectPath string, beadID types.BeadID, labels []string) error
 
-	// Unverifiable-scar exit (RED seam): classified revalidation surface.
-	// All inert until GREEN flips unverifiableImplemented.
+	// Unverifiable-scar exit (GREEN): classified revalidation surface.
+	// Inert when the classified gate is nil (the legacy (passed, ran) gate
+	// keeps working, and the sweep/who wiring is skipped).
 	classifiedGate   func(bead *types.Bead, projectPath, worktreePath string) RevalidateVerdict
 	classifiedRemove func(projectPath string, beadID types.BeadID, labels []string) error
 	classifiedAdd    func(projectPath string, beadID types.BeadID, labels []string) error
@@ -80,12 +81,21 @@ type QuarantinedChainEntry struct {
 	Branch      string   `json:"branch"` // hydra/quarantine/<key>
 	MemberIDs   []string `json:"member_ids"`
 	// RanFalseStreaks tracks consecutive no-command revalidation outcomes per
-	// member (unverifiable-scar exit, RED seam — GREEN fills the counter and
-	// persists it through this same registry file).
-	RanFalseStreaks   map[string]int `json:"ran_false_streaks,omitempty"`
-	QuarantinedAt     time.Time      `json:"quarantined_at"`
-	IntegrateAttempts int            `json:"integrate_attempts"`
-	LastRevalidation  time.Time      `json:"last_revalidation,omitempty"`
+	// member (unverifiable-scar exit); it round-trips through this registry
+	// file so the bound survives a daemon restart.
+	RanFalseStreaks map[string]int `json:"ran_false_streaks,omitempty"`
+	// UnverifiableAt anchors each stamped closed-failed-unverifiable verdict
+	// to the recorded store's modification time at stamping: the per-tick
+	// sweep treats a member whose store was rewritten afterwards without the
+	// scar as "operator removed the scar" and re-enables re-verdicting.
+	UnverifiableAt map[string]time.Time `json:"unverifiable_at,omitempty"`
+	// lastRevalidateRan (unpersisted) records that the last classified
+	// outcome actually ran the gate — the revalidationCooldown bounds only
+	// real reruns; no-command outcomes never consume it.
+	lastRevalidateRan bool
+	QuarantinedAt     time.Time `json:"quarantined_at"`
+	IntegrateAttempts int       `json:"integrate_attempts"`
+	LastRevalidation  time.Time `json:"last_revalidation,omitempty"`
 	// Status carries the quarantine-registry scrub state (scrub-in-progress
 	// when a completion callback handed the chain to the scrub goroutine so
 	// a restarted daemon can recover it); empty in normal entries.
@@ -262,6 +272,13 @@ func (r *QuarantineReconciler) bootstrapLocked() {
 }
 
 func (r *QuarantineReconciler) reconcileEntryLocked(e *QuarantinedChainEntry) {
+	// FR-001: a scrub was in flight when the daemon died — recover the
+	// decision asynchronously; the normal reconcile pass must not touch the
+	// entry while the scrub goroutine may delete or re-stamp it.
+	if e.Status == scrubInProgressStatus {
+		go recoverScrubInProgress(r, &scrubRegistryEntry{QuarantinedChainEntry: *e}, nil)
+		return
+	}
 	if !branchExists(e.ProjectPath, e.Branch) {
 		// Branch gone — someone (or an earlier pass) already handled it.
 		log.Printf("[QuarantineReconciler] %s: branch %s no longer exists — dropping entry", e.Key, e.Branch)
@@ -281,10 +298,33 @@ func (r *QuarantineReconciler) reconcileEntryLocked(e *QuarantinedChainEntry) {
 		e.MemberIDs = members
 	}
 
-	if failed, who := chainHasFailedBeadIDs(r.reader, members); failed {
+	// Per-tick unverifiable sweep: drop streaks/verdicts whose member no
+	// longer carries closed-failed (green scrub) and clear verdicts whose
+	// scar an operator removed.
+	r.sweepUnverifiableStreaks(e, func(id string) []string {
+		if b := r.reader.FindByID(id); b != nil {
+			return b.Labels
+		}
+		return nil
+	})
+
+	failed, firstFailed := chainHasFailedBeadIDs(r.reader, members)
+	if failed {
 		// M1: try to overturn the stale verdict with positive evidence before
 		// giving up on this pass. Scoped to quarantined-chain members only —
 		// never a project-wide scan.
+		who := firstFailed
+		if r.classifiedGate != nil && unverifiableImplemented {
+			// Stamped (closed-failed-unverifiable) members are skipped in the
+			// `who` selection; when none remains selectable the verdicts just
+			// stand — the quarantine holds either way (fail-closed).
+			who = revalidateTargetFor(r.reader, members, func(id string) bool {
+				return !e.UnverifiableAt[id].IsZero()
+			})
+			if who == "" {
+				return
+			}
+		}
 		r.revalidateMemberLocked(e, who)
 		if stillFailed, _ := chainHasFailedBeadIDs(r.reader, members); stillFailed {
 			return // verdict stands — wait for the next pass or a close-scrub
@@ -385,13 +425,23 @@ func (r *QuarantineReconciler) reconstructMembersLocked(e *QuarantinedChainEntry
 // (fail-closed: red, unrunnable, missing bead, or a label-op failure all
 // leave the verdict untouched). Escalation/human labels are never touched.
 func (r *QuarantineReconciler) revalidateMemberLocked(e *QuarantinedChainEntry, beadID string) {
-	if r.revalidateGate == nil || r.removeLabels == nil || r.addLabels == nil {
+	classified := r.classifiedGate != nil && unverifiableImplemented
+	if !classified && (r.revalidateGate == nil || r.removeLabels == nil || r.addLabels == nil) {
 		return
 	}
-	if time.Since(e.LastRevalidation) < revalidationCooldown {
+	if classified {
+		// The cooldown bounds real reruns only: a no-command outcome consumes
+		// no gate budget and must be re-evaluated every tick, or the bounded
+		// streak can never reach three.
+		if e.lastRevalidateRan && time.Since(e.LastRevalidation) < revalidationCooldown {
+			return
+		}
+		e.lastRevalidateRan = false
+	} else if time.Since(e.LastRevalidation) < revalidationCooldown {
 		return
+	} else {
+		e.LastRevalidation = time.Now()
 	}
-	e.LastRevalidation = time.Now()
 	bead := r.reader.FindByID(beadID)
 	if bead == nil {
 		return
@@ -424,6 +474,35 @@ func (r *QuarantineReconciler) revalidateMemberLocked(e *QuarantinedChainEntry, 
 		if _, err := os.Lstat(scratchMods); os.IsNotExist(err) {
 			_ = os.Symlink(mainMods, scratchMods)
 		}
+	}
+	if classified {
+		v := r.classifiedGate(bead, e.ProjectPath, scratch)
+		e.lastRevalidateRan = v.Ran
+		if v.Ran {
+			e.LastRevalidation = time.Now() // a real rerun — bound the next one
+		}
+		if v.Ran && v.Passed {
+			// Green rerun scrubs closed-failed (fail-closed streak of reds and
+			// faults untouched; escalation/human labels never touched).
+			if err := r.classifiedRemove(e.ProjectPath, bead.ID, []string{closedFailedLabel}); err != nil {
+				log.Printf("[QuarantineReconciler] %s: gate rerun green but label removal failed on %s: %v", e.Key, beadID, err)
+				return
+			}
+			if err := r.classifiedAdd(e.ProjectPath, bead.ID, []string{closedFailedRevalidatedLabel}); err != nil {
+				log.Printf("[QuarantineReconciler] %s: revalidated label add failed on %s: %v", e.Key, beadID, err)
+				return
+			}
+			delete(e.RanFalseStreaks, beadID)
+			delete(e.UnverifiableAt, beadID)
+			log.Printf("[QuarantineReconciler] %s: member %s closed-failed revalidated (gate rerun green) — label removed", e.Key, beadID)
+			if r.events != nil {
+				r.events.EmitRepo(e.ProjectPath, Event{Type: "label_revalidated", Project: e.RepoName,
+					Bead: beadID, Reason: "gate_rerun_green"})
+			}
+			return
+		}
+		r.noteRevalidateOutcome(e, beadID, v)
+		return
 	}
 	passed, ran := r.revalidateGate(bead, e.ProjectPath, scratch)
 	if !ran || !passed {
