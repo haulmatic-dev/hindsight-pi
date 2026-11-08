@@ -414,6 +414,7 @@ func TestIsDuplicate(t *testing.T) {
 	idx := []skillIndexEntry{
 		{Name: "jest-retry-hygiene", Description: "Gitignore jest-retry temp dirs before running test retries"},
 		{Name: "golang-patterns", Description: "Idiomatic Go patterns and conventions"},
+		{Name: "verify-first-close", Description: "Validate an already-landed fix before editing or closing a coding task"},
 	}
 	score, entry := isDuplicate("jest-retry-hygiene", "Gitignore jest-retry temp dirs before retries", idx)
 	if score < 0.9 || entry.Name != "jest-retry-hygiene" {
@@ -426,6 +427,10 @@ func TestIsDuplicate(t *testing.T) {
 	score, _ = isDuplicate("angular-signals", "Signal-based reactive state management in Angular", idx)
 	if score > 0.3 {
 		t.Errorf("unrelated should score low: %.2f", score)
+	}
+	score, entry = isDuplicate("verify-first-close-in-shared-worktree", "Validate an already-landed fix in a shared worktree before closing", idx)
+	if score < 0.6 || entry.Name != "verify-first-close" {
+		t.Errorf("variant-name sprawl must be caught by containment: %.2f vs %q", score, entry.Name)
 	}
 }
 
