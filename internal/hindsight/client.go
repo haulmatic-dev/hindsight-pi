@@ -840,9 +840,9 @@ func (c *Client) GetMentalModels(ctx context.Context) ([]MentalModel, error) {
 		detail, err := c.getMentalModelDetail(ctx, m.ID)
 		if err != nil {
 			// fail-open per model: one bad detail must not drop the rest
-				models = append(models, m) // keep whatever the list knew (likely empty content)
-				continue
-			}
+			models = append(models, m) // keep whatever the list knew (likely empty content)
+			continue
+		}
 		if strings.TrimSpace(detail.Content) != "" {
 			models = append(models, detail)
 		}
