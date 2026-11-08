@@ -54,6 +54,7 @@ func RegisterWorkerRegistryRoutes(v1 *gin.RouterGroup, getStore func() *registry
 			TokensCacheRead:     rep.TokensCacheRead,
 			TokensCacheCreation: rep.TokensCacheCreation,
 			TokensOutput:        rep.TokensOutput,
+			TurnsSoFar:          rep.TurnsSoFar,
 			ParkSince:           rep.ParkSince,
 			ParkWakeAt:          rep.ParkWakeAt,
 			ParkReason:          rep.ParkReason,

@@ -255,15 +255,7 @@ func branchAge(projectPath, branch string) (time.Duration, error) {
 	return time.Since(time.Unix(sec, 0)), nil
 }
 
-func hasLabel(labels []string, want string) bool {
-	for _, l := range labels {
-		if l == want {
-			return true
-		}
-	}
-	return false
-}
-
+// hasLabel (bead_claims.go) serves this file.
 // IntegrateStrandedRepair implements the Pan repair:integrate-stranded verb.
 // It merges a stranded worktree branch into the working branch, removes the
 // worktree on success, quarantines on merge conflict, or labels the bead

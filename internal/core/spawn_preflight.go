@@ -258,8 +258,14 @@ func (o *Overseer) spawnPreflightBeadClaims(bead types.Bead, projectPath string)
 	if o.beadCloser != nil {
 		sink = o.beadCloser.events
 	}
-	checker := newBeadClaimChecker(sink, nil)
-	if checker.checkBeadClaims(bead.ID.String(), bead.Description) {
+	checker := newBeadClaimChecker(sink, claimCheckRunner)
+	update := func(labels []string) error {
+		if o.beadsClient == nil {
+			return nil
+		}
+		return o.beadsClient.UpdateBeadLabels(projectPath, "", bead.ID, labels)
+	}
+	if checker.checkBeadClaimsWithCache(&bead, projectPath, update) {
 		return nil
 	}
 	return &SpawnSuppressedError{

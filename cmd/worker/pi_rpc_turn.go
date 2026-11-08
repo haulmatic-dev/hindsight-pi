@@ -55,11 +55,16 @@ type rpcTurn struct {
 	cacheCreation  int
 	outputTokens   int
 
-	// notifications counts fire-and-forget extension_ui_request methods by name.
-	// These are the only trace an extension leaves in the event stream — rtk
-	// reports its command rewrites this way — so without tallying them there is
-	// no way to tell from a worker log whether the extensions loaded at all.
+	// notifications counts fire-and-forget extension_ui_request methods by
+	// name. These are the only trace an extension leaves in the event stream —
+	// rtk reports its command rewrites this way — so without tallying them
+	// there is no way to tell from a worker log whether the extensions loaded
+	// at all.
 	notifications map[string]int
+
+	// turns counts the observed agent turns (turn_end events) for the FR-004
+	// turn telemetry. It persists across turn resets (nudges).
+	turns int
 
 	// aborting is set when the worker asks pi to cancel the in-flight agent
 	// turn before parking. Events emitted by the abort (agent_end/error with
@@ -297,6 +302,12 @@ func (t *rpcTurn) handleLine(line string, stdin io.Writer) bool {
 		// Usage rides turn_end/message_end too — forward it here, not only
 		// in the default branch below.
 		t.forwardUsage(event)
+		if eventType == "turn_end" {
+			// Turn telemetry (FR-004): count each observed agent turn and
+			// forward the count to the heartbeat reporter.
+			t.incrementTurns()
+			t.forwardTurns()
+		}
 		msg, _ := event["message"].(map[string]any)
 		if msg == nil {
 			return false
