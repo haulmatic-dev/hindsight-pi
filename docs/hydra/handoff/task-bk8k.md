@@ -26,3 +26,4 @@
 - Gate failure was TestExecuteWithPi_RPCSuccessReturnsNilError (30.03s hang) — enrichment GREEN (35ac22e5) reintroduced the unscoped-agent HYDRA_PI_PATH hijack the xtii bead had fixed. Repair commit 435a1b3c (skip enrichment when no target files) is landed.
 - Re-verified: go test ./cmd/worker/ -run "TestExecuteWithPi_RPCSuccessReturnsNilError|Turn" -count=1 — ok 1.981s.
 (gate-repair note run 1)
+(gate-repair note variant 1)
