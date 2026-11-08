@@ -153,78 +153,72 @@ func (i *ChainCompletionInitializer) Initialize() {
 			// insertions this way, 2026-09-16).
 			branch := resolveChainBranch(o.worktreeManager, projectPath, key, event.ChainInfo.WorktreeBranch)
 			if o.chainCompletionDetector != nil && o.chainCompletionDetector.ChainHasFailedBeads(event.ChainInfo.AllBeadIDs) {
-				if qBranch, qErr := o.worktreeManager.QuarantineBranchAndRemove(projectPath, key, branch); qErr != nil {
-					log.Printf("[Worktree] quarantine failed for chain %s: %v", event.ChainInfo.RootBeadID, qErr)
-				} else if qBranch != "" {
-					log.Printf("[Worktree] quarantined failed chain %s on %s (not integrated)", event.ChainInfo.RootBeadID, qBranch)
-					if o.quarantineReconciler != nil {
-						o.quarantineReconciler.Record(projectPath, filepath.Base(projectPath), key, qBranch, event.ChainInfo.AllBeadIDs)
-					}
-					if o.beadCloser != nil && o.beadCloser.events != nil {
-						o.beadCloser.events.EmitRepo(projectPath, Event{Type: "chain_quarantined",
-							Bead: key, Reason: "failed_beads_in_chain",
-							Fields: map[string]any{"branch": qBranch}})
-					}
-				} else {
-					log.Printf("[Worktree] chain %s: quarantine empty — no worktree or branch in %s (nothing preserved)", key, projectPath)
+				// FR-001 completion-time scar scrub: a chain whose only taint is a
+				// stale closed-failed verdict scrubs (re-verifies) and integrates
+				// through the gated path instead of quarantining. The scrub runs
+				// async from launchScarScrub; the registry row with
+				// scrub-in-progress status makes a restart mid-decision recover.
+				if o.quarantineReconciler != nil {
+					o.quarantineReconciler.MarkScrubInProgress(projectPath, filepath.Base(projectPath), key, branch, event.ChainInfo.AllBeadIDs)
 				}
+				launchScarScrub(o, event, branch)
 			} else {
 				// Chain-suite gate now runs INSIDE IntegrateBranchAndRemove (the
 				// single choke point covering reconciler, orphan janitor, Pan's
 				// integrate-stranded, and this path). A gate failure surfaces as
 				// the integrate error below — quarantine there.
 				{
-				// Capture the branch tip BEFORE teardown. Integrate returns nil
-				// when neither worktree nor branch exists in projectPath — the
-				// exact silent no-op that closed the zpf chain unintegrated —
-				// so an empty tip is a skip with reason, and a captured tip lets
-				// us verify after teardown that the merge actually landed
-				// (closed != landed detector).
-				tip := chainBranchTipOf(projectPath, branch)
-				if tip == "" {
-					log.Printf("[Worktree] chain %s: SKIPPING integrate in %s — no worktree or hydra/wt branch (nothing to integrate)", key, projectPath)
-					if o.beadCloser != nil && o.beadCloser.events != nil {
-						o.beadCloser.events.EmitRepo(projectPath, Event{Type: "chain_integration_unverified",
-							Bead: key, Reason: "no_worktree_or_branch_after_resolution",
-							Fields: map[string]any{"resolved_branch": branch}})
-					}
-				} else if err := o.worktreeManager.IntegrateBranchAndRemove(projectPath, key, branch); err != nil {
-					log.Printf("[Worktree] integrate failed for chain %s: %v", event.ChainInfo.RootBeadID, err)
-					// Chain-suite gate failure (or merge failure): quarantine the
-					// work so a fix bead can inspect it — do NOT discard, do NOT
-					// integrate broken code.
-					if strings.Contains(err.Error(), "chain suite gate") {
-						if qBranch, qErr := o.worktreeManager.QuarantineBranchAndRemove(projectPath, key, branch); qErr != nil {
-							log.Printf("[Worktree] chain-suite-gate quarantine failed for chain %s: %v", key, qErr)
-						} else if qBranch != "" {
-							log.Printf("[Worktree] quarantined chain %s on %s (%v)", key, qBranch, err)
-							if o.quarantineReconciler != nil {
-								o.quarantineReconciler.Record(projectPath, filepath.Base(projectPath), key, qBranch, event.ChainInfo.AllBeadIDs)
+					// Capture the branch tip BEFORE teardown. Integrate returns nil
+					// when neither worktree nor branch exists in projectPath — the
+					// exact silent no-op that closed the zpf chain unintegrated —
+					// so an empty tip is a skip with reason, and a captured tip lets
+					// us verify after teardown that the merge actually landed
+					// (closed != landed detector).
+					tip := chainBranchTipOf(projectPath, branch)
+					if tip == "" {
+						log.Printf("[Worktree] chain %s: SKIPPING integrate in %s — no worktree or hydra/wt branch (nothing to integrate)", key, projectPath)
+						if o.beadCloser != nil && o.beadCloser.events != nil {
+							o.beadCloser.events.EmitRepo(projectPath, Event{Type: "chain_integration_unverified",
+								Bead: key, Reason: "no_worktree_or_branch_after_resolution",
+								Fields: map[string]any{"resolved_branch": branch}})
+						}
+					} else if err := o.worktreeManager.IntegrateBranchAndRemove(projectPath, key, branch); err != nil {
+						log.Printf("[Worktree] integrate failed for chain %s: %v", event.ChainInfo.RootBeadID, err)
+						// Chain-suite gate failure (or merge failure): quarantine the
+						// work so a fix bead can inspect it — do NOT discard, do NOT
+						// integrate broken code.
+						if strings.Contains(err.Error(), "chain suite gate") {
+							if qBranch, qErr := o.worktreeManager.QuarantineBranchAndRemove(projectPath, key, branch); qErr != nil {
+								log.Printf("[Worktree] chain-suite-gate quarantine failed for chain %s: %v", key, qErr)
+							} else if qBranch != "" {
+								log.Printf("[Worktree] quarantined chain %s on %s (%v)", key, qBranch, err)
+								if o.quarantineReconciler != nil {
+									o.quarantineReconciler.Record(projectPath, filepath.Base(projectPath), key, qBranch, event.ChainInfo.AllBeadIDs)
+								}
+								if o.beadCloser != nil && o.beadCloser.events != nil {
+									o.beadCloser.events.EmitRepo(projectPath, Event{Type: "chain_quarantined",
+										Bead: key, Reason: "chain_suite_gate_failed",
+										Fields: map[string]any{"branch": qBranch, "detail": err.Error()}})
+								}
 							}
-							if o.beadCloser != nil && o.beadCloser.events != nil {
-								o.beadCloser.events.EmitRepo(projectPath, Event{Type: "chain_quarantined",
-									Bead: key, Reason: "chain_suite_gate_failed",
-									Fields: map[string]any{"branch": qBranch, "detail": err.Error()}})
+						}
+					} else if isAncestorOf(projectPath, tip, "HEAD") {
+						log.Printf("[Worktree] integrated chain %s into %s", key, projectPath)
+					} else {
+						// Integrate's own post-merge ancestor check failed — the
+						// landing is unverified (closed != landed detector).
+						log.Printf("[Worktree] UNVERIFIED integrate for chain %s: pre-teardown tip %s not contained in HEAD of %s", key, tip, projectPath)
+						if o.beadCloser != nil && o.beadCloser.events != nil {
+							o.beadCloser.events.EmitRepo(projectPath, Event{Type: "chain_integration_unverified",
+								Bead: key, Reason: "tip_not_contained_in_head",
+								Fields: map[string]any{"tip": tip}})
+						}
+						if o.beadsClient != nil {
+							if err := o.beadsClient.UpdateBeadLabels(projectPath, "", event.ChainInfo.RootBeadID, []string{"integration-unverified"}); err != nil {
+								log.Printf("[Worktree] chain %s: failed to stamp integration-unverified label: %v", key, err)
 							}
 						}
 					}
-				} else if isAncestorOf(projectPath, tip, "HEAD") {
-					log.Printf("[Worktree] integrated chain %s into %s", key, projectPath)
-				} else {
-					// Integrate's own post-merge ancestor check failed — the
-					// landing is unverified (closed != landed detector).
-					log.Printf("[Worktree] UNVERIFIED integrate for chain %s: pre-teardown tip %s not contained in HEAD of %s", key, tip, projectPath)
-					if o.beadCloser != nil && o.beadCloser.events != nil {
-						o.beadCloser.events.EmitRepo(projectPath, Event{Type: "chain_integration_unverified",
-							Bead: key, Reason: "tip_not_contained_in_head",
-							Fields: map[string]any{"tip": tip}})
-					}
-					if o.beadsClient != nil {
-						if err := o.beadsClient.UpdateBeadLabels(projectPath, "", event.ChainInfo.RootBeadID, []string{"integration-unverified"}); err != nil {
-							log.Printf("[Worktree] chain %s: failed to stamp integration-unverified label: %v", key, err)
-						}
-					}
-				}
 				}
 			}
 		}

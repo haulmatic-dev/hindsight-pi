@@ -1,0 +1,20 @@
+# discovery handoff (task-jka9o — FR-001 completion-time scar scrub)
+
+## What changed (files + one line each)
+- docs/discovery/scar-scrub-discovery-jka9o.md (new): discovery for FR-001 — verified the 11 machinery sites the scrub builds on (quarantine decision at chain_completion_initializer.go:155, uncached taint oracle, per-bead close-scrub vocabulary at bead_closer.go:499, ran=false conflation at bead_closer.go:221, gate choke point in IntegrateBranchAndRemove, registry shape, commitLocked exclusions, junksig availability), confirmed absent vocabulary (`closed-failed-suite`, `scar_scrub_failed`, `completion_scrub`, `scrub-in-progress`, marker/cap), and resolved 10 ambiguities (A1 async snapshot ownership, A2 live-worktree-then-scratch evidence surface, A3 marker+persisted entry+restart recovery, A4 junk-safe commit, A5 fallback green shape incl. the AC's "test-gate fallback green" reading (exit 0 OR nonzero+all-failing-packages-foreign), A6 per-member rerun split, A7 scrub→re-decide→gated integrate with pre-`Record()` re-stamp + `isChainSuiteGateError`, A8 bookkeeping, A9/M1 non-interference, A10 one-scrub-per-key) + 3 declared GREEN defaults + RED test sketch + sequencing (FR-003 first preferred; GREEN must tolerate either).
+- CHANGELOG.md: Documentation entry under Unreleased.
+- No production code change (discovery phase; GREEN/red phases own the code).
+
+## Verification (commands run + pass/fail)
+- `cm context "completion-time scar scrub chain worktree revalidated" --json` — queried; top bullet finalScore 0.30 (unrelated), no anti-pattern match; CASS binary absent (playbook-only degraded mode). PASS (no conflicting institutional knowledge).
+- `graphify query "Completion-time scar scrub in the chain worktree" --budget 2000` — graph present; traversal surfaced ChainCompletionConfig/Detector, TestBeadCloser_CompletedCloseScrubsStaleClosedFailed, WorktreeManager (IntegrateBranch/QuarantineBranchAndRemove/commitLocked). PASS.
+- Code inspection verified (grep+sed, this worktree): quarantine decision site, ChainHasFailedBeads (chain_completion_detector.go:190), RunVerificationGateForRevalidation (bead_closer.go:221), IntegrateBranch/IntegrateBranchAndRemove + suites gate + commitLocked (worktree_manager.go:789/897/728), QuarantinedChainEntry struct (quarantine_reconciler.go:69), parseFailingGoPackages/changedFilePaths (gate_close.go:317/355). PASS.
+- rg zero-hits confirmed for: `closed-failed-suite`, `scar_scrub_failed`, `completion_scrub`, `scrub-in-progress` — vocabulary absent, RED surface unclaimed. PASS.
+- hindsight_search at bead start — not connected (skip rule applied). graphify-out/graph.json present in cwd.
+
+## Open edges for the next phase
+- RED: pin `ScarScrub`-selector tests per docs/discovery/scar-scrub-discovery-jka9o.md §4 (gate `scarScrubRequireImpl` / `SCAR_SCRUB_ENFORCE`).
+- GREEN defaults declared in §3 (gate-output plumbing, junkSafeCommit helper, `status` JSON shape) — RED tests may pin any of them; deviations from defaults must be noted in the GREEN handoff.
+- Sequence note: FR-003 (gate move into IntegrateBranch) preferred first; FR-001 GREEN ships `isChainSuiteGateError` so either order compiles and tests pass.
+
+HYDRA_VERDICT: {"done": true, "summary": "docs-only: discovery for FR-001 completion-time scar scrub — machinery verified, 10 ambiguities resolved, GREEN defaults + RED test sketch pinned", "ac_met": ["discovery deliverable written (docs/discovery/scar-scrub-discovery-jka9o.md)", "CHANGELOG entry", "chain handoff", "CASS + graphify + code inspection ran, no anti-pattern match"], "ac_unmet": [], "files_changed": ["docs/discovery/scar-scrub-discovery-jka9o.md", "CHANGELOG.md", "docs/hydra/handoff/task-jka9o.md"], "verification": [{"cmd": "cm context ... --json", "result": "PASS (no relevant bullets, no anti-pattern)"}, {"cmd": "graphify query 'Completion-time scar scrub in the chain worktree' --budget 2000", "result": "PASS (graph present, key nodes surfaced)"}, {"cmd": "rg -rn 'closed-failed-suite|scar_scrub|scrub-in-progress' internal/", "result": "PASS (zero hits — vocabulary absent)"}]}

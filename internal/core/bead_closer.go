@@ -6,12 +6,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -1237,6 +1240,56 @@ func (c *BeadCloser) resetIntegrationFailures(beadID string) {
 	c.integMu.Unlock()
 }
 
+// detectRootOwnedGitEntries is the read-only half of the git-ownership
+// guard: when an integrate fails with the root-pollution error signature,
+// stat the checkout's git common dir for uid-0 entries and emit a typed
+// anomaly. The daemon cannot repair (chown needs root) — the systemd
+// timer hydra-git-ownership-guard.timer is the repair path; this detector
+// exists so a stopped timer surfaces as a visible anomaly instead of a
+// silent recurring wedge (adversarial review 2026-11-08, finding 5).
+func (c *BeadCloser) detectRootOwnedGitEntries(bead *types.Bead, projectPath, repoName, stage string) {
+	gitdirOut, err := gitOut(projectPath, "rev-parse", "--git-common-dir")
+	if err != nil {
+		log.Printf("[GitOwnershipDetector] %s: could not resolve git common dir: %v", bead.ID, err)
+		return
+	}
+	gitdir := strings.TrimSpace(gitdirOut)
+	if gitdir == "" || !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(projectPath, gitdir) // rev-parse can return relative
+	}
+	rootCount := 0
+	fs.WalkDir(os.DirFS("/"), strings.TrimPrefix(gitdir, "/"), func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // fail-open: unreadable entries are not proof of pollution
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			if d.IsDir() {
+				return fs.SkipDir // do not descend through symlinked dirs
+			}
+			return nil // do not count symlink entries
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid == 0 {
+			rootCount++
+		}
+		return nil
+	})
+	if rootCount == 0 {
+		log.Printf("[GitOwnershipDetector] %s: root-pollution error signature but no uid-0 entries found in %s (may be sibling module db)", bead.ID, gitdir)
+		return
+	}
+	log.Printf("🚨 [GitOwnershipDetector] %s: %d root-owned entries in %s — operator root-git pollution; repair via hydra-git-ownership-guard.timer or scripts/fix-git-ownership.sh", bead.ID, rootCount, gitdir)
+	if c.events != nil {
+		c.events.EmitRepo(projectPath, Event{Type: "git_root_ownership_pollution",
+			Project: repoName, Bead: string(bead.ID), Reason: "root-owned-git-entries",
+			Detail: fmt.Sprintf("%d root-owned entries in %s (stage %s); daemon cannot chown — root-side sweep required", rootCount, gitdir, stage),
+			Fields: map[string]any{"root_entries": rootCount, "gitdir": gitdir}})
+	}
+}
+
 // failIntegration aborts a close whose integrate/push step failed
 // verification. The bead is parked in place with the integration-pending
 // label (NOT reopened to the ready queue — a reopen respawns a full LLM
@@ -1247,6 +1300,17 @@ func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, st
 	beadID := string(bead.ID)
 	detail := cause.Error()
 	log.Printf("[Integrate] FAILED %s at %s: %s — parked integration-pending, worktree preserved", beadID, stage, detail)
+
+	// Root-pollution detector (2026-11-08): the exact git error for
+	// root-owned object-db entries left by operator root-git runs. The
+	// systemd-timer sweep repairs it root-side, but a silently stopped
+	// timer would wedge this class invisibly (timer drift is proven on
+	// this box). Stat the git common dir read-only — the daemon cannot
+	// chown, but it CAN see uid-0 entries and surface a typed anomaly
+	// so the wedge is never silent. Fail-open: detection errors log only.
+	if strings.Contains(detail, "insufficient permission for adding an object to repository database") {
+		c.detectRootOwnedGitEntries(bead, projectPath, repoName, stage)
+	}
 
 	// Contention backoff: parallel same-repo closes merge conflicting
 	// CHANGELOG.md/.gitignore entries within seconds of each other (telematics
@@ -1749,10 +1813,6 @@ func (c *BeadCloser) checkTargetScope(bead *types.Bead, projectPath, repoName st
 		return nil
 	}
 
-	// Fail-closed targetless gate (hydra-sx1z): an implementation bead that
-	// declares no Target Files but touches non-allowlisted code paths must
-	// not silently sail through verified-close in block mode. Warn mode
-	// keeps the advisory behavior; block mode rejects the close.
 	if !beadTypeShouldDeclareTargets(bead.Type) {
 		return nil
 	}

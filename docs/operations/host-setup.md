@@ -595,3 +595,25 @@ systems, compare durations, not absolute times.
 - `docs/architecture/shepherd.md` — event stream, Pan, fix-bead lifecycle
 - `AGENTS.md` §0–§5 — operating knobs, E2E test config, dogfood discipline
 - Skill `hydra-operator` — fleet operations runbook
+
+## Git ownership guard (2026-11-08)
+
+Never run git as root against repos the daemon works in (standing rule,
+hindsight 2026-10-28) — root-run git leaves root-owned entries in `.git`
+object databases and the daemon's `git add` fails with "insufficient
+permission for adding an object to repository database". When it happens
+anyway (deploy rituals, root shells), three layers repair it:
+
+- `scripts/fix-git-ownership.sh <checkout>` — root-run per-repo repair
+  (resolves submodule gitdir pointers, restores checkout-owner ownership,
+  adds `u:hydra:rwx` ACLs on objects/refs/worktrees dirs).
+- `hydra-git-ownership-guard.timer` — 15-minute fleet sweep
+  (`/etc/systemd/system/hydra-git-ownership-guard.{service,timer}`),
+  config-driven + `/home/*/projects/*` enumeration. Verify with
+  `systemctl list-timers hydra-git-ownership-guard.timer`.
+- Daemon detector: integrate failures carrying the exact error signature
+  emit a `git_root_ownership_pollution` anomaly event — a stopped timer
+  becomes a visible anomaly, not an invisible wedge.
+
+`deploy.sh` also sweeps on every exit path.
+

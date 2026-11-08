@@ -857,6 +857,23 @@ merged:
 			branch, strings.TrimSpace(tip), strings.TrimSpace(head), wtPath)
 	}
 
+	// Chain-suite gate: the last line of defense before ANY integration,
+	// moved from IntegrateBranchAndRemove (2026-11-08) so the reconciler's
+	// branch-only path and the singleton close fallback are both gated,
+	// exactly once per integrate. It runs on the always-present
+	// integrate-scratch-<key> worktree AFTER the merge — the merged tree is
+	// what was never verified (QuarantineBranchAndRemove has already
+	// removed the chain worktree, so a wt-path-conditional gate would
+	// silently skip the reconciler path). Fail-closed: a gate failure
+	// returns the typed ErrQuarantineSuiteGateBlocked so callers keep the
+	// quarantine without string sniffing, and nothing lands on the
+	// checkout. Nil gate fails open.
+	if gate := m.suiteGate(); gate != nil {
+		if gerr := gate(projectPath, scratchPath, key); gerr != nil {
+			return fmt.Errorf("chain suite gate: %v: %w", gerr, ErrQuarantineSuiteGateBlocked)
+		}
+	}
+
 	newTipOut, _ := gitOut(scratchPath, "rev-parse", "HEAD")
 	newTip := strings.TrimSpace(newTipOut)
 
@@ -883,6 +900,16 @@ merged:
 	return nil
 }
 
+// suiteGate resolves the effective suite gate: the per-instance gate when
+// set (tests inject one), else the package-level daemon-wide default. A nil
+// result means no gate is configured and integration fails open.
+func (m *WorktreeManager) suiteGate() func(projectPath, worktreePath, key string) error {
+	if m.SuiteGate != nil {
+		return m.SuiteGate
+	}
+	return defaultWorktreeSuiteGate
+}
+
 // IntegrateAndRemove merges the chain's branch into the working branch,
 // verifies the merge landed, and removes the worktree + branch. It is the
 // teardown-only variant for callers with no post-merge push step; the
@@ -893,28 +920,12 @@ func (m *WorktreeManager) IntegrateAndRemove(projectPath, key string) error {
 }
 
 // IntegrateBranchAndRemove is IntegrateAndRemove with an explicit branch
-// name — the recorded-key path for versioned worktree branches.
+// name — the recorded-key path for versioned worktree branches. The
+// chain-suite gate lives in IntegrateBranch (moved here 2026-11-08 so it
+// also gates the reconciler's branch-only path and the singleton close
+// fallback, exactly once per integrate on the integrate-scratch tree);
+// do not duplicate it here.
 func (m *WorktreeManager) IntegrateBranchAndRemove(projectPath, key, branch string) error {
-	// Chain-suite gate: the last line of defense before ANY integration.
-	// Per-bead gates are scoped or attributed; neither can see cross-bead
-	// breakage that only manifests when all changes combine (2026-11-08:
-	// reconciler merged RED tests without their GREEN implementation and
-	// broke the build on development). Fail-closed on real test failures —
-	// the caller quarantines instead of integrating broken work. Fail-open
-	// on missing gate/worktree (nil gate = ungated; branch-only integrates
-	// have no worktree to test in).
-	gate := m.SuiteGate
-	if gate == nil {
-		gate = defaultWorktreeSuiteGate
-	}
-	if gate != nil {
-		wtPath := m.worktreePath(projectPath, key)
-		if isGitWorktree(wtPath) {
-			if err := gate(projectPath, wtPath, key); err != nil {
-				return fmt.Errorf("chain suite gate: %w", err)
-			}
-		}
-	}
 	if err := m.IntegrateBranch(projectPath, key, branch); err != nil {
 		return err
 	}
