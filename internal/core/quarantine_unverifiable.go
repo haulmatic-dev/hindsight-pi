@@ -151,15 +151,29 @@ func (r *QuarantineReconciler) noteRevalidateOutcome(e *QuarantinedChainEntry, b
 // memberScarPresent reports whether the member already carries the
 // unverifiable verdict, either from an earlier stamp (ledger) or from the
 // recorded store (an operator re-applied it or a previous daemon run left it).
+// scarLabels reports whether the label set carries the closed-failed scar
+// (the member is tainted) and/or the unverifiable verdict label (already
+// stamped). Shared by the sweep, the `who` selection and the stamp anchor.
+func scarLabels(labels []string) (hasFailed, hasScar bool) {
+	for _, l := range labels {
+		switch l {
+		case closedFailedLabel:
+			hasFailed = true
+		case closedFailedUnverifiableLabel:
+			hasScar = true
+		}
+	}
+	return hasFailed, hasScar
+}
+
 func (r *QuarantineReconciler) memberScarPresent(e *QuarantinedChainEntry, beadID string) bool {
 	if !e.UnverifiableAt[beadID].IsZero() {
 		return true
 	}
 	if b := r.reader.FindByID(beadID); b != nil {
-		for _, l := range b.Labels {
-			if l == closedFailedUnverifiableLabel {
-				return true
-			}
+		_, hasScar := scarLabels(b.Labels)
+		if hasScar {
+			return true
 		}
 	}
 	return false
@@ -189,16 +203,7 @@ func (r *QuarantineReconciler) sweepUnverifiableStreaks(e *QuarantinedChainEntry
 	seen := make(map[string]bool, len(e.MemberIDs))
 	for _, id := range e.MemberIDs {
 		seen[id] = true
-		labels := beadLabels(id)
-		hasFailed, hasScar := false, false
-		for _, l := range labels {
-			switch l {
-			case closedFailedLabel:
-				hasFailed = true
-			case closedFailedUnverifiableLabel:
-				hasScar = true
-			}
-		}
+		hasFailed, hasScar := scarLabels(beadLabels(id))
 		if !hasFailed {
 			// A green scrub (post-close sweep / M1) removed closed-failed — the
 			// member's verdict is overturned and its bounded reign is over.
@@ -237,15 +242,7 @@ func revalidateTargetFor(reader *BeadFileReader, members []string, isUnverifiabl
 		if bead == nil {
 			continue
 		}
-		hasFailed, hasScar := false, false
-		for _, l := range bead.Labels {
-			switch l {
-			case closedFailedLabel:
-				hasFailed = true
-			case closedFailedUnverifiableLabel:
-				hasScar = true
-			}
-		}
+		hasFailed, hasScar := scarLabels(bead.Labels)
 		if !hasFailed || hasScar {
 			continue
 		}

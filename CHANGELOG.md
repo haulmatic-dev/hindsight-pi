@@ -62,7 +62,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 - **br CLI invocations now run with an isolated per-call `TMPDIR`.** br's fsqlite WAL layer stages files under fixed names in `$TMPDIR` (`beads.db`, `bd-beads.json`, `beads.db-fsqlite-ns-gate`, ...); any two concurrent br processes — even against different stores — collided on those names, producing cross-store WAL phantom writes and `SYNC_CONFLICT` lockouts (observed 2026-10-07: hydra fix beads phantom-duplicated into srv-jobfile's WAL, store unreadable for hours, 15-29 leaked `.br-wal-index-*` dirs per store). The daemon's beads executor now gives every invocation a private `TMPDIR` (created and removed per call). Operators should also sweep stale `/tmp/beads*` staging debris after incidents.
 
 ### Changed
--- Extracted `WorktreeManager.suiteGate()` from the inline per-instance/default gate-resolution in `IntegrateBranch` (suite-gate refactor chain) — one named seam for gate selection; behavior identical.
+- Unverifiable-scar exit refactor (`internal/core/quarantine_unverifiable.go`): shared `scarLabels(labels)` predicate now backs the sweep, the `who` selection and the stamp anchor (three duplicated `closed-failed`/`closed-failed-unverifiable` label-scan loops deduped). Behavior identical; 6 Unverifiable contract tests + Quarantine/Reconcile suite pass.
+- Extracted `WorktreeManager.suiteGate()` from the inline per-instance/default gate-resolution in `IntegrateBranch` (suite-gate refactor chain) — one named seam for gate selection; behavior identical.
  **Post-close sweeper refactor** (`internal/core/postclose_sweep.go`): eligibility folded into `sweepableCommand(bead)`, reopen comment body extracted to `reopenCommentBody`, event types named (`evPostCloseNeedsHuman`/`evPostCloseReopened`); added `BenchmarkPostCloseSweepVerifyBead` (~84 ns/op, 0 allocs). Behavior-preserving; TestPostCloseSweep suite passes.
 
 ### Documentation
