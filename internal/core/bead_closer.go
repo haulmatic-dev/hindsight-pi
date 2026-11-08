@@ -1674,7 +1674,47 @@ func (c *BeadCloser) worktreeHEADIntegratedLocally(bead *types.Bead, projectPath
 // warning. It returns a non-nil error only when the configured mode is "block"
 // and an off-scope change is found. Target-less implementation beads that edit
 // non-allowlisted paths are warned but never rejected.
+// redPhaseProductionFiles lists changed files that are production code:
+// not Go test files, not fixtures/testdata, not docs/CHANGELOG. A RED bead
+// touching any of these is doing GREEN's job.
+func redPhaseProductionFiles(changed []string) []string {
+	var prod []string
+	for _, f := range changed {
+		base := filepath.Base(f)
+		switch {
+		case strings.HasSuffix(f, "_test.go"),
+			strings.HasSuffix(f, ".md"),
+			strings.Contains(f, "testdata/"),
+			strings.Contains(f, "test-fixtures/"),
+			strings.HasSuffix(base, ".test.ts"),
+			strings.HasSuffix(base, ".test.js"),
+			strings.HasSuffix(base, ".spec.ts"),
+			strings.HasSuffix(base, ".spec.js"),
+			strings.HasSuffix(base, ".snap"),
+			strings.Contains(f, "__mocks__/"),
+			strings.Contains(f, "__tests__/"):
+			// tests/fixtures/docs — allowed in RED
+		default:
+			prod = append(prod, f)
+		}
+	}
+	return prod
+}
+
 func (c *BeadCloser) checkTargetScope(bead *types.Bead, projectPath, repoName string, changed, targets []string, mode string) error {
+	// RED-phase file-shape check (2026-11-08): a RED bead's diff must be
+	// tests (and fixtures) only. Workers writing implementation files during
+	// RED (moo5/zv1r wrote a 359-line enrichment.go) strand the work: the RED
+	// close gate rejects their passing tests, the chain quarantines, and the
+	// implementation has to be hand-recovered from quarantine. Reject before
+	// that loop starts.
+	if isRedBead(bead) {
+		prod := redPhaseProductionFiles(changed)
+		if len(prod) > 0 {
+			log.Printf("[ScopeGate] bead %s (RED) changed production files: %v", bead.ID, prod)
+			return c.rejectClose(bead, projectPath, repoName, "red-phase production files: "+strings.Join(prod, ", ")+" — RED changes must be *_test.go/fixtures only; implementation belongs to the GREEN bead")
+		}
+	}
 	if len(targets) > 0 {
 		violations := scopeViolations(changed, targets)
 		if len(violations) == 0 {

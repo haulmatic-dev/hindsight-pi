@@ -738,6 +738,20 @@ func NewOverseer(config *Config) *Overseer {
 		o.worktreeManager = NewWorktreeManager()
 		o.workerSpawner.SetWorktreeManager(o.worktreeManager, o.chainKeyForBead)
 		o.beadCloser.SetWorktreeManager(o.worktreeManager, o.chainKeyForBead, o.isChainMember)
+		// Daemon-wide integration gate (2026-11-08): every
+		// IntegrateBranchAndRemove — chain completion, reconciler, orphan
+		// janitor, Pan's integrate-stranded — runs the project's full test
+		// suite in the chain worktree first. The reconciler previously
+		// merged RED tests without their GREEN implementation and broke the
+		// build on development. Fail-closed on test failure (caller
+		// quarantines); fail-open on runner fault / missing worktree.
+		closer := o.beadCloser
+		defaultWorktreeSuiteGate = func(projectPath, worktreePath, key string) error {
+			if closer == nil {
+				return nil
+			}
+			return closer.RunChainSuiteGate(o.projectNameFromPath(projectPath), projectPath, worktreePath, key)
+		}
 		// The quarantine reconciler is constructed in ServiceStarter — it needs
 		// beadFileReader, which does not exist yet at this point.
 		log.Printf("[Overseer] Worktree isolation ENABLED")
