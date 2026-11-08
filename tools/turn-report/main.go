@@ -4,33 +4,194 @@
 // Reads `worker_turns` events from the daemon's central event stream (one
 // `<HYDRA_HOME>/events/<YYYY-MM-DD>.jsonl` file per day), groups turn counts
 // by phase (RED/GREEN/REFACTOR/SYNTAX/GATE/...), prints per-phase
-// p25/p50/p75/p90/max percentiles, and emits a suggested `turn_budgets:` yaml
-// block as a COMMENT (round-up-to-10 of each phase's p90) for operator review.
-// The tool never writes any config file itself.
-//
-// This file is the RED-phase inert stub: run() is intentionally inert until
-// the GREEN phase implements the contract pinned by main_test.go
-// (TURN_REPORT_ENFORCE=1 proves the RED).
+// p25/p50/p75/p90/max percentiles (nearest-rank), and emits a suggested
+// `turn_budgets:` yaml block as a COMMENT (round-up-to-10 of each phase's
+// p90) for operator review. The tool never writes any config file itself.
+// Zero events → `insufficient data: N events`, exit 0 (fail-open reporting).
 package main
 
 import (
+	"bufio"
+	"encoding/json"
+	"flag"
+	"fmt"
 	"io"
+	"math"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
 )
 
 // eventTypeWorkerTurns is the event type read by the extractor.
 const eventTypeWorkerTurns = "worker_turns"
 
-// turnReportImplemented gates the RED contract: false until GREEN.
-var turnReportImplemented = false
+// turnReportImplemented reports that the GREEN contract is live.
+var turnReportImplemented = true
+
+// nowNow is the injectable clock (TURN_REPORT_NOW time seam for tests).
+func nowNow() time.Time {
+	if v := os.Getenv("TURN_REPORT_NOW"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			return t
+		}
+	}
+	return time.Now()
+}
+
+// turnRecord is one windowed worker_turns event.
+type turnRecord struct {
+	turns int
+	phase string
+}
+
+// percentile computes the nearest-rank percentile of a sorted slice:
+// sorted[ceil(p/100*n)-1].
+func percentile(sorted []int, p float64) int {
+	if len(sorted) == 0 {
+		return 0
+	}
+	idx := int(math.Ceil(p/100*float64(len(sorted)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	return sorted[idx]
+}
+
+// roundUp10 rounds v up to the next multiple of 10 (already-multiples stay).
+func roundUp10(v int) int {
+	return ((v + 9) / 10) * 10
+}
+
+// loadTurnRecords scans the events dir for dated .jsonl day files whose date
+// falls within the --days window ending at now, and collects worker_turns
+// events with usable turns/phase fields. Total counts every worker_turns
+// event in the window (used for the insufficient-data message); records only
+// those with a phase.
+func loadTurnRecords(dir string, now time.Time, days int) (records []turnRecord, total int, err error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, 0, err
+	}
+	cutoff := now.AddDate(0, 0, -days)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		day, err := time.Parse("2006-01-02", strings.TrimSuffix(e.Name(), ".jsonl"))
+		if err != nil {
+			continue // non-dated file: not part of the window scheme
+		}
+		if day.Before(time.Date(cutoff.Year(), cutoff.Month(), cutoff.Day(), 0, 0, 0, 0, time.UTC)) {
+			continue // outside the --days window
+		}
+		f, err := os.Open(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, 0, err
+		}
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if line == "" {
+				continue
+			}
+			var ev struct {
+				Type   string         `json:"type"`
+				Fields map[string]any `json:"fields"`
+			}
+			if json.Unmarshal([]byte(line), &ev) != nil || ev.Type != eventTypeWorkerTurns {
+				continue
+			}
+			total++
+			phase, _ := ev.Fields["phase"].(string)
+			turns := 0
+			switch tv := ev.Fields["turns"].(type) {
+			case float64:
+				turns = int(tv)
+			case json.Number:
+				n, _ := tv.Int64()
+				turns = int(n)
+			}
+			if phase == "" || turns <= 0 {
+				continue
+			}
+			records = append(records, turnRecord{turns: turns, phase: phase})
+		}
+		f.Close()
+		if err := sc.Err(); err != nil {
+			f.Close()
+			return nil, total, err
+		}
+		f.Close()
+	}
+	return records, total, nil
+}
+
+// printReport writes the per-phase distribution and the comment-only
+// suggested turn_budgets block.
+func printReport(w io.Writer, records []turnRecord, total int) {
+	if total == 0 {
+		fmt.Fprintf(w, "insufficient data: %d events\n", total)
+		return
+	}
+	byPhase := map[string][]int{}
+	for _, r := range records {
+		byPhase[r.phase] = append(byPhase[r.phase], r.turns)
+	}
+	phases := make([]string, 0, len(byPhase))
+	for p := range byPhase {
+		phases = append(phases, p)
+	}
+	sort.Strings(phases)
+	fmt.Fprintf(w, "turn distribution (%d events, %d phases):\n", total, len(phases))
+	for _, p := range phases {
+		vals := append([]int(nil), byPhase[p]...)
+		sort.Ints(vals)
+		fmt.Fprintf(w, "  %s (n=%d): p25=%d p50=%d p75=%d p90=%d max=%d\n",
+			p, len(vals), percentile(vals, 25), percentile(vals, 50),
+			percentile(vals, 75), percentile(vals, 90), vals[len(vals)-1])
+		if len(vals) < 20 {
+			fmt.Fprintf(w, "    warning: drift — %s sample size %d < 20; budget estimate may drift\n", p, len(vals))
+		}
+	}
+	fmt.Fprintf(w, "# suggested turn_budgets: (comment only — review before applying; never written automatically)\n")
+	fmt.Fprintf(w, "# turn_budgets:\n")
+	for _, p := range phases {
+		vals := append([]int(nil), byPhase[p]...)
+		sort.Ints(vals)
+		fmt.Fprintf(w, "#  %s: %d\n", p, roundUp10(percentile(vals, 90)))
+	}
+}
 
 // run parses args and prints the report to stdout, returning the process
-// exit code. Inert in RED: it does nothing and never refuses.
+// exit code. Always exits 0 on data problems (fail-open reporting).
 func run(args []string, stdout io.Writer) int {
-	_ = args
-	_ = stdout
+	fs := flag.NewFlagSet("turn-report", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	eventsDir := fs.String("events-dir", "", "directory containing <YYYY-MM-DD>.jsonl event files")
+	days := fs.Int("days", 7, "window in days")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(stdout, err)
+		return 2
+	}
+	if *eventsDir == "" {
+		fmt.Fprintln(stdout, "--events-dir is required")
+		return 2
+	}
+	records, total, err := loadTurnRecords(*eventsDir, nowNow(), *days)
+	if err != nil {
+		// fail-open: unreadable events dir is a data problem, not a gate.
+		fmt.Fprintf(stdout, "insufficient data: 0 events (%v)\n", err)
+		return 0
+	}
+	printReport(stdout, records, total)
 	return 0
 }
 
-func main() { //nolint:revive // entry point; exercised by GREEN.
-	_ = run(nil, nil)
+func main() {
+	os.Exit(run(os.Args[1:], os.Stdout))
 }
+
+// pad line 1
