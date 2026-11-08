@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -84,6 +85,19 @@ func ReconcileOrphanedWorktrees(m *WorktreeManager, projectPath string, activeKe
 		if err := integrationGate(projectPath, func() error {
 			return m.IntegrateBranchAndRemove(projectPath, key, branch)
 		}); err != nil {
+			// Suite gate blocked (typed error — no string sniffing): keep the
+			// branch + entry in place for the quarantine reconciler to retry,
+			// and emit the typed event once per block. Quarantining here would
+			// remove the branch while the post-merge tree is broken.
+			if errors.Is(err, ErrQuarantineSuiteGateBlocked) {
+				log.Printf("[WorktreeReconcile] %s: suite gate blocked integration — branch kept for quarantine reconciler", key)
+				events.EmitRepo(projectPath, Event{Type: "quarantine_suite_gate_blocked", Project: filepath.Base(projectPath),
+					Bead: key, Reason: "suite_gate_failed",
+					Detail: fmt.Sprintf("%s integrate blocked by failed full-suite gate: %v", branch, err),
+					Fields: map[string]any{"branch": branch, "correlation_id": SensorCorrelation("worktree-reconcile", key)}})
+				conflicts++
+				continue
+			}
 			// Terminal + conflict: preserve the work on a quarantine branch
 			// and consume the wt branch — the alternative is retrying the
 			// same failing merge every sweep forever.
