@@ -47,6 +47,19 @@ func osLookupEnv(key string) (string, bool) {
 // prod and only captures in tests.
 var claimEventRecorder func(evType string)
 
+// claimCacheImplemented gates the FR-002 claim re-proof cache RED contract
+// tests (BEAD_CLAIMS_CACHE_ENFORCE=1 fails them loudly). Inert until GREEN.
+const claimCacheImplemented = false
+
+// claimCheckRunner overrides the probe runner used inside
+// spawnPreflightBeadClaims (test seam; nil = defaultClaimRun).
+var claimCheckRunner beadClaimRunner
+
+// claimHeadProbe resolves the worktree HEAD for base_sha comparison
+// (test seam; inert until GREEN — returns empty, so cached passes never
+// reuse and every spawn re-proofs).
+var claimHeadProbe = func(projectPath string) (string, error) { return "", nil }
+
 // claimLineRe captures `[hard: ]claim: <assertion> [(verify: <cmd>)]`.
 var claimLineRe = regexp.MustCompile(`^(hard:\s+)?claim:\s*(.+?)\s*(?:\(verify:\s*(.*?)\)\s*)?$`)
 
