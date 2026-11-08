@@ -57,6 +57,12 @@ func gateCmdProcGroup(cmd *exec.Cmd, ctx context.Context) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	go func() {
 		<-ctx.Done()
+		// Start failure (e.g. worktree cwd torn down by a concurrent
+		// reconciler) leaves cmd.Process nil — dereferencing it panicked the
+		// daemon (crash loop 2026-11-08, gate_runner.go:60). Nothing to kill.
+		if cmd.Process == nil {
+			return
+		}
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // ESRCH when already gone
 	}()
 }
