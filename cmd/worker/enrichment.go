@@ -68,25 +68,27 @@ func enrichDetachedPiRunner(worktreePath, prompt string) (string, error) {
 }
 
 // enrichSubstantiveWords tokenizes s into lowercase alnum runs of length >= 2.
+// enrichSubstantiveWords returns the set of lowercased alphanumeric tokens in
+// s — the vocabulary the anti-laundering attribution compares across lines.
 func enrichSubstantiveWords(s string) map[string]bool {
 	words := map[string]bool{}
-	cur := strings.Builder{}
-	flush := func() {
-		w := strings.ToLower(cur.String())
-		cur.Reset()
-		if len(w) >= 1 {
-			words[w] = true
-		}
+	for _, w := range strings.FieldsFunc(s, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
+	}) {
+		words[strings.ToLower(w)] = true
 	}
-	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			cur.WriteRune(r)
-		} else {
-			flush()
-		}
-	}
-	flush()
 	return words
+}
+
+// sharedWords counts the words two token sets have in common.
+func sharedWords(a, b map[string]bool) int {
+	n := 0
+	for w := range a {
+		if b[w] {
+			n++
+		}
+	}
+	return n
 }
 
 // enrichClaim holds one parsed `claim: <assertion> (verify: ...)` line.
@@ -111,25 +113,6 @@ func enrichParseClaims(output string) []enrichClaim {
 		claims = append(claims, enrichClaim{line: trimmed, assertion: assertion})
 	}
 	return claims
-}
-
-// enrichLineMatches reports whether a summary line shares at least 2
-// substantive words with some claim — the affixed anti-laundering match.
-func enrichLineMatches(line string, claims []enrichClaim) bool {
-	lw := enrichSubstantiveWords(line)
-	for _, c := range claims {
-		cw := enrichSubstantiveWords(c.line)
-		shared := 0
-		for w := range lw {
-			if cw[w] {
-				shared++
-				if shared >= 2 {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 // enrichStrongAssertions reports whether the claims carry substantive content
@@ -164,16 +147,13 @@ func enrichBeadClaims(bead types.Bead, projectPath, worktreePath string, run enr
 		log.Printf("[Enrich] %s: no target files — enrichment skipped, zero tokens", beadID)
 		return nil, "", nil
 	}
-	if len(targets) > 0 {
-		base, _, err := core.ResolveIntegrationBase(nil, projectPath)
-		if err != nil {
-			base = ""
-		}
-		brownfield := checkBrownfield(worktreePath, base, targets)
-		if !brownfield {
-			log.Printf("[Enrich] %s: greenfield (target files absent on base %q) — enrichment skipped, zero tokens", beadID, base)
-			return nil, "", nil
-		}
+	base, _, err := core.ResolveIntegrationBase(nil, projectPath)
+	if err != nil {
+		base = ""
+	}
+	if !checkBrownfield(worktreePath, base, targets) {
+		log.Printf("[Enrich] %s: greenfield (target files absent on base %q) — enrichment skipped, zero tokens", beadID, base)
+		return nil, "", nil
 	}
 
 	prompt := buildEnrichPrompt(bead, targets)
@@ -247,55 +227,36 @@ func firstEnrichLines(s string, n int) string {
 // must not destroy the agent's summary.
 func enrichEmitSummary(output string, claims []enrichClaim) (string, int) {
 	type entry struct {
-		line       string
-		isClaim    bool
-		claimWords map[string]bool
+		line      string
+		isClaim   bool
+		lineWords map[string]bool
 	}
 	entries := make([]entry, 0, len(claims)+4)
-	claimIdx := map[int]map[string]bool{}
-	ci := -1
-	ci2 := -1
 	for _, raw := range strings.Split(output, "\n") {
 		trimmed := strings.TrimSpace(raw)
 		if trimmed == "" {
 			continue
 		}
-		ci++
-		ci2 = len(entries)
-		if strings.HasPrefix(trimmed, "claim:") {
-			w := enrichSubstantiveWords(trimmed)
-			claimIdx[ci2] = w
-			entries = append(entries, entry{line: trimmed, isClaim: true, claimWords: w})
-			continue
-		}
-		entries = append(entries, entry{line: trimmed})
+		isClaim := strings.HasPrefix(trimmed, "claim:")
+		wordSet := enrichSubstantiveWords(trimmed)
+		entries = append(entries, entry{line: trimmed, isClaim: isClaim, lineWords: wordSet})
 	}
 
 	matched := make([]bool, len(entries))
 	anyMatched := false
 	const window = 8
-	for i, e := range entries {
-		if e.isClaim {
+	for i := range entries {
+		if entries[i].isClaim {
 			continue
 		}
-		lw := enrichSubstantiveWords(e.line)
 		for j, c := range entries {
-			if j > i+window {
-				break
-			}
-			if !c.isClaim {
+			if !c.isClaim || sharedWords(entries[i].lineWords, c.lineWords) < 3 {
 				continue
 			}
-			if j+window < i {
-				continue
-			}
-			shared := 0
-			for w := range lw {
-				if claimIdx[j][w] {
-					shared++
-				}
-			}
-			if shared >= 3 {
+			// Adjacency-scoped attribution: the matching claim must sit
+			// within 8 lines of the summary line, so a summary block cannot
+			// launder against a distant claims block.
+			if j <= i+window && i <= j+window {
 				matched[i] = true
 				anyMatched = true
 				break

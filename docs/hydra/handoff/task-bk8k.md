@@ -21,3 +21,8 @@
 - enrichment.go is still modified-uncommitted and owned by the enrichment GREEN strand; its full verification is that strand's obligation.
 - graphify-out/graph.json absent in cwd → rg fallback per protocol.
  shimmy-1
+
+## Gate repair note (bk8k re-close)
+- Gate failure was TestExecuteWithPi_RPCSuccessReturnsNilError (30.03s hang) — enrichment GREEN (35ac22e5) reintroduced the unscoped-agent HYDRA_PI_PATH hijack the xtii bead had fixed. Repair commit 435a1b3c (skip enrichment when no target files) is landed.
+- Re-verified: go test ./cmd/worker/ -run "TestExecuteWithPi_RPCSuccessReturnsNilError|Turn" -count=1 — ok 1.981s.
+(gate-repair note run 1)
