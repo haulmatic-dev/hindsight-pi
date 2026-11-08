@@ -5,6 +5,20 @@
 
 set -e
 
+# Git-ownership sweep (2026-11-08): root-run deploy git ops can leave
+# root-owned entries in the shared .git module db, wedging the daemon's
+# git add ("insufficient permission for adding an object to repository
+# database"). Repair on every exit path — guarded so a missing helper
+# can never fail the deploy (fail-open).
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+git_ownership_sweep() {
+    if [ -x "$REPO_ROOT/scripts/fix-git-ownership.sh" ]; then
+        "$REPO_ROOT/scripts/fix-git-ownership.sh" "$REPO_ROOT" || true
+    fi
+}
+trap git_ownership_sweep EXIT
+trap 'trap - EXIT; git_ownership_sweep; exit 143' TERM INT HUP
+
 ENVIRONMENT="${1:-production}"
 # Baseline for the post-deploy freshness assertion (see scripts/verify-deploy.sh).
 DEPLOY_STARTED_AT="$(date +%s)"
