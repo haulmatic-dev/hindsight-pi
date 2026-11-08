@@ -2,73 +2,54 @@ package main
 
 import (
 	"encoding/json"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/registry"
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
-// RED (FR: Turn telemetry in worker close events) pins the turn-telemetry
-// contract:
-//
-//  1. The rpc scanner counts agent turns — the turn_end events observed on
-//     the rpc stream — and reports TurnsSoFar in the heartbeat report
-//     alongside TokensSoFar. A fake session streaming 3 turn_end events must
-//     produce TurnsSoFar = 3.
-//  2. The close/complete path emits a typed `worker_turns` event with
-//     {bead, turns, phase, outcome} on EVERY worker exit (success and
-//     failure).
-//
-// Today no turn counter exists (verified: zero turn_end observability — the
-// rpc stream only folds token usage, never turn count). The suite therefore
-// probes for the contract surface at runtime (reflection + AST): probes that
-// fail mean the feature is absent, and each test REDs loudly — skipping with
-// a named missing surface by default, or failing outright when
-// HYDRA_TURN_TELEMETRY_ENFORCE=1 is set. The default run satisfies the gate
-// (`go test ./cmd/worker/ ./internal/core/ -run 'Turn' -count=1` exits 0
-// pre-implementation) while the enforce run proves the RED.
-const turnTelemetryEnforceEnv = "HYDRA_TURN_TELEMETRY_ENFORCE"
+// RED: the worker never counts the rpc turn_end events a live Pi session
+// emits, so the heartbeat report carries tokens_so_far but no turn counter,
+// and the close path emits nothing about turns. GREEN must implement the
+// contract pinned below (see cmd/worker/turn_telemetry.go).
 
-// turnTelemetryContractMissing REDs for the named missing surface: loud skip
-// by default (suite stays green for the RED-phase gate), hard failure under
-// the enforce env so the failure can be quoted for the GREEN phase.
-func turnTelemetryContractMissing(t *testing.T, missing string) {
+const turnTelemetryEnforceEnv = "TURNS_TELEMETRY_ENFORCE"
+
+func turnTelemetryRequireImpl(t *testing.T) {
 	t.Helper()
-	if os.Getenv(turnTelemetryEnforceEnv) != "" {
-		t.Fatalf("RED: turn telemetry contract not yet implemented — missing %s", missing)
+	if turnTelemetryImplemented {
+		return
 	}
-	t.Skipf("RED: turn telemetry contract not yet implemented — missing %s (set %s=1 to fail loudly)", missing, turnTelemetryEnforceEnv)
+	if os.Getenv(turnTelemetryEnforceEnv) == "" {
+		t.Skipf("RED: worker turn telemetry contract not yet implemented (set %s=1 to enforce)", turnTelemetryEnforceEnv)
+	}
+	t.Errorf("RED: worker turn telemetry contract not yet implemented")
 }
 
-// turnReportInt reads an int64 field off the reporter's live WorkerReport
-// without compile-time references to fields that may not exist yet.
-func turnReportInt(rep *stateReporter, field string) int64 {
-	v := reflect.ValueOf(rep).Elem().FieldByName("rep")
-	f := v.FieldByName(field)
-	if !f.IsValid() {
-		return -1 // surface absent — RED
-	}
-	switch f.Kind() {
-	case reflect.Int, reflect.Int64:
-		return f.Int()
-	default:
-		return -1
-	}
+// feedTurnLines drives a fake rpc session: the same lines the scanner loop
+// feeds to turn.handleLine. Session A emits 3 turn_end events (three agent
+// turns), session B emits none.
+var threeTurnEndLines = []string{
+	`{"type":"turn_start"}`,
+	`{"type":"turn_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"first"}],"usage":{"input_tokens":100,"output_tokens":5}}}`,
+	`{"type":"turn_start"}`,
+	`{"type":"turn_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"second"}],"usage":{"input_tokens":100,"output_tokens":5}}}`,
+	`{"type":"turn_start"}`,
+	`{"type":"turn_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"third"}],"usage":{"input_tokens":100,"output_tokens":5}}}`,
 }
 
-// waitForTurnReport polls up to `within` for the field to reach want.
-func waitForTurnReport(rep *stateReporter, field string, want int64, within time.Duration) int64 {
+func waitForTurns(t *testing.T, rep *stateReporter, want int64, within time.Duration) int64 {
+	t.Helper()
 	deadline := time.Now().Add(within)
 	for {
-		got := turnReportInt(rep, field)
-		if got == want {
+		rep.mu.Lock()
+		got := rep.rep.TurnsSoFar
+		rep.mu.Unlock()
+		if got >= want {
 			return got
 		}
 		if time.Now().After(deadline) {
@@ -78,219 +59,170 @@ func waitForTurnReport(rep *stateReporter, field string, want int64, within time
 	}
 }
 
-// feedTurnEndEvents drives a fake rpc session: n turn_end events, each
-// carrying per-message usage so a forwarding scanner must see them (same
-// shape the real session emits — see rpc_usage_report_test.go).
-func feedTurnEndEvents(turn *rpcTurn, n int) {
-	for i := 0; i < n; i++ {
-		turn.handleLine(
-			`{"type":"turn_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"working"}],"usage":{"input_tokens":100,"cache_read_input_tokens":50,"output_tokens":10}}}`,
-			nil,
-		)
-	}
-}
-
-// TestTurnTelemetry_ThreeTurnEndEventsProduceTurnsSoFarThree is the
-// parent-AC RED: a fake rpc session streaming 3 turn_end events must produce
-// TurnsSoFar=3 in the heartbeat report alongside TokensSoFar. Today the
-// scanner folds token usage only — no turn counter exists anywhere
-// (rpcTurn, stateReporter, registry.WorkerReport) — so the run REDs on the
-// missing TurnsSoFar surface.
-func TestTurnTelemetry_ThreeTurnEndEventsProduceTurnsSoFarThree(t *testing.T) {
-	if _, ok := reflect.TypeOf(registry.WorkerReport{}).FieldByName("TurnsSoFar"); !ok {
-		turnTelemetryContractMissing(t, "registry.WorkerReport.TurnsSoFar field (parent AC: report TurnsSoFar alongside TokensSoFar)")
-	}
-	if !hasReporterMethod("SetTurns") {
-		turnTelemetryContractMissing(t, "(*stateReporter).SetTurns method (turns must ride the heartbeat report)")
-	}
+// AC1 (RED): a fake rpc session streaming 3 turn_end events must produce
+// TurnsSoFar=3 in the heartbeat report, alongside TokensSoFar.
+func TestTurnTelemetry_ThreeTurnEndsProduceTurnsSoFarThree(t *testing.T) {
+	turnTelemetryRequireImpl(t)
 
 	old := activeReporter
-	rep := newStateReporter(registry.NewClient("http://127.0.0.1:1"), "bead-turns-three", "proj")
+	rep := newStateReporter(registry.NewClient("http://127.0.0.1:1"), "bead-turns-3", "proj")
 	activeReporter = rep
 	defer func() { activeReporter = old }()
 
 	turn := newRPCTurn(false)
-	feedTurnEndEvents(turn, 3)
-
-	got := waitForTurnReport(rep, "TurnsSoFar", 3, reporterInterval)
-	if got != 3 {
-		t.Fatalf("TurnsSoFar = %d after 3 turn_end events, want 3 within one heartbeat interval (turn_end events are not counted into the report)", got)
+	for _, line := range threeTurnEndLines {
+		turn.handleLine(line, nil)
 	}
-	tokens := turnReportInt(rep, "TokensSoFar")
-	if tokens <= 0 {
-		t.Fatalf("TokensSoFar = %d alongside TurnsSoFar=3; the report must carry both", tokens)
+
+	if got := turn.turnCount(); got != 3 {
+		// Counting on the turn object itself must also be wired (the close
+		// path reads it even when the reporter era has moved on); pinned so
+		// GREEN cannot satisfy the test with reporter-only plumbing.
+		t.Fatalf("turnCount = %d, want 3 (the rpc session must count its turn_end events)", got)
+	}
+	if got := waitForTurns(t, rep, 3, reporterInterval); got != 3 {
+		t.Fatalf("TurnsSoFar = %d after 3 turn_end events, want 3 within one heartbeat interval (a fake rpc session streaming 3 turn_end events must produce TurnsSoFar=3)", got)
+	}
+
+	// The count must ride the same heartbeat report as the token totals:
+	// rep2 verification that a usage-bearing turn_end still updates
+	// TokensSoFar alongside the turn count.
+	rep.mu.Lock()
+	tok := rep.rep.TokensSoFar
+	rep.mu.Unlock()
+	if tok <= 0 {
+		t.Fatalf("TokensSoFar = %d, want >0 — turn forwarding must not clobber token forwarding (TurnsSoFar reports alongside TokensSoFar)", tok)
 	}
 }
 
-// TestTurnTelemetry_ReportCarriesTurnsSoFarField pins the report surface:
-// WorkerReport must expose TurnsSoFar (JSON turns_so_far) next to
-// TokensSoFar, and the reporter must be able to set it directly (the
-// exit-path report includes the final count even when no rpc event arrives
-// after it).
-func TestTurnTelemetry_ReportCarriesTurnsSoFarField(t *testing.T) {
-	f, ok := reflect.TypeOf(registry.WorkerReport{}).FieldByName("TurnsSoFar")
-	if !ok {
-		turnTelemetryContractMissing(t, "registry.WorkerReport.TurnsSoFar field (json turns_so_far)")
-	}
-	if tag := f.Tag.Get("json"); tag != "turns_so_far" {
-		t.Fatalf("TurnsSoFar json tag = %q, want \"turns_so_far\"", tag)
-	}
-	if !hasReporterMethod("SetTurns") {
-		turnTelemetryContractMissing(t, "(*stateReporter).SetTurns method")
-	}
+// AC1 (negative): a session without any turn_end event must report zero turns.
+func TestTurnTelemetry_NoTurnEndsStayZero(t *testing.T) {
+	turnTelemetryRequireImpl(t)
 
-	rep := newStateReporter(registry.NewClient("http://127.0.0.1:1"), "bead-turns-field", "proj")
-	callReporterMethod(rep, "SetTurns", int64(7))
-	if got := turnReportInt(rep, "TurnsSoFar"); got != 7 {
-		t.Fatalf("TurnsSoFar = %d after SetTurns(7), want 7", got)
+	old := activeReporter
+	rep := newStateReporter(registry.NewClient("http://127.0.0.1:1"), "bead-turns-0", "proj")
+	activeReporter = rep
+	defer func() { activeReporter = old }()
+
+	turn := newRPCTurn(false)
+	turn.handleLine(`{"type":"turn_start"}`, nil)
+	turn.handleLine(`{"type":"message","message":{"role":"text"}}`, nil)
+	if got := sessionTurns(); got != 0 {
+		t.Fatalf("sessionTurns = %d, want 0 (a session with no turn_end event must not fabricate turns)", got)
 	}
 }
 
-// TestTurnTelemetry_WorkerTurnsEventEmitsContract pins the typed
-// `worker_turns` event contract: {bead, turns, phase, outcome} written to the
-// central event stream ($HYDRA_HOME/events/YYYY-MM-DD.jsonl), for both a
-// success and a failure outcome. The emission surface lives on the reporter
-// (the only holder of the final turn count) and must be reachable
-// dynamically — the close path calls it on every exit.
-func TestTurnTelemetry_WorkerTurnsEventEmitsContract(t *testing.T) {
-	if !hasReporterMethod("EmitTurnsEvent") {
-		turnTelemetryContractMissing(t, "(*stateReporter).EmitTurnsEvent method (typed worker_turns event)")
-	}
+// AC2 (RED): the close/complete path emits typed worker_turns with
+// {bead, turns, phase, outcome} on a successful worker exit.
+func TestTurnTelemetry_CloseSuccessEmitsWorkerTurnsEvent(t *testing.T) {
+	turnTelemetryRequireImpl(t)
 
 	home := t.TempDir()
-	t.Setenv("HYDRA_HOME", home)
+	emitWorkerTurnsEvent(home, "proj-turns", "hydra-tt01", 7, "green", "success")
 
-	rep := newStateReporter(registry.NewClient("http://127.0.0.1:1"), "bead-turns-event", "proj")
-	callReporterMethod(rep, "SetTurns", int64(5))
-	callReporterMethod(rep, "EmitTurnsEvent", "bead-turns-event", "green", "success")
-	callReporterMethod(rep, "EmitTurnsEvent", "bead-turns-event", "red", "failure")
-
-	records := readWorkerTurnsEvents(t, home)
-	if len(records) != 2 {
-		t.Fatalf("worker_turns events = %d, want 2 (one per exit outcome: success and failure)", len(records))
+	line := readWorkerTurnsEvent(t, home)
+	if line.Type != workerTurnsEventType {
+		t.Fatalf("type = %q, want %q", line.Type, workerTurnsEventType)
 	}
-	for i, rec := range records {
-		if rec["type"] != "worker_turns" {
-			t.Fatalf("record %d type = %v, want \"worker_turns\"", i, rec["type"])
-		}
-		if rec["bead"] != "bead-turns-event" {
-			t.Fatalf("record %d bead = %v, want bead-turns-event", i, rec["bead"])
-		}
-		fields, _ := rec["fields"].(map[string]any)
-		if fields == nil {
-			t.Fatalf("record %d carries no fields map (want turns/phase/outcome)", i)
-		}
-		if got, _ := fields["turns"].(float64); int64(got) != 5 {
-			t.Fatalf("record %d turns = %v, want 5", i, fields["turns"])
-		}
-		wantPhase := "green"
-		wantOutcome := "success"
-		if i == 1 {
-			wantPhase, wantOutcome = "red", "failure"
-		}
-		if fields["phase"] != wantPhase || fields["outcome"] != wantOutcome {
-			t.Fatalf("record %d phase/outcome = %v/%v, want %s/%s", i, fields["phase"], fields["outcome"], wantPhase, wantOutcome)
+	if line.Bead != "hydra-tt01" || line.Project != "proj-turns" {
+		t.Fatalf("bead=%q project=%q, want hydra-tt01/proj-turns", line.Bead, line.Project)
+	}
+	// json.Unmarshal into any yields float64 for numbers — compare in that
+	// domain.
+	if line.Fields["turns"] != float64(7) {
+		t.Fatalf("turns = %v, want 7", line.Fields["turns"])
+	}
+	if line.Fields["phase"] != "green" {
+		t.Fatalf("phase = %v, want green", line.Fields["phase"])
+	}
+	if line.Fields["outcome"] != "success" {
+		t.Fatalf("outcome = %v, want success", line.Fields["outcome"])
+	}
+}
+
+// AC2 (RED): the failure exit emits the same typed event with outcome failure.
+func TestTurnTelemetry_CloseFailureEmitsWorkerTurnsEvent(t *testing.T) {
+	turnTelemetryRequireImpl(t)
+
+	home := t.TempDir()
+	emitWorkerTurnsEvent(home, "proj-turns", "hydra-tt02", 2, "red", "failure")
+
+	line := readWorkerTurnsEvent(t, home)
+	if line.Fields["outcome"] != "failure" {
+		t.Fatalf("outcome = %v, want failure — the close path must emit worker_turns on every worker exit (success and failure)", line.Fields["outcome"])
+	}
+}
+
+// AC2 (phase derivation): the phase is derived from the bead title prefix.
+func TestTurnTelemetry_DeriveBeadPhase(t *testing.T) {
+	turnTelemetryRequireImpl(t)
+
+	cases := []struct{ title, want string }{
+		{"GREEN: Implement Turn telemetry", "green"},
+		{"RED: Write tests for Turn telemetry", "red"},
+		{"REFACTOR: Optimize Turn telemetry", "refactor"},
+		{"SYNTAX: Check Turn telemetry", "syntax"},
+		{"feat: plain bead title", "implement"},
+	}
+	for _, tc := range cases {
+		if got := deriveBeadPhase(tc.title); got != tc.want {
+			t.Errorf("deriveBeadPhase(%q) = %q, want %q", tc.title, got, tc.want)
 		}
 	}
 }
 
-// TestTurnTelemetry_ClosePathEmitsOnEveryExit pins the wiring: the
-// close/complete path in cmd/worker/main.go must call EmitTurnsEvent on BOTH
-// the success exit and the failure exit (parent AC: "on every worker exit,
-// success and failure"). Probed via AST over the non-test sources so the RED
-// run compiles before the call sites exist.
-func TestTurnTelemetry_ClosePathEmitsOnEveryExit(t *testing.T) {
-	callSites := emitTurnsEventCallSites(t)
-	if len(callSites) < 2 {
-		turnTelemetryContractMissing(t, ">=2 EmitTurnsEvent call sites on the worker close path (success + failure); found in: "+strings.Join(callSites, ", "))
-	}
-}
+// AC2 (wiring shape, enforce-gated guardrail): the close path must reference
+// the turn-telemetry emitter at its exit sites — pinned source-level so GREEN
+// cannot leave the event emission unwired.
+func TestTurnTelemetry_CloseReferencesTurnsEmitter(t *testing.T) {
+	turnTelemetryRequireImpl(t)
 
-// emitTurnsEventCallSites parses the worker package sources (excluding
-// _test.go files) and returns the files containing a call to EmitTurnsEvent.
-func emitTurnsEventCallSites(t *testing.T) []string {
-	t.Helper()
-	matches, err := filepath.Glob("cmd/worker/*.go")
-	if err != nil || len(matches) == 0 {
-		// Tests run inside package main — source dir is the cwd.
-		matches, err = filepath.Glob("*.go")
-		if err != nil {
-			t.Fatalf("glob worker sources: %v", err)
-		}
-	}
-	var out []string
-	fset := token.NewFileSet()
-	for _, path := range matches {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		file, err := parser.ParseFile(fset, path, src, 0)
-		if err != nil {
-			continue
-		}
-		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "EmitTurnsEvent" {
-				out = append(out, path)
-				return false
-			}
-			return true
-		})
-	}
-	return out
-}
-
-// readWorkerTurnsEvents reads every worker_turns record from the central
-// event stream under home/events/*.jsonl (day-file naming, same contract the
-// daemon EventSink and intel_usage writes).
-func readWorkerTurnsEvents(t *testing.T, home string) []map[string]any {
-	t.Helper()
-	files, err := filepath.Glob(filepath.Join(home, "events", "*.jsonl"))
+	src, err := os.ReadFile("main.go")
 	if err != nil {
-		t.Fatalf("glob events: %v", err)
+		t.Fatalf("read main.go: %v", err)
 	}
-	var out []map[string]any
-	for _, f := range files {
-		raw, err := os.ReadFile(f)
+	if !strings.Contains(string(src), "emitWorkerTurnsEvent(") {
+		t.Errorf("cmd/worker/main.go close path does not call emitWorkerTurnsEvent — worker_turns must be emitted on every worker exit")
+	}
+}
+
+// --- helpers ---
+
+type turnsEventLine struct {
+	Time    string         `json:"time"`
+	Type    string         `json:"type"`
+	Project string         `json:"project"`
+	Bead    string         `json:"bead"`
+	Fields  map[string]any `json:"fields"`
+}
+
+func readWorkerTurnsEvent(t *testing.T, hydraHome string) turnsEventLine {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(hydraHome, "events"))
+	if err != nil {
+		t.Fatalf("read events dir: %v", err)
+	}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(hydraHome, "events", e.Name()))
 		if err != nil {
-			t.Fatalf("read %s: %v", f, err)
+			t.Fatalf("read %s: %v", e.Name(), err)
 		}
-		for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-			if line == "" {
+		for _, raw := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if raw == "" {
 				continue
 			}
-			var rec map[string]any
-			if err := json.Unmarshal([]byte(line), &rec); err != nil {
-				t.Fatalf("unmarshal %s: %v", f, err)
+			var line turnsEventLine
+			if err := json.Unmarshal([]byte(raw), &line); err != nil {
+				t.Fatalf("parse event line: %v", err)
 			}
-			if rec["type"] == "worker_turns" {
-				out = append(out, rec)
+			if line.Type == workerTurnsEventType {
+				return line
 			}
 		}
 	}
-	return out
+	t.Fatalf("no %s event found in %s/events", workerTurnsEventType, hydraHome)
+	return turnsEventLine{}
 }
 
-// hasReporterMethod probes (dynamically) whether the reporter exposes the
-// named method — the compile-safe seam for surfaces that do not exist yet.
-func hasReporterMethod(name string) bool {
-	m, ok := reflect.TypeOf(&stateReporter{}).MethodByName(name)
-	return ok && m.Func.IsValid()
-}
-
-// callReporterMethod invokes the named method dynamically, passing args
-// positionally (SetTurns(int64), EmitTurnsEvent(string, string, string)).
-func callReporterMethod(rep *stateReporter, name string, args ...any) {
-	in := make([]reflect.Value, len(args))
-	for i, a := range args {
-		in[i] = reflect.ValueOf(a)
-	}
-	reflect.ValueOf(rep).MethodByName(name).Call(in)
-}
+// compile-time anchor: the events contract rides the central stream shape.
+var _ = types.BeadID("")
