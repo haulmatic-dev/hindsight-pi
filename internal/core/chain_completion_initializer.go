@@ -169,6 +169,35 @@ func (i *ChainCompletionInitializer) Initialize() {
 					log.Printf("[Worktree] chain %s: quarantine empty — no worktree or branch in %s (nothing preserved)", key, projectPath)
 				}
 			} else {
+				// Chain-completion full-suite gate: the compensating control for
+				// per-bead gate relaxations (RED inverse check, foreign-failure
+				// attribution). Runs the project's full test gate in the chain
+				// worktree before integration — per-bead gates cannot see
+				// cross-bead breakage that only manifests when all changes
+				// combine. Fail-open on runner faults, fail-closed on real
+				// failures (quarantine below).
+				chainSuiteErr := error(nil)
+				if o.beadCloser != nil {
+					wtPath, _ := o.worktreeManager.ExistingWorktree(projectPath, key)
+					chainSuiteErr = o.beadCloser.RunChainSuiteGate(o.projectNameFromPath(projectPath), projectPath, wtPath, key)
+				}
+				if chainSuiteErr != nil {
+					// Full suite failed — quarantine like a failed chain so a
+					// fix bead can inspect the work; do NOT integrate broken code.
+					if qBranch, qErr := o.worktreeManager.QuarantineBranchAndRemove(projectPath, key, branch); qErr != nil {
+						log.Printf("[Worktree] chain-suite-gate quarantine failed for chain %s: %v", key, qErr)
+					} else if qBranch != "" {
+						log.Printf("[Worktree] quarantined chain %s on %s (chain suite gate: %v)", key, qBranch, chainSuiteErr)
+						if o.quarantineReconciler != nil {
+							o.quarantineReconciler.Record(projectPath, filepath.Base(projectPath), key, qBranch, event.ChainInfo.AllBeadIDs)
+						}
+						if o.beadCloser != nil && o.beadCloser.events != nil {
+							o.beadCloser.events.EmitRepo(projectPath, Event{Type: "chain_quarantined",
+								Bead: key, Reason: "chain_suite_gate_failed",
+								Fields: map[string]any{"branch": qBranch, "detail": chainSuiteErr.Error()}})
+						}
+					}
+				} else {
 				// Capture the branch tip BEFORE teardown. Integrate returns nil
 				// when neither worktree nor branch exists in projectPath — the
 				// exact silent no-op that closed the zpf chain unintegrated —
@@ -202,6 +231,7 @@ func (i *ChainCompletionInitializer) Initialize() {
 						}
 					}
 				}
+				}
 			}
 		}
 
@@ -212,4 +242,19 @@ func (i *ChainCompletionInitializer) Initialize() {
 
 	log.Printf("[ChainCompletion] Detector initialized (interval: %v, timeout: %v)",
 		config.DetectionInterval, config.Timeout)
+}
+
+// projectNameFromPath resolves the configured project name for a main-checkout
+// path (the inverse of gatesFor's name → gates lookup). Empty string when no
+// config entry matches — RunChainSuiteGate treats that as no gates declared.
+func (o *Overseer) projectNameFromPath(projectPath string) string {
+	if o.config == nil {
+		return ""
+	}
+	for i := range o.config.Projects {
+		if o.config.Projects[i].Path == projectPath {
+			return o.config.Projects[i].Name
+		}
+	}
+	return ""
 }
