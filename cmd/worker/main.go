@@ -2330,7 +2330,8 @@ func phaseGuidance(bead types.Bead) string {
 		return "RED-phase discipline:\n" +
 			"- Write tests that pin BEHAVIOR from the acceptance criteria, never implementation details.\n" +
 			"- Run the tests and verify each fails for the RIGHT reason — the missing feature — not a compile error or typo. Quote the failure output.\n" +
-			"- Do NOT implement the feature in this task."
+			"- Do NOT implement the feature in this task.\n" +
+			"- HARD RULE: your changed files must be *_test.go (plus test fixtures/data). Creating or editing implementation files (production code) during RED is doing GREEN's job — the close gate rejects RED closes whose tests all pass, and implementation work written now risks being quarantined with the chain. If the behavior you were told to test already exists, close with the done verdict and summary token \"superseded\" citing the existing code."
 	case strings.HasPrefix(title, "GREEN:"):
 		return "GREEN-phase discipline:\n" +
 			"- You are the implementer: EDIT the target files now. Ending this task with only a plan or analysis is a failure — the close gate rejects tasks that changed nothing.\n" +

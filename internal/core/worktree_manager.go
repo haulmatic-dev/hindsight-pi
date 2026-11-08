@@ -25,7 +25,22 @@ import (
 type WorktreeManager struct {
 	mu        sync.Mutex // serialize git worktree ops (shared repo, single process)
 	eventSink *EventSink // optional: emits worktree-level typed events
+	// SuiteGate, when set, runs the project's full test gate in the
+	// chain worktree BEFORE any integration merges the branch into the
+	// working branch. It is the single choke point covering every integrate
+	// caller (chain completion, worktree reconciler, orphan janitor, Pan's
+	// integrate-stranded repair). Per-instance override for tests; the
+	// package-level defaultWorktreeSuiteGate (set once at daemon startup)
+	// covers standalone NewWorktreeManager() instances (charon, publisher).
+	// Both nil = ungated (fail-open, pre-gate behavior).
+	SuiteGate func(projectPath, worktreePath, key string) error
 }
+
+// defaultWorktreeSuiteGate is the daemon-wide integration gate, set by the
+// overseer during startup from BeadCloser.RunChainSuiteGate. Standalone
+// WorktreeManager instances (charon's orphan janitor, the publisher's
+// reconciler pass) share it; tests inject per-instance SuiteGate instead.
+var defaultWorktreeSuiteGate func(projectPath, worktreePath, key string) error
 
 // NewWorktreeManager creates a worktree manager.
 func NewWorktreeManager() *WorktreeManager { return &WorktreeManager{} }
@@ -880,6 +895,26 @@ func (m *WorktreeManager) IntegrateAndRemove(projectPath, key string) error {
 // IntegrateBranchAndRemove is IntegrateAndRemove with an explicit branch
 // name — the recorded-key path for versioned worktree branches.
 func (m *WorktreeManager) IntegrateBranchAndRemove(projectPath, key, branch string) error {
+	// Chain-suite gate: the last line of defense before ANY integration.
+	// Per-bead gates are scoped or attributed; neither can see cross-bead
+	// breakage that only manifests when all changes combine (2026-11-08:
+	// reconciler merged RED tests without their GREEN implementation and
+	// broke the build on development). Fail-closed on real test failures —
+	// the caller quarantines instead of integrating broken work. Fail-open
+	// on missing gate/worktree (nil gate = ungated; branch-only integrates
+	// have no worktree to test in).
+	gate := m.SuiteGate
+	if gate == nil {
+		gate = defaultWorktreeSuiteGate
+	}
+	if gate != nil {
+		wtPath := m.worktreePath(projectPath, key)
+		if isGitWorktree(wtPath) {
+			if err := gate(projectPath, wtPath, key); err != nil {
+				return fmt.Errorf("chain suite gate: %w", err)
+			}
+		}
+	}
 	if err := m.IntegrateBranch(projectPath, key, branch); err != nil {
 		return err
 	}
