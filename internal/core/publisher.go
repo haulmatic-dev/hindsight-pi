@@ -1,6 +1,8 @@
 package core
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -8,10 +10,52 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
+
+// prWaiting tracks branch tips that already have a PR standing open awaiting
+// a human merge (tier policy). While the recorded tip is unchanged, publisher
+// ticks skip the publish attempt entirely — re-pushing the same tip and
+// re-attempting the same merge is pure churn and its events read as failures.
+// Process-local: a daemon restart re-discovers the waiting PR once, which is
+// cheap and self-healing.
+var (
+	prWaitingMu sync.Mutex
+	prWaiting   = map[string]string{} // projectPath+"\x00"+branch -> tip sha
+)
+
+func prWaitingKey(projectPath, branch string) string { return projectPath + "\x00" + branch }
+
+func prWaitingMark(projectPath, branch string) string {
+	prWaitingMu.Lock()
+	defer prWaitingMu.Unlock()
+	return prWaiting[prWaitingKey(projectPath, branch)]
+}
+
+func setPRWaiting(projectPath, branch, tip string) {
+	prWaitingMu.Lock()
+	defer prWaitingMu.Unlock()
+	prWaiting[prWaitingKey(projectPath, branch)] = tip
+}
+
+func clearPRWaiting(projectPath, branch string) {
+	prWaitingMu.Lock()
+	defer prWaitingMu.Unlock()
+	delete(prWaiting, prWaitingKey(projectPath, branch))
+}
+
+// localBranchTip resolves a local branch tip; error → caller falls through to
+// the normal publish path (fail-open).
+func localBranchTip(projectPath, branch string) (string, error) {
+	out, err := exec.Command("git", "-C", projectPath, "rev-parse", "refs/heads/"+branch).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
 
 // branchAheadOfRemote reports whether localBranch has commits not yet on
 // origin/localBranch. When origin/localBranch does not exist (never pushed) it
@@ -36,6 +80,38 @@ func branchAheadOfRemote(repoPath, branch string) bool {
 	return n > 0
 }
 
+// branchMergedIntoBase reports whether the working branch's tip is already
+// an ancestor of origin/<integration base> — i.e. the branch's work is fully
+// merged upstream. Publishing it again can only produce a no-op PR (gh: "No
+// commits between <base> and <head>") or, once the merged remote branch is
+// pruned, the blank-sha GraphQL failure — the hydra-ybhh publish loop
+// (2026-10-02: working branch dogfood/orphan-digest-escalated tip already
+// merged via PR #144, remote branch deleted, publish retried every tick).
+// Fail-open: resolution or git errors return false so the normal publish
+// path runs.
+func branchMergedIntoBase(projectPath, branch string) bool {
+	if projectPath == "" || branch == "" {
+		return false
+	}
+	base := originDefaultBranch(projectPath)
+	if base == "" || base == branch {
+		return false
+	}
+	// Ensure origin/<base> actually exists before trusting merge-base.
+	if _, err := gitOut(projectPath, "rev-parse", "--verify", "origin/"+base); err != nil {
+		return false
+	}
+	cmd := exec.Command("git", "-C", projectPath, "merge-base", "--is-ancestor", branch, "origin/"+base)
+	if err := cmd.Run(); err != nil {
+		// exit 1 = not an ancestor (expected); anything else is a git error.
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return false
+		}
+		return false
+	}
+	return true
+}
+
 // PublishRepo consolidates a project's completed work onto its working branch
 // and pushes it to origin using the owner's token. It:
 //  1. reconciles orphaned (completed, non-active) worktree branches into the
@@ -53,7 +129,15 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 		return false, "no worktree manager"
 	}
 	// 1. Land any completed worktree work on the working branch.
-	ReconcileOrphanedWorktrees(m, projectPath, activeKeys, isTerminal)
+	ReconcileOrphanedWorktrees(m, projectPath, activeKeys, isTerminal, publishEvents)
+
+	// 1b. Delete remote integration branches whose PRs have merged
+	// (hydra-9dp5): without cleanup every campaign leaves one permanent
+	// remote branch per bead — srv-telematics accumulated 88 in one
+	// campaign. Fail-open: cleanup must never gate publishing.
+	if token != "" {
+		CleanupMergedIntegrationBranches(projectPath, token)
+	}
 
 	branch, err := m.WorkingBranch(projectPath)
 	if err != nil || branch == "" {
@@ -65,12 +149,51 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 		log.Printf("[Publish] %s: branch %s matches origin, nothing to publish", projectPath, branch)
 		return false, "up to date"
 	}
+	// 2b. Skip when the branch tip is already merged into the integration
+	// base — re-publishing can only produce a no-op PR (hydra-ybhh loop).
+	if branchMergedIntoBase(projectPath, branch) {
+		log.Printf("[Publish] %s: branch %s tip already merged into origin base — skipping publish", projectPath, branch)
+		publishEvents.EmitRepo(projectPath, Event{Type: "publish_push_skipped_merged", Project: filepath.Base(projectPath),
+			Detail: "branch " + branch + " tip already merged into origin integration base — no publish needed",
+			Fields: map[string]any{"branch": branch, "project_path": projectPath}})
+		AppendActivity(projectPath, "publish", "skipped publish: branch tip already merged into origin base")
+		return false, "already integrated"
+	}
+	// 2c. Junk guard (hydra-ai97h): refuse to push branches whose committed
+	// diff contains junk-signature paths. Fail closed with a bounded
+	// ladder — after publishJunkMaxBlocks consecutive blocks the escalated
+	// reason stops retry churn. Probe failures fail open and never block a
+	// healthy publish.
+	if publishJunkImplemented {
+		if blocked, reason := publishJunkGuard(projectPath); blocked {
+			publishEvents.EmitRepo(projectPath, Event{Type: publishJunkGuardRefusedEvent, Project: filepath.Base(projectPath),
+				Reason: reason,
+				Detail: "publish refused by junk guard",
+				Fields: map[string]any{"reason": reason, "branch": branch, "project_path": projectPath}})
+			AppendActivity(projectPath, "publish", "skipped publish: junk guard blocked ("+reason+")")
+			return false, reason
+		}
+	}
 	publishEvents.EmitRepo(projectPath, Event{Type: "publish_push_attempted", Project: filepath.Base(projectPath),
 		Detail: "publisher attempting to land " + branch + " on origin",
 		Fields: map[string]any{"branch": branch, "pr_merge": prMerge, "project_path": projectPath}})
 	log.Printf("[Publish] push attempted for %s (%s) pr_merge=%v", projectPath, branch, prMerge)
 	if prMerge {
-		feature := "dogfood/publish-" + prSafeName(filepath.Base(projectPath))
+		feature := IntegrationBranchPrefix(projectPath) + "publish-" + prSafeName(filepath.Base(projectPath))
+		// Idempotence: when this project/branch already has a PR standing
+		// open (tier policy: waiting on a human merge), re-invoking
+		// PublishViaPR just re-pushes the same tip and re-attempts the same
+		// merge — 114 publish_push_rejected events/day across 3 projects on
+		// 2026-10-06, and the pr_merge_failed misnomer poisoned audit signal
+		// (routine waiting read as failure). Skip while the same branch tip
+		// is still ahead; a new bead landing on the branch flips
+		// branchAheadOfRemote back to true with a NEW tip and re-publishes.
+		if mark := prWaitingMark(projectPath, branch); mark != "" {
+			if tip, terr := localBranchTip(projectPath, branch); terr == nil && tip == mark {
+				return false, "pr awaiting human merge"
+			}
+			clearPRWaiting(projectPath, branch) // tip advanced since the wait was recorded
+		}
 		publishEvents.EmitRepo(projectPath, Event{Type: "publish_pr_invoked", Project: filepath.Base(projectPath),
 			Detail: "PublishViaPR invoked for " + branch + " via " + feature,
 			Fields: map[string]any{"branch": branch, "feature_branch": feature, "project_path": projectPath}})
@@ -82,12 +205,43 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 			func() error { return rebaseCheckoutOntoBase(projectPath, branch) },
 			projectPath, branch)
 		if err != nil {
+			var pw *PRWaitingError
+			if errors.As(err, &pw) {
+				// Standing-open PR is the DESIGNED tier policy, not a failure:
+				// emit publish_pr_waiting (reason pr_awaiting_human), record the
+				// branch tip so later ticks skip without re-pushing, and do not
+				// emit publish_push_rejected — that event is reserved for real
+				// failures (credential-class, conflicts, API errors).
+				if tip, terr := localBranchTip(projectPath, branch); terr == nil {
+					setPRWaiting(projectPath, branch, tip)
+				}
+				publishEvents.EmitRepo(projectPath, Event{Type: "publish_pr_waiting", Project: filepath.Base(projectPath), Reason: "pr_awaiting_human",
+					Detail: "PR left open awaiting human merge for " + branch + ": " + pw.URL,
+					Fields: map[string]any{"branch": branch, "feature_branch": feature, "pr_url": pw.URL, "project_path": projectPath}})
+				log.Printf("[Publish] %s/%s: PR awaiting human merge: %s", projectPath, branch, pw.URL)
+				AppendActivity(projectPath, "publish", "PR awaiting human merge: "+pw.URL)
+				return false, "pr awaiting human merge"
+			}
+			mergeErr := err.Error()
+			cls := ClassifyPushFailure(err.Error())
+			// NOT_FOUND is credential-class (org rename / missing PAT
+			// scope): retrying against the same URL can never succeed.
+			// Surface it loud instead of burying it as a generic merge
+			// failure (hydra-m372: 91 not-found push events in one day
+			// because the owner PAT predates the org rename).
+			if cls == ClassNotFound {
+				mergeErr += " — credential-class failure (repository not found with the publish token; org rename or missing PAT visibility/scope): human must fix the remote URL or the publish credential; retrying cannot succeed"
+				log.Printf("[Publish] CREDENTIAL-CLASS publish failure for %s/%s: %v", projectPath, branch, err)
+			}
 			publishEvents.EmitRepo(projectPath, Event{Type: "publish_push_rejected", Project: filepath.Base(projectPath), Reason: "pr_merge_failed",
-				Detail: "PR merge failed for " + branch + ": " + err.Error(),
+				Detail: "PR merge failed for " + branch + ": " + mergeErr,
 				Fields: map[string]any{"branch": branch, "feature_branch": feature, "project_path": projectPath}})
-			log.Printf("[Publish] PR merge failed for %s/%s: %v", projectPath, branch, err)
+			publishEvents.EmitRepo(projectPath, Event{Type: "publish_path_classified", Project: filepath.Base(projectPath), Reason: string(cls),
+				Detail: "pr-merge push failure classified " + string(cls) + " for " + branch + ": " + err.Error(),
+				Fields: map[string]any{"branch": branch, "class": string(cls), "reason": err.Error(), "project_path": projectPath}})
+			log.Printf("[Publish] PR merge failed for %s/%s: %v (class=%s)", projectPath, branch, err, cls)
 			AppendActivity(projectPath, "publish", "PR merge failed: "+err.Error())
-			return false, "pr merge failed: " + err.Error()
+			return false, "pr merge failed: " + mergeErr
 		}
 		publishEvents.EmitRepo(projectPath, Event{Type: "publish_pr_opened", Project: filepath.Base(projectPath),
 			Detail: "landed via PR " + url,
@@ -283,10 +437,14 @@ func defaultRebaseBranchOntoBase(projectPath, branch, base string) error {
 // the existing quarantine/Activity channels.
 func publishWithRebaseRetry(publish func() (string, error), rebase func() error, projectPath, base string) (string, error) {
 	url, err := publish()
+	// Sensor symmetry: the rebase-retry sensor's correlation ID pairs each
+	// publish_rebase_attempted fire with the publish_succeeded resolve.
+	corr := SensorCorrelation("publish-retry", projectPath)
 	for attempt := 1; err != nil && prConflictError(err) && attempt <= MaxPRRebaseAttempts; attempt++ {
 		log.Printf("[Publish] PR conflict detected — rebase attempt %d/%d onto origin/%s", attempt, MaxPRRebaseAttempts, base)
 		publishEvents.EmitRepo(projectPath, Event{Type: "publish_rebase_attempted",
-			Detail: fmt.Sprintf("PR conflict: rebase attempt %d/%d onto origin/%s", attempt, MaxPRRebaseAttempts, base)})
+			Detail: fmt.Sprintf("PR conflict: rebase attempt %d/%d onto origin/%s", attempt, MaxPRRebaseAttempts, base),
+			Fields: map[string]any{"attempt": attempt, "correlation_id": corr}})
 		if rerr := rebase(); rerr != nil {
 			return url, fmt.Errorf("pr conflict: rebase attempt %d failed — human review needed: %w", attempt, rerr)
 		}
@@ -294,8 +452,16 @@ func publishWithRebaseRetry(publish func() (string, error), rebase func() error,
 	}
 	if err != nil && prConflictError(err) {
 		publishEvents.EmitRepo(projectPath, Event{Type: "publish_rebase_exhausted",
-			Detail: fmt.Sprintf("PR still conflicted after %d rebase attempts — human review needed", MaxPRRebaseAttempts)})
+			Detail: fmt.Sprintf("PR still conflicted after %d rebase attempts — human review needed", MaxPRRebaseAttempts),
+			Fields: map[string]any{"correlation_id": corr}})
 		return url, fmt.Errorf("pr still conflicted after %d rebase attempts — human review needed: %w", MaxPRRebaseAttempts, err)
+	}
+	if err == nil && url != "" {
+		// Sensor symmetry (resolve): a completed publish resolves the
+		// retry sensor's fires. correlation_id pairs with the attempted fires.
+		publishEvents.EmitRepo(projectPath, Event{Type: "publish_succeeded",
+			Detail: fmt.Sprintf("publish completed for %s after rebase-retry path", projectPath),
+			Fields: map[string]any{"url": url, "correlation_id": corr}})
 	}
 	return url, err
 }
@@ -536,7 +702,7 @@ func defaultAutoPRGhMerge(repoPath, head, token string) error {
 	if token != "" {
 		env = append(env, "GH_TOKEN="+token)
 	}
-	merge := exec.Command("gh", "pr", "merge", head, "--merge", "--admin")
+	merge := exec.Command("gh", "pr", "merge", head, "--merge", "--admin", "--delete-branch")
 	merge.Dir = repoPath
 	merge.Env = env
 	if out, err := merge.CombinedOutput(); err != nil {
@@ -569,6 +735,54 @@ func defaultAutoPRGhMerge(repoPath, head, token string) error {
 		}
 	}
 	return fmt.Errorf("gh pr view: state=%q, want MERGED (after %d attempts)", state, mergeStateVerifyAttempts)
+}
+
+// CleanupMergedIntegrationBranches deletes remote integration branches
+// (dogfood/ or hydra/ — IsHydraOwnedBranch) whose PRs reached MERGED
+// (hydra-9dp5). The auto-merge path already deletes its head via
+// --delete-branch; this sweep catches human-merged PRs on tier-2 product
+// repos. Fail-open and quiet: any gh/push fault is logged, never returned.
+func CleanupMergedIntegrationBranches(projectPath, token string) {
+	env := os.Environ()
+	if token != "" {
+		env = append(env, "GH_TOKEN="+token)
+	}
+	list := exec.Command("gh", "pr", "list", "--state", "merged", "--json", "headRefName", "--limit", "200")
+	list.Dir = projectPath
+	list.Env = env
+	out, err := list.CombinedOutput()
+	if err != nil {
+		log.Printf("[Publish] merged-branch cleanup %s: gh pr list failed (not blocking): %v", projectPath, err)
+		return
+	}
+	var prs []struct {
+		HeadRefName string `json:"headRefName"`
+	}
+	if err := json.Unmarshal(out, &prs); err != nil {
+		log.Printf("[Publish] merged-branch cleanup %s: parse failed (not blocking): %v", projectPath, err)
+		return
+	}
+	originURL, err := gitOut(projectPath, "remote", "get-url", "origin")
+	if err != nil || strings.TrimSpace(originURL) == "" {
+		return
+	}
+	authURL := authenticatedURL(originURL, token)
+	if authURL == "" {
+		return
+	}
+	for _, pr := range prs {
+		head := pr.HeadRefName
+		if !IsHydraOwnedBranch(head, nil) {
+			continue
+		}
+		cmd := exec.Command("git", "-C", projectPath, "push", "--no-verify", authURL, "--delete", head)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			// Ref already gone or never pushed — benign; keep sweeping.
+			log.Printf("[Publish] merged-branch cleanup %s: delete %s failed (not blocking): %s", projectPath, head, strings.TrimSpace(string(out)))
+			continue
+		}
+		log.Printf("[Publish] merged-branch cleanup %s: deleted merged integration branch %s", projectPath, head)
+	}
 }
 
 // ghPRState reads a PR's state via gh pr view. env carries GH_TOKEN when set.
@@ -623,7 +837,7 @@ func maybeOpenAutoPR(beadsClient BeadsClient, cfg *Config, projectPath, repoName
 	if cfg == nil || !cfg.AutoPREnabled() || beadsClient == nil || bead == nil || branch == "" {
 		return false
 	}
-	head := "dogfood/" + string(bead.ID)
+	head := IntegrationBranchPrefix(projectPath) + string(bead.ID)
 	for _, l := range bead.Labels {
 		if l == "pr-open" {
 			log.Printf("[AutoPR] skipping %s: already has pr-open label", bead.ID)

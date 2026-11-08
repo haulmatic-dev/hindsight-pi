@@ -16,12 +16,12 @@
 package core
 
 import (
-	"strings"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -46,8 +46,8 @@ type DeployConfig struct {
 type Tier1Deployer struct {
 	cfg        DeployConfig
 	events     *EventSink
-	workers    func() int                // active in-flight worker count
-	pinWorkers func(int)                 // set max workers (drain / restore)
+	workers    func() int // active in-flight worker count
+	pinWorkers func(int)  // set max workers (drain / restore)
 	runner     func(name string, args ...string) error
 	now        func() time.Time
 	busy       bool // one deploy at a time

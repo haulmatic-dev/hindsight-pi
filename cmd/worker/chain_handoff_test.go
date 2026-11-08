@@ -101,10 +101,10 @@ func TestChainHandoffFragmentName(t *testing.T) {
 		{"hydra-5xvh", "discovery", filepath.Join("docs", "hydra", "handoff", "discovery-5xvh.md")},
 		{"hydra-dogfood-w5ac", "green", filepath.Join("docs", "hydra", "handoff", "green-w5ac.md")},
 		{"myproject-abc123", "implement", filepath.Join("docs", "hydra", "handoff", "implement-abc123.md")},
-		{"x-1", "RED", filepath.Join("docs", "hydra", "handoff", "red-1.md")},   // phase lowercased
+		{"x-1", "RED", filepath.Join("docs", "hydra", "handoff", "red-1.md")},               // phase lowercased
 		{"x-2", "Weird Type!", filepath.Join("docs", "hydra", "handoff", "weirdtype-2.md")}, // sanitized
-		{"x-3", "", filepath.Join("docs", "hydra", "handoff", "unknown-3.md")},  // no type
-		{"bare", "test", filepath.Join("docs", "hydra", "handoff", "test-bare.md")}, // no suffix
+		{"x-3", "", filepath.Join("docs", "hydra", "handoff", "unknown-3.md")},              // no type
+		{"bare", "test", filepath.Join("docs", "hydra", "handoff", "test-bare.md")},         // no suffix
 	}
 	for _, tc := range tests {
 		got := chainHandoffFragmentName(types.Bead{ID: types.BeadID(tc.id), Type: tc.btype})

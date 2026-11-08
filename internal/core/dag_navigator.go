@@ -98,12 +98,18 @@ func (n *DAGNavigator) GetReadyBeads(completed map[string]bool) []types.Bead {
 			// Human gates are never worker-executed, whatever their status.
 			continue
 		}
+		if campaignParkGateActive(node.Bead.Labels) {
+			// Campaign-wide park (hydra-gcip): the PARK-GATE label hard-parks
+			// every member of a parked campaign; the unpark sweep removes it
+			// and readiness is restored.
+			continue
+		}
 		if hasBeadLabel(node.Bead.Labels, escalatedLabel) {
 			// Escalated beads are parked for a human; never hand them to a
 			// worker even if a stale status/label refresh made them look ready.
 			continue
 		}
-		if hasBeadLabel(node.Bead.Labels, worktreeUnavailableLabel) {
+		if hasBeadLabel(node.Bead.Labels, worktreeUnavailableLabel) || hasBeadLabel(node.Bead.Labels, gitOwnershipLabel) {
 			// Hard-parked by a fail-closed worktree spawn: the chain worktree
 			// was unavailable and isolation must never silently downgrade to
 			// the shared main checkout (2026-09-11/12 corruption incidents).
@@ -114,6 +120,10 @@ func (n *DAGNavigator) GetReadyBeads(completed map[string]bool) []types.Bead {
 			// the close repeatedly failed at integrate/push. Scheduling it here
 			// respawned the bead into the same failing integrate (ag6i, 2026-09-27:
 			// ~95 respawns). Only Pan repair or a human clears the label.
+			continue
+		}
+		if hasBeadLabel(node.Bead.Labels, integrationPendingLabel) {
+			// Work complete, integrate failed; the retest stage owns the retry.
 			continue
 		}
 		if completed != nil && completed[string(node.Bead.ID)] {

@@ -89,6 +89,53 @@ func (g *BeadStoreGuard) NoteListFailure(project types.Project, listErr error) {
 	g.checkCount(project, 0, listErr)
 }
 
+// NoteMissingCanonical blocks a project when its canonical issues.jsonl is
+// missing while .br_history snapshots exist. This catches the corruption
+// window before any ListBeads call is attempted and triggers the same
+// verified restore path used for an open-count collapse.
+func (g *BeadStoreGuard) NoteMissingCanonical(project types.Project) {
+	g.mu.Lock()
+	if g.states == nil {
+		g.states = make(map[string]*storeGuardState)
+	}
+	st := g.states[project.Path]
+	if st == nil {
+		st = &storeGuardState{}
+		g.states[project.Path] = st
+	}
+	if st.blocked {
+		g.mu.Unlock()
+		return
+	}
+	st.blocked = true
+	st.blockedAt = time.Now()
+	st.blockedObserved = 0
+	attemptAuto := !st.autoRestoreAttempted
+	st.autoRestoreAttempted = true
+	g.mu.Unlock()
+
+	issuesPath := filepath.Join(project.Path, ".beads", "issues.jsonl")
+	histDir := filepath.Join(project.Path, ".beads", ".br_history")
+	log.Printf("🚨 [BeadStoreGuard] project %s (%s): %s missing but %s exists — treating as store corruption, FAIL-CLOSED: project excluded from scheduling until restored", project.Name, project.Path, issuesPath, histDir)
+	g.emit(Event{
+		Type:    "bead_store_suspect",
+		Project: project.Name,
+		Reason:  "missing_issues_jsonl",
+		Detail:  fmt.Sprintf("%s is missing but %s has snapshots for %s; store presumed corrupt, scheduling blocked", issuesPath, histDir, project.Name),
+		Fields: map[string]any{
+			"project_path": project.Path,
+			"issues_path":  issuesPath,
+			"history_dir":  histDir,
+		},
+	})
+
+	if attemptAuto {
+		if err := g.Restore(project.Path); err != nil {
+			log.Printf("⚠️  [BeadStoreGuard] auto-restore for %s failed (project stays blocked): %v — Pan repair-bead-store or manual restore required", project.Name, err)
+		}
+	}
+}
+
 func (g *BeadStoreGuard) checkCount(project types.Project, open int, listErr error) {
 	g.mu.Lock()
 	if g.states == nil {
@@ -315,4 +362,3 @@ func copyAtomic(src, dst string) error {
 	}
 	return nil
 }
-

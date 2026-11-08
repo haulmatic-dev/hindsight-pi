@@ -33,7 +33,7 @@ func TestReconcileOrphanedWorktrees_SkipsNonTerminalBead(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return false })
+	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return false }, nil)
 	if integrated != 0 || conflicts != 0 {
 		t.Fatalf("non-terminal bead must be skipped, got integrated=%d conflicts=%d", integrated, conflicts)
 	}
@@ -67,7 +67,7 @@ func TestReconcileOrphanedWorktrees_NilPredicateSkipsAll(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, nil)
+	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, nil, nil)
 	if integrated != 0 || conflicts != 0 {
 		t.Fatalf("nil predicate = fail-closed, got integrated=%d conflicts=%d", integrated, conflicts)
 	}
@@ -108,7 +108,7 @@ func TestReconcileOrphanedWorktrees_QuarantinesTerminalConflict(t *testing.T) {
 	}
 	backdateWorktree(t, m, projectPath, key) // past the reconciler age floor
 
-	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
+	integrated, conflicts := ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true }, nil)
 	if integrated != 0 {
 		t.Fatalf("conflicted branch cannot integrate, got integrated=%d", integrated)
 	}
@@ -126,7 +126,7 @@ func TestReconcileOrphanedWorktrees_QuarantinesTerminalConflict(t *testing.T) {
 	}
 
 	// The next sweep must be quiet: no wt branch left to conflict again.
-	integrated, conflicts = ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true })
+	integrated, conflicts = ReconcileOrphanedWorktrees(m, projectPath, nil, func(string) bool { return true }, nil)
 	if integrated != 0 || conflicts != 0 {
 		t.Fatalf("second sweep must be clean, got integrated=%d conflicts=%d", integrated, conflicts)
 	}

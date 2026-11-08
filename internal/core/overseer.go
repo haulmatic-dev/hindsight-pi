@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/agents"
@@ -76,6 +78,25 @@ type BeadsClient interface {
 	AddDependency(projectPath, repoName string, beadID, dependsOn types.BeadID) error
 }
 
+// beadsBridgeUpdater adapts BeadsClient status updates to the BrUpdater seam
+// (pan_mirror_health.go) so the idempotent heal primitive goes through the
+// same br CLI path every other caller uses.
+type BrUpdater = interface {
+	BrUpdateStatus(storePath, beadID, status string) error
+}
+
+type beadsBridgeUpdater struct {
+	beadsClient BeadsClient
+}
+
+// BrUpdateStatus rewrites the mirror record in storePath to status.
+func (b *beadsBridgeUpdater) BrUpdateStatus(storePath, beadID, status string) error {
+	if b.beadsClient == nil {
+		return fmt.Errorf("beads client unavailable")
+	}
+	return b.beadsClient.UpdateBeadStatus(storePath, types.BeadID(beadID), types.BeadStatus(status))
+}
+
 // Overseer is the main scheduler daemon
 type Overseer struct {
 	// beadSource maps bead ID -> the project path whose store listed it
@@ -97,18 +118,45 @@ type Overseer struct {
 	stateController  *StateController // Runtime state (running, paused, maxWorkers, interval)
 	configManager    *ConfigManager   // Dynamic configuration management
 	beadsClient      BeadsClient
+	// Pan file-bead signature window: recently filed signatures (normalized
+	// title per project) are remembered for panFileSigTTL so a closed wedge
+	// bead is not re-filed while the same root cause is still producing
+	// blocked beads (2026-10-02: one spawn failure filed 15+ PROJECT-WEDGE
+	// twins, each spawning its own diagnostic worker run).
+	panSigMu         sync.Mutex
+	recentPanSigs    map[string]time.Time
 	workerSpawner    *WorkerSpawner
 	pushPendingMu    sync.Mutex
-	pushPending      map[string]*PushPendingEntry // projectPath → stranded-push state
-	diskWatermarkPct int                          // host disk watermark (0 = default 85%)
-	diskStatPath     string                       // statfs path ("" = "/")
+	pushPending      map[string]*PushPendingEntry    // projectPath → stranded-push state
+	publishBackoff   map[string]*publishBackoffEntry // projectPath → failing-publish backoff state (publish tick retry throttle)
+	diskWatermarkPct int                             // host disk watermark (0 = default 85%)
+	diskStatPath     string                          // statfs path ("" = "/")
+	diskCleanup      *diskCleanupGuard               // watermark-breach cleanup (fail-open)
 	dag              *DAG
 	dagMu            sync.RWMutex
 	epicCloseGuard   epicCloseGuard // store-verification refusals for epic auto-close
 	dagNavigator     *DAGNavigator
-	completed        map[string]bool  // Track completed beads for this session
-	retryManager     *RetryManager    // Retry and validation-retry tracking
-	intelligenceHub  *IntelligenceHub // Encapsulates TLDR, GPTCache, Hindsight clients
+	// panCapHits marks project paths whose pan-filed filing was refused at
+	// the per-project cap (keyed by project path; cleared on a successful
+	// filing). collectHealthDigest surfaces it as a stable anomaly so the
+	// suppression stays visible to Pan.
+	panCapHits      sync.Map
+	completed       map[string]bool  // Track completed beads for this session
+	retryManager    *RetryManager    // Retry and validation-retry tracking
+	intelligenceHub *IntelligenceHub // Encapsulates TLDR, GPTCache, Hindsight clients
+	// hardParkProbes tracks consecutive successful worktree probes per bead
+	// for the hard-park reconciler (hysteresis x2 before clearing labels).
+	hardParkProbes        map[string]int
+	lastHardParkReconcile time.Time
+	// Stale-filing sweep throttle (one sweep tick per staleFilingSweepInterval;
+	// internal rate limit is one auto-close per project per sweep tick).
+	lastStaleFilingSweep time.Time
+	// Mirror health sweep throttle.
+	lastMirrorHealthSweep time.Time
+	// brUpdater is the seam for the idempotent heal primitive (`br update <id>
+	// --status <same>`) used by the mirror health sweep (FR-3). Always set by
+	// NewOverseer; tests may stub it.
+	brUpdater BrUpdater
 	// These clients remain direct fields until IntelligenceHub fully exposes their APIs.
 	gptCache              *GPTCacheClient                 // GPTCache client for caching
 	hindsightClient       HindsightClient                 // Hindsight client for pre-execution context retrieval
@@ -116,7 +164,6 @@ type Overseer struct {
 	providerPool          *ProviderPool                   // nil-safe; shared provider concurrency budget (Shepherd B3)
 	poolReleases          sync.Map                        // workerID -> func() releasing its provider-pool slot
 	batchRetentionSvc     *services.BatchRetentionService // Batch retention service for efficient memory storage
-	hindsightLifecycle    *services.HindsightLifecycle    // Hindsight lifecycle manager for memory management
 	intelMutex            sync.RWMutex                    // Mutex for intelligence clients
 	bvClient              *bv.Client                      // BV client for graph analytics
 	settledStateSvc       *SettledStateService            // Settled-state detection service
@@ -124,6 +171,10 @@ type Overseer struct {
 	// Integration-retest stage: periodic mechanical recheck of
 	// integration-parked beads; nil unless HYDRA_HOME is set.
 	integrationRetest *IntegrationRetestStage
+
+	// Quarantine reconciler: re-verdicts quarantined chains and re-integrates
+	// them once no member carries closed-failed; nil without worktree isolation.
+	quarantineReconciler *QuarantineReconciler
 
 	// MCP manager for Model Context Protocol operations
 	mcpManager *MCPManager
@@ -137,11 +188,25 @@ type Overseer struct {
 	// Orphan process janitor for cleaning up orphaned worker processes
 	orphanJanitor *Charon // Cleans up orphaned worker processes
 
+	// Gate artifact root ($HYDRA_HOME); enables the fleet digest's
+	// close-in-progress probe so beads mid-close are not counted as
+	// orphaned claims. Empty = probe disabled.
+	gateRoot string
+
 	// Stale-escalation ager (nil when escalation_ttl <= 0)
 	escalationTTL *EscalationTTLScanner
+	panPromoter   *PanFiledPromoter
 
 	// Stale integration-exhausted park sweeper (nil when disabled)
 	integrationSweep *IntegrationExhaustedSweeper
+	panDigestAt      atomic.Int64 // unix-nano of last collectHealthDigest (0 = unknown)
+	evidenceSweep    *ToolHealthEvidenceScanner
+	tokenUsageRollup *TokenUsageRollupJob
+
+	// Waiting-on-human-merge PR ledger + weekly aging-digest scanner (nil when
+	// disabled / no HYDRA_HOME).
+	prWaiting *PRWaitingLedger
+	prAging   *PRAgingScanner
 
 	// Worker registry (daemon-owned SQLite truth) and Pan, the shepherd that
 	// decides the ambiguous tail of worker states. Both fail-open: a registry
@@ -250,11 +315,13 @@ func NewOverseer(config *Config) *Overseer {
 		maxRetries = defaultMaxRetries
 	}
 
+	sharedClient := beads.NewClient()
 	o := &Overseer{
 		config:           config,
 		activeWorkers:    make(map[string]*types.Worker),
 		stateController:  NewStateController(config.Overseer.MaxWorkers, config.Overseer.BeadDiscoveryInterval),
-		beadsClient:      beads.NewClient(),
+		beadsClient:      sharedClient,
+		brUpdater:        &beadsBridgeUpdater{beadsClient: sharedClient},
 		bvClient:         bv.NewClient(),
 		dag:              NewDAG(),
 		completed:        make(map[string]bool),
@@ -288,6 +355,9 @@ func NewOverseer(config *Config) *Overseer {
 
 	// Initialize DAG builder
 	o.dagBuilder = NewDAGBuilder(o.errorLogger)
+	o.dagBuilder.Sensor = NewMissingEdgeSensor(o.eventSink, func(projectPath, title, description string) error {
+		return o.filePanBead(projectPath, "", title, description)
+	})
 
 	// Prefer bv --robot-graph for DAG edges: one call per repo replaces the
 	// per-bead br show N+1 pattern (86 CLI calls per rebuild) that contended on
@@ -323,6 +393,7 @@ func NewOverseer(config *Config) *Overseer {
 		// running window=8 at 0.5/0.125. A status line that misrepresents live
 		// state is worse than no status line.
 		log.Printf("[Governor] Initialized (%s)", o.concurrencyGovernor.Describe())
+		o.concurrencyGovernor.SetEventSink(o.eventSink)
 	}
 
 	// Shared provider budget (Shepherd B3). Sized to the plan's concurrency, not
@@ -375,7 +446,12 @@ func NewOverseer(config *Config) *Overseer {
 		maxMemory = config.Overseer.ResourceMonitoring.MaxMemoryPercent
 	}
 	o.resourceMonitor = NewResourceMonitor(maxCPU, maxMemory)
-	log.Printf("[ResourceMonitor] Initialized with CPU: %.1f%%, Memory: %.1f%% limits (0=unlimited)", maxCPU, maxMemory)
+	minMemAvail := config.Overseer.ResourceMonitoring.MinMemAvailableMB
+	if minMemAvail == 0 {
+		minMemAvail = defaultMinMemAvailableMB
+	}
+	o.resourceMonitor.SetMinMemAvailableMB(minMemAvail)
+	log.Printf("[ResourceMonitor] Initialized with CPU: %.1f%%, Memory: %.1f%% limits, MemAvailable floor %dMB (0=unlimited)", maxCPU, maxMemory, minMemAvail)
 
 	// Initialize worker tracker for PID tracking
 	workerTracker, err := NewWorkerTracker(".")
@@ -399,8 +475,28 @@ func NewOverseer(config *Config) *Overseer {
 	if config.Overseer.EscalationTTL > 0 {
 		o.escalationTTL = NewEscalationTTLScanner(o.beadsClient, o.GetProjects, config.Overseer.EscalationTTL, o.eventSink)
 	}
+	// Retroactive pan-filed promotion: pan-filed beads whose text names a
+	// code change are work, not human triage; the reconciler strips the
+	// label so discovery admits them (see pan_filed_promotion.go).
+	o.panPromoter = NewPanFiledPromoter(o.beadsClient, o.GetProjects, o.eventSink)
 	if config.Overseer.IntegrationExhaustedSweep > 0 {
 		o.integrationSweep = NewIntegrationExhaustedSweeper(o.beadsClient, o.GetProjects, config.Overseer.IntegrationExhaustedSweep, o.eventSink)
+	}
+	if o.intelligenceHub != nil {
+		evidenceScanner := NewToolHealthEvidenceScanner(o.GetProjects, o.eventSink)
+		evidenceScanner.SetActivityProbe(o.recentWorkerActivityProbe())
+		evidenceScanner.SetHindsightProbe(o.hindsightMemoriesProbe())
+		o.evidenceSweep = evidenceScanner
+	}
+	// PR aging sweep (bead hydra-rrtq): record waiting-on-human-merge PRs at
+	// close time and produce a weekly per-owner digest for PRs open past the
+	// threshold. Ledger needs HYDRA_HOME; without it recording is inert.
+	if home := os.Getenv("HYDRA_HOME"); home != "" {
+		o.prWaiting = NewPRWaitingLedger(home)
+		if config.Overseer.PRAgingDays > 0 {
+			o.prAging = NewPRAgingScanner(o.prWaiting, o.GetProjects, config.IsPRAutoMergeRepo, config.Overseer.PRAgingDays, o.eventSink)
+		}
+		o.beadCloser.SetPRWaitingRecorder(o.recordPRWaiting)
 	}
 	// Inject access to the in-memory activeWorkers map so Charon can clean up
 	// stale placeholder entries (PID 0) that would otherwise block new spawns
@@ -494,6 +590,14 @@ func NewOverseer(config *Config) *Overseer {
 		o.workerLifecycle,
 		nil, // userContexts set after discovery
 	)
+	if o.escalationTTL != nil {
+		o.escalationTTL.SetLiveWorkerFunc(o.workerSpawner.HasLiveRegistryWorker)
+	}
+	// Stale-filing sweep production probes (spawn-success telemetry + bead
+	// store reads; see pan_stale_filing.go).
+	wireStaleFilingProbes(o)
+	// Campaign park label sweep production plumbing (see campaign_park.go).
+	wireCampaignParkSweep(o)
 
 	// Session-file resume pilot (Self-heal recovery A): quality-gated resume
 	// of Pi sessions after infra-class orphan deaths.
@@ -542,11 +646,19 @@ func NewOverseer(config *Config) *Overseer {
 	// Initialize bead closer
 	o.beadCloser = NewBeadCloser(o.beadsClient, o.intelligenceHub, o.projectResolver, o.validationService, config)
 	o.beadCloser.SetSourceIndex(o.beadSource)
+	// Gate-doctor (feature-fva4): pi-based triage of verification RED on the
+	// close path. Fail-open: with the doctor absent Triage escalates uncertain,
+	// so wiring it here (not optional) is safe.
+	o.beadCloser.SetGateDoctor(NewGateDoctor(DefaultGateDoctorConfig()))
 
 	// Owner-identity publish (OPERATOR RULE 2026-09-29): project -> owning
 	// user -> owner PAT, fail-closed for non-daemon-owned projects.
 	SetPublishIdentityResolver(func(projectPath string) (PublishIdentity, error) {
 		return ResolvePublishIdentity(projectPath, o.getUserContextForProject(projectPath))
+	})
+	SetDaemonOwnedChecker(func(projectPath string) bool {
+		uc := o.getUserContextForProject(projectPath)
+		return uc == nil || uc.Username == daemonOwnerName
 	})
 	SetPublishGitAuthorResolver(func(projectPath string) (string, string, bool) {
 		uc := o.getUserContextForProject(projectPath)
@@ -557,12 +669,23 @@ func NewOverseer(config *Config) *Overseer {
 		return "", "", false // resolveGitAuthorFor falls back to the service account
 	})
 
+	// Single-source daemon credential (2026-10-01 drift incident): when
+	// output.github_token_owner_user is set, the daemon's GitHub identity
+	// comes from that user's ~/.hydra/.github-token — never the private
+	// ~/.git-credentials copy.
+	if config.Output.GithubTokenOwnerUser != "" {
+		SetDaemonTokenOwnerUser(config.Output.GithubTokenOwnerUser)
+		log.Printf("[PublishIdentity] daemon GitHub token owner user: %s (per-user PAT file is the single source of truth)", config.Output.GithubTokenOwnerUser)
+	}
+
 	// Daemon gate runner (FR-002): attach to the close path and recover any
 	// artifacts the previous daemon incarnation died inside (running + dead
 	// PID -> interrupted, never trusted). Fail-open: recovery errors are
 	// logged, never gate startup.
 	if home := os.Getenv("HYDRA_HOME"); home != "" {
 		o.beadCloser.SetGateRunner(NewGateRunner(home))
+		o.orphanJanitor.SetGateRoot(home)
+		o.gateRoot = home
 		if n, err := FinalizeStaleGateArtifacts(home); err != nil {
 			log.Printf("[DaemonGates] stale artifact recovery failed (continuing): %v", err)
 		} else if n > 0 {
@@ -573,16 +696,21 @@ func NewOverseer(config *Config) *Overseer {
 	// per-repo .hydra/events.jsonl mirrors.
 	events := NewEventSink(DefaultEventsDir())
 	o.eventSink = events
+	if gidx := o.intelligenceHub.GraphifyIndexer(); gidx != nil {
+		gidx.SetEventSink(events)
+	}
 	SetPublishEventSink(events)
 	o.beadCloser.SetEventSink(events)
 	o.providerPool.SetEventSink(events)
 	o.orphanJanitor.SetEventSink(events)
+	o.concurrencyGovernor.SetEventSink(events)
+	o.diskCleanup = &diskCleanupGuard{events: events}
 	// Integration-retest stage (Tier A): periodic mechanical recheck of
 	// integration-failed/exhausted beads. Constructed whenever HYDRA_HOME is
 	// available; the stage is inert unless integration_retest.enabled is set.
 	// Fail-open by construction: Run isolates per-project/panics.
 	if home := os.Getenv("HYDRA_HOME"); home != "" {
-		o.integrationRetest = NewIntegrationRetestStage(config.IntegrationRetest, config, o.beadsClient, events, NewGateRunner(home), home)
+		o.integrationRetest = NewIntegrationRetestStage(config.IntegrationRetest, config, o.beadsClient, events, NewGateRunner(home), home, o.chainKeyForBeadID)
 		if o.integrationRetest.Enabled() {
 			log.Printf("[IntegrationRetest] stage armed (max_attempts=%d retry_interval=%s)",
 				o.integrationRetest.cfg.MaxAttempts, o.integrationRetest.cfg.RetryInterval)
@@ -610,6 +738,22 @@ func NewOverseer(config *Config) *Overseer {
 		o.worktreeManager = NewWorktreeManager()
 		o.workerSpawner.SetWorktreeManager(o.worktreeManager, o.chainKeyForBead)
 		o.beadCloser.SetWorktreeManager(o.worktreeManager, o.chainKeyForBead, o.isChainMember)
+		// Daemon-wide integration gate (2026-11-08): every
+		// IntegrateBranchAndRemove — chain completion, reconciler, orphan
+		// janitor, Pan's integrate-stranded — runs the project's full test
+		// suite in the chain worktree first. The reconciler previously
+		// merged RED tests without their GREEN implementation and broke the
+		// build on development. Fail-closed on test failure (caller
+		// quarantines); fail-open on runner fault / missing worktree.
+		closer := o.beadCloser
+		defaultWorktreeSuiteGate = func(projectPath, worktreePath, key string) error {
+			if closer == nil {
+				return nil
+			}
+			return closer.RunChainSuiteGate(o.projectNameFromPath(projectPath), projectPath, worktreePath, key)
+		}
+		// The quarantine reconciler is constructed in ServiceStarter — it needs
+		// beadFileReader, which does not exist yet at this point.
 		log.Printf("[Overseer] Worktree isolation ENABLED")
 	}
 
@@ -701,14 +845,41 @@ func (o *Overseer) findProjectPath(bead *types.Bead) string {
 
 // getUserContextForProject returns the user context for a project path, if any.
 func (o *Overseer) getUserContextForProject(projectPath string) *UserContext {
+	target := normalizeProjectPath(projectPath)
 	for _, ctx := range o.userContexts {
 		for _, p := range ctx.Config.Projects {
-			if p.Path == projectPath {
+			pp := normalizeProjectPath(p.Path)
+			if pp == target {
+				return ctx
+			}
+			// Multi projects: repos live as children under the configured
+			// parent dir (e.g. ~/projects). A repo path inside the parent
+			// belongs to this user — without this, per-owner publish identity
+			// silently fell back to the daemon identity for every
+			// auto-discovered repo (hydra-k3nb L2, exposed 2026-10-05).
+			if p.Type == "multi" && strings.HasPrefix(target, pp+string(filepath.Separator)) {
 				return ctx
 			}
 		}
 	}
+	// Attribution miss on a user-home path silently falls back to the daemon
+	// identity (hydra-k3nb L2): surface it so a misconfigured/moved project
+	// does not publish under the daemon owner's credentials.
+	if strings.HasPrefix(target, "/home/") {
+		log.Printf("[Overseer] WARN: no user context for project %s — publish identity falls back to daemon owner", target)
+	}
 	return nil
+}
+
+// normalizeProjectPath canonicalizes a project path for attribution matching:
+// Clean removes trailing slashes, EvalSymlinks collapses compatibility links
+// (best-effort; a missing path just skips the symlink step).
+func normalizeProjectPath(p string) string {
+	p = filepath.Clean(p)
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		p = r
+	}
+	return p
 }
 
 // validateScope validates the scope of changes against configured limits
@@ -841,6 +1012,20 @@ func (o *Overseer) tick() error {
 		o.refreshDiscoveredProjects()
 	}
 	err := o.scheduler.Tick()
+	// Fail-open: clear stale worktree-unavailable hard-park labels when the
+	// worktree probe has recovered for two consecutive ticks.
+	o.reconcileHardParks()
+	// Stale-filing sweep: re-verify spawn-wedge/cohort pan filings whose
+	// premise may have cleared (fail-open, throttled).
+	if time.Since(o.lastStaleFilingSweep) >= staleFilingSweepInterval {
+		o.lastStaleFilingSweep = time.Now()
+		o.sweepStalePanFilings(time.Now())
+	}
+	if o.config != nil && o.config.Overseer.MirrorHealth.Enabled &&
+		time.Since(o.lastMirrorHealthSweep) >= o.config.Overseer.MirrorHealth.Interval {
+		o.lastMirrorHealthSweep = time.Now()
+		o.sweepMirrorHealth(time.Now())
+	}
 	// After scheduling, publish each project's working branch to its remote
 	// (opt-in via output.push). This consolidates completed worktree commits
 	// onto the working branch and pushes with the project owner's PAT, so by
@@ -891,6 +1076,20 @@ func (o *Overseer) publishProjects() {
 	}
 }
 
+// reconcileHardParks runs the worktree-unavailable label reconciler at most
+// once per hardParkReconcileInterval. Fail-open: any error inside the
+// reconciler is logged there and never affects the scheduling tick.
+func (o *Overseer) reconcileHardParks() {
+	if time.Since(o.lastHardParkReconcile) < hardParkReconcileInterval {
+		return
+	}
+	o.lastHardParkReconcile = time.Now()
+	if o.hardParkProbes == nil {
+		o.hardParkProbes = map[string]int{}
+	}
+	ReconcileHardParkedWorktrees(o.beadsClient, o.projects, nil, o.hardParkProbes, o.eventSink)
+}
+
 // PushPendingEntry records a project whose integration/working branch holds
 // commits that have not landed on origin. publishProjects previously
 // discarded PublishRepo's (pushed, reason) result, so a failing push retried
@@ -901,6 +1100,13 @@ type PushPendingEntry struct {
 	ProjectName string
 	Since       time.Time
 	Reason      string
+	// Failures tracks consecutive non-benign publish failures for the
+	// project (failure state tracking for backoff/escalation logic).
+	Failures int
+	// LastClass records the publish failure classification of the most
+	// recent failure (ClassifyPushFailure result, e.g. TRANSIENT,
+	// CREDENTIAL) so backoff logic can distinguish transient vs permanent.
+	LastClass string
 }
 
 // benignPublishReasons are PublishRepo results that mean "nothing stranded".
@@ -908,6 +1114,7 @@ var benignPublishReasons = map[string]bool{
 	"up to date":          true,
 	"no branch":           true,
 	"no worktree manager": true,
+	"already integrated":  true, // branch tip already merged into origin base — no PR to make (hydra-ybhh)
 }
 
 // publishOneProject runs PublishRepo for a single project and tracks the
@@ -928,6 +1135,9 @@ func (o *Overseer) publishOneProject(project types.Project, active map[string]bo
 // 2026-09-30). Identity resolves once on the parent project path (where the
 // user config matches); push-pending state is aggregated on the parent.
 func (o *Overseer) publishOneProjectRepos(project types.Project, active map[string]bool) (bool, string) {
+	if o.publishBackoffActive(project.Path) {
+		return false, "publish backoff"
+	}
 	id, err := ResolvePublishIdentity(project.Path, o.getUserContextForProject(project.Path))
 	token := ""
 	if err != nil {
@@ -960,8 +1170,10 @@ func (o *Overseer) publishOneProjectRepos(project types.Project, active map[stri
 	}
 	if len(project.Repos) == 0 || pushedAny || (allBenign && lastReason == "") {
 		o.clearPushPending(project.Path)
+		o.clearPublishBackoff(project.Path)
 	} else {
 		o.notePushPending(project, lastReason)
+		o.notePublishBackoff(project.Path, lastReason)
 	}
 	return pushedAny, lastReason
 }
@@ -972,6 +1184,9 @@ func (o *Overseer) publishOneProjectRepos(project types.Project, active map[stri
 // fail-closed via ResolvePublishIdentity; daemon-owned repos use the service
 // account's own credential).
 func (o *Overseer) publishOneRepo(project types.Project, projectPath string, active map[string]bool) (bool, string) {
+	if o.publishBackoffActive(projectPath) {
+		return false, "publish backoff"
+	}
 	id, err := ResolvePublishIdentity(project.Path, o.getUserContextForProject(project.Path))
 	token := ""
 	if err != nil {
@@ -992,10 +1207,81 @@ func (o *Overseer) publishOneRepo(project types.Project, projectPath string, act
 	}
 	if pushed || benignPublishReasons[reason] {
 		o.clearPushPending(project.Path)
+		o.clearPublishBackoff(projectPath)
 	} else {
 		o.notePushPending(project, reason)
+		o.notePublishBackoff(projectPath, reason)
 	}
 	return pushed, reason
+}
+
+// publishBackoffEntry records the exponential retry cooldown for a
+// project whose PublishRepo keeps failing. Without it, a persistent
+// failure (stale token, PR waiting on human merge, missing remote)
+// re-attempted the full publish every scheduler tick: 2,709 classified
+// failures + 6,721 identity resolutions in 12h across three projects
+// (2026-10-02 fleet digest). Base 2m, doubling, capped 15m; success or a
+// benign result clears it.
+type publishBackoffEntry struct {
+	attempt int
+	next    time.Time
+}
+
+const (
+	publishBackoffBase = 2 * time.Minute
+	publishBackoffMax  = 15 * time.Minute
+)
+
+// publishBackoffActive reports whether the project's publish tick is
+// currently in a failure cooldown. Backoff is per process (in-memory):
+// a daemon restart gives every project one immediate fair retry, which
+// is the desired fail-open behavior.
+func (o *Overseer) publishBackoffActive(projectPath string) bool {
+	if o == nil {
+		return false
+	}
+	o.pushPendingMu.Lock()
+	defer o.pushPendingMu.Unlock()
+	e, ok := o.publishBackoff[projectPath]
+	return ok && time.Now().Before(e.next)
+}
+
+// notePublishBackoff extends the project's publish cooldown exponentially
+// after another non-benign publish failure.
+func (o *Overseer) notePublishBackoff(projectPath, reason string) {
+	if o == nil {
+		return
+	}
+	o.pushPendingMu.Lock()
+	defer o.pushPendingMu.Unlock()
+	if o.publishBackoff == nil {
+		o.publishBackoff = make(map[string]*publishBackoffEntry)
+	}
+	e, ok := o.publishBackoff[projectPath]
+	if !ok {
+		e = &publishBackoffEntry{}
+		o.publishBackoff[projectPath] = e
+	}
+	e.attempt++
+	d := publishBackoffBase << uint(min(e.attempt-1, 20))
+	if d > publishBackoffMax || d <= 0 {
+		d = publishBackoffMax
+	}
+	e.next = time.Now().Add(d)
+	log.Printf("[Publish] backoff %s: attempt %d, next publish eligible in %v (%s)", projectPath, e.attempt, d, reason)
+}
+
+// clearPublishBackoff resets the project's publish cooldown after a
+// successful or benign publish tick.
+func (o *Overseer) clearPublishBackoff(projectPath string) {
+	if o == nil {
+		return
+	}
+	o.pushPendingMu.Lock()
+	defer o.pushPendingMu.Unlock()
+	if _, ok := o.publishBackoff[projectPath]; ok {
+		delete(o.publishBackoff, projectPath)
+	}
 }
 
 func (o *Overseer) notePushPending(project types.Project, reason string) {
@@ -1004,8 +1290,11 @@ func (o *Overseer) notePushPending(project types.Project, reason string) {
 	if o.pushPending == nil {
 		o.pushPending = make(map[string]*PushPendingEntry)
 	}
+	cls := string(ClassifyPushFailure(reason))
 	if e, ok := o.pushPending[project.Path]; ok {
 		e.Reason = reason
+		e.Failures++
+		e.LastClass = cls
 		return
 	}
 	o.pushPending[project.Path] = &PushPendingEntry{
@@ -1013,6 +1302,8 @@ func (o *Overseer) notePushPending(project types.Project, reason string) {
 		ProjectName: project.Name,
 		Since:       time.Now(),
 		Reason:      reason,
+		Failures:    1,
+		LastClass:   cls,
 	}
 	log.Printf("[Publish] push pending for %s: %s (surfaced to Pan as PUSH-PENDING)", project.Path, reason)
 }
@@ -1110,7 +1401,13 @@ func (o *Overseer) persistClosedEpics(beadIDs []string) {
 		if o.epicCloseGuard.recentlyRefused(id, time.Now()) {
 			continue
 		}
-		if o.epicHasOpenDependent(id) {
+		projectPath, _ := o.findProjectPathForBead(id)
+		if projectPath == "" {
+			log.Printf("[DAG] Could not find project path for epic %s; skipping persistence", id)
+			o.epicCloseGuard.markRefused(id, time.Now())
+			continue
+		}
+		if o.epicHasOpenDependent(id, projectPath) {
 			log.Printf("[DAG] Epic %s has open dependents in the beads store; refusing auto-close (DAG view incomplete)", id)
 			o.epicCloseGuard.markRefused(id, time.Now())
 			if o.eventSink != nil {
@@ -1120,15 +1417,27 @@ func (o *Overseer) persistClosedEpics(beadIDs []string) {
 			}
 			continue
 		}
-		projectPath, _ := o.findProjectPathForBead(id)
-		if projectPath == "" {
-			log.Printf("[DAG] Could not find project path for epic %s; skipping persistence", id)
-			o.epicCloseGuard.markRefused(id, time.Now())
-			continue
-		}
 		reason := "epic auto-close: all dependencies and children closed"
-		if err := o.beadsClient.CloseBead(projectPath, "", types.BeadID(id), reason); err != nil {
-			log.Printf("[DAG] Failed to persist close for epic %s: %v", id, err)
+		err := o.beadsClient.CloseBead(projectPath, "", types.BeadID(id), reason)
+		if err != nil {
+			// br itself refused the close because the epic still has open
+			// children in its own parent-child graph (the ground truth the
+			// DAG and the Dependencies-based store scan cannot see when
+			// compile-time epic-child links failed). Classify it as a
+			// refusal so the throttle applies and operators get a typed
+			// event (srv-jobfile master epic: closed with 33 open children).
+			msg := err.Error()
+			if strings.Contains(msg, "open children") || strings.Contains(msg, "Skipped") {
+				o.epicCloseGuard.markRefused(id, time.Now())
+				log.Printf("[DAG] Epic %s auto-close refused by br (open children); throttled for re-check", id)
+				if o.eventSink != nil {
+					o.eventSink.Emit(Event{Type: "epic_close_refused", Bead: id,
+						Reason: "open_children",
+						Detail: msg})
+				}
+			} else {
+				log.Printf("[DAG] Failed to persist close for epic %s: %v", id, err)
+			}
 			continue
 		}
 		log.Printf("[DAG] Auto-closed epic %s (all dependencies and children done)", id)
@@ -1140,6 +1449,25 @@ func (o *Overseer) persistClosedEpics(beadIDs []string) {
 // bead's project prefix (e.g. "srv-file-handler-xyz" -> project "srv-file-handler").
 // Returns the first matching project's path.
 func (o *Overseer) findProjectPathForBead(beadID string) (string, types.BeadID) {
+	// Prefer the DAG's bead record: bead IDs may be user-namespaced
+	// ("ajantha-srv-smart-engine-1u3") while project.Name is not
+	// ("srv-smart-engine"), so the raw prefix match below never fires and
+	// epic auto-close persistence silently no-ops forever (hydra-ysaz).
+	// dag carries its own mutex, so this is safe under dagMu.
+	if o.dag != nil {
+		if node, ok := o.dag.GetNode(beadID); ok && node.Bead.Project != "" {
+			for _, project := range o.GetProjects() {
+				if project.Name == node.Bead.Project {
+					if project.Type == types.RepoTypeMulti && len(project.Repos) > 0 {
+						if dir := repoDirForBead(project, beadID, o.beadsClient); dir != "" {
+							return dir, types.BeadID(beadID)
+						}
+					}
+					return project.Path, types.BeadID(beadID)
+				}
+			}
+		}
+	}
 	for _, project := range o.GetProjects() {
 		if len(beadID) > len(project.Name) && beadID[:len(project.Name)+1] == project.Name+"-" {
 			if project.Type == types.RepoTypeMulti && len(project.Repos) > 0 {
@@ -1147,6 +1475,28 @@ func (o *Overseer) findProjectPathForBead(beadID string) (string, types.BeadID) 
 				// there fails ("Could not find project path for epic"). Find
 				// the repo whose bead store contains the exact ID
 				// (nipuna.j fms incident, 2026-09-30).
+				if dir := repoDirForBead(project, beadID, o.beadsClient); dir != "" {
+					return dir, types.BeadID(beadID)
+				}
+			}
+			return project.Path, types.BeadID(beadID)
+		}
+	}
+	// Namespaced-ID fallback: strip the trailing "-<suffix>" and match the
+	// project name as the whole namespace or a hyphen-delimited tail of it
+	// ("ajantha-srv-smart-engine-1u3" -> namespace "ajantha-srv-smart-engine"
+	// tail-matches "srv-smart-engine"). Longest name first so
+	// "srv-smart-engine" beats "engine"; naive Contains("-"+name+"-")
+	// substring-matches hyphenated names ("-engine-" inside "smart-engine-").
+	ns := beadID
+	if idx := strings.LastIndex(beadID, "-"); idx > 0 {
+		ns = beadID[:idx]
+	}
+	projects := append([]types.Project(nil), o.GetProjects()...)
+	sort.Slice(projects, func(i, j int) bool { return len(projects[i].Name) > len(projects[j].Name) })
+	for _, project := range projects {
+		if ns == project.Name || strings.HasSuffix(ns, "-"+project.Name) {
+			if project.Type == types.RepoTypeMulti && len(project.Repos) > 0 {
 				if dir := repoDirForBead(project, beadID, o.beadsClient); dir != "" {
 					return dir, types.BeadID(beadID)
 				}
@@ -1249,17 +1599,33 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 			if bead.Project == "" {
 				bead.Project = current.Project
 			}
+			// hydra-bldo: label truth matters at spawn time too — a pan-filed
+			// (human-triage) label added by Pan while the stale in-memory copy
+			// was queued must be seen by the preflight below.
+			if len(current.Labels) > 0 {
+				bead.Labels = current.Labels
+			}
 		}
 	}
 
 	// Fail-closed preflight (fmsfe-a2u, 2026-09-30): a bead whose Type cannot
 	// be verified, or whose store Type is a human gate/container, must never
-	// reach a worker. Also blocks the spawn funnel on an unresolved owner
-	// publish identity (auto-resumes when the PAT lands).
+	// reach a worker. Also blocks on a foreign-uid .beads store (daemon stops
+	// managing user-owned repos) and on an unresolved owner publish identity
+	// (auto-resumes when the PAT lands).
 	if err := o.spawnPreflightBead(bead, projectPath); err != nil {
 		return err
 	}
+	if err := o.spawnPreflightStoreOwnership(bead, projectPath); err != nil {
+		return err
+	}
+	if err := o.spawnPreflightGitAccess(bead, projectPath); err != nil {
+		return err
+	}
 	if err := o.spawnPreflightPublishIdentity(bead, projectPath); err != nil {
+		return err
+	}
+	if err := o.spawnPreflightBeadClaims(bead, projectPath); err != nil {
 		return err
 	}
 
@@ -1270,7 +1636,14 @@ func (o *Overseer) spawnWorker(bead types.Bead) error {
 	if o.prespawnCloseIfGreen(bead) {
 		return nil
 	}
-	return o.workerSpawner.Spawn(bead)
+	err := o.workerSpawner.Spawn(bead)
+	if err == nil {
+		// Successful spawn telemetry for the stale-filing premise probe
+		// (probe (c): project spawned healthy within the window).
+		noteSpawnSuccessFiling(bead.Project, time.Now())
+		return nil
+	}
+	return err
 }
 
 // emitSpawnSuppressedClosed writes a structured event when a spawn is aborted
@@ -1470,6 +1843,7 @@ func (o *Overseer) spawnWorkersForNodes(nodes []*Node, maxSlots int) int {
 		}
 		if o.campaignParked(node.Bead) {
 			log.Printf("⏸️  Skipping bead %s: campaign parked (Pan)", node.Bead.ID)
+			o.campaignParkSweepBead(&node.Bead)
 			continue
 		}
 		if !o.shouldSpawnWorker(node) {
@@ -1494,10 +1868,7 @@ func (o *Overseer) shouldSpawnWorker(node *Node) bool {
 	if o.isBeadRunning(beadID) {
 		return false
 	}
-	if node.Bead.Type == "approval-gate" || node.Bead.Type == "epic" {
-		return false
-	}
-	if node.Bead.Type == "approval" {
+	if isNonExecutableBeadType(node.Bead.Type) {
 		return false
 	}
 	return true

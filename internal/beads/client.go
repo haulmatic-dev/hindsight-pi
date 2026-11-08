@@ -70,8 +70,24 @@ type defaultExecutorWithDir struct {
 }
 
 func (e *defaultExecutorWithDir) Execute(name string, arg ...string) ([]byte, error) {
+	// br's fsqlite WAL layer stages files under FIXED names in $TMPDIR
+	// (beads.db, bd-beads.json, beads.db-fsqlite-ns-gate, ...). Any two br
+	// processes — even against different stores — collide on those names,
+	// producing cross-store WAL phantom writes and SYNC_CONFLICT lockouts
+	// (observed 2026-10-07: hydra fix beads phantom-duplicated into
+	// srv-jobfile's WAL; store unreadable for hours). Isolate each
+	// invocation's TMPDIR and clean it up afterwards.
+	tmpDir, tmpErr := os.MkdirTemp("", "hydra-br-")
+	if tmpErr != nil {
+		// Fail open: run with the inherited TMPDIR rather than not running.
+		log.Printf("[beads] TMPDIR isolation unavailable (%v); using inherited TMPDIR", tmpErr)
+	}
 	cmd := exec.Command(name, arg...)
 	cmd.Dir = e.Dir
+	if tmpErr == nil {
+		defer os.RemoveAll(tmpDir)
+		cmd.Env = append(os.Environ(), "TMPDIR="+tmpDir)
+	}
 	// Capture both stdout and stderr so we can check for warnings
 	return cmd.CombinedOutput()
 }
@@ -186,18 +202,23 @@ func (c *Client) exec(cmd string, args ...string) ([]byte, error) {
 	return output, nil
 }
 
-// brExecMu serializes br invocations. The br daemon (SQLite-backed) returns
-// exit 8 under concurrent access, and the overseer fans out many br calls
-// during DAG builds — serializing removes that self-inflicted contention.
-var brExecMu sync.Mutex
+// brExecLocks serializes br invocations per store directory. A raced
+// concurrent `br` rebuild can delete .beads/issues.jsonl and rebuild
+// beads.db with 0 issues (srv-smart-engine, 2026-09-11). Serializing per
+// store keeps concurrency across independent projects while eliminating the
+// race for any single .beads directory.
+var brExecLocks sync.Map // string dir -> *sync.Mutex
 
 // execInDir runs a CLI command in a directory, serializing br calls and
 // retrying transient daemon-lock failures (exit 8 / "database is locked")
 // with exponential backoff. Non-transient errors return immediately.
 func (c *Client) execInDir(dir string, cmd string, args ...string) ([]byte, error) {
 	if cmd == "br" {
-		brExecMu.Lock()
-		defer brExecMu.Unlock()
+		key := filepath.Clean(dir)
+		muIface, _ := brExecLocks.LoadOrStore(key, &sync.Mutex{})
+		mu := muIface.(*sync.Mutex)
+		mu.Lock()
+		defer mu.Unlock()
 	}
 	const maxAttempts = 4
 	var lastErr error
@@ -399,15 +420,32 @@ func (c *Client) closeBeadOnce(projectPath, repoName string, beadID types.BeadID
 	// without blocking downstream work. Without --force, a failed worker that
 	// leaves a bead stuck in_progress with open children would never be recovered.
 	if skipped {
-		log.Printf("[CloseBead] Bead %s has open children; retrying close with --force (reason: %s)", beadID.String(), reason)
-		forceOutput, forceErr := c.execInDir(repoCwd(projectPath, repoName), "br", "close", beadID.String(), "-r", reason, "--force")
-		if forceErr != nil {
-			return fmt.Errorf("force-close failed for bead %s: %w (original skip: %s)", beadID.String(), forceErr, outputStr)
+		// Epics are never force-closed over an open-children skip. br's own
+		// parent-child graph is the ground truth the DAG cannot see when
+		// compile-time epic-child dependency links failed (br single-parent
+		// constraint); a forced close would silently mark an epic done over
+		// open work (srv-jobfile master epic: closed with 33 open children).
+		bead, gerr := c.GetBead(projectPath, repoName, beadID)
+		if gerr != nil {
+			return fmt.Errorf("close of bead %s skipped (%s); refusing to force-close because bead type could not be verified: %v",
+				beadID.String(), outputStr, gerr)
 		}
-		if strings.Contains(string(forceOutput), "Warning: Skipped") {
-			return fmt.Errorf("force-close still skipped for bead %s: %s", beadID.String(), string(forceOutput))
+		if bead.Status.IsTerminal() {
+			// Terminal already: the skip was benign; verification below passes.
+		} else if bead.Type == "epic" {
+			return fmt.Errorf("refusing to force-close epic %s: br reports open children (%s)",
+				beadID.String(), outputStr)
+		} else {
+			log.Printf("[CloseBead] Bead %s has open children; retrying close with --force (reason: %s)", beadID.String(), reason)
+			forceOutput, forceErr := c.execInDir(repoCwd(projectPath, repoName), "br", "close", beadID.String(), "-r", reason, "--force")
+			if forceErr != nil {
+				return fmt.Errorf("force-close failed for bead %s: %w (original skip: %s)", beadID.String(), forceErr, outputStr)
+			}
+			if strings.Contains(string(forceOutput), "Warning: Skipped") {
+				return fmt.Errorf("force-close still skipped for bead %s: %s", beadID.String(), string(forceOutput))
+			}
+			log.Printf("[CloseBead] Force-closed bead %s (had open children at the time)", beadID.String())
 		}
-		log.Printf("[CloseBead] Force-closed bead %s (had open children at the time)", beadID.String())
 	}
 
 	// Verify the bead was actually closed

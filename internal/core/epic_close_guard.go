@@ -2,6 +2,7 @@ package core
 
 import (
 	"log"
+	"strings"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
@@ -37,40 +38,53 @@ func (g *epicCloseGuard) markRefused(epicID string, now time.Time) {
 	g.refusals[epicID] = now
 }
 
-// epicHasOpenDependent scans every configured project's bead store for a
-// non-terminal bead that depends on epicID. CloseReadyEpics only sees children
-// that made it into the in-memory DAG (discovery incident 2026-09-30: epics
-// auto-closed while blocked/approval-gated children were still open, because
-// those children were invisible to the DAG build — e.g. their repo's
-// ListBeads failed during the build and was skipped). This store-level check
-// is the fail-closed gate: if ANY store listing fails, we treat the epic as
-// having open dependents and refuse the close.
-func (o *Overseer) epicHasOpenDependent(epicID string) bool {
-	for _, project := range o.GetProjects() {
-		repos := []types.Repo{{Name: ""}}
-		if project.Type == types.RepoTypeMulti {
-			repos = project.Repos
+// epicHasOpenDependent reports whether the epic still has a non-terminal
+// dependent in the beads store. CloseReadyEpics only sees children that made
+// it into the in-memory DAG (discovery incident 2026-09-30: epics auto-closed
+// while blocked/approval-gated children were still open because those children
+// were invisible to the DAG build). This store-level check is the fail-closed
+// gate.
+//
+// Data source: the epic's own `br show` dependent_ids (parser stores them in
+// Metadata). The previous implementation scanned every project's ListBeads
+// output for Dependencies pointing at the epic — but ParseBeadListPaginated
+// never populates Bead.Dependencies (only metadata dependency_count), so the
+// scan saw zero dependents and the guard was vacuous (fail-open) from the day
+// it shipped (found 2026-10-15, hydra-ysaz).
+//
+// Status of each dependent is resolved cheaply: session-completed map first,
+// then the freshly-built DAG (authoritative for open beads), with a per-bead
+// GetBead fallback for dependents missing from both. Any error refuses the
+// close (fail-closed).
+func (o *Overseer) epicHasOpenDependent(epicID, projectPath string) bool {
+	epic, err := o.beadsClient.GetBead(projectPath, "", types.BeadID(epicID))
+	if err != nil || epic == nil {
+		log.Printf("[DAG] epic close guard: GetBead(%s) failed (%v); refusing close (fail-closed)", epicID, err)
+		return true
+	}
+	for _, depID := range strings.Split(epic.Metadata["dependent_ids"], ",") {
+		depID = strings.TrimSpace(depID)
+		if depID == "" {
+			continue
 		}
-		for _, repo := range repos {
-			beads, err := o.beadsClient.ListBeads(project.Path, repo.Name)
-			if err != nil {
-				log.Printf("[DAG] epic close guard: ListBeads failed for %s/%s; refusing close of %s (fail-closed)",
-					project.Name, repo.Name, epicID)
+		if o.completed[depID] {
+			continue
+		}
+		if node, ok := o.dag.GetNode(depID); ok {
+			if !node.Bead.Status.IsTerminal() {
 				return true
 			}
-			for _, bead := range beads {
-				if string(bead.ID) == epicID {
-					continue
-				}
-				if bead.Status.IsTerminal() || o.completed[string(bead.ID)] {
-					continue
-				}
-				for _, dep := range bead.Dependencies {
-					if string(dep) == epicID {
-						return true
-					}
-				}
-			}
+			continue
+		}
+		// Dependent is neither open in the DAG nor session-completed: verify
+		// against the store before trusting that it is terminal.
+		dep, derr := o.beadsClient.GetBead(projectPath, "", types.BeadID(depID))
+		if derr != nil || dep == nil {
+			log.Printf("[DAG] epic close guard: dependent %s of %s unverifiable (%v); refusing close (fail-closed)", depID, epicID, derr)
+			return true
+		}
+		if !dep.Status.IsTerminal() {
+			return true
 		}
 	}
 	return false

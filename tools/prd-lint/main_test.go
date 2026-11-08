@@ -313,3 +313,161 @@ func writeFile(path, content string) error {
 func writeFileBytes(path string, data []byte) error {
 	return os.WriteFile(path, data, 0644)
 }
+
+// TestCreatePrdProducerContract pins the producer contract documented in the
+// create-prd skill: the five-value System Type enum, the five chain prefixes,
+// and the strict classification precedence. Regression for the TDD chain
+// "create-prd producer contract documentation" (hydra-cxpf).
+func TestCreatePrdProducerContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", ".agents", "skills", "create-prd", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read SKILL.md: %v", err)
+	}
+	doc := string(data)
+
+	// 1. System Type enum with all five values.
+	enumValues := []string{"library", "cli", "api", "application", "ops"}
+	for _, v := range enumValues {
+		if !strings.Contains(doc, "`"+v+"`") {
+			t.Errorf("System Type enum value %q missing from SKILL.md", v)
+		}
+	}
+	if !strings.Contains(doc, "**System Type enum") {
+		t.Error("SKILL.md does not document the System Type enum section")
+	}
+
+	// 2. All five chain prefixes documented.
+	prefixes := []string{"RED:", "GREEN:", "REFACTOR:", "SYNTAX:", "FIX:"}
+	for _, p := range prefixes {
+		if !strings.Contains(doc, "`"+p+"`") {
+			t.Errorf("chain prefix %q missing from SKILL.md", p)
+		}
+	}
+
+	// 3. Precedence order stated: prefix > target-file shape > System Type > tdd_chain.
+	if !strings.Contains(doc, "Classification precedence") {
+		t.Error("SKILL.md does not document the classification precedence")
+	}
+	ordered := []string{"**Prefix**", "**Target-file shape**", "**System Type**", "**tdd_chain**"}
+	last := -1
+	for _, term := range ordered {
+		idx := strings.Index(doc, term)
+		if idx < 0 {
+			t.Fatalf("precedence term %q missing", term)
+		}
+		if idx <= last {
+			t.Errorf("precedence term %q appears out of order", term)
+		}
+		last = idx
+	}
+}
+
+func TestSystemTypeLint(t *testing.T) {
+	if _, ok := systemType([]line{{text: "**System Type:** library (internal Go, daemon-side)"}}); !ok {
+		t.Error("expected System Type line to be detected")
+	}
+	if v, _ := systemType([]line{{text: "**System Type:** library (internal Go, daemon-side)"}}); v != "library" {
+		t.Errorf("expected enum value \"library\", got %q", v)
+	}
+	if _, ok := systemType([]line{{text: "**Priority:** P1"}}); ok {
+		t.Error("non-System-Type line must not be detected")
+	}
+	if isValidSystemType("database") {
+		t.Error("\"database\" must be an invalid System Type")
+	}
+	for _, v := range []string{"library", "cli", "api", "application", "ops"} {
+		if !isValidSystemType(v) {
+			t.Errorf("%q must be a valid System Type", v)
+		}
+	}
+}
+
+// coverage-threshold semantics rule (RED phase — hydra-74mf).
+//
+// The rule under test: a requirement whose Acceptance Criteria state a
+// coverage threshold over a file glob (e.g. "coverage >= 80% for `tools/**`")
+// must also carry an explicit coverage-exemption marker when it does not
+// intend to be gated by that threshold. A block that names a coverage
+// threshold on a glob without the marker yields a coverage-threshold
+// warning violation. Blocks that never mention coverage are unaffected.
+//
+// RED gating: the rule is not implemented yet (GREEN's job), so by default
+// These tests pin the R10-coverage-threshold rule: a block stating a
+// coverage percentage threshold without a `<!-- coverage-threshold:
+// exempt -->` marker must warn, non-coverage blocks must stay clean, and
+// the marker must suppress the warning.
+func isCoverageThresholdWarning(v Violation) bool {
+	return strings.Contains(strings.ToLower(v.Rule), "coverage-threshold") ||
+		strings.Contains(strings.ToLower(v.Message), "coverage-threshold")
+}
+
+func coverageThresholdFixturePRD() string {
+	return minimalValidPRD() + `
+
+## FR-COV: Coverage threshold reporting
+
+**Type:** fr
+**Priority:** P1
+**Target Files:** ` + "`tools/prd-lint/main.go`" + `
+**Acceptance Criteria:**
+- ` + "`go test ./... -cover` reports coverage >= 80% for glob `tools/**`" + `
+`
+}
+
+func TestCoverageThresholdLint_GlobThresholdCriterionWithoutMarkerWarns(t *testing.T) {
+	result := lintContent("test.md", coverageThresholdFixturePRD())
+	if result.Passed {
+		t.Fatalf("expected the glob coverage-threshold criterion without an exemption marker to produce a coverage-threshold warning, got a clean pass")
+	}
+	found := false
+	for _, v := range result.Violations {
+		if !isCoverageThresholdWarning(v) {
+			continue
+		}
+		found = true
+		if v.ID != "FR-COV" {
+			t.Errorf("coverage-threshold warning should point at FR-COV, got ID %q", v.ID)
+		}
+		if v.Line == 0 {
+			t.Errorf("coverage-threshold warning must carry a line number")
+		}
+		if strings.TrimSpace(v.Message) == "" {
+			t.Errorf("coverage-threshold warning must carry a message")
+		}
+	}
+	if !found {
+		t.Fatalf("expected a coverage-threshold warning mentioning the threshold semantics for FR-COV, got violations: %v", result.Violations)
+	}
+}
+
+func TestCoverageThresholdLint_NonCoverageCriteriaUnaffected(t *testing.T) {
+	// Regression fixture: no block mentions coverage, so no
+	// coverage-threshold warning may appear.
+	result := lintContent("test.md", minimalValidPRD())
+	for _, v := range result.Violations {
+		if isCoverageThresholdWarning(v) {
+			t.Errorf("non-coverage criterion must not trigger a coverage-threshold warning, got %+v", v)
+		}
+	}
+	if !result.Passed {
+		t.Fatalf("expected the coverage-free regression fixture to stay clean, got violations: %v", result.Violations)
+	}
+
+	// Same fixture with the exemption marker present: the marker suppresses
+	// the warning, so the glob-threshold block lints clean.
+	marked := strings.Replace(
+		coverageThresholdFixturePRD(),
+		"## FR-COV: Coverage threshold reporting",
+		"<!-- coverage-threshold: exempt -->\n\n## FR-COV: Coverage threshold reporting",
+		1,
+	)
+	markedResult := lintContent("test.md", marked)
+	for _, v := range markedResult.Violations {
+		if isCoverageThresholdWarning(v) {
+			t.Errorf("explicit exemption marker must suppress the coverage-threshold warning, got %+v", v)
+		}
+	}
+	if !markedResult.Passed {
+		t.Fatalf("expected the marked fixture to pass cleanly, got violations: %v", markedResult.Violations)
+	}
+}

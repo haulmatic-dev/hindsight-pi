@@ -18,10 +18,11 @@ func TestBeadTargetFiles(t *testing.T) {
 		bead types.Bead
 		want int
 	}{
-		{"metadata files", types.Bead{Metadata: map[string]string{"files": "a.go, b.go"}}, 2},
-		{"metadata target_files", types.Bead{Metadata: map[string]string{"target_files": "x/a.go, x/b.go"}}, 2},
-		{"metadata files takes precedence", types.Bead{Metadata: map[string]string{"files": "a.go", "target_files": "x/a.go"}}, 1},
-		{"description", types.Bead{Description: "Do X\nFiles: internal/x.go internal/y.go\nmore text"}, 2},
+		// Post FR-006: every .go impl file gains its sibling test.
+		{"metadata files", types.Bead{Metadata: map[string]string{"files": "a.go, b.go"}}, 4},
+		{"metadata target_files", types.Bead{Metadata: map[string]string{"target_files": "x/a.go, x/b.go"}}, 4},
+		{"metadata files takes precedence", types.Bead{Metadata: map[string]string{"files": "a.go", "target_files": "x/a.go"}}, 2},
+		{"description", types.Bead{Description: "Do X\nFiles: internal/x.go internal/y.go\nmore text"}, 4},
 		{"tbd-ignored", types.Bead{Description: "Files: TBD"}, 0},
 		{"none", types.Bead{Description: "no files declared here"}, 0},
 	}
@@ -82,8 +83,15 @@ func TestVerifyBeforeClose_EmptyTargetsBypasses(t *testing.T) {
 	}
 }
 
-func TestVerifyBeforeClose_ChangedFilesErrorFailsOpen(t *testing.T) {
-	// Use a non-git directory so changedFiles returns an error.
+func TestVerifyBeforeClose_NonRepoEvidenceSurfaceLegacyFailOpen(t *testing.T) {
+	// Contract refinement (akn8 gate round 2): a path that is NOT a git
+	// repository has no evidence surface by design — git itself reports
+	// "not a git repository" and cannot distinguish it from an unreadable
+	// .git — so the close proceeds (legacy fail-open; the worker_completion
+	// path-resolution fixtures close against /test/test-project). Real-repo
+	// git faults (dubious ownership, permission denied) are fail-closed,
+	// pinned by TestEvidenceFatalErr_Classifier in worktree_misroot_test.go
+	// and by the worktree-mode blanket-fatal test.
 	nonGitRepo := t.TempDir()
 	closer := newScopeGateCloser(t, nonGitRepo, "block")
 	bead := &types.Bead{
@@ -94,7 +102,7 @@ func TestVerifyBeforeClose_ChangedFilesErrorFailsOpen(t *testing.T) {
 	}
 
 	if err := closer.verifyBeforeClose(bead, nonGitRepo, ""); err != nil {
-		t.Fatalf("changedFiles error should fail open: %v", err)
+		t.Fatalf("non-repo evidence surface must stay legacy fail-open, got: %v", err)
 	}
 }
 
@@ -313,7 +321,7 @@ func TestVerifyBeforeClose_MainCheckoutLeak(t *testing.T) {
 }
 
 func TestVerifyBeforeClose_TargetLessImplementationWarns(t *testing.T) {
-	repo, closer, bead := setupScopeGateTest(t, "block")
+	repo, closer, bead := setupScopeGateTest(t, "warn")
 	bead.Metadata = nil
 	bead.Description = "no targets declared"
 	bead.Type = "fr"
@@ -321,7 +329,7 @@ func TestVerifyBeforeClose_TargetLessImplementationWarns(t *testing.T) {
 
 	logs := captureLogOutput(t, func() {
 		if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
-			t.Fatalf("target-less warning must not reject close: %v", err)
+			t.Fatalf("warn mode must not reject target-less close: %v", err)
 		}
 	})
 
@@ -330,6 +338,25 @@ func TestVerifyBeforeClose_TargetLessImplementationWarns(t *testing.T) {
 	}
 	if !strings.Contains(logs, "internal/core/x.go") {
 		t.Fatalf("expected log containing 'internal/core/x.go', got:\n%s", logs)
+	}
+}
+
+func TestVerifyBeforeClose_TargetLessImplementationBlocks(t *testing.T) {
+	repo, closer, bead := setupScopeGateTest(t, "block")
+	bead.Metadata = nil
+	bead.Description = "no targets declared"
+	bead.Type = "fr"
+	writeAndCommit(t, repo, "internal/core/x.go", "package x\n// modified\n")
+
+	err := closer.verifyBeforeClose(bead, repo, "")
+	if err == nil {
+		t.Fatal("block mode must reject target-less non-allowlisted changes")
+	}
+	if !strings.Contains(err.Error(), "non-allowlisted changes on target-less bead") {
+		t.Fatalf("expected fail-closed rejection reason, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "internal/core/x.go") {
+		t.Fatalf("expected violation path in rejection, got: %v", err)
 	}
 }
 

@@ -294,6 +294,35 @@ func TestRecoverOrphanInProgressBeads_SkipsEscalatedLabel(t *testing.T) {
 	}
 }
 
+// TestRecoverOrphanInProgressBeads_SkipsPanFiledLabel guards the 2026-10-06
+// orphan-claim filing loop: a pan-filed campaign/triage bead legitimately sits
+// in_progress past the grace window (awaiting spawn or close gates), and
+// reopening it respawns the same triage task — the filing loop's other half.
+func TestRecoverOrphanInProgressBeads_SkipsPanFiledLabel(t *testing.T) {
+	beadID := "test-orphan-panfiled"
+	old := time.Now().Add(-10 * time.Minute)
+
+	list := beadListJSON(beadID, old)
+	var page struct {
+		Issues []map[string]any `json:"issues"`
+	}
+	if err := json.Unmarshal(list, &page); err != nil || len(page.Issues) != 1 {
+		t.Fatalf("beadListJSON shape changed: %v", err)
+	}
+	page.Issues[0]["labels"] = []string{"pan-filed"}
+	list, _ = json.Marshal(page)
+
+	charon, exec := setupOrphanCharon(t, list, 5*time.Minute)
+
+	got := charon.recoverOrphanInProgressBeads()
+	if got != 0 {
+		t.Fatalf("recovered = %d, want 0 for pan-filed bead", got)
+	}
+	if n := exec.CountCalls("br update " + beadID + " --status open"); n != 0 {
+		t.Errorf("expected zero UpdateBeadStatus(open) calls for pan-filed bead, got %d; calls:\n%v", n, exec.Calls())
+	}
+}
+
 func TestRecoverOrphanInProgressBeads_RespectsGrace(t *testing.T) {
 	beadID := "test-orphan-young"
 	charon, exec := setupOrphanCharon(t, beadListJSON(beadID, time.Now().Add(-1*time.Minute)), 5*time.Minute)
@@ -483,7 +512,19 @@ func TestMain(m *testing.M) {
 	// asleep and pushed the package past the 10m test timeout (gate 2026-09-27).
 	integrationBackoffBase = time.Millisecond
 
+	// CI runners (and any non-daemon host) have no hydra user, no PAT file,
+	// no GH_TOKEN and no ~/.git-credentials, so the default
+	// ResolveDaemonPublishIdentity fallback is environment-coupled and
+	// fail-closed (CI 'test' job red 2026-10-02, PR #85). Install a stub
+	// identity resolver by default; tests that exercise identity resolution
+	// override publishIdentityResolver directly and restore it.
+	publishIdentityResolver = func(string) (PublishIdentity, error) {
+		return PublishIdentity{Owner: "test", Token: "test-token", Source: "test-stub"}, nil
+	}
+
 	code := m.Run()
+
+	publishIdentityResolver = nil
 
 	os.RemoveAll(tmp)
 	os.Exit(code)
@@ -531,4 +572,5 @@ func TestRecoverOrphanInProgressBeads_ParkedCampaignStillRecovers(t *testing.T) 
 	}
 	if rec, ok := charon.workerTracker.GetWorkerByBead(beadID); ok && rec.Status == "running" {
 		t.Errorf("expected dead worker row to be reaped despite park, still running: %+v", rec)
-	}}
+	}
+}

@@ -25,7 +25,22 @@ import (
 type WorktreeManager struct {
 	mu        sync.Mutex // serialize git worktree ops (shared repo, single process)
 	eventSink *EventSink // optional: emits worktree-level typed events
+	// SuiteGate, when set, runs the project's full test gate in the
+	// chain worktree BEFORE any integration merges the branch into the
+	// working branch. It is the single choke point covering every integrate
+	// caller (chain completion, worktree reconciler, orphan janitor, Pan's
+	// integrate-stranded repair). Per-instance override for tests; the
+	// package-level defaultWorktreeSuiteGate (set once at daemon startup)
+	// covers standalone NewWorktreeManager() instances (charon, publisher).
+	// Both nil = ungated (fail-open, pre-gate behavior).
+	SuiteGate func(projectPath, worktreePath, key string) error
 }
+
+// defaultWorktreeSuiteGate is the daemon-wide integration gate, set by the
+// overseer during startup from BeadCloser.RunChainSuiteGate. Standalone
+// WorktreeManager instances (charon's orphan janitor, the publisher's
+// reconciler pass) share it; tests inject per-instance SuiteGate instead.
+var defaultWorktreeSuiteGate func(projectPath, worktreePath, key string) error
 
 // NewWorktreeManager creates a worktree manager.
 func NewWorktreeManager() *WorktreeManager { return &WorktreeManager{} }
@@ -259,7 +274,32 @@ func (m *WorktreeManager) worktreePath(projectPath, key string) string {
 // chain integrates).
 func (m *WorktreeManager) ExistingWorktree(projectPath, key string) (string, bool) {
 	wtPath := m.worktreePath(projectPath, key)
-	return wtPath, isGitWorktree(wtPath)
+	if !isGitWorktree(wtPath) {
+		return wtPath, false
+	}
+	// Identity validation (2026-10-20 mis-rooting cascade): a path may be a
+	// valid git worktree of the WRONG repository — observed live when a chain
+	// worktree was attached to the parent monorepo's gitdir while the project
+	// is a submodule (hydra-q3p: every git op exit 128, verified-close then
+	// failed open and accepted zero-work closes). Never hand a worktree whose
+	// common gitdir does not match the project repo to a worker or the closer.
+	if !isOurWorktree(projectPath, wtPath) {
+		m.emitMisrootedRefusal(projectPath, wtPath, key)
+		return "", false
+	}
+	return wtPath, true
+}
+
+// emitMisrootedRefusal records the typed event for a refused mis-rooted
+// worktree. Fail-open: an event failure never changes the refusal.
+func (m *WorktreeManager) emitMisrootedRefusal(projectPath, wtPath, key string) {
+	log.Printf("[Worktree] refusing %s: gitdir does not match project repo %s (mis-rooted worktree, key %s)", wtPath, projectPath, key)
+	if m.eventSink == nil {
+		return
+	}
+	m.eventSink.Emit(Event{Type: "worktree_refused", Reason: "misrooted_gitdir",
+		Detail: fmt.Sprintf("worktree %s is a git worktree of a different repository than project %s", wtPath, projectPath),
+		Fields: map[string]any{"project_path": projectPath, "worktree": wtPath, "key": key}})
 }
 
 // WorkingBranch returns the project checkout's current branch name.
@@ -278,7 +318,116 @@ func (m *WorktreeManager) EnsureWorktree(projectPath, key string) (string, error
 		return "", err
 	}
 	m.provisionSiblingDeps(projectPath)
+	m.provisionGraphifyOut(projectPath, wtPath)
+	m.scaffoldScratch(projectPath, wtPath, key)
 	return wtPath, nil
+}
+
+// --- Worktree scratch scaffolding (RED phase: contract pinned, feature not
+// yet implemented) ---
+//
+// Every chain worktree gets a scratch directory OUTSIDE the worktree tree —
+// tools like mongodb-memory-server write scratch artifacts (MONGOMS_TMPDIR
+// style) that must never land inside the worktree diff or survive teardown.
+// EnsureWorktree scaffolds the dir and injects the `.scratch/` ignore line,
+// every teardown path prunes it, and the worker env builder exports its path
+// as HYDRA_SCRATCH_DIR (see worktree_manager_scratch_test.go).
+const (
+	// scratchEnvVar is the worker-env variable carrying the scratch dir path.
+	scratchEnvVar = "HYDRA_SCRATCH_DIR"
+
+	// scratchDirName is the per-project scratch root under the worktree root.
+	scratchDirName = ".scratch"
+)
+
+// scratchScaffoldingImplemented gates the scratch contract tests: false =
+// RED (tests skip loudly; SCRATCH_ENFORCE=1 fails them), true = GREEN
+// (scaffolding/pruning/export are wired).
+var scratchScaffoldingImplemented = true
+
+// worktreeScratchDirFor returns the canonical scratch directory for a chain
+// key: <worktreeRoot(projectPath)>/.scratch/<sanitized key> — always OUTSIDE
+// the worktree dir itself. Package-level so the worker env builder exports
+// the exact same path the manager scaffolds and prunes.
+func worktreeScratchDirFor(projectPath, key string) string {
+	return filepath.Join(worktreeRoot(projectPath), scratchDirName, sanitizeKey(key))
+}
+
+// scaffoldScratch creates the chain's scratch dir (outside the worktree
+// tree) and injects the `.scratch/` ignore line into the worktree .gitignore
+// so scratch-relative writes never leak into git status. Fail-open: scratch
+// is a convenience surface, never a reason to fail worktree creation.
+func (m *WorktreeManager) scaffoldScratch(projectPath, wtPath, key string) {
+	scratch := worktreeScratchDirFor(projectPath, key)
+	if err := os.MkdirAll(scratch, 0o755); err != nil {
+		log.Printf("[Worktree] scratch: mkdir %s for %s: %v", scratch, key, err)
+		return
+	}
+	ensureGitignoreLine(filepath.Join(wtPath, ".gitignore"), scratchDirName+"/")
+	// The scaffolded .gitignore itself is hydra infrastructure, not bead
+	// evidence: hide the untracked file from git status via the repo-local
+	// exclude so close-evidence scope gates and WIP detection never flag it.
+	// Tracked .gitignore files are unaffected (exclude hides untracked paths
+	// only). Fail-open like every other scaffolding step.
+	ensureGitignoreLine(filepath.Join(projectPath, ".git", "info", "exclude"), ".gitignore")
+}
+
+// pruneScratch removes a chain's scratch dir. Called from every teardown
+// path (Remove/Integrate* via removeWorktreeAndBranchName,
+// QuarantineBranchAndRemove, CleanupStaleWorktrees) so nothing is left
+// behind. Fail-open.
+func (m *WorktreeManager) pruneScratch(projectPath, key string) {
+	if err := os.RemoveAll(worktreeScratchDirFor(projectPath, key)); err != nil {
+		log.Printf("[Worktree] scratch: remove for %s: %v", key, err)
+	}
+}
+
+// provisionGraphifyOut links the main checkout's graphify-out directory into
+// a newly created worktree so graphify output (graph.json) indexed in the
+// main checkout is visible in the worktree without re-indexing. The symlink
+// is ignored via the worktree's .gitignore so git status stays clean.
+// Fail-open: an absent graphify-out dir is a silent no-op; any provisioning
+// error is logged and skipped, never fatal to worktree creation.
+func (m *WorktreeManager) provisionGraphifyOut(projectPath, wtPath string) {
+	mainOut := filepath.Join(projectPath, "graphify-out")
+	info, err := os.Stat(mainOut)
+	if err != nil || !info.IsDir() {
+		return // main checkout has no graphify-out — nothing to link
+	}
+	link := filepath.Join(wtPath, "graphify-out")
+	if fi, err := os.Lstat(link); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			if target, rerr := os.Readlink(link); rerr == nil {
+				resolved := target
+				if !filepath.IsAbs(resolved) {
+					resolved = filepath.Join(wtPath, resolved)
+				}
+				if filepath.Clean(resolved) == mainOut {
+					return // already correct — idempotent keep
+				}
+			}
+		} else {
+			return // a real directory/file occupies the path — leave it alone
+		}
+		// Wrong symlink: replace it below.
+		if err := os.Remove(link); err != nil {
+			log.Printf("[Worktree] graphify-out: remove stale symlink %s: %v", link, err)
+			return
+		}
+	} else if !os.IsNotExist(err) {
+		log.Printf("[Worktree] graphify-out: lstat %s: %v", link, err)
+		return
+	}
+	if err := os.Symlink(mainOut, link); err != nil {
+		log.Printf("[Worktree] graphify-out: symlink %s -> %s: %v", link, mainOut, err)
+		return
+	}
+	// Ignore the symlink so git status stays clean. Both spellings are
+	// required: trailing-slash `graphify-out/` matches directories, but git
+	// may treat the symlink itself as a non-directory file, so the bare
+	// `graphify-out` line is what keeps status --porcelain quiet.
+	ensureGitignoreLine(filepath.Join(wtPath, ".gitignore"), "graphify-out/")
+	ensureGitignoreLine(filepath.Join(wtPath, ".gitignore"), "graphify-out")
 }
 
 func (m *WorktreeManager) ensureWorktreeLocked(projectPath, key string) (string, error) {
@@ -392,6 +541,16 @@ func (m *WorktreeManager) ensureWorktreeLocked(projectPath, key string) (string,
 			return "", fmt.Errorf("worktree add %s off %s: %w", branch, base, err)
 		}
 	}
+	// Post-creation identity assertion (2026-10-20 mis-rooting cascade): the
+	// fresh worktree MUST share the project's common gitdir. A path-decoding
+	// or exec-dir bug can attach the parent monorepo's gitdir when the project
+	// is a submodule; detect it immediately, remove the mis-rooted worktree,
+	// and fail closed instead of spawning a worker into a foreign repo.
+	if !isOurWorktree(projectPath, wtPath) {
+		_, _ = gitOut(projectPath, "worktree", "remove", wtPath, "--force")
+		_, _ = gitOut(projectPath, "worktree", "prune")
+		return "", fmt.Errorf("worktree %s mis-rooted: gitdir does not match project repo %s (removed)", wtPath, projectPath)
+	}
 
 	// A stale branch may carry old commits; reset the (possibly reattached)
 	// worktree to the current base so the chain starts from a clean, known
@@ -503,11 +662,74 @@ func stagedConflictMarkerFiles(dir string) []string {
 	return files
 }
 
+// embeddedGitRepos returns directories below root (excluding .beads) that
+// contain their own .git directory — i.e. an embedded/foreign git repo. The
+// heavy dependency dirs are pruned: they can be enormous and never host agent
+// scaffolding worth rescuing.
+func embeddedGitRepos(root string) []string {
+	var found []string
+	skip := map[string]bool{"node_modules": true, "vendor": true, "dist": true, "build": true, "target": true, ".venv": true, "__pycache__": true}
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // unreadable paths fail open
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		base := d.Name()
+		if base == ".git" || base == ".beads" || skip[base] {
+			return fs.SkipDir
+		}
+		if _, err := os.Stat(filepath.Join(path, ".git")); err == nil && !pathsEqual(path, root) {
+			found = append(found, path)
+			return fs.SkipDir // don't descend into embedded repos
+		}
+		return nil
+	})
+	return found
+}
+
+// guardEmbeddedRepos strips embedded git repo metadata (.git dirs of nested
+// repos) before staging so `git add -A` does not die with exit 128 "does not
+// have a commit checked out" — which killed closes AFTER a full worker turn
+// burned (fmsfe-b8h wedge: internal/core/.git scaffolded inside an Angular
+// repo). Files inside the embedded repo survive as plain untracked content
+// and are committed like any other worktree change. Emits a typed
+// embedded_repo_detected event per repo so Pan sees the pattern. Fail-open:
+// removal errors are logged, staging proceeds and reports its own error.
+func (m *WorktreeManager) guardEmbeddedRepos(dir, beadID string) {
+	for _, repo := range embeddedGitRepos(dir) {
+		log.Printf("[Worktree] embedded repo detected in %s: %s — removing .git metadata (bead: %s)", dir, repo, beadID)
+		err := os.RemoveAll(filepath.Join(repo, ".git"))
+		m.eventSink.Emit(Event{
+			Type:   "embedded_repo_detected",
+			Bead:   beadID,
+			Reason: map[bool]string{true: "removed", false: "remove_failed"}[err == nil],
+			Detail: "embedded git repo scaffolded inside worktree by agent — .git metadata removed so the close commit can stage the files",
+			Fields: map[string]any{"path": repo},
+		})
+		if err != nil {
+			log.Printf("[Worktree] embedded repo cleanup failed for %s: %v", repo, err)
+		}
+	}
+}
+
 // Commit stages everything in the worktree and commits it. Returns
 // (false, nil) when there is nothing to commit (no work was done).
 func (m *WorktreeManager) Commit(worktreePath, message string) (bool, error) {
+	return m.commitLocked(worktreePath, message, "")
+}
+
+// CommitBead is Commit with the bead identity attached for typed events.
+func (m *WorktreeManager) CommitBead(worktreePath, message, beadID string) (bool, error) {
+	return m.commitLocked(worktreePath, message, beadID)
+}
+
+func (m *WorktreeManager) commitLocked(worktreePath, message, beadID string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	m.guardEmbeddedRepos(worktreePath, beadID)
 
 	// .beads is daemon machinery state (status flips, DB mirror) — never
 	// product content. Union-merging id-keyed JSONL produced duplicate rows
@@ -635,6 +857,23 @@ merged:
 			branch, strings.TrimSpace(tip), strings.TrimSpace(head), wtPath)
 	}
 
+	// Chain-suite gate: the last line of defense before ANY integration,
+	// moved from IntegrateBranchAndRemove (2026-11-08) so the reconciler's
+	// branch-only path and the singleton close fallback are both gated,
+	// exactly once per integrate. It runs on the always-present
+	// integrate-scratch-<key> worktree AFTER the merge — the merged tree is
+	// what was never verified (QuarantineBranchAndRemove has already
+	// removed the chain worktree, so a wt-path-conditional gate would
+	// silently skip the reconciler path). Fail-closed: a gate failure
+	// returns the typed ErrQuarantineSuiteGateBlocked so callers keep the
+	// quarantine without string sniffing, and nothing lands on the
+	// checkout. Nil gate fails open.
+	if gate := m.suiteGate(); gate != nil {
+		if gerr := gate(projectPath, scratchPath, key); gerr != nil {
+			return fmt.Errorf("chain suite gate: %v: %w", gerr, ErrQuarantineSuiteGateBlocked)
+		}
+	}
+
 	newTipOut, _ := gitOut(scratchPath, "rev-parse", "HEAD")
 	newTip := strings.TrimSpace(newTipOut)
 
@@ -661,6 +900,16 @@ merged:
 	return nil
 }
 
+// suiteGate resolves the effective suite gate: the per-instance gate when
+// set (tests inject one), else the package-level daemon-wide default. A nil
+// result means no gate is configured and integration fails open.
+func (m *WorktreeManager) suiteGate() func(projectPath, worktreePath, key string) error {
+	if m.SuiteGate != nil {
+		return m.SuiteGate
+	}
+	return defaultWorktreeSuiteGate
+}
+
 // IntegrateAndRemove merges the chain's branch into the working branch,
 // verifies the merge landed, and removes the worktree + branch. It is the
 // teardown-only variant for callers with no post-merge push step; the
@@ -671,7 +920,11 @@ func (m *WorktreeManager) IntegrateAndRemove(projectPath, key string) error {
 }
 
 // IntegrateBranchAndRemove is IntegrateAndRemove with an explicit branch
-// name — the recorded-key path for versioned worktree branches.
+// name — the recorded-key path for versioned worktree branches. The
+// chain-suite gate lives in IntegrateBranch (moved here 2026-11-08 so it
+// also gates the reconciler's branch-only path and the singleton close
+// fallback, exactly once per integrate on the integrate-scratch tree);
+// do not duplicate it here.
 func (m *WorktreeManager) IntegrateBranchAndRemove(projectPath, key, branch string) error {
 	if err := m.IntegrateBranch(projectPath, key, branch); err != nil {
 		return err
@@ -695,6 +948,7 @@ func (m *WorktreeManager) removeWorktreeAndBranchName(projectPath, key, branch s
 	}
 	_, _ = gitOut(projectPath, "branch", "-D", branch)
 	_, _ = gitOut(projectPath, "worktree", "prune")
+	m.pruneScratch(projectPath, key)
 }
 
 // beadsOnlyConflict reports whether every unmerged path in a failed merge
@@ -857,6 +1111,7 @@ func (m *WorktreeManager) QuarantineBranchAndRemove(projectPath, key, branch str
 	}
 	_, _ = gitOut(projectPath, "branch", "-D", branch)
 	_, _ = gitOut(projectPath, "worktree", "prune")
+	m.pruneScratch(projectPath, key)
 	return qBranch, nil
 }
 
@@ -912,6 +1167,11 @@ func CleanupStaleWorktrees(maxAge time.Duration, activeKeys map[string]bool, eve
 			if !e.IsDir() || activeKeys[e.Name()] {
 				continue
 			}
+			// The per-project scratch root lives under the worktree dir but is
+			// not a worktree — never treat it as a junk/partial worktree dir.
+			if e.Name() == scratchDirName {
+				continue
+			}
 			wt := filepath.Join(projDir, e.Name())
 			gitFile := filepath.Join(wt, ".git")
 			info, err := os.Stat(gitFile)
@@ -957,6 +1217,9 @@ func CleanupStaleWorktrees(maxAge time.Duration, activeKeys map[string]bool, eve
 				log.Printf("[WorktreeGC] remove %s: %v", wt, err)
 				continue
 			}
+			// The scratch dir is fresh by design (never aged with the worktree),
+			// so only an explicit prune tied to the worktree teardown removes it.
+			_ = os.RemoveAll(filepath.Join(projDir, scratchDirName, e.Name()))
 			removed++
 		}
 	}
@@ -1119,7 +1382,44 @@ func isForeignWorktree(wtPath string) bool {
 
 func worktreeClean(wtPath string) bool {
 	out, err := gitOut(wtPath, "status", "--porcelain")
-	return err == nil && strings.TrimSpace(out) == ""
+	if err != nil {
+		return false
+	}
+	s := strings.TrimSpace(out)
+	if s == "" {
+		return true
+	}
+	// An untracked .gitignore whose only lines are hydra scaffold ignores is
+	// daemon infrastructure (scratch scaffolding, graphify symlink ignore),
+	// not worker output — it must not block the reuse-reset, or every
+	// scaffolded worktree would stay pinned to a stale base on respawn.
+	if s != "?? .gitignore" && !strings.HasSuffix(s, "\n?? .gitignore") {
+		return false
+	}
+	return scaffoldIgnoreOnly(filepath.Join(wtPath, ".gitignore"))
+}
+
+// scaffoldIgnoreLines are the ignore lines hydra itself injects into a
+// worktree .gitignore (scratch scaffolding, graphify symlink ignore).
+var scaffoldIgnoreLines = map[string]bool{".scratch/": true, "graphify-out/": true, "graphify-out": true}
+
+// scaffoldIgnoreOnly reports whether the ignore file's meaningful lines are
+// all hydra scaffold lines.
+func scaffoldIgnoreOnly(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !scaffoldIgnoreLines[line] {
+			return false
+		}
+	}
+	return true
 }
 
 // autoCommitDirtyMain turns a dirty main checkout into a janitorial commit.

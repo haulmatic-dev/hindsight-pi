@@ -178,8 +178,8 @@ func TestVerdictRetainer_RetainPOSTsOnce(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("Method = %q, want POST", r.Method)
 		}
-		if !strings.HasPrefix(r.URL.Path, "/v1/default/banks/hydra/memories") {
-			t.Errorf("Path = %q, want /v1/default/banks/hydra/memories", r.URL.Path)
+		if !strings.HasPrefix(r.URL.Path, "/v1/default/banks/"+hindsight.BankID+"/memories") {
+			t.Errorf("Path = %q, want /v1/default/banks/%s/memories", r.URL.Path, hindsight.BankID)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode body: %v", err)

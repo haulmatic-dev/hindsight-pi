@@ -9,16 +9,21 @@
 # absent signals (zero verdict_retained events, no quarantine branches) were
 # rationalised as "nothing has triggered it yet" rather than checked.
 #
-# Three assertions, cheapest first:
+# Four assertions, cheapest first:
 #   1. The daemon's live exe resolves to the path we deployed to.
 #   2. Both binaries are newer than the deploy started.
 #   3. Optional: a caller-supplied marker string is present in the binary.
+#   4. Optional: md5 of the installed binaries equals the just-built artifacts
+#      (catches the 2026-10-06 failure: two 'successful' deploy chains left
+#      yesterday's binary installed while systemctl reported active).
 #
 # Usage:
-#   scripts/verify-deploy.sh [since-epoch] [marker-string] [marker-target]
+#   scripts/verify-deploy.sh [since-epoch] [marker-string] [marker-target] [build-dir]
 #     since-epoch    binaries must be newer than this (default: 10 minutes ago)
 #     marker-string   a string unique to the change, e.g. "concurrent request limit"
 #     marker-target   worker|daemon|both  (default: both)
+#     build-dir       directory containing the fresh hydra/worker builds;
+#                     when supplied, installed binaries must md5-match exactly
 #
 # Exit 0 = the running code is what we deployed. Exit 1 = it is not; the caller
 # must treat the deploy as failed rather than assume success.
@@ -28,6 +33,7 @@ set -uo pipefail
 SINCE="${1:-$(( $(date +%s) - 600 ))}"
 MARKER="${2:-}"
 MARKER_TARGET="${3:-both}"
+BUILD_DIR="${4:-}"
 
 HYDRA_HOME="${HYDRA_HOME:-/opt/dev-tools/var/hydra}"
 DAEMON_LINK="$HYDRA_HOME/bin/hydra"
@@ -113,6 +119,29 @@ if [ -n "$MARKER" ]; then
   esac
 else
   echo "  note no marker supplied — freshness only, cannot prove the change itself is present"
+fi
+
+# --- 4. Do the installed binaries exactly match what we just built? --------
+# Freshness proves newness, not content: a stale cp that exits 0 (or an install
+# to the wrong path followed by a lucky rebuild) passes assertion 2 while the
+# running code is unchanged. Exact md5 equality with the build output is the
+# only proof that what we built is what is installed.
+if [ -n "$BUILD_DIR" ]; then
+  for pair in "hydra:$DAEMON_LINK" "worker:$WORKER_LINK"; do
+    name="${pair%%:*}"; installed="${pair#*:}"
+    built="$BUILD_DIR/$name"
+    if [ ! -e "$built" ]; then
+      bad "build artifact $built missing — cannot md5-verify $name"
+      continue
+    fi
+    inst_md5="$(md5sum "$(readlink -f "$installed")" 2>/dev/null | awk '{print $1}')"
+    built_md5="$(md5sum "$built" 2>/dev/null | awk '{print $1}')"
+    if [ -n "$inst_md5" ] && [ "$inst_md5" = "$built_md5" ]; then
+      ok "$name installed md5 == build md5 ($built_md5)"
+    else
+      bad "$name md5 MISMATCH: installed=$inst_md5 build=$built_md5 — the install did not land"
+    fi
+  done
 fi
 
 if [ "$fail" -ne 0 ]; then

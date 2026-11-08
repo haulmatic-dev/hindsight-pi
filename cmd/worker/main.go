@@ -436,6 +436,12 @@ func main() {
 	// problem is debug-logged and never gates the worker result.
 	emitSessionToolMixStats(bead, os.Getenv("HYDRA_HOME"))
 
+	// Hindsight extension-connectivity sensor: detects the fail-open class
+	// where the hindsight pi extension died at bootstrap (or never registered
+	// its tools) and the agent skipped memory recall silently. Loud log +
+	// degrade counter only; never gates the result.
+	runHindsightSensor(config.Pi, os.Getenv("HYDRA_HOME"), bead)
+
 	// Calculate duration
 	duration := time.Since(startTime)
 	if result != nil {
@@ -509,19 +515,25 @@ func main() {
 	}
 
 	if exitCode == 0 && result != nil && result.Success {
-		if err := closeBeadFromWorker(bead, projectPath, config.Repo, "completed"); err != nil {
-			log.Printf("[WARN] Failed to close bead from worker (non-fatal): %v", err)
-		} else {
+		// Bounded close-hold (FR-004): a self-reported done:false verdict is an
+		// honest unmet claim — the worker must not close the bead as completed.
+		// closeWithHold holds the close (emit worker_close_held + close-hold-N
+		// label); at the cap the hold fails open and the close proceeds anyway.
+		if err := closeWithHold(bead, projectPath, config.Repo, "completed", result.Verdict); err == nil {
 			log.Printf("✅ Successfully closed bead %s with status: completed", beadID)
+		} else {
+			log.Printf("[WARN] Bead %s not closed from worker (close-hold or close failed, non-fatal): %v", beadID, err)
 		}
 	} else if workComplete {
 		// Auto-close guard: Pi may have timed out or exited non-zero, but files were
 		// modified and tests pass. Close the bead to prevent infinite retry loops.
 		log.Printf("🛡️  Auto-close guard: Pi exit=%d but work is complete (files modified + tests pass). Closing bead.", exitCode)
-		if err := closeBeadFromWorker(bead, projectPath, config.Repo, "completed"); err != nil {
-			log.Printf("[WARN] Failed to close bead from worker (non-fatal): %v", err)
-		} else {
+		// Bounded close-hold applies here too: files+tests may look complete,
+		// but a done:false verdict means the agent itself says otherwise.
+		if err := closeWithHold(bead, projectPath, config.Repo, "completed", result.Verdict); err == nil {
 			log.Printf("✅ Successfully closed bead %s with status: completed (auto-close guard)", beadID)
+		} else {
+			log.Printf("[WARN] Bead %s not closed from worker (close-hold or close failed, non-fatal): %v", beadID, err)
 		}
 	} else {
 		successStr := "false"
@@ -548,6 +560,11 @@ func main() {
 	}
 	log.Printf("✅ Worker completed for bead: %s (status: %s, duration: %v, attempts: %d)",
 		beadID, status, duration, attempts)
+
+	// Turn telemetry (FR-004): emit the typed worker_turns event on every
+	// worker exit — success AND failure — with {bead, turns, phase, outcome}.
+	emitWorkerTurnsEvent(os.Getenv("HYDRA_HOME"), os.Getenv("HYDRA_PROJECT"), string(beadID),
+		sessionTurns(), deriveBeadPhase(bead.Title), status)
 
 	// Report terminal state before exiting so the daemon registry reflects
 	// the outcome even if the scheduler misses the process exit.
@@ -1553,6 +1570,14 @@ func executeWithPi(
 		return result, fmt.Errorf("failed to start pi: %w", err)
 	}
 
+	// Brownfield subagent enrichment (FR-003): scoped to the bead's target
+	// files, fire once per bead, committed handoff doc feeds the
+	// loadChainContext injection below. Fail-open: an enrichment error never
+	// blocks the bead.
+	if _, _, enrichErr := enrichBeadClaims(bead, projectPath, cmd.Dir, enrichDefaultAgentRunner); enrichErr != nil {
+		log.Printf("[Enrich] %s: enrichment failed (non-blocking): %v", bead.ID, enrichErr)
+	}
+
 	// Frozen chain handoffs from prior phases live on the integration branch
 	// this worktree was cut from; embed them so this phase builds on verified
 	// outcomes instead of re-deriving them (prefix-stability programme #2).
@@ -1566,6 +1591,16 @@ func executeWithPi(
 	// is reserved for the multi-account router: single credential today, so
 	// it is logged empty rather than omitted, keeping the format stable.
 	log.Printf("[Worker] prompt_sha256=%s head8k_sha256=%s prompt_bytes=%d bead=%s account=", fullSha, headSha, len(prompt), bead.ID)
+
+	// Evidence-of-use probe (deep tier): record which intelligence services
+	// contributed before the agent invocation, so the evidence sweep can tell
+	// a healthy fleet from one whose Hindsight/CASS/graphify stack silently
+	// serves nothing.
+	hem := hindsightCtx.Get()
+	emitIntelUsageEvent(os.Getenv("HYDRA_HOME"), os.Getenv("HYDRA_PROJECT"), bead,
+		hem != nil && len(hem.Memories) > 0,
+		len(extras.CassBullets) > 0,
+		graphifyFallbackFor(projectPath))
 
 	// turn is non-nil only in rpc mode, where it owns the protocol state and the
 	// verdict. It stays nil in text mode so that path is byte-for-byte unchanged.
@@ -1793,7 +1828,7 @@ monitorLoop:
 				s.Input, s.Output, s.CacheReadInput, s.CacheCreation, s.FreshInput, s.Total)
 			reportTurnTokens(s)
 			result.TokensTotal = int64(s.Total)
-		result.TurnCount = turnCount
+			result.TurnCount = turnCount
 			result.TokensFresh = int64(s.FreshInput + s.Output)
 			result.TokensCacheRead = int64(s.CacheReadInput)
 			result.TokensCacheCreation = int64(s.CacheCreation)
@@ -1997,6 +2032,7 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 		"--offline",
 	}
 	if sessionID != "" && sessionDir != "" {
+		quarantinePoisonedSessions(sessionDir)
 		if os.Getenv("HYDRA_RESUME_SESSION") == "1" && sessionHasFiles(sessionDir) {
 			// Resume the orphan's existing session (Self-heal recovery A).
 			// --session requires the session to exist; sessionHasFiles guards
@@ -2066,10 +2102,10 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 	cmd := exec.Command(piPath, args...)
 	cmd.Dir = path
 
-	// Create new process group
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	// Own process group + PDEATHSIG: if this worker dies without cleanup, the
+	// kernel kills Pi instead of leaving it reparented to PID 1 (see
+	// sysprocattr_linux.go).
+	cmd.SysProcAttr = piSysProcAttr()
 
 	// Prepare environment
 	envVars := os.Environ()
@@ -2122,6 +2158,12 @@ func buildPiCommand(bead types.Bead, piConfig PiConfig, projectPath string, hind
 	envVars = append(envVars, fmt.Sprintf("HYDRA_AGENT_TYPE=%s", bead.Type))
 	envVars = append(envVars, fmt.Sprintf("HYDRA_BEAD_TYPE=%s", bead.Type))
 
+	// Recall once per session, not per turn: the daemon already pre-queries
+	// Hindsight once per bead (hindsightContextFuture), so the hindsight-pi
+	// extension's every-turn recall is redundant for workers and costs an API
+	// round-trip (~1-4.6s) per agent turn on long beads.
+	envVars = append(envVars, "HINDSIGHT_INJECTION_FREQUENCY=first-turn")
+
 	cmd.Env = envVars
 
 	// Report the session id to the daemon so a replacement worker can resume it.
@@ -2168,7 +2210,116 @@ func sessionHasFiles(dir string) bool {
 	return err == nil && len(entries) > 0
 }
 
+// poisonedSessionThresholdBytes: a session JSONL beyond this can never fit a
+// model context window again (2026-10-08 incident: a compaction-vetoed session
+// grew to 138MB / 26.4M tokens = 2014% of the window; every resumed turn then
+// failed on context-overflow while re-POSTing the full transcript — 132
+// executions, ~148GB of request bodies, zero completions). Resuming such a
+// session is pure token burn, so we quarantine it and let the worker start
+// fresh. The binding constraint is OpenRouter's gateway body cap: 8MB
+// (confirmed platform-level — opencode#33589 and independent reports). Pi's
+// compaction summarize call sends ~the full context; beyond 8MB the summarize
+// request itself is rejected, making the session permanently unrecoverable.
+// 8.5MB sits just above that wall with margin. Below it, pi's overflow
+// compact-and-retry can still save the session, so we must NOT quarantine —
+// that would kill recoverable work (a 7MB threshold was considered and
+// rejected for this reason, 2026-10-10).
+const poisonedSessionThresholdBytes = 8*1024*1024 + 512*1024 // 8.5MB
+
+// quarantinePoisonedSessions moves oversize session JSONL files out of
+// sessionDir into <sessions-root>/.poisoned-quarantine/ so resume logic never
+// picks them up again. Fail-open: any error leaves files untouched.
+//
+// Two signals required, both empirically grounded (2026-10-09 audit of 1,232
+// session files): (1) size > 20MB — the healthy population tops at ~8.5MB,
+// the six poisoned sessions sat at 89-159MB; (2) ZERO compaction entries —
+// every poisoned session had compaction vetoed (0 entries), while healthy
+// multiturn sessions contain compaction markers. The second signal protects
+// legitimately long tasks: pi's session file is append-only, so a productive
+// session with many successful compactions would eventually cross 20MB while
+// its live context is perfectly healthy.
+func quarantinePoisonedSessions(sessionDir string) {
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		fi, err := e.Info()
+		if err != nil || fi.Size() <= poisonedSessionThresholdBytes {
+			continue
+		}
+		src := filepath.Join(sessionDir, e.Name())
+		if sessionHasCompaction(src) {
+			continue // compacting fine — large but healthy
+		}
+		dstDir := filepath.Join(filepath.Dir(sessionDir), ".poisoned-quarantine")
+		if err := os.MkdirAll(dstDir, 0750); err != nil {
+			continue
+		}
+		dst := filepath.Join(dstDir, filepath.Base(sessionDir)+"_"+e.Name())
+		if err := os.Rename(src, dst); err != nil {
+			continue
+		}
+		log.Printf("[Worker] Quarantined poisoned session %s (%d bytes, no compactions) -> %s", src, fi.Size(), dst)
+	}
+}
+
+// sessionHasCompaction reports whether the session log contains at least one
+// completed compaction entry — proof the context is being managed. Streams the
+// file; stops at first hit. Any read error returns true (assume healthy:
+// quarantine must fail open).
+func sessionHasCompaction(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	marker := []byte(`"type":"compaction"`)
+	buf := make([]byte, 1<<20)
+	var overlap []byte
+	for {
+		n, err := f.Read(buf)
+		if n > 0 {
+			chunk := append(overlap, buf[:n]...)
+			if bytes.Contains(chunk, marker) {
+				return true
+			}
+			// Keep a tail slice so a marker split across reads is still found.
+			if len(marker) < len(chunk) {
+				overlap = chunk[len(chunk)-len(marker):]
+			} else {
+				overlap = chunk
+			}
+		}
+		if err != nil {
+			return false // EOF or read error without a hit
+		}
+	}
+}
+
 // buildPiPrompt builds the prompt message for Pi agent
+// fixPreImplGuidance is the mandatory pre-implementation cross-verification
+// for fix/bug beads (thok-class false closure, 2026-10-01 audit): a fix must
+// first prove the defect exists on the current integration base and that the
+// fix does not already exist elsewhere, before any code is written.
+const fixPreImplGuidance = "PRE-IMPLEMENTATION CROSS-VERIFICATION (before writing any code):\n" +
+	"A1. Confirm the defect EXISTS on the current integration base: reproduce it on a clean checkout/worktree of origin/<base>. Quote the failing evidence in your notes.\n" +
+	"A2. Not reproducible? STOP — do not implement. Verify-first close citing the reproduction output (the defect may be already fixed, mis-diagnosed, or environment-specific).\n" +
+	"A3. Check the fix does not already exist elsewhere: grep the tree for the mechanism you are about to add (function names, error strings, config keys). Duplicated machinery is worse than none (the #458 duplicate-method class).\n"
+
+// preCloseGuidance is the mandatory pre-close cross-verification before a
+// done verdict: re-prove the original defect, inspect the actual diff, and
+// map every acceptance criterion to an executed check. Applies to fix/bug
+// beads AND feature beads (a claim not in the diff is a lie even when tests
+// pass — the #85 silent-no-op class).
+const preCloseGuidance = "PRE-CLOSE CROSS-VERIFICATION (before HYDRA_VERDICT done):\n" +
+	"B1. Re-run the ORIGINAL reproduction against your final worktree (narrowest failing test, not full suite) — it must now pass; quote the before/after.\n" +
+	"B2. Inspect your own diff (git diff origin/<base>...HEAD --stat, spot-read the hunks): every change your verdict/summary claims must be literally IN the diff. A claim not in the diff is a lie even when tests pass.\n" +
+	"B3. Map each acceptance criterion to at least one executed check (test run, command output); list any AC you could NOT verify as NOT VERIFIED.\n"
+
 // phaseGuidance returns phase-specific working doctrine for a bead, keyed on
 // the TDD-phase title prefix task-breakdown emits (RED:/GREEN:/REFACTOR:) and
 // on fix-type beads. Empty for phases with no special discipline.
@@ -2179,27 +2330,34 @@ func phaseGuidance(bead types.Bead) string {
 		return "RED-phase discipline:\n" +
 			"- Write tests that pin BEHAVIOR from the acceptance criteria, never implementation details.\n" +
 			"- Run the tests and verify each fails for the RIGHT reason — the missing feature — not a compile error or typo. Quote the failure output.\n" +
-			"- Do NOT implement the feature in this task."
+			"- Do NOT implement the feature in this task.\n" +
+			"- HARD RULE: your changed files must be *_test.go (plus test fixtures/data). Creating or editing implementation files (production code) during RED is doing GREEN's job — the close gate rejects RED closes whose tests all pass, and implementation work written now risks being quarantined with the chain. If the behavior you were told to test already exists, close with the done verdict and summary token \"superseded\" citing the existing code."
 	case strings.HasPrefix(title, "GREEN:"):
 		return "GREEN-phase discipline:\n" +
 			"- You are the implementer: EDIT the target files now. Ending this task with only a plan or analysis is a failure — the close gate rejects tasks that changed nothing.\n" +
 			"- Implement the MINIMUM that makes the failing tests pass. No speculative abstractions, no extra options, no gold-plating.\n" +
-			"- Run the tests and quote the passing output.\n" +
+			"- Run the narrowest test that proves your change works and quote the passing output.\n" +
 			"- If a test itself looks wrong, say so explicitly in your summary instead of contorting the implementation to satisfy it."
 	case strings.HasPrefix(title, "REFACTOR:"):
 		return "REFACTOR-phase discipline:\n" +
-			"- Behavior must not change. Run the tests BEFORE and AFTER your change; quote both outputs.\n" +
+			"- Behavior must not change. Run the narrowest test BEFORE and AFTER your change; quote both outputs.\n" +
 			"- Improve names, structure, and duplication only.\n" +
 			"- If you find a real bug, do NOT fix it here: record it with `cm add` and finish the refactor unchanged."
-	case strings.HasPrefix(title, "FIX:") || strings.EqualFold(bead.Type, "fix"):
-		return "FIX discipline — verify first, then root-cause; follow strictly:\n" +
+	case strings.HasPrefix(title, "FIX:") || strings.EqualFold(bead.Type, "fix") || strings.EqualFold(bead.Type, "bug"):
+		return fixPreImplGuidance +
+			"FIX discipline — verify first, then root-cause; follow strictly:\n" +
 			"0. VERIFY-FIRST (before ANY redo): re-run the original task's verification commands against the worktree you inherited. If they all pass, the work was already done — close immediately citing that evidence in your HYDRA_VERDICT and do NOT modify files. Only redo what verification proves broken. The original attempt may have recorded a done verdict (see the original-verdict block in this prompt, if present) — an exit-code failure does not mean the work is bad.\n" +
 			"1. REPRODUCE: run the failing command/test first; capture the exact error text.\n" +
 			"2. ISOLATE: form ONE hypothesis; design the smallest experiment that can disprove it (a single command, a tiny probe). Do not fix anything yet.\n" +
 			"3. VERIFY the hypothesis with that experiment. Wrong? Form the next hypothesis from the new evidence — never stack two unverified guesses.\n" +
 			"4. FIX the proven root cause, not the symptom. Silencing an error, skipping a test, or widening a timeout is a symptom fix — reject it unless the evidence shows it IS the root cause.\n" +
 			"5. PROVE: re-run the originally failing command and quote its passing output.\n" +
-			"Any prior-failure text in this prompt is evidence for step 1 — read it first."
+			"Any prior-failure text in this prompt is evidence for step 1 — read it first.\n" +
+			preCloseGuidance
+	case strings.HasPrefix(title, "FEATURE:") || strings.EqualFold(bead.Type, "feature") || strings.EqualFold(bead.Type, "fr"):
+		return "FEATURE discipline:\n" +
+			"- Check the mechanism does not already exist before adding it: grep the tree for function names, error strings, config keys (the #458 duplicate-method class — two PRs adding the same method).\n" +
+			preCloseGuidance
 	}
 	return ""
 }
@@ -2237,7 +2395,6 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 		piConfig = piConfigs[0]
 	}
 	budget := piConfig.turnBudget()
-	reminderCadence := piConfig.reminderCadence()
 
 	var promptParts []string
 
@@ -2265,6 +2422,12 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 	promptParts = append(promptParts,
 		"WORKSPACE: your cwd is your git worktree. NEVER write files outside it — never cd to the main checkout, never use absolute paths into it. All edits belong in cwd.")
 
+	// Repo hygiene (fmsfe-b8h wedge): agents scaffolded embedded git repos
+	// (git init / go mod init) inside worktree subdirs, killing the close-time
+	// commit with exit 128 AFTER the full worker turn succeeded.
+	promptParts = append(promptParts,
+		"REPO HYGIENE: NEVER run `git init`, `git clone`, or `go mod init` inside a subdirectory of your workspace — the workspace root is already a git repo. If you need to bootstrap a new project, ask for a new bead/repo instead.")
+
 	// Turn economy (session forensics 2026-08-17): every turn re-bills the
 	// full transcript (16K -> 244K over one bead = 25M tokens, 24.8M cache
 	// reads). The model defaults to one tool call per turn (measured 1.00
@@ -2276,20 +2439,16 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 		"TURN ECONOMY: every turn re-sends the entire conversation to the model — turns are the cost multiplier.\n"+
 			"- Batch independent tool calls in the same message (multiple reads, one search+read pair, etc.).\n"+
 			"- Prefer one comprehensive command over a probe sequence (e.g. one script that gathers everything over five separate calls).\n"+
-			"- Do NOT re-run the full test suite between micro-edits: run the narrowest failing test until it passes, then the full suite ONCE at the end.\n"+
+			"- Do NOT re-run the full test suite between micro-edits: run the narrowest failing test until it passes. The daemon runs the full suite after you finish.\n"+
 			"- Read files at the offsets you need instead of re-reading whole files.")
 
 	// Turn horizon (2026-08-22): the economy block says turns are expensive
 	// but implies infinite runway; 200-turn grinds (20M tokens) resulted. An
 	// explicit budget makes the model pace itself and converts wandering
 	// into an early honest unmet verdict instead of a grind to the wall.
-	reminderPhrase := "every turn"
-	if reminderCadence > 1 {
-		reminderPhrase = fmt.Sprintf("every %d turns", reminderCadence)
-	}
 
 	promptParts = append(promptParts,
-		fmt.Sprintf("TURN BUDGET: plan for ~%d turns total. Track your own count. If you pass %d without the narrow test green: stop exploring, commit whatever progress exists, and emit HYDRA_VERDICT with done:false and your findings — an honest unmet verdict is a good outcome; grinding without convergence is not. When running tests, pipe output through tail (`... 2>&1 | tail -30`) — full test output floods the context every turn. You will receive a non-binding \"You have used N of ~%d turns\" reminder %s.", budget, budget, budget, reminderPhrase))
+		fmt.Sprintf("TURN BUDGET: plan for ~%d turns total. Track your own count. If you pass %d without the narrow test green: stop exploring, commit whatever progress exists, and emit HYDRA_VERDICT with done:false and your findings — an honest unmet verdict is a good outcome; grinding without convergence is not. When running tests, pipe output through tail (`... 2>&1 | tail -30`) — full test output floods the context every turn. Track your own count — no automated reminder will arrive mid-run.", budget, budget))
 
 	// Daemon-owned gates (FR-002): when the project delegates verification to
 	// the daemon, the prompt redirects the agent away from suite babysitting.
@@ -2297,7 +2456,7 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 		promptParts = append(promptParts,
 			"VERIFICATION OWNERSHIP: the daemon runs the project's test/lint/build gates after you finish and re-verifies on every completion. Do NOT run the full test suite or coverage commands yourself — fix code, run only the narrowest test that proves your change, and end your turn. If a previous gate failed, its parsed summary and raw log path are in this bead's description; start from that evidence.")
 		promptParts = append(promptParts,
-			"VERIFY LOOP BUDGET: the daemon runs the gate commands after you finish; during your run, each full gate command may be executed at most 3 times (once RED, once GREEN, once final). Between edits, use the cheapest scoped check your project skills name (e.g. a single-suite run or a typecheck), never the full suite.")
+			"Between edits, use the cheapest scoped check your project skills name (e.g. a single-suite run or a typecheck) — the same rule as TURN ECONOMY above. This is your VERIFY LOOP BUDGET.")
 	}
 
 	// Closure protocol (PRD worker-park-and-resume Part 3): the turn does not
@@ -2306,9 +2465,10 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 	promptParts = append(promptParts,
 		`CLOSURE PROTOCOL: end your final message with exactly one verdict block.
 When done:
-HYDRA_VERDICT: {"done": true, "ac_met": [...], "ac_unmet": [], "files_changed": [...], "verification": [{"cmd": "...", "result": "..."}]}
+HYDRA_VERDICT: {"done": true, "summary": "brief outcome — include one of docs-only | superseded | chain-deferred-to-root here if your diff is empty", "ac_met": [...], "ac_unmet": [], "files_changed": [...], "verification": [{"cmd": "...", "result": "..."}]}
 When you cannot complete it:
 HYDRA_VERDICT: {"done": false, "summary": "what was done and what remains"}
+An empty diff is accepted ONLY with done:true and a summary containing exactly one of: docs-only (you changed only docs), superseded (the work already exists upstream), chain-deferred-to-root (integration deferred). Otherwise the bead reopens.
 A turn ending without this block is treated as unfinished and you will be re-prompted.`)
 
 	// Chain handoff: the next phase of the chain reads this bead's outcome
@@ -2355,7 +2515,7 @@ A turn ending without this block is treated as unfinished and you will be re-pro
 		promptParts = append(promptParts,
 			fmt.Sprintf("CODE DISCOVERY (mandatory): run `graphify query %q --budget 2000` BEFORE exploring files.", keywords),
 			"- If graphify-out/graph.json is missing in cwd, fall back to `rg`.",
-			"- Reuse the existing target-file parsing; do not add a second parser.")
+			"- Prefer the bead's declared Files:/metadata target files over re-deriving targets by parsing descriptions.")
 	}
 
 	// Anti-consultant guard: implementation-type beads must produce file
@@ -2398,6 +2558,27 @@ A turn ending without this block is treated as unfinished and you will be re-pro
 		promptParts = append(promptParts, "\nRelevant past executions (deterministic order):")
 		for _, c := range stableByContentHash(contents) {
 			promptParts = append(promptParts, "- "+c)
+		}
+	}
+
+	// Mental models: living summaries of the bank (validation patterns,
+	// scheduling rules, tooling conventions). Cached server-side and refreshed
+	// after consolidation, so this is stable guidance, not raw recall. Total
+	// budget capped the same way as memories — deterministic order, content
+	// hash rank — so prompts stay byte-stable for the pi provider cache.
+	if hindsightContext != nil && len(hindsightContext.MentalModels) > 0 {
+		modelContents := make([]string, 0, len(hindsightContext.MentalModels))
+		for _, mm := range hindsightContext.MentalModels {
+			modelContents = append(modelContents, truncateString(mm.Name+": "+mm.Content, 700))
+		}
+		promptParts = append(promptParts, "\nKnown mental models (distilled project knowledge, deterministic order):")
+		total := 0
+		for _, c := range stableByContentHash(modelContents) {
+			if total+len(c) > 4000 {
+				break
+			}
+			promptParts = append(promptParts, "- "+c)
+			total += len(c)
 		}
 	}
 
@@ -2571,6 +2752,16 @@ func queryHindsightForContext(
 	} else {
 		log.Println("ℹ️ No relevant memories found in Hindsight")
 		streamLog(mcpClient, "info", "No relevant memories found in Hindsight")
+	}
+
+	// Mental models: cheap list read (no LLM); fail-open. Injected into the
+	// pi prompt by buildPiPrompt. Models with empty content (never refreshed)
+	// are filtered out client-side.
+	if models, err := hindsightClient.GetMentalModels(ctx); err != nil {
+		log.Printf("ℹ️ Mental models unavailable (fail-open): %v", err)
+	} else if len(models) > 0 {
+		enrichment.MentalModels = models
+		log.Printf("🧠 %d mental models attached", len(models))
 	}
 
 	return enrichment

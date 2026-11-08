@@ -21,6 +21,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
 // ContextPackVersion is the pack schema version. Bump on breaking schema
@@ -45,6 +47,16 @@ const (
 // below the threshold counts as unmappable and makes the requirement
 // scout-eligible.
 const PackScoutConfidenceThreshold = 0.7
+
+// DefaultMaxPackTokens is the default estimated-token budget for a context
+// pack (chars/4). Configurable via context_pack.max_pack_tokens.
+const DefaultMaxPackTokens = 40000
+
+// PackMemberDigest is one chain member's one-line digest ("- <id>: <title>").
+type PackMemberDigest struct {
+	ID     types.BeadID `json:"id"`
+	Digest string       `json:"digest"`
+}
 
 // PackFileAnchor maps a requirement term to the file that implements it.
 // Populated best-effort from the graphify symbol index (provenance
@@ -71,7 +83,13 @@ type ContextPack struct {
 	SpecPattern  string           `json:"spec_pattern,omitempty"`
 	TargetDirs   []string         `json:"target_dirs,omitempty"`
 	Files        []PackFileAnchor `json:"files,omitempty"`
-	Provenance   string           `json:"provenance"`
+	// MemberDigests carries one one-line digest per chain member so every
+	// spawned worker sees the chain's shape without re-fetching beads.
+	MemberDigests []PackMemberDigest `json:"member_digests,omitempty"`
+	// Footer lists elided bead IDs ("elided: id1, id2, ...") after token
+	// budget trimming; empty when nothing was elided.
+	Footer     string `json:"footer,omitempty"`
+	Provenance string `json:"provenance"`
 }
 
 // ParseContextPack unmarshals a bead's AgentContext string. Returns an error
@@ -88,6 +106,61 @@ func ParseContextPack(raw string) (*ContextPack, error) {
 		return nil, nil // not one of ours (e.g. a human's agent_context)
 	}
 	return &p, nil
+}
+
+// packTokenEstimate estimates the pack's token size as chars/4.
+func packTokenEstimate(pack *ContextPack) int {
+	raw, err := json.Marshal(pack)
+	if err != nil {
+		return 0
+	}
+	return len(raw) / 4
+}
+
+// nextElidable returns the index of the first member digest that may be
+// elided — any digest other than the current bead's — or -1 when only the
+// current bead's digest remains.
+func nextElidable(digests []PackMemberDigest, current types.BeadID) int {
+	for i, d := range digests {
+		if d.ID != current {
+			return i
+		}
+	}
+	return -1
+}
+
+// elideFooter renders the "elided: id1, id2, ..." footer listing the elided
+// bead IDs in trim order.
+func elideFooter(elided []string) string {
+	return "elided: " + strings.Join(elided, ", ")
+}
+
+// ApplyPackTokenBudget trims member digests oldest-first until the pack's
+// estimated token size (chars/4) fits the budget. The current bead's own
+// digest is never elided. Returns the elided bead IDs in trim order and
+// writes the footer ("elided: id1, id2, ..."); empty result = no footer.
+// budget <= 0 means the default (DefaultMaxPackTokens).
+func ApplyPackTokenBudget(pack *ContextPack, budget int, current types.BeadID) []string {
+	if pack == nil {
+		return nil
+	}
+	if budget <= 0 {
+		budget = DefaultMaxPackTokens
+	}
+	pack.Footer = ""
+	var elided []string
+	for packTokenEstimate(pack) > budget {
+		idx := nextElidable(pack.MemberDigests, current)
+		if idx == -1 {
+			break // only the current bead's digest remains; never elided
+		}
+		elided = append(elided, string(pack.MemberDigests[idx].ID))
+		pack.MemberDigests = append(pack.MemberDigests[:idx], pack.MemberDigests[idx+1:]...)
+	}
+	if len(elided) > 0 {
+		pack.Footer = elideFooter(elided)
+	}
+	return elided
 }
 
 // packDirsSkipped are directory names never walked for spec patterns or

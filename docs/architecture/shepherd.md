@@ -58,10 +58,14 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `verdict_retained` | a judgment was stored in Hindsight | `kind` (`adjudication`/`failed_close`), verdict or exit code |
 | `satisfied_closed` | Pan closes a bead whose acceptance criteria are already met on the working branch | `tokens` (`0`) |
 | `retry_exhausted` | a bead exhausts `default_retries` and has no live worker or registry row | `attempts` |
+| `disk_cleanup_run` | disk usage ≥ watermark (85% on `/` by default): the guard ran a `systemd-tmpfiles --clean` pass (hourly cooldown, fail-open) | `Detail` carries used%/path/watermark |
 | `spawn-suppressed-closed` | a queued retry spawn is aborted because the bead became terminal while in the retry queue | `status` |
 | `spawn_blocked_type_missing` | fail-closed spawn preflight: the bead's effective `Type` is empty (post-restart reconstruction, fmsfe-a2u 2026-09-30) — an unverifiable type must never reach a worker; the bead stays open and is re-checked next tick | `bead` |
 | `spawn_blocked_human_gate` | fail-closed spawn preflight: store-truth `Type` is a human gate/container (`approval-gate`/`approval`/`epic`/`hold`, or a `hold` label) even though the scheduler's in-memory copy looked executable | `bead` |
 | `spawn_blocked_identity_missing` | spawn-funnel publish-identity preflight: the bead owner's PAT is unresolved (non-daemon-owned project) — spawn blocked, auto-resumes when the PAT lands; transient resolver errors fail open | `bead` |
+| `spawn_blocked_git_ownership` | spawn-funnel git-access preflight: git refuses the project repo as the hydra user (exit 128 "dubious ownership") — spawn blocked, auto-resumes once a human adds the repo to the owner's `safe.directory`; detail carries the exact remediation command | `bead` |
+| `git_ownership_unusable` | startup preflight: `git rev-parse` as the hydra user hit a dubious-ownership refusal on a project repo — project auto-parked (fail closed); detail carries the exact `git config --global --add safe.directory` command | `project` |
+| `spawn_failed_git_ownership` | spawn-time worktree setup failed with a dubious-ownership refusal — bead hard-parked with the distinct `git-ownership` label (not `worktree-unavailable`); detail carries the exact fix command | `bead` |
 | `integration-failed` | singleton integrate/push failed verification (merge not contained in HEAD, or push rejected / remote ref did not advance) — bead reopened with `integration-failed` label, worktree preserved. Non-fast-forward rejections get one fetch + merge + retry (`PushBranchWithNonFFRecovery`) before this fires | `stage` (`integrate`/`push`), `error` (exact remote stderr) |
 | `integration_retest` | integration-retest stage (Tier A, opt-in via `integration_retest.enabled`) rechecked an `integration-failed`/`integration-exhausted` bead: `merge-tree --write-tree origin/<base> hydra/wt-\*` proved the conflict state, gates ran in a scratch worktree off `origin/<base>` (never the user's main checkout), and the bead either landed via the dogfood PR path (`result: landed`, bead closed, labels stripped), stayed parked (`result: conflict` / `gates-failed`), or hit the attempt cap | `result` (`landed`/`conflict`/`gates-failed`), `pr` (landed only) |
 | `close-accepted-already-integrated` | verified-close accepted a bead whose worktree HEAD is a strict ancestor of the main checkout HEAD — the singleton integrate landed locally but the push was rejected (hydra-7k1 2026-09-16: non-FF push failure → reopened bead → empty-diff loop). Emitted once per accepted close; the publisher ticker remains responsible for landing the working branch on origin | `reason` (`worktree_head_ancestor_of_main`) |
@@ -71,13 +75,77 @@ event surfaces as `type:"unknown"` rather than vanishing.
 | `bead_store_restore_failed` | snapshot restore could not verify recovery (no snapshot, copy error, re-list failure, or count still collapsed) — project stays blocked | `project_path`, `snapshot`, `error` |
 | `pan_judge_degraded` | Pan's pi judge invocation failed `judgeDegradedThreshold` (5) times in a row (re-fires every 25 further failures) — every judgment is silently running on deterministic rules. Added 2026-09-23 after 6494/6494 invocations failed across Aug–Sep with zero signal | `consecutive_failures` |
 | `pan_judge_recovered` | a judge invocation succeeded after a degraded outage | `outage_failures` |
+| `agent_verdict` | adversarial close gate (validation.agent_verifier, bounded veto) scored a close: `pass` (zero blockers, score ≥ min_score — close ships) or `reject` (blockers or score below threshold — close reopens with findings injected into the bead description, riding the standard max_rounds escalation) | `score`, `blockers`, `nits` |
+| `adversary_churn` | the verifier produced a DIFFERENT blocker set on a retry round — the infinite-nitpick signature; the close ships with dissent (`closed-with-findings` label) instead of burning remaining rounds | `score`, `blockers`, `nits` |
+| `adversary_error` | the verifier itself failed (pi error, timeout, unparseable verdict, diff-evidence failure) — FAILS OPEN: the close proceeds; the event makes the silent-skip class visible | `reason` (`verifier`/`parse`/`diff-evidence`) |
+| `credential_recovered` | a project auto-parked by credential preflight passed the same repo-level probe again; park cleared automatically by the 10-minute recovery sweep (no daemon restart or manual unpark needed) | — |
+| `zero_token_stall_detected` | Charon found a worker with state=working, tokens_so_far=0 and age>15m — the session never completed a turn (fresh heartbeats alone made the 2026-10-20 stall invisible); surfaced to the Pan digest with the `kill-stalled-worker` repair | `bead`, `pid`, `age_minutes` |
+| `rogue_pi_detected` | Charon found a `pi` process outside hydra.service, untracked, older than 2h — nothing owns it (live fixture: bare-pi interactive launch burning a core through every daemon restart); surfaced to the Pan digest with the `kill-rogue-pi` repair, deduped per PID | `pid`, `cmdline`, `cgroup`, `age_minutes` |
+| `publish_pr_waiting` | tier policy left an integration PR open awaiting human merge; emitted once per branch tip (later ticks skip while the tip is unchanged). Replaces the `publish_push_rejected`/`pr_merge_failed` noise that routine waiting generated | `pr_url`, `branch` |
+| `close_gate_junk_dropped` | FR-003 close-time junk gate auto-dropped junk artifacts once (committed junk removed from the index with a single removal commit, files kept on disk and FR-001 ignore lines injected; staged-only junk unstaged) and the close proceeds | paths verbatim (≤50) |
+| `close_gate_rejected` (reason `junk-artifacts` / `verification-failed` / `closed-vs-quarantined` / `dep-open`) | close-time hard gates in `runCloseHardGates` rejected a close: junk re-committed after two auto-drops (distinct `junk-artifacts` reason/label, escalation ladder untouched), a failing verification command (`verification-failed`), a still-quarantined worktree (`closed-vs-quarantined`), or an open dependency (`dep-open`) | gate evidence in `Detail` |
 
 Read programmatically with `ReadEvents(path)` (torn-line tolerant; a missing
 file is an empty stream, not an error).
 
 ---
 
+## 1a. Adversarial close gate (bounded veto) — `adversary_gate.go`
+
+Last gate in `verifyBeforeClose`, after the deterministic gates (execution
+re-run, diff, scope). A pi-backed reviewer (same headless invocation shape
+as Pan's judge) scores the diff against the bead's acceptance criteria.
+
+Design invariants:
+
+- **Bounded veto.** Ship condition: zero BLOCKER findings AND
+  `score >= min_score` (default 0.8). NIT findings never block — an
+  unconstrained adversary is an infinite nitpick generator, so the veto is
+  deliberately finite.
+- **Anti-nitpick rubric.** The prompt demands every BLOCKER cite a violated
+  acceptance criterion or a reproducible defect; uncited findings are NITs.
+- **Rounds are shared.** Rejections go through `rejectClose` — the same
+  max_rounds (default 3) escalation path as verified-close, with blocker
+  feedback appended to the bead description so the retry is not blind.
+- **Churn tripwire.** A different blocker set on a retry round = adversary
+  manufacturing work; the close ships with dissent recorded
+  (`adversary_churn` event + `closed-with-findings` label) so the
+  blocker-vs-churn ratio is measurable per class.
+- **Fail-open on itself.** Verifier errors/timeouts/parse failures emit
+  `adversary_error` and the close proceeds — optional tooling never wedges
+  the pipeline.
+- **Class-gated.** Default classes: `implement`, `feature`, `refactor`.
+  Test/docs/syntax phases are execution-gated already; paying an LLM call
+  there finds nothing.
+
+Config (`validation.agent_verifier`): `enabled` (default false), `min_score`,
+`classes`, `max_diff_bytes` (32KB), `timeout_seconds` (300), `provider`,
+`model`, `pi_path`.
+
+## 1b. Mirror health SLO check — `scripts/mirror-health-slo.sh`
+
+After any direct-sqlite / emergency store repair, verify the mirror is clean
+before trusting file-based reports
+(`docs/PRDs/mirror-health-prd-20261022.md` runbook line):
+
+```sh
+scripts/mirror-health-slo.sh
+```
+
+Read-only; never opens, repairs, or mutates stores. Exits 0 iff the daemon
+event stream (`$HYDRA_EVENTS_DIR`, default `/opt/dev-tools/var/hydra/.hydra-events`)
+shows **0 `mirror_drift_detected`** events in the last 24h **AND** at least one
+`mirror_audit_clean` event per registered store in the same window. Window
+override: `MIRROR_SLO_MAX_AGE_HOURS`. Infrastructure failures (missing tools,
+unreadable event dir) exit 2 — fail-closed: a breach is a signal, not a blocker.
+
+FR-003 close-time junk gate (`gate_junk.go`): the close evaluates the junk changed set — committed paths at HEAD unioned with staged paths, classified by `internal/junksig` structural signatures — and auto-drops junk once per bead generation (committed: `git rm --cached` + single removal commit + ignore-line injection, file kept on disk; staged-only: unstaged, no commit, the removal commit would die on a clean tree). A durable `junk-drop-N` label counts drops; after 2 drops, a further re-committed junk generation is rejected with the distinct `junk-artifacts` reason/label — never overloaded onto the off-scope warn ladder, which stays warn-only. Every git probe failure is fail-open.
+
 ## 2. Close verdicts & quarantine (A1) — `bead_closer.go`, `worktree_manager.go`, `chain_completion_*.go`
+
+Spec-infeasible decision packets (close-path-truth FR-004, `pan_decision_packet.go`): the stale-filing sweep tick also evaluates every listed bead for a structurally unsatisfiable close gate. A non-terminal bead whose durable `gate-fp-<fp8>-<N>` label reaches N ≥ 3 (same-fingerprint `work` rejections; the counted form is written by `trackVerificationFingerprint`, bare `gate-fp-<fp8>` counts as 1), carries no `infra-reject-*`/`infra-requeue-*` marker, and whose latest recorded worker verdict says `"done": false` is labeled `spec-infeasible` and files exactly one `decision_request` event per bead (fields: `command` from `verificationCommandFor`, `fingerprint` fp8, `gate_output` capped at 4 KB, `measurements` parsed from the jest coverage table). A human decision label `spec-decided:<choice>` — or any status change — clears the candidacy; while a packet is pending the `clear-escalation` Pan repair refuses with `clear-escalation: <id> is spec-infeasible; awaiting spec-decided` instead of wiping the mark. All probes fail open; the packet never gates the sweep.
+
+Orphan recovery (Charon) treats a bead whose close is running daemon gates as alive: the artifact-first gate marker (`$HYDRA_HOME/gates/<project>/<bead>/<gate>.json` with `status=running`, live writer PID, started <45m ago) is written BEFORE the per-project gate lock is taken, so a close queued behind a long sibling gate (`go test ./...`) no longer looks orphaned and gets respawned mid-close (hydra-kf2t 2026-09-27, hydra-mo66 2026-10-06). The fleet digest applies the same probe (`GateCloseInProgress`) when counting `orphanclaims`, so mid-close beads do not re-fire the P0 "orphaned claims" campaign anomaly (hydra 2026-10-06, 6 phantom orphans). Gate artifacts record the gate child's PID, not the daemon's — a daemon-PID marker stays "alive" while the daemon lives and could never be finalized as interrupted.
 
 Singleton close is fail-closed end to end (2026-09-06, hydra-xnx incident). FR-010
 PR-first close contract: when the project has a remote configured, the
@@ -194,8 +262,40 @@ human never answered wedged its scheduler slot indefinitely (measured
 91h–290h). A periodic scanner (`EscalationTTLScanner`, 1h cadence + once at
 startup) demotes non-terminal beads whose `escalated` label has aged past the
 TTL: label swapped for `escalation-expired`, typed `escalation_expired` event,
-bead returns to the ready queue. `in_progress` beads are skipped so a live
-worker finishing under the stay is never raced. Default 72h; 0 disables.
+bead returns to the ready queue. Default 72h; 0 disables.
+
+**Wedge-aware escalation handling (2026-10-05, srv-jobfile stall).** An
+escalated bead is `in_progress` with no worker *by construction*, which made
+the TTL scanner's blanket in_progress skip dead code — it had never demoted a
+single bead. The scanner now skips only in_progress beads with a **live
+registry worker** (`SetLiveWorkerFunc`; nil probe = fail-closed legacy skip)
+and scans `repoScanTargets` so multi-repo children are covered. Two faster
+paths complement the 72h backstop: (1) `panBlockedReason` surfaces an
+escalated bead to Pan after `pan.escalated_wedge_grace_seconds` (default 1h)
+when it still has live dependents — a chain head stalls its whole subtree
+and the Pan rescue recipe prefers `repair:clear-escalation` for wedged
+heads.
+An escalated **leaf** (no dependents) becomes a candidate after
+`pan.escalated_leaf_grace_seconds` (default 24h, the historical human
+window) and its reason also prefers `repair:clear-escalation`: an
+escalation whose cause was a daemon defect fixed by a subsequent deploy
+should be retried automatically instead of idling a day for a human
+(srv-jobfile-eci, 2026-10-05: gate-extraction defect fixed by deploy, bead
+idled escalated overnight with no path back). Lower the leaf knob when
+verified-close defect-class escalations should cycle within the hour. (2) Charon's
+escalated-skip emits a cooldown-limited `orphan_escalated_wedged` event per
+the event-stream contract (was log-only).
+
+**Token-usage daily rollup (fix-jwk8, 2026-10-02).** Worker-registry rows are
+ephemeral: `ReapStale` prunes completed rows after 24h and `ReapGhosts`
+removes dead workers, so token/turn spend trends were unmeasurable across
+days. Every doomed row's token usage is now persisted first (reap paths
+merge before delete) and a daily job at 00:05 UTC (`TokenUsageRollupJob`)
+snapshots live rows into the durable `token_usage_daily` table (day+project
+primary key, additive: completions, tokens_fresh/output/cache, max per bead,
+rerun count, zero-token count) and emits a typed `token_usage_daily` event
+per (day, project). Median per bead is recomputed from the stored per-bead
+token list. Fail-open; never gates the pipeline.
 
 **Integration-exhausted park sweeping (`overseer.integration_exhausted_sweep`,
 2026-09-30).** The `integration-exhausted` hard-park stays durable by design,
@@ -207,6 +307,24 @@ for manual intervention or the Pan retry-quarantine repair. The park itself is
 never cleared, `in_progress` beads are skipped, and beads already carrying
 `needs-human` are left alone (idempotent). Default 48h; 0 disables.
 
+**Escape-rate regression budget (NFR-001, 2026-10-03).** Two halves:
+
+- *Close-path guard.* Every close path that terminates as completed runs the
+  bead's declared verification command (metadata `test_command`, or a
+  "Test Command:" description line) via the daemon gate runner. Verified-close
+  and singleton integration share the `Close` success route; Pan's
+  satisfied-close (`close_satisfied`) runs the guard too. A command that runs
+  and exits nonzero rejects the close (reopen, same as a red daemon gate);
+  the close proceeds only on a green command or when no command is declared.
+  Fail-open only when no gate runner is attached or the runner itself faults.
+- *Weekly sweep.* `PostCloseSweeper` (`overseer.postclose_sweep`, default on,
+  daily cadence over a 7-day window) re-runs the verification command of
+  closed-completed beads; a bead that now fails is labelled `postclose-escape`
+  and emits a typed `postclose_escape` event. Observe-and-report: terminal
+  beads are never reopened by the sweep. `scripts/escape-rate-weekly.sh`
+  computes the weekly escape rate from the store (`br list --status closed
+  --json`) and the event stream (`postclose_escape` count).
+
 **Worktree-unavailable hard-park (2026-09-13).** The same durability rule now
 covers the spawn path: when `EnsureWorktree` fails (dubious-ownership,
 foreign-repo path, unresolvable base), `SpawnInternal` fails the spawn
@@ -232,6 +350,17 @@ janitorial commits landing on the user's working branch. The bead is stamped
 `GetReadyBeads`, Charon orphan recovery), exactly like `escalated`. Recovery
 is human: fix the worktree (Pan's whitelisted `repair-worktree` repair runs
 `Remove`+`EnsureWorktree` daemon-side), then clear the label.
+
+**Hard-park reconciler (2026-10-13).** Recovery is no longer manual-only. Each
+overseer tick (throttled to once per minute) runs a repo-level git probe for
+every project with `worktree-unavailable` beads. After **two consecutive
+successful probes** the reconciler clears the label, emits the typed event
+`worktree_unparked`, and the bead becomes schedulable on the normal paths.
+Probe failure resets the hysteresis counter and leaves the label untouched
+(fail-open). The reconciler never touches `escalated` or `needs-human` — those
+stay human-only. Observed before this: the fms dubious-ownership wedge was
+root-fixed at host level (2026-10-02 08:13 UTC) but 26 labeled beads stayed
+parked until an operator removed each label by hand.
 
 **Inspecting quarantined work:**
 
@@ -259,6 +388,7 @@ from a measured pathology:
    the retry starts from evidence, not from zero. Verified live: 26/26 fix
    beads in run B1 carried cause blocks.
 1b. **Verify-first (2026-09-25, the tin0/jx78 redo):** fix-bead prompts now open with a step-0 VERIFY-FIRST directive and the description carries a `### Original verdict already recorded` fenced block — `ExtractRecordedVerdict` pulls the original's HYDRA_VERDICT (ac_met list verbatim) from the newest worker log. The fix worker re-runs the original's verification commands first; if they pass it closes citing that evidence without modifying files. Also: fix-bead `phaseGuidance` (cmd/worker) leads with the same directive. Defense in depth with the Pan FIX-AUDIT close; the worker directive is the last resort when Pan's re-verification is inconclusive.
+1c. **Cross-verification doctrine (2026-10-01, the thok false closure):** fix/bug `phaseGuidance` opens with PRE-IMPLEMENTATION CROSS-VERIFICATION — reproduce the defect on a clean checkout of `origin/<base>` (not reproducible → verify-first close without code changes), and grep the tree so the fix never duplicates an existing mechanism (#458 duplicate-method class). Every fix/bug/feature bead prompt ends with PRE-CLOSE CROSS-VERIFICATION — re-run the original reproduction against the final worktree, inspect `git diff origin/<base>...HEAD` so every verdict claim is literally in the diff, and map each acceptance criterion to an executed check. Mechanical backstop: the verified-close gate emits `empty_diff_completed` when a done verdict is rejected over an empty or target-missing diff. Live-fire: a seeded already-fixed bug bead was verify-first closed with zero code changes.
 2. **Deduped:** an open/in-progress fix bead for the same original blocks a
    duplicate (`fix_deduped` event). *Known gap:* fix beads created by the TDD
    validation path bypass this — run D3 produced five identical FR
@@ -299,6 +429,16 @@ storm). The governor thins the fleet instead of freezing it:
   Driven from the scheduler tick, not from outcomes.
 - **Read:** scheduler computes slots from `min(max_workers, Limit())`.
   Every change logs `[Governor] concurrency N -> M (reason)`.
+- **Memory throttle feedback** (`memory_pressure.go`, 2026-10-15 incident):
+  memory.high reclaims WITHOUT killing, so a governor keyed only on outcomes
+  saw a healthy fleet while the slice sat pinned at memory.high with workers
+  throttled and redlined at `max_workers`. Each scheduler tick probes the
+  daemon cgroup (`/sys/fs/cgroup/system.slice/hydra.service/`): PSI
+  `memory.pressure` "some" avg10, or 100 when `memory.current >= memory.high`.
+  At or above `memory_pressure_threshold` (default 50%) the limit is halved
+  (the MD in AIMD) and recovery is re-armed so it cannot climb straight back
+  while throttling persists. Unreadable cgroup (v1, no slice) = fail-open, no
+  signal; negative threshold disables the feedback.
 
 *Why the last two rules look like that.* The original design halved on decrease
 and recovered only on a full window of outcomes. Both failed together on
@@ -320,6 +460,7 @@ overseer:
     increase_threshold: 0.125
     cooldown_seconds: 120
     recovery_interval_seconds: 300
+    memory_pressure_threshold: 50  # negative disables the memory throttle feedback
 ```
 
 Composes with the provider circuit breaker: the breaker pauses spawns for a
@@ -489,6 +630,8 @@ outcome, and emits a `[PanRepair]` JSON audit event (`bead_id`, `action`,
 | `prune-worktree-registration` | `git worktree prune` on the bead's project | project-scoped: rate-limited per project (30m), not per bead — one repair clears a fleet-wide registered-but-missing wedge (13 webapp beads from one stale registration, 2026-09-13) |
 | `re-push-integration` | reruns the publisher (`PublishRepo`) for a `<project>-push-pending` pseudo-bead | fail-closed: errors unless the stranded push actually cleared; project-scoped rate limit |
 | `integrate-stranded` | merges a stranded `hydra/wt-<key>` branch into the working branch and removes the worktree; on conflict quarantines to `hydra/quarantine/<key>` and labels `stranded-conflict`; on verification failure labels `integration-unverified` | only when the bead is terminal/unknown or carries a quarantine label (`stranded-conflict`/`integration-unverified`) and no live worker or active chain exists; idempotent via the `stranded-work` label; open `stranded-conflict` beads surface as Pan BLOCKED candidates via `panBlockedReason` |
+| `kill-stalled-worker` | kills the stalled worker by its EXPLICIT registry PID (never by PGID — close gates share the daemon's process group), marks the worker row dead (`zero-token-stall-killed`), reopens the bead, resets retries | requires a registry worker row with a usable PID; the bead reopens for respawn |
+| `kill-rogue-pi` | kills every rogue bare-pi process Charon recorded, by EXPLICIT PID | host-level (beadID ignored); no-op when no rogue snapshot |
 | `retry-quarantine` | merge-trees the bead's `hydra/quarantine/<key>` branch against the current base (origin preferred, local fallback); if clean, restores `hydra/wt-<key>` at the quarantine tip, deletes the quarantine branch, removes `stranded-conflict`, reopens the bead, resets retries, emits `quarantine_reattempt{result:requeued}` | fail-closed: refuses (bead stays quarantined) when no quarantine branch exists, the merge-tree errors, or the branch still conflicts — re-queue goes through the ordinary gated/verified integration paths, never a direct merge |
 
 **Per-repo integration gate (2026-09-29).** The close path's integrate/PR step
@@ -542,11 +685,14 @@ worker-origin problems and scheduler-level blocked records — a hard-parked
 bead with no retry record (e.g. after a restart cleared in-memory retry state)
 was invisible to the shepherd. The `BlockedBeads` provider now also scans
 project stores for non-terminal beads carrying `worktree-unavailable`,
-`integration-exhausted`, or a >24h `escalated` label, and surfaces stranded
+`integration-exhausted`, `integration-pending`, or a >24h `escalated` label,
+and surfaces stranded
 pushes (below) as `<project>-push-pending` pseudo-beads. The
 `integration-exhausted` label is set by `failIntegration` after 3 consecutive
 integrate/push failures on one bead (2026-09-16 close-reopen loop): below the
-cap a failed close reopens the bead as before, at the cap it hard-parks here
+cap the close does NOT reopen the bead — it parks it in place with the
+durable `integration-pending` label (every respawn path skips it; the
+integration-retest stage owns the retry), at the cap it hard-parks here
 instead of respawning into the same failing integrate forever; the counter
 resets on the first successful integrate+push. When ≥3 BLOCKED
 candidates share a normalized reason, `collapseWedges` replaces them with one
@@ -556,7 +702,8 @@ of N rate-limited per-bead ones.
 **Integration-exhausted contract change (2026-09-22, Tier A).** Hard-park no
 longer means "parked until a human looks": with `integration_retest.enabled`
 the overseer tick runs a mechanical retest stage over beads labelled
-`integration-failed`/`integration-exhausted` whose `hydra/wt-<id>[-vN]` or
+`integration-failed`/`integration-exhausted`/`integration-pending` whose
+`hydra/wt-<id>[-vN]` or
 `hydra/quarantine/<id>` branch still exists (quarantine branches included
 because the telematics campaign left 35 commits of real work in 20 of them
 while beads read closed). Per bead, at most one retest per
@@ -572,7 +719,21 @@ defaults `go build ./...` / `npm run build`; fail-open when undetectable).
 Gates green → land via the existing dogfood PR path (`dogfood/<id>-retest` +
 `gh pr create` + `gh pr merge --admin`, verified MERGED — branch protection
 respected, never direct-push, never force-push), close the bead, strip both
-labels, emit `integration_retest{result:landed,pr}`. Gates red → stay parked,
+labels, emit `integration_retest{result:landed,pr}`. Four refinements landed 2026-10-19/20 (srv-data-harbour drain incident):
+the selector is **chain-aware** — a chain member's worktree branch is the
+chain root's `hydra/wt-<chain-root>` (DRYAD members share one worktree), so
+when the bead's own branch matches nothing the stage retries with the chain
+key; a branch tip already an ancestor of `origin/<base>` closes the bead
+directly (`closeLanded`, no empty-diff PR); the base `fetch` **fails open**
+to the local tracking ref (the daemon uid has no GitHub credential for
+user-owned repos — exit 128 was killing every attempt); and Pan's blocked
+reasons now carry the stage's REAL attempt counters (`RETEST SILENCE` when a
+bead sits past 90 min with zero attempts, `retest ACTIVE (attempt n, last …)`
+otherwise, `EXHAUSTED (n/max)` at the cap) instead of a static "retries
+mechanically" that once narrated a fiction for 70+ minutes. Selector drops
+log their reason (excluded label / active worker / rate-limit / no-branch
+with chain key), deduped per bead per 10 minutes.
+Gates red → stay parked,
 emit `integration_retest{result:gates-failed}`. Beads also carrying
 `worktree-unavailable` or `infra-exhausted` (parked by Pan for another cause)
 are skipped. Everything fails open: gh/network/registry errors skip the bead

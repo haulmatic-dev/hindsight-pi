@@ -40,6 +40,17 @@ overseer:
   # retry-quarantine instead of staying hidden forever. The hard-park itself
   # is never cleared. 0 disables the sweeper. Suggested: 48h.
   integration_exhausted_sweep: 48h
+  # postclose_sweep: re-run recently closed beads' verification commands (flake
+  # guard + bounded reopen). 0 (default) disables.
+
+  # Escape-rate regression budget (NFR-001): when true, a weekly sweeper
+  # re-runs the declared verification command of every bead closed-completed
+  # in the last 7 days; a command that now exits nonzero gets the durable
+  # `postclose-escape` label and a typed `postclose_escape` event. The weekly
+  # escape-rate query is scripts/escape-rate-weekly.sh. Observe-and-report,
+  # fail-open; the close paths themselves always run the bead's verification
+  # command before completing. Set false to disable.
+  postclose_sweep: true
 
   worker_timeout: 10m
 
@@ -51,6 +62,10 @@ overseer:
     enabled: true
     max_cpu_percent: 80
     max_memory_percent: 80
+    # Absolute MemAvailable spawn floor (hydra-3ocq): refuse to spawn a worker
+    # while the host has less free memory than this, even when the percentage
+    # gate above passes. 0 = default 2500 (2.5G); negative disables.
+    # min_memory_available_mb: 2500
     mode: hydra
 
   # Chain completion detection — triggers PRD validation when a full chain finishes
@@ -148,6 +163,20 @@ intelligence:
     pattern_extraction_timeout: 5m
     retain_unsettled_beads: 1000
     min_settlement_checks: 3
+
+  # Skill induction — Mine successful worker execution transcripts into
+  # candidate Pi skills (staged in $HYDRA_HOME/skill-candidates; promotion to
+  # the shared library is a human PR — hydra never writes the shared config).
+  # `hydra induce-skills` runs one manual pass regardless of `enabled`.
+  skill_induction:
+    enabled: false
+    interval: 6h
+    model: kimi-k2              # required when enabled
+    provider: kimi              # or openai + base_url pointing at a router
+    api_key_env: KIMI_API_KEY
+    max_processed_per_run: 10   # LLM-call cap per pass
+    max_candidates_per_run: 3   # candidate cap per pass
+    similarity_threshold: 0.6   # Jaccard dedup bar vs existing skills
 
 # ------------------------------------------------------------------------------
 # VALIDATION — Self-healing validation loops (TDD + PRD)
@@ -281,6 +310,10 @@ shepherd:
     provider: minimax
     model: MiniMax-M2.7
     api_key_name: MINIMAX_API_KEY   # env var holding Pan's own key (NOT the fleet key)
+    # Cap on open pan-filed beads per project (FR-022). When hit, filing is
+    # suppressed (event pan_filed_cap_hit + digest anomaly) until an open
+    # pan-filed bead closes. Default 4.
+    # max_filed_beads_per_project: 4
 
 # ------------------------------------------------------------------------------
 # OUTPUT — Publishing completed work back to origin and automatic PR fallback
@@ -308,7 +341,13 @@ output:
   # close completes as waiting-on-human-merge, not an integration failure.
   pr_auto_merge_repos: []
 
-
+  # Single-source daemon GitHub credential (2026-10-01 drift incident): when
+  # set, the daemon service account's GitHub identity comes from this user's
+  # ~/.hydra/.github-token — never the daemon's private ~/.git-credentials
+  # copy (skipped entirely: no GH_TOKEN, no credential-store fallback;
+  # fail-closed when the file is missing). Empty keeps the legacy fallback
+  # chain (daemon PAT file -> GH_TOKEN -> ~/.git-credentials).
+  # github_token_owner_user: buddhi
 
 # Self-healing: session-file resume pilot (opt-in).
 # Resume a dead worker's Pi session on orphan respawn only when the death was

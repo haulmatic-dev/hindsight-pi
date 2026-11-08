@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -45,6 +46,34 @@ type GateSet struct {
 
 const gateDefaultTimeout = 10 * time.Minute
 
+// gateCmdProcGroup starts the gate in its own POSIX process group (Setpgid):
+// before this the `sh -c` gate ran in the DAEMON's process group, so a
+// `kill -PGID` aimed at a stuck gate would have hit the daemon itself. It
+// also arms a group killer: on timeout (or completion, via the caller) the
+// whole group is SIGKILLed, not just the shell — jest/pytest grandchildren
+// otherwise survive the artifact and reparent to PID 1 (observed: jest alive
+// 16+ min after the gate artifact recorded exit 2).
+func gateCmdProcGroup(cmd *exec.Cmd, ctx context.Context) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	go func() {
+		<-ctx.Done()
+		// Start failure (e.g. worktree cwd torn down by a concurrent
+		// reconciler) leaves cmd.Process nil — dereferencing it panicked the
+		// daemon (crash loop 2026-11-08, gate_runner.go:60). Nothing to kill.
+		if cmd.Process == nil {
+			return
+		}
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // ESRCH when already gone
+	}()
+}
+
+// killGateProcessGroup reaps any grandchildren still holding the log pipe
+// after the shell itself exited (e.g. `npm test &`); must be called after
+// cmd.Wait so the child is reaped first and the group has no leader race.
+func killGateProcessGroup(pid int) {
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+}
+
 // gateSummaryCap bounds what ever reaches a prompt or bead annotation.
 const gateSummaryCap = 2048
 
@@ -60,7 +89,7 @@ type GateRequest struct {
 	// for scoped gates (npx jest <scope>). Empty scope drops the token
 	// carrying the placeholder, so the full gate command runs instead. The
 	// value is single-quote escaped before reaching the shell.
-	Scope        string
+	Scope string
 	// AllowMainCheckout permits running with WorktreePath == ProjectPath.
 	// Reserved for `hydra gates verify`, whose whole job is proving the
 	// toolchain on the real checkout before daemon_owned is enabled.
@@ -148,8 +177,24 @@ func (r *GateRunner) RunCoverageTruthGate(req GateRequest, truth CoverageTruthGa
 	cmd.Dir = req.WorktreePath
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	gateCmdProcGroup(cmd, ctx)
 
-	runErr := cmd.Run()
+	// Record the actual gate child PID, not the daemon's: the running marker
+	// with the daemon PID stays "alive" while the daemon lives, so a stale
+	// running artifact (crash mid-gate before the final write) permanently
+	// fooled close-in-progress probes and blocked orphan recovery.
+	if err := cmd.Start(); err != nil {
+		return GateArtifact{}, fmt.Errorf("coverage-truth gate for %s: start: %w", req.BeadID, err)
+	}
+	a.PID = cmd.Process.Pid
+	if err := WriteGateArtifact(r.root, a); err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		return GateArtifact{}, fmt.Errorf("coverage-truth artifact pid rewrite: %w", err)
+	}
+
+	runErr := cmd.Wait()
+	killGateProcessGroup(cmd.Process.Pid)
 	a.EndedAt = time.Now()
 
 	exitCode := 0
@@ -290,8 +335,24 @@ func (r *GateRunner) RunGate(req GateRequest) (GateArtifact, error) {
 	cmd.Dir = req.WorktreePath
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	gateCmdProcGroup(cmd, ctx)
 
-	runErr := cmd.Run()
+	// Record the actual gate child PID, not the daemon's: the running marker
+	// with the daemon PID stays "alive" while the daemon lives, so a stale
+	// running artifact (crash mid-gate before the final write) permanently
+	// fooled close-in-progress probes and blocked orphan recovery.
+	if err := cmd.Start(); err != nil {
+		return GateArtifact{}, fmt.Errorf("gate %s for %s: start: %w", req.Gate, req.BeadID, err)
+	}
+	a.PID = cmd.Process.Pid
+	if err := WriteGateArtifact(r.root, a); err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		return GateArtifact{}, fmt.Errorf("gate artifact pid rewrite: %w", err)
+	}
+
+	runErr := cmd.Wait()
+	killGateProcessGroup(cmd.Process.Pid)
 	a.EndedAt = time.Now()
 
 	exitCode := 0

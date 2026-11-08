@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,9 +48,43 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	if o.escalationTTL != nil {
 		o.escalationTTL.Start()
 	}
+	// Retroactive pan-filed promotion (nil-client inert)
+	if o.panPromoter != nil {
+		o.panPromoter.Start()
+	}
 	if o.integrationSweep != nil {
 		o.integrationSweep.Start()
 	}
+	if o.evidenceSweep != nil {
+		o.evidenceSweep.Start()
+	}
+
+	// Credential preflight (2026-10-01 drift incident): probe each project
+	// repo's origin with the resolved publish identity; stale/revoked ->
+	// typed event + auto-park, instead of silent publish failures. Run in a
+	// background goroutine so a slow remote never blocks startup; fail-open.
+	go o.RunCredentialPreflight()
+
+	// Credential recovery sweep: a project auto-parked by the preflight must
+	// come back on its own once the PAT is fixed — re-probe parked-only
+	// projects periodically (cheap: usually zero parked). Without this the
+	// park outlived the credential fix by 26h on hydra itself (2026-10-06).
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			o.RunCredentialRecoverySweep()
+		}
+	}()
+	// PR aging weekly digest (no-op when disabled)
+	if o.prAging != nil {
+		o.prAging.Start()
+	}
+	// Git-ownership preflight (fmsfe wedge): run `git rev-parse` as the
+	// daemon's (hydra) user against every project repo BEFORE the project
+	// is enabled for work; a dubious-ownership refusal fails closed with a
+	// typed event + auto-park carrying the exact remediation command.
+	go o.RunGitOwnershipPreflight()
 
 	// Open the worker registry (daemon-owned SQLite truth; PRD
 	// worker-park-and-resume Part 4) and construct Pan, the shepherd.
@@ -88,7 +124,20 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 			log.Printf("[Registry] Reconciled %d dead worker row(s) orphaned by restart: %s", n, strings.Join(ids, ", "))
 		}
 
+		// Daily token-usage rollup: persists worker token totals into the
+		// durable token_usage_daily table at 00:05 UTC and emits a typed
+		// event per row, so spend trends survive ReapStale/ReapGhosts pruning.
+		o.tokenUsageRollup = NewTokenUsageRollupJob(func() *registry.Store { return o.registryStore }, o.eventSink)
+		o.tokenUsageRollup.Start()
+
 		panCfg := o.config.Shepherd.Pan
+		// blockedLogged dedups per-process candidate logging: each blocked
+		// candidate is logged once per daemon run (keyed bead+reason) so a
+		// candidate that never reaches the judge is visible in the log
+		// (srv-jobfile-eci, 2026-10-06: past leaf grace, invisible to Pan,
+		// and the silent fail-open below gave no way to tell scan-error
+		// from no-candidate).
+		blockedLogged := make(map[string]bool)
 		o.panShepherd = pan.New(pan.Config{
 			Enabled:          panCfg.Enabled,
 			Interval:         time.Duration(panCfg.IntervalSeconds) * time.Second,
@@ -132,6 +181,18 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 						continue
 					}
 					if reason, since, ok := o.workerSpawner.LastSpawnFailure(beadID); ok {
+						// Stale-entry purge (fmsfe-npa 2026-10-02): a spawn-failure
+						// entry survives until the bead closes, so the digest kept
+						// re-surfacing a phantom "N beads blocked by spawn failed"
+						// cohort — Pan re-filed wedge beads in a loop while the
+						// store itself showed 0 blocked. Purge entries that can no
+						// longer represent a real blocker: superseded by a live
+						// registry worker, or aged out past the TTL (terminal beads
+						// stop respawning, so TTL eventually covers them too).
+						if staleSpawnFailure(o.workerSpawner, beadID, since) {
+							o.workerSpawner.ClearSpawnFailure(beadID)
+							continue
+						}
 						blocked = append(blocked, pan.BlockedBead{
 							BeadID: beadID,
 							Reason: fmt.Sprintf("spawn failed: %s", reason),
@@ -144,17 +205,49 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				// restart cleared in-memory retry state) is invisible to Pan — the
 				// 2026-09-13 webapp wedge needed manual label clearing twice.
 				if o.beadsClient != nil {
+					wedgeGrace := time.Duration(panCfg.EscalatedWedgeGraceSeconds) * time.Second
+					if wedgeGrace <= 0 {
+						wedgeGrace = time.Hour
+					}
+					leafGrace := time.Duration(panCfg.EscalatedLeafGraceSeconds) * time.Second
+					if leafGrace <= 0 {
+						leafGrace = 24 * time.Hour
+					}
 					for _, project := range o.projects {
 						for _, target := range repoScanTargets(project) {
 							beads, err := o.beadsClient.ListBeads(target, "")
 							if err != nil {
+								log.Printf("[PanSweep] store scan failed for %s (fail-open, beads there are invisible to Pan this cycle): %v", target, err)
 								continue // fail open: one unreadable store must not blind the scan
 							}
+							// dependent_count comes from br list itself (parser.go maps it
+							// into Metadata; the full dependencies list is NOT in list
+							// output). An escalated chain head stalls its whole subtree
+							// (srv-jobfile 2026-10-05: 2 wedged escalations, br ready=0
+							// for the whole repo), while an escalated leaf can safely
+							// wait out the 24h human window.
 							for _, b := range beads {
 								if b.Status.IsTerminal() {
 									continue
 								}
-								if reason, ok := panBlockedReason(b, time.Now()); ok {
+								dependents := 0
+								if b.Metadata != nil {
+									dependents, _ = strconv.Atoi(b.Metadata["dependent_count"])
+								}
+								// hydra-1hbo: real retest counters feed the blocked reason so
+								// Pan stops narrating mechanical retries that are not running.
+								var retestStatsFn func(string) (int, time.Time, bool)
+								retestMax := 0
+								if o.integrationRetest != nil {
+									retestStatsFn = o.integrationRetest.RetestStats
+									retestMax = o.config.IntegrationRetest.MaxAttempts
+								}
+								if reason, ok := panBlockedReasonWithRetest(b, time.Now(), wedgeGrace, leafGrace, dependents, retestStatsFn, retestMax); ok {
+									key := b.ID.String() + "|" + reason
+									if !blockedLogged[key] {
+										blockedLogged[key] = true
+										log.Printf("[PanSweep] blocked candidate: %s — %s", b.ID.String(), reason)
+									}
 									blocked = append(blocked, pan.BlockedBead{
 										BeadID: b.ID.String(),
 										Reason: reason,
@@ -275,7 +368,11 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 		// Pan repair handlers: whitelisted daemon-side actions that clear
 		// scheduler-level blockers without a worker command. They are
 		// fail-open: errors are logged and emitted as audit events only.
-		o.panShepherd.SetRepairHandlers(map[string]func(beadID string) error{
+		// Sensor symmetry: every repair verdict is wrapped so each verb emits
+		// repair_succeeded (resolve) or repair_failed (fire) with a per
+		// verb+bead correlation ID; failures here are 218-vs-28 invisible
+		// outcomes in the pre-symmetry measurement window.
+		repairRaw := map[string]func(beadID string) error{
 			"repair-worktree": func(beadID string) error {
 				id := types.BeadID(beadID)
 				projectPath := projectPathForID(id)
@@ -348,7 +445,7 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				}
 				var toClear []string
 				for _, lbl := range bead.Labels {
-					if lbl == worktreeUnavailableLabel || lbl == integrationExhaustedLabel {
+					if lbl == worktreeUnavailableLabel || lbl == integrationExhaustedLabel || lbl == gitOwnershipLabel {
 						toClear = append(toClear, lbl)
 					}
 				}
@@ -390,6 +487,11 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				if bead == nil {
 					return fmt.Errorf("clear-escalation: %s not found", beadID)
 				}
+				// FR-004: a pending spec decision (spec-infeasible without
+				// spec-decided:<x>) must not be wiped by an automated reset.
+				if refusal := clearEscalationRefusalFor(*bead); refusal != "" {
+					return fmt.Errorf("%s", refusal)
+				}
 				var toClear []string
 				escLabels := map[string]bool{escalatedLabel: true, "needs-human": true, "verified-close-escalated": true}
 				for _, lbl := range bead.Labels {
@@ -427,6 +529,40 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 					return fmt.Errorf("prune-worktree-registration: %w", err)
 				}
 				log.Printf("[PanRepair] prune-worktree-registration pruned %s", projectPath)
+				return nil
+			},
+			// recover-spawn-cohort is the one-pass project-scoped repair for the
+			// spawn-failure wedge class (fmsfe-npa 2026-10-02): prune stale
+			// worktree registrations, then clear every recorded spawn failure
+			// belonging to this project together with its retry counter. One
+			// invocation recovers the whole batch; per-bead repairs cannot.
+			"recover-spawn-cohort": func(beadID string) error {
+				id := types.BeadID(beadID)
+				projectPath := projectPathForID(id)
+				if projectPath == "" {
+					return fmt.Errorf("recover-spawn-cohort: project path unresolved for %s", beadID)
+				}
+				if o.workerSpawner == nil {
+					return fmt.Errorf("recover-spawn-cohort: no worker spawner")
+				}
+				if _, err := gitOut(projectPath, "worktree", "prune"); err != nil {
+					log.Printf("[PanRepair] recover-spawn-cohort: worktree prune for %s failed (continuing): %v", projectPath, err)
+				}
+				cleared := 0
+				for _, bid := range o.workerSpawner.ListSpawnFailures() {
+					if projectPathForID(types.BeadID(bid)) != projectPath {
+						continue
+					}
+					o.workerSpawner.ClearSpawnFailure(bid)
+					if o.retryManager != nil {
+						o.retryManager.ResetRetryCount(bid)
+					}
+					cleared++
+				}
+				if cleared == 0 {
+					return fmt.Errorf("recover-spawn-cohort: no spawn failures recorded for %s", projectPath)
+				}
+				log.Printf("[PanRepair] recover-spawn-cohort cleared %d spawn failure(s) in %s", cleared, projectPath)
 				return nil
 			},
 			// re-push-integration reruns the publisher for the project of a
@@ -484,7 +620,50 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				}
 				return nil
 			},
-		})
+			// kill-stalled-worker implements the zero-token-stall repair
+			// (2026-10-20 incident): kills the stalled worker by its EXPLICIT
+			// registry PID (never by PGID — close gates share the daemon's
+			// process group), marks the worker row dead, and reopens the bead
+			// for respawn with one fair retry.
+			"kill-stalled-worker": func(beadID string) error {
+				if o.orphanJanitor == nil {
+					return fmt.Errorf("kill-stalled-worker: no Charon janitor configured")
+				}
+				if err := o.orphanJanitor.KillStalledWorker(beadID); err != nil {
+					return err
+				}
+				id := types.BeadID(beadID)
+				projectPath := projectPathForID(id)
+				if projectPath == "" {
+					return fmt.Errorf("kill-stalled-worker: project path unresolved for %s", beadID)
+				}
+				if err := o.beadsClient.UpdateBeadStatus(projectPath, id, types.StatusOpen); err != nil {
+					return fmt.Errorf("kill-stalled-worker: reopen %s: %w", beadID, err)
+				}
+				if o.retryManager != nil {
+					o.retryManager.ResetRetryCount(beadID)
+				}
+				return nil
+			},
+			// kill-rogue-pi implements the rogue-pi repair: kills every rogue
+			// bare-pi process Charon recorded, by EXPLICIT PID only. beadID is
+			// unused — the finding is host-level.
+			"kill-rogue-pi": func(beadID string) error {
+				if o.orphanJanitor == nil {
+					return fmt.Errorf("kill-rogue-pi: no Charon janitor configured")
+				}
+				killed, err := o.orphanJanitor.KillRoguePis()
+				if killed > 0 {
+					log.Printf("[PanRepair] kill-rogue-pi: killed %d rogue pi process(es)", killed)
+				}
+				return err
+			},
+		}
+		// Sensor symmetry: every repair verdict emits repair_succeeded
+		// (resolve) or repair_failed (fire) with a per verb+bead correlation
+		// ID; failures here were 218-vs-28 invisible outcomes in the
+		// pre-symmetry measurement window.
+		o.panShepherd.SetRepairHandlers(wrapRepairHandlers(repairRaw, o.eventSink))
 		o.panShepherd.SetLogImprovement(o.logImprovementRepair)
 
 		// FR-022 bead-filing actuator: Pan files improvement beads for human
@@ -620,6 +799,28 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 	o.beadFileReader = NewBeadFileReader(o.projects)
 	o.beadAnalyzer.SetProjects(o.projects)
 
+	// Quarantine reconciler: constructed here, not in NewOverseer — it needs
+	// beadFileReader, which does not exist yet at NewOverseer time (first
+	// deploy silently never built it, 2026-10-16). Requires worktree isolation.
+	if o.worktreeManager != nil && o.quarantineReconciler == nil {
+		if home := os.Getenv("HYDRA_HOME"); home != "" {
+			o.quarantineReconciler = NewQuarantineReconciler(
+				filepath.Join(home, "quarantined-chains.json"),
+				o.worktreeManager, o.beadFileReader, o.eventSink,
+				func() []types.Project { return o.projects })
+			wireScarScrubHooks(o) // FR-001 completion-time scar scrub hooks
+			o.quarantineReconciler.SetRevalidation(
+				o.beadCloser.RunVerificationGateForRevalidation,
+				func(pp string, id types.BeadID, l []string) error {
+					return o.beadsClient.RemoveBeadLabels(pp, "", id, l)
+				},
+				func(pp string, id types.BeadID, l []string) error {
+					return o.beadsClient.UpdateBeadLabels(pp, "", id, l)
+				})
+			o.quarantineReconciler.Start()
+		}
+	}
+
 	// Update bead discovery with discovered projects
 	if o.beadDiscovery != nil {
 		o.beadDiscovery.SetProjects(o.projects)
@@ -680,8 +881,20 @@ func (s *ServiceStarter) Stop() {
 	if o.escalationTTL != nil {
 		o.escalationTTL.Stop()
 	}
+	if o.panPromoter != nil {
+		o.panPromoter.Stop()
+	}
 	if o.integrationSweep != nil {
 		o.integrationSweep.Stop()
+	}
+	if o.quarantineReconciler != nil {
+		o.quarantineReconciler.Stop()
+	}
+	if o.evidenceSweep != nil {
+		o.evidenceSweep.Stop()
+	}
+	if o.tokenUsageRollup != nil {
+		o.tokenUsageRollup.Stop()
 	}
 	if o.settledStateSvc != nil {
 		if err := o.settledStateSvc.Stop(); err != nil {
@@ -704,27 +917,102 @@ func (s *ServiceStarter) Stop() {
 		o.triageSvc.Stop()
 		log.Println("🧭 PR-triage pass stopped")
 	}
+	if o.prAging != nil {
+		o.prAging.Stop()
+		log.Println("📋 PR aging sweeper stopped")
+	}
 }
 
 // panBlockedReason maps a non-terminal bead's durable labels to a Pan blocked
 // candidacy reason. Returns ok=false when no label warrants a candidate.
 // Extracted from the BlockedBeads sweep so label→candidate policy is
 // unit-testable; the sweep itself only aggregates per project store.
-func panBlockedReason(b types.Bead, now time.Time) (string, bool) {
+//
+// wedgeGrace + blockedDependents implement the wedge fast-path: an escalated
+// bead that still has live dependents stalls its dependency subtree (every
+// escalation leaves the bead in_progress with no worker by construction, so
+// Charon's orphan recovery correctly refuses to reopen it — the chain then
+// starves: srv-jobfile 2026-10-05, 2 escalated heads, br ready=0, zero
+// spawns for 3.5h). A chain-head escalation cannot wait, so it becomes a
+// Pan candidate after wedgeGrace with a reason that tells the judge the
+// chain is stalled. A leaf escalation becomes a candidate after leafGrace
+// (default 24h, configurable via pan.escalated_leaf_grace_seconds): beyond
+// grace it also gets the repair:clear-escalation preference, because an
+// escalation whose cause was a daemon defect fixed since the escalation
+// should be retried automatically rather than sitting a day for a human
+// (srv-jobfile-eci, 2026-10-05: gate-extraction defect fixed by deploy,
+// bead idled escalated overnight with no path back).
+func panBlockedReason(b types.Bead, now time.Time, wedgeGrace, leafGrace time.Duration, blockedDependents int) (string, bool) {
+	return panBlockedReasonWithRetest(b, now, wedgeGrace, leafGrace, blockedDependents, nil, 0)
+}
+
+// retestSilenceThreshold: integration-pending age beyond which ZERO recorded
+// retest attempts is reported to Pan as RETEST SILENCE (hydra-1hbo). ~1.5x
+// the default hourly RetryInterval so normal waiting never trips it.
+const retestSilenceThreshold = 90 * time.Minute
+
+// panBlockedReasonWithRetest is panBlockedReason with the retest-stage
+// attempt counters (hydra-1hbo). stats==nil keeps the legacy wording.
+// maxAttempts comes from the stage config so the exhausted-branch reads
+// correctly regardless of yaml tuning.
+func panBlockedReasonWithRetest(b types.Bead, now time.Time, wedgeGrace, leafGrace time.Duration, blockedDependents int, stats func(beadID string) (int, time.Time, bool), maxAttempts int) (string, bool) {
 	if b.Status.IsTerminal() {
 		return "", false
+	}
+	if leafGrace <= 0 {
+		leafGrace = 24 * time.Hour
 	}
 	for _, lbl := range b.Labels {
 		switch lbl {
 		case worktreeUnavailableLabel, integrationExhaustedLabel:
 			return fmt.Sprintf("hard-parked by label %s (durable; scheduler never retries — clear only when the cause is fixed)", lbl), true
+		case integrationPendingLabel:
+			age := now.Sub(b.UpdatedAt)
+			if stats != nil {
+				attempts, last, ok := stats(b.ID.String())
+				if ok && attempts == 0 && age > retestSilenceThreshold {
+					return fmt.Sprintf("RETEST SILENCE: work complete, parked %v with ZERO recorded retest attempts (selector mismatch suspected — hydra-1hbo data) — escalate: file a bead and alert; do NOT assume mechanical retries are happening", age.Round(time.Minute)), true
+				}
+				if ok && maxAttempts > 0 && attempts >= maxAttempts {
+					return fmt.Sprintf("work complete, integrate failed %v ago; retest attempts EXHAUSTED (%d/%d) — repair or human action required", age.Round(time.Minute), attempts, maxAttempts), true
+				}
+				if ok && attempts > 0 && !last.IsZero() {
+					return fmt.Sprintf("work complete, integrate failed %v ago; retest ACTIVE (attempt %d, last %v ago) — leave parked, the stage owns retry", age.Round(time.Minute), attempts, now.Sub(last).Round(time.Minute)), true
+				}
+			}
+			return fmt.Sprintf("work complete, integrate/push failed %v ago (label %s) — parked, NOT reopened; the integration-retest stage retries it mechanically, repair only if the retest attempts are exhausted", age.Round(time.Minute), lbl), true
+		case gitOwnershipLabel:
+			return "hard-parked by label git-ownership (git refused the repo as the hydra user; fix is: git config --global --add safe.directory <repo-path> — human/T3 action)", true
 		case escalatedLabel:
-			if now.Sub(b.UpdatedAt) > 24*time.Hour {
-				return "escalated to a human over 24h ago — stale escalation or genuinely waiting?", true
+			age := now.Sub(b.UpdatedAt)
+			if blockedDependents > 0 && wedgeGrace > 0 && age > wedgeGrace {
+				return fmt.Sprintf("escalated to a human %v ago and WEDGING %d dependent bead(s) — the dependency chain is stalled and no human has acted; prefer repair:clear-escalation so the bead gets one fair retry (the escalation re-fires if the failure recurs)", age.Round(time.Minute), blockedDependents), true
+			}
+			if age > leafGrace {
+				return fmt.Sprintf("escalated to a human %v ago with no dependents blocked — beyond the %v leaf grace; prefer repair:clear-escalation so the bead gets one fair retry (the escalation re-fires if the failure recurs; if it was a daemon defect that has since been fixed, the retry should just pass)", age.Round(time.Minute), leafGrace), true
 			}
 		case strandedConflictLabel:
 			return "quarantined by integrate-stranded (merge conflict) — human review or re-attempt needed", true
 		}
 	}
 	return "", false
+}
+
+// spawnFailureTTL bounds how long a recorded spawn-failure entry stays
+// visible to Pan after its cause could not have produced a live worker.
+const spawnFailureTTL = 15 * time.Minute
+
+// staleSpawnFailure reports whether a recorded spawn-failure entry can no
+// longer represent a real blocker (fmsfe-npa 2026-10-02): superseded by a
+// live registry worker, or older than the TTL with no live worker (terminal
+// beads never respawn, so the TTL eventually clears their entries too).
+// Fail-open toward keeping the entry visible: only positive evidence purges.
+func staleSpawnFailure(spawner *WorkerSpawner, beadID string, since time.Time) bool {
+	if spawner == nil {
+		return false
+	}
+	if spawner.HasLiveRegistryWorker(beadID) {
+		return true
+	}
+	return !since.IsZero() && time.Since(since) > spawnFailureTTL
 }

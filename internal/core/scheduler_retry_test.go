@@ -105,6 +105,7 @@ func TestScheduler_ExhaustedBeadRemovedFromReadyAndEventEmittedOnce(t *testing.T
 		t.Errorf("event bead = %q, want %q", events[0].Bead, bead.ID)
 	}
 }
+
 // allowed to react to. Exit 7 is the one that matters: it is a capacity blip
 // that clears in seconds, and feeding it to the governor made the governor and
 // the provider pool two controllers fighting over one actuator.

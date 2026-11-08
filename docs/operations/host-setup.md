@@ -250,6 +250,45 @@ Group=beads
 UMask=0007
 ```
 
+```ini
+# cgroup-memory.conf — per-worker containment (hydra-3ocq, 2026-10-15 after
+# 4 daemon OOM deaths in one night). Delegate=yes hands the service cgroup
+# subtree to the hydra uid so worker_spawner can create per-worker
+# memory.max cgroups (daemon first moves itself into a `daemon/` leaf —
+# the kernel's no-internal-process constraint forbids enabling +memory on a
+# cgroup that directly contains processes). MemoryHigh/Max are the
+# fleet-level backstop; per-worker caps must trip first: keep
+# max_workers * worker_memory_max_mb + ~2G (daemon + hindsight) < MemoryMax.
+# Also: `resource_monitoring.min_memory_available_mb` (default 2500) refuses a
+# spawn while host MemAvailable is below the floor (hydra-3ocq OOM guard).
+[Service]
+Delegate=yes
+MemoryHigh=16G
+MemoryMax=19G
+```
+
+**Swap:** zram is REQUIRED, disk-only swap absorbs jest heap spikes too
+slowly (2026-10-15: 15G swapfile full + OOM anyway). Needs
+`linux-modules-extra-$(uname -r)` (zram.ko lives there, not in
+linux-modules) + `systemd-zram-generator` with
+`/etc/systemd/zram-generator.conf`:
+
+```ini
+[zram0]
+zram-size = ram / 2
+compression-algorithm = zstd
+swap-priority = 100
+fs-type = swap
+```
+
+Verify: `zramctl` shows `/dev/zram0 zstd` at priority 100 above the
+swapfile's -2.
+
+**hindsight.service** also needs a memory cap — the python process leaks
+slowly (observed 1.8G RSS; restart returned it to 160MB):
+`/etc/systemd/system/hindsight.service.d/memory.conf` with
+`MemoryMax=2G` / `MemoryHigh=1500M`.
+
 **Verify:** `systemctl daemon-reload && systemctl start hydra`;
 `systemctl status hydra` active; `curl -s localhost:8089/health`.
 
@@ -264,15 +303,28 @@ when wrong:
 | `overseer.max_workers` | Must not exceed the provider's real concurrency. A 2nd worker against a 1-lane provider causes 403 lease ping-pong. |
 | `overseer.worker_timeout` | Active-time cap (parked excluded). 15m = zero completions on real tasks; 45m proven. |
 | `overseer.max_bead_tokens` | Soft cap (15M) + hard backstop (30M). Budget is a signal for Pan, not an axe. The cap is evaluated against **fresh tokens** (`tokens_fresh` = fresh input + output); cache-read and cache-creation tokens count toward `tokens_so_far` for observability only. |
-| `output.push` | Off = finished work never reaches origin. When the working branch has permanent branch protection, pair it with `output.pr_merge: true` — direct pushes can never succeed, and the PR route (`dogfood/<id>` branch + `gh pr create` + `gh pr merge --merge --admin`, MERGED-state verified) is the only path that lands work. |
+| `output.push` | Off = finished work never reaches origin. When the working branch has permanent branch protection, pair it with `output.pr_merge: true` — direct pushes can never succeed, and the PR route (integration branch + `gh pr create` + `gh pr merge --merge --admin --delete-branch`, MERGED-state verified) is the only path that lands work. Branch namespace: `dogfood/` for daemon-owned repos, `hydra/` for user-owned product repos (2026-10-05); merged integration branches are swept each publish cycle. |
 | `output.writable_branch_prefixes` | Extra branch prefixes (beyond built-in `hydra/`, `dogfood/`) that count as hydra-owned for the publish-path ownership gate: a push landing elsewhere is classified loudly (`publish_path_classified` event) instead of silently counting as published. |
+| `validation.agent_verifier` | Adversarial close gate (bounded veto; `adversary_gate.go` — see shepherd.md §1a). `enabled` (default false), `min_score` (0.8), `classes` (implement/feature/refactor), `max_diff_bytes` (32KB), `timeout_seconds` (300), `provider`/`model`/`pi_path` (empty = pi defaults). Errors fail open (close proceeds). |
 | `output.pr_auto_merge_repos` | Absolute repo paths allowed to admin-merge integration PRs (tier-1; `deploy.repo_path` implicitly included, and only into base `development`). Unlisted (product) repos NEVER auto-merge: the PR is left open and the close completes as waiting-on-human-merge — not an integration failure. |
+| Node dependency preflight (close-time executable-acceptance gate; FR-001 companion) | Before a close's verification command runs in a Node project, the daemon installs dependencies when `package.json` is present and `node_modules` is missing, and refuses the close if the install leaves the worktree dirty (`git status --porcelain` non-empty — tree-clean guard). Projects without a manifest skip the install. Implemented in `internal/core/gate_deps_preflight.go`; contract pinned by `internal/core/gate_deps_preflight_test.go`. |
+| `output.github_token_owner_user` | Names the human user whose `~/.hydra/.github-token` is the daemon service account's GitHub credential — single source of truth (2026-10-01 drift incident: a stale private `~/.git-credentials` token grounded the fleet 7h). When set, the daemon skips GH_TOKEN and its own `~/.git-credentials` entirely (fail-closed when the file is missing). Empty keeps the legacy fallback chain (daemon PAT file -> GH_TOKEN -> `~/.git-credentials`). Recommend: set it, and `setfacl -m u:hydra:r` the token file. |
+
+### Credential preflight (repo-level probe)
+
+At daemon start, each project repo's `origin` is probed with `git ls-remote` under the SAME publish identity the publish path resolves (owner PAT / token-owner user). The probe is **repo-level, not account-level**: a token can pass `/user` (200) yet have lost repo access (GitHub answers 404 "Repository not found"), which is the second failure mode of the 2026-10-01 incident. A stale result (401 auth failure or 404 repo-not-found) emits a typed `credential_stale{project}` event and AUTO-PARKS the project so beads stop entering silent publish-failure loops. Network/git failures fail open (logged, no event). After rotating a PAT, fix the file and unpark via the operator API (`POST /api/v1/projects/:name/unpark`).
 | `pi.config_dir` | Wrong dir = 0 skills loaded, degraded generation (see §6). |
 | `projects.list[].path` | Workers run `br`/gates inside these repos; permissions per §2. |
 | `projects.multi_user_discovery` | Default `true`. Enables scanning `/home/*/.hydra/config.yaml` for per-user projects. Set to `false` only to run a purely config-listed fleet. |
 | `projects.auto_discover_exclude` | Directory names or paths excluded from auto-discovery. Applies to both the explicit `projects.auto_discover` path walk and multi-user `type: multi` + `auto_discover: true` discovery. Use to silence non-Hydra directories (e.g. `demo`) or, operator-side, to keep a project like `webapp` out of discovery until its fix is deployed and verified live. |
 | `deploy.enabled` (FR-031) | Opt-in (default `false`) tier-1 canary deploy with automatic rollback: after a publish lands on `deploy.repo_path`, the daemon pins max_workers to 0 (drain precondition — deploys are skipped with a typed event if workers are in flight), backs up the daemon binary, builds + atomically swaps, restarts, and runs `scripts/verify-deploy.sh`; verify failure triggers automatic rollback to the previous binary + restart. Requires `repo_path` (the hydra repo) and, by default, systemd unit `hydra`. Every step emits typed deploy events. |
 | `HYDRA_DEGRADE_WINDOW` (env, FR-032) | Fail-open degradation counter window (Go duration, default `24h`). A fail-open subsystem at 0% success over the window (>= 3 attempts) renders a `host: degradations=[name 0/N]` line in the Pan health digest. Worker-process counters are process-local; daemon-side counters (Pan store scans) surface in the digest. |
+
+### Git-ownership preflight (git-access-as-hydra, fmsfe wedge)
+
+At daemon start, each project repo is also probed with `git rev-parse` **as the daemon (hydra) user**. When git refuses the repository with exit 128 `fatal: detected dubious ownership in repository at '<path>'` (a repo owned by another user without a `safe.directory` entry), the preflight fails CLOSED: typed `git_ownership_unusable{project}` event + auto-park, and the message carries the EXACT remediation command: `git config --global --add safe.directory <repo-path>` (run as the repo owner). At spawn time the same class maps to the distinct hard-park label `git-ownership` (NOT `worktree-unavailable`) plus a typed `spawn_failed_git_ownership` event — Pan's bead filing contains the fix command.
+
+**The daemon never sets `safe.directory` itself.** Granting git trust on another user's repository is a security posture change and stays a human/T3 action. After the fix, unpark the project via the operator API and clear the `git-ownership` label (`repair:clear-hard-park`).
 
 ### Multi-user project discovery
 
@@ -296,7 +348,14 @@ marker). For each discovered repo, PrefixGuard writes `.beads/config.yaml` with
 projects that share a repo name. An explicit `issue_prefix` on the user
 project entry overrides the generated value. Existing deliberate custom
 prefixes are preserved with a warning; explicit config-listed projects in
-`/etc/hydra/hydra.yaml` are not mutated.
+`/etc/hydra/hydra.yaml` are not mutated. A prefix equal to the repo basename
+is only treated as br's default when `.beads/config.yaml` does not explicitly
+configure it (br writes defaults as a commented `# issue_prefix:` line) — an
+explicit value is preserved even when it equals the basename, and an unreadable
+store config preserves the namespace rather than risking a mid-life rename
+(srv-jobfile 2026-10-05: a rename split the store into `srv-jobfile-*` and
+`ajantha-srv-jobfile-*` bead IDs and broke cross-references, including every
+Pan-filed wedge bead filed after the rename).
 
 #### Beads-group permission convention (auto-onboarded)
 
@@ -417,17 +476,22 @@ nothing.
 sqlite3 -json /opt/dev-tools/var/hydra/.hydra/registry.db \
   "SELECT bead_id,state,pid FROM workers WHERE state IN ('working','parked')"
 
-# 2. Build packages (not single files) and swap atomically — a plain cp onto
-#    a running binary fails with "Text file busy"
-go build -o /tmp/hydra.new ./cmd/hydra && go build -o /tmp/worker.new ./cmd/worker
-cp /tmp/hydra.new /opt/dev-tools/var/hydra/bin/.hydra.new
-cp /tmp/worker.new /opt/dev-tools/var/hydra/bin/.worker.new
+# 2. Build packages (not single files) into a build dir, swap atomically —
+#    a plain cp onto a running binary fails with "Text file busy"
+mkdir -p /tmp/hydra-deploy
+go build -o /tmp/hydra-deploy/hydra ./cmd/hydra && go build -o /tmp/hydra-deploy/worker ./cmd/worker
+cp /tmp/hydra-deploy/hydra /opt/dev-tools/var/hydra/bin/.hydra.new
+cp /tmp/hydra-deploy/worker /opt/dev-tools/var/hydra/bin/.worker.new
 mv -f /opt/dev-tools/var/hydra/bin/.hydra.new /opt/dev-tools/var/hydra/bin/hydra
 mv -f /opt/dev-tools/var/hydra/bin/.worker.new /opt/dev-tools/var/hydra/bin/worker
 
-# 3. Restart and prove the deploy
+# 3. Restart and prove the deploy. The 4th argument is MANDATORY: the md5
+#    assertion is the only check that proves the installed binaries are
+#    byte-identical to what you just built (2026-10-06: two deploy chains
+#    reported active while yesterday's binary stayed installed; freshness
+#    and restart checks alone did not catch it).
 systemctl restart hydra
-scripts/verify-deploy.sh
+scripts/verify-deploy.sh "" "" both /tmp/hydra-deploy
 ```
 
 ## 11. GitHub access (for PR-flow projects)
@@ -501,7 +565,22 @@ sqlite3 -json /opt/dev-tools/var/hydra/.hydra/registry.db \
 # breaks every [ ... -eq ] test on it. Use grep -c x f || true, or if/then.
 ```
 
-## 14. Known time/skew note
+## 14. Hindsight memory service (operational state)
+
+The fleet's memory backend (`hindsight-api` 0.10.1, `hindsight.service`, port 8888,
+Postgres `hindsight` DB — 29 GB) is documented end-to-end in
+**`docs/operations/memory-system.md`** (architecture, pipelines, quality harness,
+history). Server-side config is code in the infra repo (`services/hindsight/`:
+bank-config.json + idempotent apply + burn-kill runbook; golden queries, cass-sync
+timers installed).
+
+State highlights (2026-11-08): single `coding-brain` bank (split-brain `hydra`
+bank merged then deleted); consolidation + `prefer_observations` live; worker
+recall is first-turn + mental-model injected; PAT unblocked, all campaign PRs
+merged. **The 29 GB Postgres bank is still single-copy — GCS backup is the
+outstanding dependency (bucket + SA key).**
+
+## 15. Known time/skew note
 
 Log timestamps on this host run ahead of UTC. When correlating with external
 systems, compare durations, not absolute times.
@@ -516,3 +595,25 @@ systems, compare durations, not absolute times.
 - `docs/architecture/shepherd.md` — event stream, Pan, fix-bead lifecycle
 - `AGENTS.md` §0–§5 — operating knobs, E2E test config, dogfood discipline
 - Skill `hydra-operator` — fleet operations runbook
+
+## Git ownership guard (2026-11-08)
+
+Never run git as root against repos the daemon works in (standing rule,
+hindsight 2026-10-28) — root-run git leaves root-owned entries in `.git`
+object databases and the daemon's `git add` fails with "insufficient
+permission for adding an object to repository database". When it happens
+anyway (deploy rituals, root shells), three layers repair it:
+
+- `scripts/fix-git-ownership.sh <checkout>` — root-run per-repo repair
+  (resolves submodule gitdir pointers, restores checkout-owner ownership,
+  adds `u:hydra:rwx` ACLs on objects/refs/worktrees dirs).
+- `hydra-git-ownership-guard.timer` — 15-minute fleet sweep
+  (`/etc/systemd/system/hydra-git-ownership-guard.{service,timer}`),
+  config-driven + `/home/*/projects/*` enumeration. Verify with
+  `systemctl list-timers hydra-git-ownership-guard.timer`.
+- Daemon detector: integrate failures carrying the exact error signature
+  emit a `git_root_ownership_pollution` anomaly event — a stopped timer
+  becomes a visible anomaly, not an invisible wedge.
+
+`deploy.sh` also sweeps on every exit path.
+

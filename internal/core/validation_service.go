@@ -48,6 +48,10 @@ func (v *ValidationService) CloseBead(projectPath, repoName string, beadID types
 // P3 so validation meta-work never queue-jumps fresh PRD beads — on
 // srv-smart-engine these fix beads inherited P0-P2 parents and ~25% of a
 // day's commits were validation-round churn while the open board grew.
+// defaultValidationRounds matches the historical default for
+// Validation.MaxRounds when the knob is unset or non-positive.
+const defaultValidationRounds = 3
+
 func validationFixDecision(severity validation.ErrorSeverity, parentPriority int) (bool, int) {
 	if severity == validation.SeverityWarning {
 		return false, 0
@@ -57,6 +61,38 @@ func validationFixDecision(severity validation.ErrorSeverity, parentPriority int
 		p = 3
 	}
 	return true, p
+}
+
+// validationRounds reports the retry round a bead has reached and the
+// effective round cap, plus whether that cap is already exhausted.
+func (v *ValidationService) validationRounds(beadID string) (round, maxRounds int, exhausted bool) {
+	round = v.retryManager.GetValidationRetryCount(beadID)
+	maxRounds = v.config.Validation.MaxRounds
+	if maxRounds <= 0 {
+		maxRounds = defaultValidationRounds
+	}
+	return round, maxRounds, round >= maxRounds
+}
+
+// newTDDValidator builds a TDD validator from the service's knobs.
+func (v *ValidationService) newTDDValidator() *validation.TDDValidator {
+	return validation.NewTDDValidator(validation.ValidationConfig{
+		Enabled:                  v.config.Validation.Enabled,
+		AgentVerificationEnabled: v.config.Validation.AgentVerificationEnabled,
+	})
+}
+
+// recordCreatedFix remembers a fix bead created in this round so a
+// repeated gap title cannot spawn an identical sibling before the store
+// is re-listed on the next validation round.
+func recordCreatedFix(existing []types.Bead, fixTitle string) []types.Bead {
+	return append(existing, types.Bead{Title: fixTitle, Status: types.StatusOpen})
+}
+
+// isTDDRole reports whether a dependency bead fills the given chain
+// role, either by title keyword or by the bead type that role maps to.
+func isTDDRole(bead *types.Bead, keyword, beadType string) bool {
+	return strings.Contains(strings.ToLower(bead.Title), keyword) || bead.Type == beadType
 }
 
 // RunTDDValidation validates a REFACTOR bead's TDD chain and creates fix beads on failure.
@@ -97,18 +133,13 @@ func (v *ValidationService) RunTDDValidation(refactorBead types.Bead, projectPat
 
 	beadID := string(refactorBead.ID)
 
-	redBead, greenBead, err := v.findTDDChainBeads(refactorBead)
+	redBead, greenBead, err := v.findTDDChainBeads(refactorBead, projectPath)
 	if err != nil {
 		log.Printf("[TDDValidation] Could not find RED/GREEN beads for %s: %v", beadID, err)
 		return nil
 	}
 
-	tddValidator := validation.NewTDDValidator(validation.ValidationConfig{
-		Enabled:                  v.config.Validation.Enabled,
-		AgentVerificationEnabled: v.config.Validation.AgentVerificationEnabled,
-	})
-
-	result, err := tddValidator.ValidateTDDChain(redBead, greenBead, refactorBead, projectPath)
+	result, err := v.newTDDValidator().ValidateTDDChain(redBead, greenBead, refactorBead, projectPath)
 	if err != nil {
 		log.Printf("[TDDValidation] Validation error for %s: %v", beadID, err)
 		return nil
@@ -120,13 +151,8 @@ func (v *ValidationService) RunTDDValidation(refactorBead types.Bead, projectPat
 		return nil
 	}
 
-	retryCount := v.retryManager.GetValidationRetryCount(beadID)
-	maxRounds := v.config.Validation.MaxRounds
-	if maxRounds <= 0 {
-		maxRounds = 3
-	}
-
-	if retryCount >= maxRounds {
+	retryCount, maxRounds, exhausted := v.validationRounds(beadID)
+	if exhausted {
 		log.Printf("[TDDValidation] Bead %s exhausted %d/%d validation rounds, proceeding", beadID, retryCount, maxRounds)
 		return nil
 	}
@@ -171,9 +197,7 @@ func (v *ValidationService) RunTDDValidation(refactorBead types.Bead, projectPat
 			log.Printf("[TDDValidation] Failed to create fix bead for %s: %v", beadID, err)
 			continue
 		}
-		// Within-run dedup: multiple gaps share one fix title, so record the
-		// creation in the snapshot to avoid N identical beads in one round.
-		existing = append(existing, types.Bead{Title: fixTitle, Status: types.StatusOpen})
+		existing = recordCreatedFix(existing, fixTitle)
 		log.Printf("[TDDValidation] Created fix bead %s for gap in %s", fixBeadID, beadID)
 	}
 
@@ -192,18 +216,13 @@ func (v *ValidationService) TDDChainPasses(refactorBead types.Bead, projectPath 
 		return true, nil
 	}
 
-	redBead, greenBead, err := v.findTDDChainBeads(refactorBead)
+	redBead, greenBead, err := v.findTDDChainBeads(refactorBead, projectPath)
 	if err != nil {
 		// Cannot locate the chain — do not hard-block on inability to verify.
 		return true, nil
 	}
 
-	tddValidator := validation.NewTDDValidator(validation.ValidationConfig{
-		Enabled:                  v.config.Validation.Enabled,
-		AgentVerificationEnabled: v.config.Validation.AgentVerificationEnabled,
-	})
-
-	result, err := tddValidator.ValidateTDDChain(redBead, greenBead, refactorBead, projectPath)
+	result, err := v.newTDDValidator().ValidateTDDChain(redBead, greenBead, refactorBead, projectPath)
 	if err != nil {
 		return true, err
 	}
@@ -251,13 +270,8 @@ func (v *ValidationService) RunPRDValidation(chainInfo *ChainInfo, projectPath s
 		return nil
 	}
 
-	retryCount := v.retryManager.GetValidationRetryCount(string(rootBeadID))
-	maxRounds := v.config.Validation.MaxRounds
-	if maxRounds <= 0 {
-		maxRounds = 3
-	}
-
-	if retryCount >= maxRounds {
+	retryCount, maxRounds, exhausted := v.validationRounds(string(rootBeadID))
+	if exhausted {
 		log.Printf("[PRDValidation] Chain %s exhausted %d/%d validation rounds, marking complete", rootBeadID, retryCount, maxRounds)
 		return nil
 	}
@@ -299,9 +313,7 @@ func (v *ValidationService) RunPRDValidation(chainInfo *ChainInfo, projectPath s
 			continue
 		}
 		fixBeadIDs = append(fixBeadIDs, fixBeadID)
-		// Within-run dedup: record the creation so a repeated gap title in the
-		// same round does not spawn a second identical bead.
-		existing = append(existing, types.Bead{Title: fixTitle, Status: types.StatusOpen})
+		existing = recordCreatedFix(existing, fixTitle)
 		log.Printf("[PRDValidation] Created fix bead %s for gap in chain %s", fixBeadID, rootBeadID)
 	}
 
@@ -332,20 +344,28 @@ func (v *ValidationService) RunPRDValidation(chainInfo *ChainInfo, projectPath s
 }
 
 // findTDDChainBeads locates RED and GREEN beads that are dependencies of a REFACTOR bead.
-func (v *ValidationService) findTDDChainBeads(refactorBead types.Bead) (types.Bead, types.Bead, error) {
+func (v *ValidationService) findTDDChainBeads(refactorBead types.Bead, projectPath string) (types.Bead, types.Bead, error) {
 	var redBead, greenBead types.Bead
 	var redFound, greenFound bool
 
 	for _, depID := range refactorBead.Dependencies {
-		bead, err := v.beadsClient.GetBead(refactorBead.Project, refactorBead.Repo, depID)
+		// Use the projectPath parameter (the checkout directory that holds
+		// the .beads store), NOT refactorBead.Project: the bead's Project
+		// field is routinely empty for project-scoped beads (br stores it as
+		// null), and GetBead with an empty path runs br show in the daemon's
+		// cwd — no .beads there, every dependency silently skipped, and the
+		// TDD chain validator reads "no RED or GREEN beads found" even when
+		// the closed RED bead is a perfectly healthy dependency (2026-10-21
+		// 8nz terminal-chain verification-fail loop, srv-data-harbour).
+		bead, err := v.beadsClient.GetBead(projectPath, refactorBead.Repo, depID)
 		if err != nil {
 			continue
 		}
-		if strings.Contains(strings.ToLower(bead.Title), "red") || bead.Type == "test" {
+		if isTDDRole(bead, "red", "test") {
 			redBead = *bead
 			redFound = true
 		}
-		if strings.Contains(strings.ToLower(bead.Title), "green") || bead.Type == "implement" {
+		if isTDDRole(bead, "green", "implement") {
 			greenBead = *bead
 			greenFound = true
 		}

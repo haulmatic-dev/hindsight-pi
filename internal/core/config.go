@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/skillinducer"
 	"gopkg.in/yaml.v3"
 )
 
@@ -50,6 +51,39 @@ type ContextPackConfig struct {
 	// Scout is the agentic fallback for requirements the mechanical pack
 	// cannot map (confidence below threshold). Disabled by default.
 	Scout ScoutConfig `yaml:"scout"`
+	// MaxPackTokens caps the pack's estimated token size (chars/4) by
+	// trimming member digests oldest-first. 0 = default (40000).
+	MaxPackTokens int `yaml:"max_pack_tokens"`
+	// MaxChainMembers caps the per-spawn chain scan: fetching every member's
+	// bead to find an existing pack costs one `br show` each — fine for
+	// chains, not for epic-scale lists. Only non-terminal members count.
+	// 0 = default (50).
+	MaxChainMembers int `yaml:"max_chain_members"`
+}
+
+// DefaultMaxChainMembers is the default non-terminal-member cap for the
+// context-pack chain scan (see ContextPackConfig.MaxChainMembers).
+const DefaultMaxChainMembers = 50
+
+// MaxPackTokensOrDefault returns the configured pack token budget, or the
+// default (40000) when unset.
+func (c ContextPackConfig) MaxPackTokensOrDefault() int {
+	if c.MaxPackTokens > 0 {
+		return c.MaxPackTokens
+	}
+	return DefaultMaxPackTokens
+}
+
+// MaxChainMembersOrDefault returns the configured non-terminal chain-member
+// cap, or the default (50) when unset.
+func (c *ContextPackConfig) MaxChainMembersOrDefault() int {
+	if c == nil {
+		return DefaultMaxChainMembers
+	}
+	if c.MaxChainMembers > 0 {
+		return c.MaxChainMembers
+	}
+	return DefaultMaxChainMembers
 }
 
 // ShepherdConfig configures Pan, the shepherd that decides the ambiguous
@@ -59,19 +93,41 @@ type ShepherdConfig struct {
 	Pan PanConfig `yaml:"pan"`
 }
 
+const DefaultPanFiledBeadsPerProject = 4
+
 // PanConfig configures the Pan shepherd agent. Provider/Model/APIKeyName are
 // deliberately separate from the worker fleet's: Pan must stay lucid during
 // the congestion storms it manages.
 type PanConfig struct {
-	Enabled                 bool   `yaml:"enabled"`
-	IntervalSeconds         int    `yaml:"interval_seconds"`
-	HungAfterSeconds        int    `yaml:"hung_after_seconds"`
-	ParkOverdueGraceSeconds int    `yaml:"park_overdue_grace_seconds"`
-	NudgeCap                int    `yaml:"nudge_cap"`
-	Provider                string `yaml:"provider"`
-	Model                   string `yaml:"model"`
-	Thinking                string `yaml:"thinking"`
-	APIKeyName              string `yaml:"api_key_name"`
+	Enabled                 bool `yaml:"enabled"`
+	IntervalSeconds         int  `yaml:"interval_seconds"`
+	HungAfterSeconds        int  `yaml:"hung_after_seconds"`
+	ParkOverdueGraceSeconds int  `yaml:"park_overdue_grace_seconds"`
+	NudgeCap                int  `yaml:"nudge_cap"`
+	// EscalatedWedgeGraceSeconds is how long an escalated bead that blocks
+	// dependents may sit before Pan sees it as a wedge candidate. Leaf
+	// escalations keep the 24h stale-escalation path; a chain-head escalation
+	// stalls a campaign in minutes, so the wedge path must be much shorter.
+	// Default: 3600 (1h).
+	EscalatedWedgeGraceSeconds int `yaml:"escalated_wedge_grace_seconds"`
+	// EscalatedLeafGraceSeconds is how long an escalated bead with NO
+	// dependents may sit before Pan sees it as a stale-escalation candidate
+	// (one fair retry via repair:clear-escalation; the escalation re-fires
+	// on merit if the failure recurs). Default: 86400 (24h) — the historical
+	// human window. Lower it when verified-close escalations of the
+	// daemon-defect class (gate extraction errors, broken gate cwd) should
+	// be auto-retried shortly after a fix deploys instead of waiting a day.
+	EscalatedLeafGraceSeconds int    `yaml:"escalated_leaf_grace_seconds"`
+	Provider                  string `yaml:"provider"`
+	Model                     string `yaml:"model"`
+	Thinking                  string `yaml:"thinking"`
+	APIKeyName                string `yaml:"api_key_name"`
+	// MaxFiledBeadsPerProject caps how many open pan-filed beads may exist
+	// per project at once (FR-022). The default (0 → 4, see
+	// DefaultPanFiledBeadsPerProject) leaves filing slots for distinct
+	// findings during wedge storms; a cap hit emits a pan_filed_cap_hit
+	// event and a Pan digest anomaly so suppression stays visible.
+	MaxFiledBeadsPerProject int `yaml:"max_filed_beads_per_project"`
 }
 
 // AgentsConfig contains agent connector settings
@@ -335,6 +391,13 @@ type OutputConfig struct {
 	// and the close is treated as waiting-on-human-merge, NOT an integration
 	// failure. deploy.repo_path is implicitly on the list.
 	PRAutoMergeRepos []string `yaml:"pr_auto_merge_repos"`
+	// GithubTokenOwnerUser names the human user whose ~/.hydra/.github-token
+	// is the daemon service account's GitHub credential (single source of
+	// truth; 2026-10-01: a stale private ~/.git-credentials token grounded the
+	// fleet for 7h). When set, daemon identity resolution reads that user's
+	// PAT file and SKIPS the GH_TOKEN env and the daemon ~/.git-credentials
+	// store entirely (fail-closed). Empty keeps the legacy fallback chain.
+	GithubTokenOwnerUser string `yaml:"github_token_owner_user"`
 }
 
 // WorktreeConfig controls git-worktree behaviour used by the daemon.
@@ -520,6 +583,13 @@ type IntelligenceConfig struct {
 	Patterns              PatternConfig               `yaml:"patterns"`
 	CollectiveUnconscious CollectiveUnconsciousConfig `yaml:"collective_unconscious"`
 	Hindsight             HindsightConfig             `yaml:"hindsight"`
+
+	// SkillInduction mines successful worker execution transcripts
+	// ($TMPDIR/hydra-executions, written by cmd/worker) into candidate Pi
+	// skills under a staging dir, for human PR review — never directly into
+	// the shared Pi config. Disabled by default. See the skillinducer package
+	// for the full contract. (Skills module of ScholarEvolve, arXiv:2609.40169.)
+	SkillInduction skillinducer.Config `yaml:"skill_induction"`
 }
 
 // GraphifyConfig controls the code knowledge graph that replaces llm-tldr as the
@@ -653,14 +723,25 @@ type HindsightConfig struct {
 
 // OverseerConfig contains overseer-specific settings
 type OverseerConfig struct {
-	BeadDiscoveryInterval time.Duration            `yaml:"bead_discovery_interval"`
-	MaxWorkers            int                      `yaml:"max_workers"`
-	DefaultRetries        int                      `yaml:"default_retries"`
-	MaxRetries            int                      `yaml:"max_retries"`
-	WorkerTimeout         time.Duration            `yaml:"worker_timeout"`
-	RetryDelay            time.Duration            `yaml:"retry_delay"`
-	ResourceMonitoring    ResourceMonitoringConfig `yaml:"resource_monitoring"`
-	ChainDetection        ChainDetectionConfig     `yaml:"chain_detection"`
+	BeadDiscoveryInterval time.Duration `yaml:"bead_discovery_interval"`
+	MaxWorkers            int           `yaml:"max_workers"`
+	DefaultRetries        int           `yaml:"default_retries"`
+	MaxRetries            int           `yaml:"max_retries"`
+	WorkerTimeout         time.Duration `yaml:"worker_timeout"`
+	// WorkerMemoryMaxMB caps each worker (plus its children: pi, jest, npm)
+	// in a dedicated cgroup with memory.max (hydra-3ocq). Requires cgroup v2
+	// + Delegate=yes on hydra.service; without it, containment logs a warning
+	// and the worker runs uncapped (fail-open). <=0 disables. Default 5120 (4G OOM-killed borderline-healthy workers; observed peak 3.7G).
+	WorkerMemoryMaxMB int `yaml:"worker_memory_max_mb"`
+	// WorkerNodeHeapMB caps the V8 heap of every node process in the worker
+	// tree via NODE_OPTIONS=--max-old-space-size (pi itself and jest).
+	// Only applied when NODE_OPTIONS is not already set. <=0 disables.
+	WorkerNodeHeapMB   int                      `yaml:"worker_node_heap_mb"`
+	RetryDelay         time.Duration            `yaml:"retry_delay"`
+	ResourceMonitoring ResourceMonitoringConfig `yaml:"resource_monitoring"`
+	ChainDetection     ChainDetectionConfig     `yaml:"chain_detection"`
+	// MirrorHealth guards the beads JSONL mirror vs db drift detection.
+	MirrorHealth MirrorHealthConfig `yaml:"mirror_health"`
 	// ConcurrencyGovernor enables AIMD adaptive concurrency limiting.
 	// Disabled by default.
 	ConcurrencyGovernor GovernorConfig `yaml:"concurrency_governor"`
@@ -683,6 +764,21 @@ type OverseerConfig struct {
 	// staying hidden forever. The hard-park itself is never cleared. 0
 	// disables the sweeper.
 	IntegrationExhaustedSweep time.Duration `yaml:"integration_exhausted_sweep"`
+	// PostCloseSweep is the escape-rate regression budget (NFR-001): a
+	// weekly scan that re-runs the declared verification command of beads
+	// closed-completed in the last window. Any bead whose command now exits
+	// nonzero is labelled `postclose-escape` and emits a typed
+	// `postclose_escape` event — the escape-rate metric for the weekly query
+	// (scripts/escape-rate-weekly.sh). Observe-and-report, fail-open. 0
+	// disables the sweeper.
+	PostCloseSweep bool `yaml:"postclose_sweep"`
+	// PRAgingDays ages integration PRs left open waiting on a human merge:
+	// a weekly per-owner digest (pr_aging_digest events) lists every PR still
+	// open past this threshold, classified as stuck-auto-merge (repo is in
+	// output.pr_auto_merge_repos / deploy.repo_path — the automated merge is
+	// wedged) or t2-human-merge-queue (designed Tier-2 stop state — gentle
+	// reminder that the human merge queue is aging). 0 disables the sweeper.
+	PRAgingDays int `yaml:"pr_aging_days"`
 	// MaxBeadTokens is the cumulative per-bead token ceiling enforced by
 	// Charon: a working worker past the ceiling is killed and escalated via
 	// the retry cap (0 = disabled). Non-converging grinders otherwise burn
@@ -698,6 +794,20 @@ type ChainDetectionConfig struct {
 	Enabled  bool          `yaml:"enabled"`
 	Interval time.Duration `yaml:"interval"`
 	Timeout  time.Duration `yaml:"timeout"`
+}
+
+// MirrorHealthConfig configures the periodic read-only audit sweep for
+// beads jsonl <-> db mirror drift detection.
+type MirrorHealthConfig struct {
+	// Enabled turns on the periodic audit sweep. Default true (audit-only,
+	// auto-heal is a separate flag).
+	Enabled bool `yaml:"enabled"`
+	// AuditInterval throttles the sweep. 0 disables.
+	Interval time.Duration `yaml:"audit_interval"`
+	// AutoResync opts into FR-3 guarded healing. Default false: the sweep is
+	// audit-only and drift stays visible via events (FR-4 filing runs only
+	// under auto_resync, when a guard blocks healing).
+	AutoResync bool `yaml:"auto_resync"`
 }
 
 // ValidationConfig contains self-healing validation loop settings
@@ -748,6 +858,55 @@ type ValidationConfig struct {
 	// Inert unless Enabled; all embedding failures fail open to the string
 	// path. See internal/core/semantic_cluster.go.
 	SemanticClustering SemanticClusterConfig `yaml:"semantic_clustering"`
+
+	// AgentVerifier is the semantic close-gate adversary (bounded veto):
+	// after the deterministic gates pass, a pi-backed reviewer scores the
+	// diff against the acceptance criteria. See docs/architecture/shepherd.md.
+	AgentVerifier AgentVerifierConfig `yaml:"agent_verifier"`
+}
+
+// AgentVerifierConfig tunes the adversarial close gate. Bounded veto by
+// construction: a close ships when the verifier reports zero BLOCKER
+// findings AND score >= MinScore; NIT findings never block (recorded as
+// events + closed-with-findings label). Rejections ride the standard
+// verified-close rounds (Validation.MaxRounds); a verifier that produces
+// NEW findings every round trips the churn guard and the close ships — an
+// unconstrained adversary is an infinite nitpick generator, so the veto is
+// deliberately finite.
+type AgentVerifierConfig struct {
+	// Enabled gates the whole gate (default false; opt-in per class).
+	Enabled bool `yaml:"enabled"`
+	// MinScore is the ship threshold (default 0.8). Crank toward 0.95 for
+	// enhancement-hungry dogfood repos, down toward 0.5 for throughput.
+	MinScore float64 `yaml:"min_score"`
+	// Classes limits the gate to these bead types (default implement,
+	// feature, refactor). Test/docs/syntax phases are execution-gated.
+	Classes []string `yaml:"classes"`
+	// MaxDiffBytes caps the diff fed to the reviewer (default 32KB).
+	MaxDiffBytes int `yaml:"max_diff_bytes"`
+	// TimeoutSeconds bounds one verifier call (default 300).
+	TimeoutSeconds int `yaml:"timeout_seconds"`
+	// Provider/Model/PiPath mirror the Pan runner identity; empty = pi defaults.
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"`
+	PiPath   string `yaml:"pi_path"`
+}
+
+// agentVerifierWithDefaults normalizes zero-valued knobs.
+func agentVerifierWithDefaults(c AgentVerifierConfig) AgentVerifierConfig {
+	if c.MinScore <= 0 || c.MinScore > 1 {
+		c.MinScore = 0.8
+	}
+	if len(c.Classes) == 0 {
+		c.Classes = []string{"implement", "feature", "refactor"}
+	}
+	if c.MaxDiffBytes <= 0 {
+		c.MaxDiffBytes = 32768
+	}
+	if c.TimeoutSeconds <= 0 {
+		c.TimeoutSeconds = 300
+	}
+	return c
 }
 
 // TargetScopeMode returns the normalized scope gate enforcement mode.
@@ -769,6 +928,12 @@ type ResourceMonitoringConfig struct {
 	Enabled          bool    `yaml:"enabled"`
 	MaxCPUPercent    float64 `yaml:"max_cpu_percent"`
 	MaxMemoryPercent float64 `yaml:"max_memory_percent"`
+	// MinMemAvailableMB is the absolute MemAvailable spawn floor (hydra-3ocq):
+	// a worker spawn is refused while the host has less free memory than this,
+	// even when max_memory_percent still passes — percentage ignores free
+	// headroom, which is exactly what the 2026-10-15 OOM/swap-storm outran.
+	// 0 = default 2500 (2.5G); negative disables. Probe errors fail open.
+	MinMemAvailableMB int `yaml:"min_memory_available_mb"`
 }
 
 // ProjectConfig represents a project configuration
@@ -821,11 +986,19 @@ func DefaultConfig() *Config {
 			DefaultRetries:            3,
 			EscalationTTL:             72 * time.Hour,
 			IntegrationExhaustedSweep: 48 * time.Hour,
+			PostCloseSweep:            true,
+			PRAgingDays:               PRAgingThresholdDays,
 			WorkerTimeout:             30 * time.Minute,
+			WorkerMemoryMaxMB:         5120,
+			WorkerNodeHeapMB:          3072,
 			ChainDetection: ChainDetectionConfig{
 				Enabled:  true,
 				Interval: 10 * time.Second,
 				Timeout:  10 * time.Minute,
+			},
+			MirrorHealth: MirrorHealthConfig{
+				Enabled:  true,
+				Interval: 30 * time.Minute,
 			},
 		},
 		Validation: ValidationConfig{
@@ -945,6 +1118,20 @@ func DefaultConfig() *Config {
 		Status: StatusConfig{
 			LogPath: "/var/log/hydra/hydra-error.log",
 		},
+	}
+}
+
+// restoreMirrorHealthDefaults reapplies DefaultConfig's mirror_health defaults
+// when the raw yaml did not set them. LoadConfig copies raw.Overseer over the
+// defaults wholesale, zeroing MirrorHealth, so a config body missing the
+// section would otherwise disable the audit-only sweep.
+func restoreMirrorHealthDefaults(o *OverseerConfig) {
+	if o == nil || o.MirrorHealth != (MirrorHealthConfig{}) {
+		return
+	}
+	o.MirrorHealth = MirrorHealthConfig{
+		Enabled:  true,
+		Interval: 30 * time.Minute,
 	}
 }
 
@@ -1077,6 +1264,7 @@ func LoadConfig(path string) (*Config, error) {
 
 	// Copy non-project fields
 	config.Overseer = raw.Overseer
+	restoreMirrorHealthDefaults(&config.Overseer)
 	config.MCP = raw.MCP
 	config.API = raw.API
 	config.Intelligence = raw.Intelligence
@@ -1159,6 +1347,7 @@ func LoadConfigUncached(path string) (*Config, error) {
 
 	// Copy non-project fields
 	config.Overseer = raw.Overseer
+	restoreMirrorHealthDefaults(&config.Overseer)
 	config.MCP = raw.MCP
 	config.API = raw.API
 	config.Intelligence = raw.Intelligence

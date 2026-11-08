@@ -1,7 +1,10 @@
 package core
 
 import (
+	"errors"
+	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -26,9 +29,14 @@ import (
 // has no hydra worktree branches, it returns (0, 0) without error.
 // reconcileMinIdle is the age floor for the reconciler: a worktree whose
 // contents changed within this window is treated as live and skipped.
-const reconcileMinIdle = 30 * time.Minute
+// 2026-10-29 emergency raise 30m -> 6h: with a single-lane provider the fleet's
+// workers think for >30m between worktree writes; the reconciler was
+// integrating+removing their live (read-only-pending) worktrees at each
+// hourly sweep — 69 `[Registry] FATAL: worktree` worker deaths in one day.
+// Proper fix (registry-keyed liveness, not mtimes) is beaded separately.
+const reconcileMinIdle = 6 * time.Hour
 
-func ReconcileOrphanedWorktrees(m *WorktreeManager, projectPath string, activeKeys map[string]bool, isTerminal func(key string) bool) (integrated int, conflicts int) {
+func ReconcileOrphanedWorktrees(m *WorktreeManager, projectPath string, activeKeys map[string]bool, isTerminal func(key string) bool, events *EventSink) (integrated int, conflicts int) {
 	// Not a git repo — nothing to reconcile.
 	if _, err := gitOut(projectPath, "rev-parse", "--git-dir"); err != nil {
 		return 0, 0
@@ -77,6 +85,19 @@ func ReconcileOrphanedWorktrees(m *WorktreeManager, projectPath string, activeKe
 		if err := integrationGate(projectPath, func() error {
 			return m.IntegrateBranchAndRemove(projectPath, key, branch)
 		}); err != nil {
+			// Suite gate blocked (typed error — no string sniffing): keep the
+			// branch + entry in place for the quarantine reconciler to retry,
+			// and emit the typed event once per block. Quarantining here would
+			// remove the branch while the post-merge tree is broken.
+			if errors.Is(err, ErrQuarantineSuiteGateBlocked) {
+				log.Printf("[WorktreeReconcile] %s: suite gate blocked integration — branch kept for quarantine reconciler", key)
+				events.EmitRepo(projectPath, Event{Type: "quarantine_suite_gate_blocked", Project: filepath.Base(projectPath),
+					Bead: key, Reason: "suite_gate_failed",
+					Detail: fmt.Sprintf("%s integrate blocked by failed full-suite gate: %v", branch, err),
+					Fields: map[string]any{"branch": branch, "correlation_id": SensorCorrelation("worktree-reconcile", key)}})
+				conflicts++
+				continue
+			}
 			// Terminal + conflict: preserve the work on a quarantine branch
 			// and consume the wt branch — the alternative is retrying the
 			// same failing merge every sweep forever.
@@ -84,6 +105,13 @@ func ReconcileOrphanedWorktrees(m *WorktreeManager, projectPath string, activeKe
 				log.Printf("[WorktreeReconcile] %s: integrate failed (%v); quarantine failed (%v)", key, err, qerr)
 			} else {
 				log.Printf("[WorktreeReconcile] %s: integrate conflicted — quarantined to %s (work preserved, retry loop ends)", key, qb)
+				// Sensor symmetry (fire): the paired resolve (quarantine_restored)
+				// is emitted by the retry-quarantine repair with the same
+				// correlation ID when the quarantined branch merges clean again.
+				events.EmitRepo(projectPath, Event{Type: "worktree_quarantined", Project: filepath.Base(projectPath),
+					Bead: key, Reason: "merge_conflict",
+					Detail: fmt.Sprintf("%s quarantined to %s after integrate conflict", branch, qb),
+					Fields: map[string]any{"quarantine_branch": qb, "correlation_id": SensorCorrelation("worktree-reconcile", key)}})
 			}
 			conflicts++
 			continue

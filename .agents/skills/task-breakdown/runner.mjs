@@ -28,6 +28,22 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { analyzePRDDeterministic } from './analyzer.mjs';
 import { BeadsExecutor } from './executor.mjs';
+
+/**
+ * Wildcard config-task target list: emitted when a configuration_task
+ * requirement declares no concrete files (missing, '*', or 'TBD').
+ * Serves both the task metadata (`files`) and the instruction text.
+ */
+const DEFAULT_CONFIG_TARGET_FILES = [
+  'package.json (root)',
+  'tsconfig.json (root)',
+  'tsconfig.base.json (if tsconfig.json extends it)',
+  'turbo.json',
+  'biome.json',
+  'apps/api/package.json',
+  'apps/web/package.json',
+  'packages/math/package.json',
+];
 import { RollbackManager } from './rollback.mjs';
 import { StateManager } from './state.mjs';
 
@@ -36,6 +52,9 @@ export class TaskBreakdownRunner extends EventEmitter {
     super();
     this.sessionId = options.sessionId || `td-${Date.now()}`;
     this.state = new StateManager(this.sessionId);
+    // Repo-language detection (go/javascript/python/unknown) — drives language-
+    // specific acceptance criteria; 'unknown' keeps the legacy JS boilerplate.
+    this.repoLanguage = 'unknown';
     // Pure deterministic execution - no AI agents
     this.executor = new BeadsExecutor();
     this.rollback = new RollbackManager();
@@ -132,6 +151,10 @@ export class TaskBreakdownRunner extends EventEmitter {
   async run(prdPath) {
     console.log(`[Runner] Starting task breakdown for: ${prdPath}`);
     console.log(`[Runner] Session ID: ${this.sessionId}`);
+
+    // Detect the repo language once up front so every synthesized bead gets
+    // language-appropriate criteria (go.mod → Go, package.json → JS, ...).
+    await this.ensureRepoLanguage();
 
     // Emit workflow start
     this._emitEvent('workflow:start', {
@@ -601,7 +624,7 @@ export class TaskBreakdownRunner extends EventEmitter {
     }
 
     // Validate taskPattern is one of allowed values
-    const validPatterns = ['tdd_chain', 'verification_gate', 'aggregation_task', 'configuration_task'];
+    const validPatterns = ['tdd_chain', 'direct_task', 'verification_gate', 'aggregation_task', 'configuration_task'];
     if (!validPatterns.includes(req.taskPattern)) {
       errors.push(`Invalid taskPattern: ${req.taskPattern}. Must be one of: ${validPatterns.join(', ')}`);
     }
@@ -727,7 +750,7 @@ export class TaskBreakdownRunner extends EventEmitter {
   hasClearImplementationApproach(prdContent) {
     // Check for technology stack specification
     const hasTechStack =
-      /\b(typescript|javascript|python|react|vue|angular|node|bun|deno|svelte|solid)\b/i.test(
+      /\b(typescript|javascript|python|react|vue|angular|node|bun|deno|svelte|solid|go|golang)\b/i.test(
         prdContent,
       );
     // Check for architecture patterns
@@ -824,8 +847,19 @@ export class TaskBreakdownRunner extends EventEmitter {
 
     // GREENFIELD GUARD: If no package.json exists, inject a monorepo config task
     // so that TDD beads have vitest/tsconfig scaffolding to run tests.
+    // Skipped when the PRD produced no TDD chains — analysis/docs-shaped PRDs
+    // have no test harness to scaffold, and injecting it spawned a phantom
+    // NFR-003 "Monorepo Configuration" bead in those campaigns.
     const hasPackageJson = await fs.access('package.json').then(() => true).catch(() => false);
-    if (!hasPackageJson) {
+    const hasTddChains = requirements.some(r => r.taskPattern === 'tdd_chain');
+    // Language gate: Go/Python repos must NOT receive the JS monorepo
+    // scaffolding task (vitest/tsconfig/biome is meaningless there). Only
+    // JS-ecosystem or unknown-language repos keep the legacy injection.
+    const injectMonorepoConfig =
+      !hasPackageJson &&
+      hasTddChains &&
+      (this.repoLanguage === 'javascript' || this.repoLanguage === 'unknown');
+    if (injectMonorepoConfig) {
       console.log('  🏗️  No package.json found — injecting monorepo configuration task');
       const configReq = {
         id: 'NFR-003',
@@ -857,9 +891,10 @@ export class TaskBreakdownRunner extends EventEmitter {
 
       const order = {
         'tdd_chain': 0,
-        'configuration_task': 1,
-        'aggregation_task': 2,
-        'verification_gate': 3,
+        'direct_task': 1,
+        'configuration_task': 2,
+        'aggregation_task': 3,
+        'verification_gate': 4,
       };
       const patternDiff = (order[a.taskPattern] || 0) - (order[b.taskPattern] || 0);
       if (patternDiff !== 0) return patternDiff;
@@ -867,6 +902,34 @@ export class TaskBreakdownRunner extends EventEmitter {
       // Simple tasks first → more beads complete in limited time
       return (a.estimatedHours || 1) - (b.estimatedHours || 1);
     });
+
+    // Dependency-aware ordering: a requirement must be emitted AFTER every
+    // requirement it explicitly depends on. The sort above happily places a
+    // P0 tdd_chain before the P0 direct_task it depends on (tdd_chain sorts
+    // first within a priority tier), crashing dep resolution with
+    // 'implement-<id>-apply not found'. Stable Kahn pass over
+    // explicitDependsOn; unknown/self IDs ignored; cycles keep sort order.
+    const reqsByOrigId = new Map(requirements.map((r) => [r.originalId, r]));
+    const placedIds = new Set();
+    const topoOrdered = [];
+    const remaining = [...requirements];
+    let progressed = true;
+    while (remaining.length > 0 && progressed) {
+      progressed = false;
+      for (let i = 0; i < remaining.length; i++) {
+        const r = remaining[i];
+        const knownDeps = (r.explicitDependsOn || []).filter((d) => reqsByOrigId.has(d));
+        if (knownDeps.every((d) => placedIds.has(d))) {
+          topoOrdered.push(r);
+          placedIds.add(r.originalId);
+          remaining.splice(i, 1);
+          i--;
+          progressed = true;
+        }
+      }
+    }
+    if (remaining.length > 0) topoOrdered.push(...remaining);
+    requirements = topoOrdered;
 
     // Track tasks per requirement for dependency resolution
     const reqTasks = new Map(); // reqId -> { discoveryId, implementationId }
@@ -897,6 +960,19 @@ export class TaskBreakdownRunner extends EventEmitter {
       });
 
       for (const req of requirements) {
+        // Discovery is only useful when targets are unresolved (TBD) — the
+        // PRD contract already supplies Target Files, and gates/aggregations
+        // have no implementation surface to research. Skipping resolved
+        // requirements kills the discovery-bead inflation class (44 beads in
+        // one srv-telematics campaign). Impl deps fall back to approvalGate
+        // via taskInfo.discoveryLocalId || 'approvalGate'.
+        const reqFiles = req.files || [];
+        const targetsResolved = reqFiles.length > 0 && !reqFiles.includes('TBD');
+        const noDiscoverySurface =
+          req.taskPattern === 'verification_gate' || req.taskPattern === 'aggregation_task';
+        if (targetsResolved || noDiscoverySurface) {
+          continue;
+        }
         const localId = `discovery-${req.id.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
 
         const discoveryTask = {
@@ -1056,7 +1132,24 @@ export class TaskBreakdownRunner extends EventEmitter {
         }
       }
 
-      // Type-aware task creation
+      /**
+ * Terminal local task id for a dependency requirement, resolved by pattern.
+ * Chains terminate at the `-syntax` leg; single-bead patterns (direct_task,
+ * configuration_task) terminate at the `-apply` bead; verification gates and
+ * aggregation tasks emit under the base id. Hardcoding `-syntax` broke mixed
+ * graphs the moment a chain depended on a direct_task (the common case for
+ * test-coverage PRDs: implementation chains depend on test-foundation tasks).
+ */
+function terminalDepLocalId(depReq) {
+  const base = `implement-${depReq.id.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
+  if (depReq.taskPattern === 'tdd_chain') return `${base}-syntax`;
+  if (depReq.taskPattern === 'direct_task' || depReq.taskPattern === 'configuration_task') {
+    return `${base}-apply`;
+  }
+  return base;
+}
+
+// Type-aware task creation
       if (req.taskPattern === 'verification_gate') {
         // Verification NFRs: single gate bead that runs after all implementation
         // Use req.dependsOn (explicit Verifies list) for blockers
@@ -1090,10 +1183,10 @@ This gate runs after all implementation tasks complete.`,
         };
 
         const gateBlockers = gateDeps.map((dep) => {
-          // Map requirement IDs to their SYNTAX task IDs
+          // Map requirement IDs to their terminal task IDs (pattern-aware)
           const depReq = requirements.find(r => r.originalId === dep);
           if (depReq) {
-            const depLocalId = `implement-${depReq.id.toLowerCase().replace(/[^a-z0-9]/g, '-')}-syntax`;
+            const depLocalId = terminalDepLocalId(depReq);
             return idMapping[depLocalId];
           }
           return idMapping[dep];
@@ -1108,7 +1201,7 @@ This gate runs after all implementation tasks complete.`,
         const aggregatedSyntaxIds = req.dependsOn.map(depId => {
           const depReq = requirements.find(r => r.originalId === depId);
           if (depReq) {
-            return `implement-${depReq.id.toLowerCase().replace(/[^a-z0-9]/g, '-')}-syntax`;
+            return terminalDepLocalId(depReq);
           }
           return null;
         }).filter(Boolean);
@@ -1117,6 +1210,21 @@ This gate runs after all implementation tasks complete.`,
       } else if (req.taskPattern === 'configuration_task') {
         // Configuration tasks: RED depends on approval gate
         await this.createConfigurationTask(req, baseTask, null, state, ['approvalGate']);
+      } else if (req.taskPattern === 'direct_task') {
+        // Direct tasks: single bead, no RED→GREEN→REFACTOR chain; depends on
+        // explicit Depends On (mapped to SYNTAX ids) + P0 APPLY tasks.
+        let directDeps = ['approvalGate'];
+        if (req.explicitDependsOn && req.explicitDependsOn.length > 0) {
+          directDeps = req.explicitDependsOn.map(depId => {
+            const depReq = requirements.find(r => r.originalId === depId);
+            if (depReq) {
+              return terminalDepLocalId(depReq);
+            }
+            return null;
+          }).filter(Boolean);
+        }
+        directDeps = [...new Set([...directDeps, ...p0ApplyIds])];
+        await this.createConfigurationTask(req, baseTask, null, state, directDeps);
       } else {
         // Default: TDD_CHAIN for FRs
         // RED depends on approval gate or explicit Depends On + P0 APPLY tasks
@@ -1125,7 +1233,7 @@ This gate runs after all implementation tasks complete.`,
           redDeps = req.explicitDependsOn.map(depId => {
             const depReq = requirements.find(r => r.originalId === depId);
             if (depReq) {
-              return `implement-${depReq.id.toLowerCase().replace(/[^a-z0-9]/g, '-')}-syntax`;
+              return terminalDepLocalId(depReq);
             }
             return null;
           }).filter(Boolean);
@@ -1177,6 +1285,7 @@ This gate runs after all implementation tasks complete.`,
     const verificationNFRs = requirements.filter(r => r.taskPattern === 'verification_gate');
     const aggregationTasks = requirements.filter(r => r.taskPattern === 'aggregation_task');
     const configTasks = requirements.filter(r => r.taskPattern === 'configuration_task');
+    const directTasks = requirements.filter(r => r.taskPattern === 'direct_task');
 
     // Count fused vs full chains
     const trivialFRs = frs.filter(r => r.estimatedHours < 0.5 && (r.files || []).length <= 1);
@@ -1187,7 +1296,9 @@ This gate runs after all implementation tasks complete.`,
     const fullStackExtraSubtasks = fullStackUSs.length * 6; // backend(3) + frontend(3)
 
     const tddSubtasks = trivialFRs.length * 3 + complexFRs.length * 4 + aggregationTasks.length * 3 + configTasks.length * 2 + fullStackExtraSubtasks;
-    const totalTasks = requirements.length + tddSubtasks;
+    // Direct tasks emit exactly one bead per requirement — no phase synthesis.
+    // Beads per pattern: fr trivial=3, fr complex=4, agg=3, config=2, direct=1, verification=1.
+    const totalTasks = tddSubtasks + directTasks.length + verificationNFRs.length;
 
     console.log(`  ✓ Created all tasks deterministically (type-aware)`);
     if (skipDiscovery) {
@@ -1298,7 +1409,7 @@ This gate runs after all implementation tasks complete.`,
       localId: 'lint-gate',
       title: 'LINT GATE: Code Quality Review',
       description: `## Scope
-Comprehensive PROJECT-LEVEL Biome linting on ALL source files.
+Comprehensive PROJECT-LEVEL linting on ALL source files.
 
 ## Difference from SYNTAX phases
 - **SYNTAX phases** (per-task): Run on files modified by each specific task
@@ -1316,15 +1427,11 @@ Comprehensive PROJECT-LEVEL Biome linting on ALL source files.
 
 ## Command
 \`\`\`bash
-# Run the project's linter on all source files.
-# Inspect the project for linting configuration and run the appropriate command.
-# Examples: npx biome lint --write src/, npx eslint --fix src/, go vet ./...
+${this.lintGateCommandBlock()}
 \`\`\`
 
 ## Acceptance Criteria
-- Biome passes with exit code 0
-- All safe fixes applied automatically
-- No remaining lint errors
+${this.lintGateAcceptanceBlock()}
 
 ## Failure Handling
 If this task fails, a 'Fix All Lint Errors' task will be created.
@@ -1563,6 +1670,37 @@ ${req.description}`;
    * @param {string} options.instructions - Tracking instructions
    * @returns {string} Formatted tracker description
    */
+  /**
+   * Verification Command contract (FR-001, executable-acceptance PRD):
+   * every synthesized bead carries metadata.verification_command plus a
+   * **Verification Command:** fenced block in its description.
+   *   - Test Command present  → verification_command equals it byte-for-byte.
+   *   - Test Command missing  → Build Command + non-vacuity wrapper tail.
+   *   - Neither present       → the non-vacuity wrapper alone (still non-empty).
+   */
+  buildVerificationCommand(testCommand, buildCommand) {
+    const NON_VACUITY_TAIL =
+      'echo "verification: non-vacuity gate — command completed with exit 0"';
+    const test = (testCommand || '').trim();
+    if (test) return test;
+    const build = (buildCommand || '').trim();
+    if (build) return `${build} && ${NON_VACUITY_TAIL}`;
+    return NON_VACUITY_TAIL;
+  }
+
+  /** Machine-parseable fenced block rendering the verification command. */
+  verificationCommandBlock(command) {
+    return `\n\n**Verification Command:**\n\n\`\`\`sh\n${command}\n\`\`\``;
+  }
+
+  /** Attach the verification_command contract (metadata + description block) to a bead. */
+  applyVerificationContract(task, testCommand, buildCommand) {
+    const command = this.buildVerificationCommand(testCommand, buildCommand);
+    task.metadata = { ...task.metadata, verification_command: command };
+    task.description = (task.description || '') + this.verificationCommandBlock(command);
+    return command;
+  }
+
   formatTrackerDescription({ req, instructions }) {
     // Build context for tracker tasks (minimal, just requirement context)
     const context = {
@@ -1604,12 +1742,141 @@ ${req.description}`;
   }
 
   /**
-   * Get development constraints for Node.js/JS/TS projects
+   * Detect the repository language from marker files in the given directory
+   * (project root at runtime).
+   *   go.mod → 'go'; package.json → 'javascript';
+   *   requirements.txt / pyproject.toml → 'python'; otherwise 'unknown'.
+   * @param {string} [dir='.'] - Directory to probe.
+   * @returns {Promise<string>} Detected language.
+   */
+  async detectRepoLanguage(dir = '.') {
+    const markers = [
+      ['go.mod', 'go'],
+      ['package.json', 'javascript'],
+      ['requirements.txt', 'python'],
+      ['pyproject.toml', 'python'],
+    ];
+    for (const [file, language] of markers) {
+      // eslint-disable-next-line no-await-in-loop
+      const exists = await fs.access(path.join(dir, file)).then(() => true).catch(() => false);
+      if (exists) return language;
+    }
+    return 'unknown';
+  }
+
+  /**
+   * Detect and cache the repo language on this runner instance.
+   * @param {string} [dir='.'] - Directory to probe.
+   * @returns {Promise<string>} Detected language ('unknown' on probe error).
+   */
+  async ensureRepoLanguage(dir = '.') {
+    try {
+      this.repoLanguage = await this.detectRepoLanguage(dir);
+    } catch {
+      // Fail open: an unreadable directory keeps legacy (JS/unknown) behavior.
+      this.repoLanguage = 'unknown';
+    }
+    if (this.repoLanguage !== 'unknown') {
+      console.log(`  🔎 Repo language detected: ${this.repoLanguage}`);
+    }
+    return this.repoLanguage;
+  }
+
+  /**
+   * Formatter command appropriate to the detected repo language.
+   * @returns {string} Formatter invocation used in SYNTAX/config instructions.
+   */
+  formatterCommand() {
+    switch (this.repoLanguage) {
+      case 'go':
+        return 'gofmt -w';
+      case 'python':
+        return "the project's formatter (e.g. ruff format)";
+      default:
+        return 'biome format --write';
+    }
+  }
+
+  /**
+   * Lint-gate command block for the detected repo language.
+   * @returns {string}
+   */
+  lintGateCommandBlock() {
+    if (this.repoLanguage === 'go') {
+      return `# Run the Go linters on all source files.
+go vet ./...
+gofmt -l .`;
+    }
+    if (this.repoLanguage === 'python') {
+      return `# Run the project's Python linter on all source files.
+# Inspect the project for linting configuration and run the appropriate command.
+# Examples: ruff check ., flake8 .`;
+    }
+    return `# Run the project's linter on all source files.
+# Inspect the project for linting configuration and run the appropriate command.
+# Examples: npx biome lint --write src/, npx eslint --fix src/, go vet ./...`;
+  }
+
+  /**
+   * Lint-gate acceptance criteria for the detected repo language.
+   * @returns {string}
+   */
+  lintGateAcceptanceBlock() {
+    if (this.repoLanguage === 'go') {
+      return `- go vet ./... passes with exit code 0
+- gofmt reports no unformatted files
+- No remaining vet diagnostics`;
+    }
+    if (this.repoLanguage === 'python') {
+      return `- The project linter passes with exit code 0
+- No remaining lint errors`;
+    }
+    return `- Biome passes with exit code 0
+- All safe fixes applied automatically
+- No remaining lint errors`;
+  }
+
+  /**
+   * Biome-specific configuration block for configuration-task instructions.
+   * Empty for non-JS repos (Go/Python) — Biome boilerplate must not appear.
+   * @returns {string}
+   */
+  biomeConfigBlock() {
+    if (this.repoLanguage === 'go' || this.repoLanguage === 'python') return '';
+    return `CRITICAL — If using Biome for linting/formatting, create \`biome.json\` with:
+{
+  "files": {
+    "ignore": [".hydra", ".beads", "node_modules", ".git"]
+  }
+}
+This prevents Biome from scanning worktree directories.
+
+`;
+  }
+
+  /**
+   * Get development constraints for the detected repo language
    * @param {Object} parentTask - Parent task object
    * @param {string} phase - TDD phase (red, green, refactor, syntax)
    * @returns {string} Development constraints block
    */
   getDevelopmentConstraints() {
+    if (this.repoLanguage === 'go') {
+      return `
+### Development Constraints
+- Floating-point comparisons MUST use an explicit tolerance (e.g. math.Abs(diff) < epsilon in table tests), NOT exact equality. Applies to: sqrt, log, divide, pow, sin, cos, tan results
+- go vet ./... must pass before bead is complete
+- Test output must show 0 failures (go test ./...)
+- Tooling prerequisites verified: go in PATH`;
+    }
+    if (this.repoLanguage === 'python') {
+      return `
+### Development Constraints
+- All floating-point comparisons MUST use an explicit tolerance (e.g. pytest.approx), NOT exact equality. Applies to: sqrt, log, divide, pow, sin, cos, tan results
+- Lint must pass before bead is complete
+- Test output must show 0 failures (pytest)
+- Tooling prerequisites verified: python, pytest in PATH`;
+    }
     return `
 ### Development Constraints
 - All floating-point comparisons MUST use \`toBeCloseTo()\`, NOT \`toBe()\`. Applies to: sqrt, log, divide, pow, sin, cos, tan results
@@ -1738,6 +2005,8 @@ ${req.description}`;
     const testCmdLine = testCommand ? '\n- Run the exact test command: ' + testCommand + ' and confirm exit code 0' : '';
     const buildCmdLine = buildCommand ? '\n- Run the exact build command: ' + buildCommand + ' and confirm exit code 0' : '';
 
+    // Verification Command contract: propagated to every phase bead below.
+
     const tasks = [
       {
         localId: `${baseId}-red`,
@@ -1826,7 +2095,7 @@ ${req.description}`;
         parentCriteria,
         parentFiles,
         parentFunctions,
-        specificInstructions: `Run linting and type-checking on modified files. Fix any errors or warnings.\n\nAlso verify:\n1. All public functions/methods/types have adequate documentation (JSDoc, Go doc, docstrings, etc.)\n2. Type checking passes with no errors\n3. Run biome format --write (or the project's formatter) on all modified files to ensure consistent formatting\n4. Code follows project style guidelines${syntaxTestCmd}${syntaxBuildCmd}\n5. Verify every target file is non-empty and contains no placeholder comments (e.g. "// Placeholder", "// TODO", "// FIXME")`,
+        specificInstructions: `Run linting and type-checking on modified files. Fix any errors or warnings.\n\nAlso verify:\n1. All public functions/methods/types have adequate documentation (JSDoc, Go doc, docstrings, etc.)\n2. Type checking passes with no errors\n3. Run ${this.formatterCommand()} (or the project's formatter) on all modified files to ensure consistent formatting\n4. Code follows project style guidelines${syntaxTestCmd}${syntaxBuildCmd}\n5. Verify every target file is non-empty and contains no placeholder comments (e.g. "// Placeholder", "// TODO", "// FIXME")`,
       }),
       level: parentTask.level,
       dependsOn: syntaxDependsOn,
@@ -1850,6 +2119,10 @@ ${req.description}`;
         current_retry: 0,
       },
     });
+
+    for (const sub of tasks) {
+      this.applyVerificationContract(sub, testCommand, buildCommand);
+    }
 
     return tasks;
   }
@@ -1884,6 +2157,13 @@ ${req.description}`;
     const buildCommand = req.buildCommand || '';
     const testCmdLine = testCommand ? '\n- Run the exact test command: ' + testCommand + ' and confirm exit code 0' : '';
     const buildCmdLine = buildCommand ? '\n- Run the exact build command: ' + buildCommand + ' and confirm exit code 0' : '';
+
+    // Verification Command contract: every aggregation bead carries the command.
+    const vc = this.buildVerificationCommand(testCommand, buildCommand);
+    const _aggCreateTask = (task, blockers) => {
+      this.applyVerificationContract(task, testCommand, buildCommand);
+      return this.executor.createTask(task, blockers);
+    };
 
     // FULL-STACK EXPLOSION: If US implies both backend and frontend,
     // create separate TDD chains for backend and frontend BEFORE integration.
@@ -1925,7 +2205,7 @@ ${req.description}`;
         metadata: { tdd_phase: 'red', parent_task: backendBaseId },
       };
       const backendRedBlockers = aggregatedSyntaxIds.map(localId => idMapping[localId]).filter(Boolean);
-      const backendRedId = this.executor.createTask(backendRedTask, backendRedBlockers);
+      const backendRedId = _aggCreateTask(backendRedTask, backendRedBlockers);
       console.log(`        ✓ ${backendRedTask.localId} → ${backendRedId}`);
       idMapping[backendRedTask.localId] = backendRedId;
 
@@ -1948,7 +2228,7 @@ ${req.description}`;
         labels: [...new Set([...parentTask.labels, 'tdd-green', 'backend'])],
         metadata: { tdd_phase: 'green', parent_task: backendBaseId },
       };
-      const backendGreenId = this.executor.createTask(backendGreenTask, [backendRedId]);
+      const backendGreenId = _aggCreateTask(backendGreenTask, [backendRedId]);
       console.log(`        ✓ ${backendGreenTask.localId} → ${backendGreenId}`);
       idMapping[backendGreenTask.localId] = backendGreenId;
 
@@ -1971,7 +2251,7 @@ ${req.description}`;
         labels: [...new Set([...parentTask.labels, 'tdd-syntax', 'backend-quality'])],
         metadata: { tdd_phase: 'syntax', parent_task: backendBaseId },
       };
-      backendSyntaxId = this.executor.createTask(backendSyntaxTask, [backendGreenId]);
+      backendSyntaxId = _aggCreateTask(backendSyntaxTask, [backendGreenId]);
       console.log(`        ✓ ${backendSyntaxTask.localId} → ${backendSyntaxId}`);
       idMapping[backendSyntaxTask.localId] = backendSyntaxId;
 
@@ -2005,7 +2285,7 @@ ${req.description}`;
         metadata: { tdd_phase: 'red', parent_task: frontendBaseId },
       };
       const frontendRedBlockers = aggregatedSyntaxIds.map(localId => idMapping[localId]).filter(Boolean);
-      const frontendRedId = this.executor.createTask(frontendRedTask, frontendRedBlockers);
+      const frontendRedId = _aggCreateTask(frontendRedTask, frontendRedBlockers);
       console.log(`        ✓ ${frontendRedTask.localId} → ${frontendRedId}`);
       idMapping[frontendRedTask.localId] = frontendRedId;
 
@@ -2028,7 +2308,7 @@ ${req.description}`;
         labels: [...new Set([...parentTask.labels, 'tdd-green', 'frontend'])],
         metadata: { tdd_phase: 'green', parent_task: frontendBaseId },
       };
-      const frontendGreenId = this.executor.createTask(frontendGreenTask, [frontendRedId]);
+      const frontendGreenId = _aggCreateTask(frontendGreenTask, [frontendRedId]);
       console.log(`        ✓ ${frontendGreenTask.localId} → ${frontendGreenId}`);
       idMapping[frontendGreenTask.localId] = frontendGreenId;
 
@@ -2051,7 +2331,7 @@ ${req.description}`;
         labels: [...new Set([...parentTask.labels, 'tdd-syntax', 'frontend-quality'])],
         metadata: { tdd_phase: 'syntax', parent_task: frontendBaseId },
       };
-      frontendSyntaxId = this.executor.createTask(frontendSyntaxTask, [frontendGreenId]);
+      frontendSyntaxId = _aggCreateTask(frontendSyntaxTask, [frontendGreenId]);
       console.log(`        ✓ ${frontendSyntaxTask.localId} → ${frontendSyntaxId}`);
       idMapping[frontendSyntaxTask.localId] = frontendSyntaxId;
     }
@@ -2073,7 +2353,7 @@ ${req.description}`;
         parentFunctions: req.functions,
         specificInstructions: `Write integration tests that verify the aggregated features work together. Tests must exercise real code, not mocks, and must fail if any aggregated FR is missing or broken.` +
           (isFullStack ? '\n\nCRITICAL: This is a WIRING-ONLY task. The backend API and frontend component are implemented in separate beads. This bead ONLY writes tests that verify they work together (e.g., end-to-end test calling API through frontend).' : '') +
-          `\n\nAggregated FRs: ${req.dependsOn.join(', ')}`,
+          `\n\nAggregated FRs: ${(req.dependsOn || []).join(', ')}`,
       }),
       level: parentTask.level,
       dependsOn: integrationRedDeps,
@@ -2088,7 +2368,7 @@ ${req.description}`;
     };
 
     const redBlockers = integrationRedDeps.map(localId => idMapping[localId]).filter(Boolean);
-    const redId = this.executor.createTask(redTask, redBlockers);
+    const redId = _aggCreateTask(redTask, redBlockers);
     this._emitEvent('task:subtask:created', {
       step: stepName,
       parentLocalId: baseId,
@@ -2117,7 +2397,7 @@ ${req.description}`;
 - Verify every target file is non-empty and contains no placeholder comments (e.g. "// Placeholder", "// TODO", "// FIXME")
 - Ensure all aggregated FRs are importable/resolvable from this integration layer
 
-Aggregated FRs: ${req.dependsOn.join(', ')}`,
+Aggregated FRs: ${(req.dependsOn || []).join(', ')}`,
       }),
       level: parentTask.level,
       dependsOn: [`${baseId}-red`],
@@ -2131,7 +2411,7 @@ Aggregated FRs: ${req.dependsOn.join(', ')}`,
       },
     };
 
-    const greenId = this.executor.createTask(greenTask, [redId]);
+    const greenId = _aggCreateTask(greenTask, [redId]);
     this._emitEvent('task:subtask:created', {
       step: stepName,
       parentLocalId: baseId,
@@ -2168,7 +2448,7 @@ Aggregated FRs: ${req.dependsOn.join(', ')}`,
       },
     };
 
-    const syntaxId = this.executor.createTask(syntaxTask, [greenId]);
+    const syntaxId = _aggCreateTask(syntaxTask, [greenId]);
     this._emitEvent('task:subtask:created', {
       step: stepName,
       parentLocalId: baseId,
@@ -2184,9 +2464,113 @@ Aggregated FRs: ${req.dependsOn.join(', ')}`,
   }
 
   /**
-   * Create configuration task (for NFRs like Module System, Setup)
-   * These can run in parallel with FRs
+   * Map a DIRECT_TASK requirement to its shape-specific acceptance line.
+   * @param {Object} req - Parsed requirement (needs .type, .originalId)
+   * @returns {string} Acceptance line for the deliverable shape
    */
+  getDirectTaskAcceptanceLine(req) {
+    const t = (req.type || '').toLowerCase();
+    const orig = (req.originalId || '').toUpperCase();
+    if (t.includes('test') || orig.startsWith('TEST-')) {
+      return 'suite exits 0; assertion count > 0; zero skipped/todo tests';
+    }
+    if (t.includes('refactor') || orig.startsWith('REF-')) {
+      return 'existing suite exits 0 unchanged';
+    }
+    if (t.includes('deletion') || orig.startsWith('DEL-')) {
+      return 'suite exits 0; absence grep returns no matches';
+    }
+    if (t.includes('spike') || t.includes('audit') || orig.startsWith('SPIKE-') || orig.startsWith('AUDIT-')) {
+      return 'findings artifact exists, non-vacuous, citations resolve where applicable';
+    }
+    return 'Test Command exits 0';
+  }
+
+  /**
+   * DIRECT_TASK: emit exactly ONE bead per requirement — no RED/GREEN/REFACTOR/SYNTAX
+   * phase synthesis. Used for docs, test-authoring, refactor, spike, deletion, audit
+   * deliverables where TDD ceremony is wrong-shape overhead.
+   */
+  async createDirectTask(req, parentTask, parentId, state, redDeps = []) {
+    const { idMapping } = state;
+    const stepName = 'create-tasks';
+
+    const cleanTitle = this.normalizeTitle(req.title);
+    const acceptanceLine = this.getDirectTaskAcceptanceLine(req);
+    const testCommand = (req.testCommand || '').trim();
+    const buildCommand = (req.buildCommand || '').trim();
+
+    let instructions = `## Direct Task
+
+This is a single-bead deliverable task — no TDD phase synthesis.
+
+Deliverable: ${cleanTitle}.
+
+Acceptance: ${acceptanceLine}.`;
+
+    if (testCommand) {
+      instructions += `\n\nTest Command (must be run exactly as written):\n\n\`${testCommand}\``;
+    }
+
+    const directTask = {
+      localId: parentTask.localId,
+      title: req.title,
+      description: this.formatTrackerDescription({ req, instructions }),
+      level: parentTask.level,
+      dependsOn: redDeps,
+      priority: parentTask.priority,
+      type: 'task',
+      labels: [...new Set([...parentTask.labels, 'direct-task'])],
+      metadata: {
+        prd_requirement_id: req.id,
+        task_pattern: 'direct_task',
+        test_command: req.testCommand || '',
+        build_command: req.buildCommand || '',
+        files: req.files || [],
+        parent_criteria: req.acceptanceCriteria || [],
+        acceptance_line: acceptanceLine,
+      },
+    };
+    this.applyVerificationContract(directTask, testCommand, buildCommand);
+
+    const blockers = redDeps.map((depLocalId) => {
+      const realId = idMapping[depLocalId];
+      if (!realId)
+        throw new Error(`Direct task dependency ${depLocalId} not found`);
+      return realId;
+    });
+
+    const directId = this.executor.createTask(directTask, blockers);
+    this._recordSubtaskEmission(directId, {
+      step: stepName,
+      parentLocalId: parentTask.localId,
+      task: directTask,
+      subtaskType: 'direct',
+      state,
+    });
+    idMapping[parentTask.localId] = directId;
+
+    await this.state.update({ idMapping });
+  }
+
+  /**
+   * Record a just-created subtask bead: emit its creation event, log the
+   * mapping, and register the localId → real bead id in the state idMapping.
+   * Shared by every subtask-synthesis path (TDD phases, config, direct).
+   */
+  _recordSubtaskEmission(taskId, { step, parentLocalId, task, subtaskType, state }) {
+    this._emitEvent('task:subtask:created', {
+      step,
+      parentLocalId,
+      localId: task.localId,
+      taskId,
+      subtaskType,
+      timestamp: Date.now(),
+    });
+    console.log(`        ✓ ${task.localId} → ${taskId}${subtaskType === 'direct' ? ' (direct task)' : ''}`);
+    state.idMapping[task.localId] = taskId;
+  }
+
   async createConfigurationTask(req, parentTask, parentId, state, redDeps = []) {
     const { idMapping } = state;
     const stepName = 'create-tasks';
@@ -2201,29 +2585,20 @@ Aggregated FRs: ${req.dependsOn.join(', ')}`,
     // The agent applies config, then SYNTAX validates it.
 
     const isWildcardFiles = !req.files || req.files.length === 0 || req.files.every(f => f === '*' || f === 'TBD');
-    const targetFiles = isWildcardFiles ? [
-      'package.json (root)',
-      'tsconfig.json (root)',
-      'tsconfig.base.json (if tsconfig.json extends it)',
-      'turbo.json',
-      'biome.json',
-      'apps/api/package.json',
-      'apps/web/package.json',
-      'packages/math/package.json',
-    ] : req.files;
+    const targetFiles = isWildcardFiles ? DEFAULT_CONFIG_TARGET_FILES : req.files;
 
-    const targetFilesBlock = isWildcardFiles ? `
-Target files (create ALL of these):
-- package.json (root)
-- tsconfig.json (root)
-- tsconfig.base.json (if tsconfig.json extends it)
-- turbo.json
-- biome.json
-- apps/api/package.json
-- apps/web/package.json
-- packages/math/package.json` : '';
+    const targetFilesBlock = isWildcardFiles ? `\nTarget files (create ALL of these):\n${DEFAULT_CONFIG_TARGET_FILES.map(f => `- ${f}`).join('\n')}` : '';
 
-    const applySpecificInstructions = `Apply the configuration for ${cleanTitle}.${targetFilesBlock}
+    const isDirect = req.taskPattern === 'direct_task';
+    const applySpecificInstructions = isDirect
+      ? `Deliver ${cleanTitle}.${targetFilesBlock}
+
+This is a single-bead deliverable task — no TDD phase synthesis, no separate validation bead.
+
+1. Produce the deliverable exactly as scoped in Target Files (write the tests / code / docs this requirement calls for — for test requirements, writing the test files IS the deliverable).
+2. Run the Test Command in the Verification block below and make it exit 0 (fix the deliverable, not the command).
+3. Report what was created or modified.`
+      : `Apply the configuration for ${cleanTitle}.${targetFilesBlock}
 
 This is an infrastructure/setup task. Create or update ONLY configuration files (e.g., package.json, tsconfig.json, turbo.json, build configs) according to the acceptance criteria. Do NOT write implementation code or tests in this task.
 
@@ -2239,18 +2614,15 @@ CRITICAL — Create or update \`.gitignore\` to exclude:
 - .tldr/
 - *.log
 
-CRITICAL — If using Biome for linting/formatting, create \`biome.json\` with:
-{
-  "files": {
-    "ignore": [".hydra", ".beads", "node_modules", ".git"]
-  }
-}
-This prevents Biome from scanning worktree directories.`;
+${this.biomeConfigBlock()}Then VALIDATE the configuration in the same bead (syntax gate fused into apply):
+1. All config files are syntactically valid
+2. Required fields are present
+3. Config matches project conventions
+4. Run ${this.formatterCommand()} on all config files to ensure consistent formatting`;
 
-    // APPLY: Apply configuration
     const applyTask = {
       localId: `${baseId}-apply`,
-      title: `APPLY: Configure ${cleanTitle}`,
+      title: isDirect ? cleanTitle : `APPLY: Configure ${cleanTitle}`,
       description: this.formatTDDDescription({
         phase: 'green',
         cleanTitle,
@@ -2263,7 +2635,7 @@ This prevents Biome from scanning worktree directories.`;
       dependsOn: redDeps,
       priority: parentTask.priority,
       type: 'task',
-      labels: [...new Set([...parentTask.labels, 'config-apply', 'configuration', 'phase:apply'])],
+      labels: [...new Set([...parentTask.labels, 'config-apply', 'configuration', 'phase:apply', 'tdd-syntax', 'quality'])],
       metadata: {
         tdd_phase: 'apply',
         parent_task: baseId,
@@ -2271,18 +2643,18 @@ This prevents Biome from scanning worktree directories.`;
       },
     };
 
+    // Verification Command contract (Test Command when present, Build Command + wrapper otherwise)
+    this.applyVerificationContract(applyTask, req.testCommand, req.buildCommand || parentTask.metadata?.build_command);
+
     const applyBlockers = redDeps.map(localId => idMapping[localId]).filter(Boolean);
     const applyId = this.executor.createTask(applyTask, applyBlockers);
-    this._emitEvent('task:subtask:created', {
+    this._recordSubtaskEmission(applyId, {
       step: stepName,
       parentLocalId: baseId,
-      localId: applyTask.localId,
-      taskId: applyId,
+      task: applyTask,
       subtaskType: 'apply',
-      timestamp: Date.now(),
+      state,
     });
-    console.log(`        ✓ ${applyTask.localId} → ${applyId}`);
-    idMapping[applyTask.localId] = applyId;
 
     // SYNTAX: Validate configuration
     const syntaxTask = {
@@ -2294,7 +2666,7 @@ This prevents Biome from scanning worktree directories.`;
         parentCriteria: req.acceptanceCriteria,
         parentFiles: targetFiles,
         parentFunctions: [],
-        specificInstructions: `Validate configuration files pass linting and schema checks.\n\nVerify:\n1. All config files are syntactically valid\n2. Required fields are present\n3. Config matches project conventions\n4. Run biome format --write on all config files to ensure consistent formatting`,
+        specificInstructions: `Validate configuration files pass linting and schema checks.\n\nVerify:\n1. All config files are syntactically valid\n2. Required fields are present\n3. Config matches project conventions\n4. Run ${this.formatterCommand()} on all config files to ensure consistent formatting`,
       }),
       level: parentTask.level,
       dependsOn: [`${baseId}-apply`],
@@ -2307,18 +2679,7 @@ This prevents Biome from scanning worktree directories.`;
       },
     };
 
-    const syntaxId = this.executor.createTask(syntaxTask, [applyId]);
-    this._emitEvent('task:subtask:created', {
-      step: stepName,
-      parentLocalId: baseId,
-      localId: syntaxTask.localId,
-      taskId: syntaxId,
-      subtaskType: 'syntax',
-      timestamp: Date.now(),
-    });
-    console.log(`        ✓ ${syntaxTask.localId} → ${syntaxId}`);
-    idMapping[syntaxTask.localId] = syntaxId;
-
+    const syntaxId = applyId;
     await this.state.update({ idMapping });
   }
 

@@ -201,7 +201,6 @@ func TestCloseBeadFromWorker_SkipsNonWorkspace(t *testing.T) {
 	}
 }
 
-
 // Daemon-owned gates: the worker must NOT self-close — closure is the
 // daemon's job after gates pass. Self-close bypassed the entire gate loop on
 // the first dogfood run (hydra-5cl, 2026-08-20): worktree fallback put the

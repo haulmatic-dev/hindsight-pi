@@ -10,6 +10,7 @@
  */
 export const TaskPattern = {
   TDD_CHAIN: 'tdd_chain',               // FRs: RED→GREEN→REFACTOR→SYNTAX
+  DIRECT_TASK: 'direct_task',           // Shape-pinned FRs (TEST/REF/SPIKE/AUDIT/DEL headers, markdown/test-only targets)
   VERIFICATION_GATE: 'verification_gate', // NFRs: coverage, quality, perf (no worktree)
   AGGREGATION_TASK: 'aggregation_task',   // USs: integrate FRs
   CONFIGURATION_TASK: 'configuration_task', // Config: module system, setup
@@ -40,6 +41,10 @@ export function analyzePRDDeterministic(prdContent) {
   let inAcceptanceCriteria = false;
   let inDescription = true;
   let inVerifiesSection = false;
+  let inDependsOnSection = false;
+  let pendingCommandField = null; // 'testCommand' | 'buildCommand' awaiting fenced block
+  let commandFenceOpen = false;
+  let commandLines = [];
   let inAggregatesSection = false;
 
   // Extract feature name from title (first H1)
@@ -48,6 +53,10 @@ export function analyzePRDDeterministic(prdContent) {
     featureName = titleMatch[1].trim();
   }
 
+  // System type from the §0 Scope Profile (`- **System Type:** cli-tool ...`).
+  const systemTypeMatch = prdContent.match(/^\s*[-*]?\s*\*{0,2}System Type:?\*{0,2}\s+([a-z][a-z-]*)/im);
+  const systemType = systemTypeMatch ? systemTypeMatch[1].toLowerCase() : null;
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmedLine = line.trim();
@@ -55,7 +64,7 @@ export function analyzePRDDeterministic(prdContent) {
     // Match requirement headers: ### FR-*, ### NFR-*, ### US-*, etc.
     // NFR IDs may be numeric (NFR-003) or alphanumeric (NFR-SYS)
     const reqMatch = trimmedLine.match(
-      /^#{3,4}\s+(FR-?\d+[a-z]?|NFR-[A-Z0-9]+|US-?\d+|US-INT-\d+|SETUP-?\d+|Doc-?\d+|QA-?\d+):?\s*(.+)$/i,
+      /^#{3,4}\s+(FR-?\d+[a-z]?|NFR-[A-Z0-9]+|US-?\d+|US-INT-\d+|SETUP-?\d+|Doc-?\d+|QA-?\d+|TEST-?\d+|REF-?\d+|SPIKE-?\d+|AUDIT-?\d+|DEL-?\d+|ANALYSIS-?\d+):?\s*(.+)$/i,
     );
 
     if (reqMatch) {
@@ -94,17 +103,39 @@ export function analyzePRDDeterministic(prdContent) {
         explicitVerifies: [],      // From **Verifies:** section
         explicitAggregates: [],    // From **Aggregates:** section
         explicitDependsOn: [],     // From **Depends On:** section
+        readsFrom: [],             // From **Reads From:** section (read-only deps — NOT write targets)
       };
 
       inAcceptanceCriteria = false;
       inDescription = true;
       inVerifiesSection = false;
       inAggregatesSection = false;
+      inDependsOnSection = false;
       continue;
     }
 
     // If we have a current requirement, accumulate data
     if (currentReq) {
+      // Fenced command capture: `**Test Command:**` / `**Build Command:**`
+      // followed by a ``` block (the form the create-prd contract shows).
+      // Multi-line blocks join with ' && ' (fail-fast sequential semantics).
+      if (pendingCommandField) {
+        if (!commandFenceOpen) {
+          if (trimmedLine.startsWith('```')) { commandFenceOpen = true; continue; }
+          if (trimmedLine === '') { continue; }
+          pendingCommandField = null; // no fence followed — fall through to normal parsing
+        } else {
+          if (trimmedLine.startsWith('```')) {
+            currentReq[pendingCommandField] = commandLines.join(' && ');
+            pendingCommandField = null;
+            commandFenceOpen = false;
+            commandLines = [];
+          } else if (trimmedLine !== '') {
+            commandLines.push(trimmedLine);
+          }
+          continue;
+        }
+      }
       // Check for semantic sections
       if (trimmedLine.match(/^\*{0,2}priority:?\*{0,2}/i)) {
         const priorityMatch = trimmedLine.match(/^\*{0,2}priority:?\*{0,2}\s*(p[0-3])/i);
@@ -113,6 +144,7 @@ export function analyzePRDDeterministic(prdContent) {
         }
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inAcceptanceCriteria = false;
         inDescription = false;
         continue;
@@ -133,6 +165,7 @@ export function analyzePRDDeterministic(prdContent) {
         }
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inAcceptanceCriteria = false;
         inDescription = false;
         continue;
@@ -146,26 +179,47 @@ export function analyzePRDDeterministic(prdContent) {
             .map(f => f.trim().replace(/^`|`$/g, '').replace(/^"|"$/g, ''))
             .filter(f => f && f.length > 0);
           for (const f of files) {
-            if (!currentReq.files.includes(f)) {
-              currentReq.files.push(f);
+            // Reads From declares read-only dependencies, not write targets.
+            // Merging them into files caused false validateFileOverlap errors
+            // (a docs FR reading jest.config.ts 'targeted' it alongside its
+            // owning FR). Track separately in readsFrom.
+            if (!currentReq.readsFrom.includes(f) && !currentReq.files.includes(f)) {
+              currentReq.readsFrom.push(f);
             }
           }
         }
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inAcceptanceCriteria = false;
         inDescription = false;
         continue;
       }
 
-      // Parse Test Command and Build Command (stack-agnostic contract fields)
+      // Explicit `**Type:**` deliverable-shape marker (analysis/audit/test/
+      // refactor/spike/deletion) — captured so classifyRequirement can apply
+      // the same routing the shape-bearing header prefixes get.
+      const typeMarkerMatch = trimmedLine.match(/^\*{0,2}type:?\*{0,2}\s+([A-Za-z_-]+)/i);
+      if (typeMarkerMatch) {
+        currentReq.typeMarker = typeMarkerMatch[1].toLowerCase().trim();
+        continue;
+      }
+
+      // Parse Test Command and Build Command (stack-agnostic contract fields).
+      // Both forms supported: inline (`**Test Command:** npm test`) and fenced
+      // block on the following lines (the form the create-prd contract shows).
       if (trimmedLine.match(/^\*{0,2}test command:?\*{0,2}/i)) {
         const tcMatch = trimmedLine.match(/^\*{0,2}test command:?\*{0,2}\s+(.+)/i);
         if (tcMatch && currentReq) {
           currentReq.testCommand = tcMatch[1].trim().replace(/^`|`$/g, '');
+        } else if (currentReq) {
+          pendingCommandField = 'testCommand';
+          commandFenceOpen = false;
+          commandLines = [];
         }
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inAcceptanceCriteria = false;
         inDescription = false;
         continue;
@@ -175,9 +229,14 @@ export function analyzePRDDeterministic(prdContent) {
         const bcMatch = trimmedLine.match(/^\*{0,2}build command:?\*{0,2}\s+(.+)/i);
         if (bcMatch && currentReq) {
           currentReq.buildCommand = bcMatch[1].trim().replace(/^`|`$/g, '');
+        } else if (currentReq) {
+          pendingCommandField = 'buildCommand';
+          commandFenceOpen = false;
+          commandLines = [];
         }
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inAcceptanceCriteria = false;
         inDescription = false;
         continue;
@@ -186,8 +245,10 @@ export function analyzePRDDeterministic(prdContent) {
       if (trimmedLine.match(/^\*{0,2}verifies:?\*{0,2}/i)) {
         inVerifiesSection = true;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inAcceptanceCriteria = false;
         inDescription = false;
+        parseInlineReqIds(trimmedLine, currentReq, 'explicitVerifies');
         continue;
       }
       
@@ -196,6 +257,8 @@ export function analyzePRDDeterministic(prdContent) {
         inAggregatesSection = true;
         inAcceptanceCriteria = false;
         inDescription = false;
+        inDependsOnSection = false;
+        parseInlineReqIds(trimmedLine, currentReq, 'explicitAggregates');
         continue;
       }
       
@@ -203,8 +266,12 @@ export function analyzePRDDeterministic(prdContent) {
         // Parse depends on section
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inAcceptanceCriteria = false;
         inDescription = false;
+        inDependsOnSection = true;
+        parseInlineReqIds(trimmedLine, currentReq, 'explicitDependsOn');
+        continue;
         continue;
       }
 
@@ -213,6 +280,7 @@ export function analyzePRDDeterministic(prdContent) {
         inAcceptanceCriteria = true;
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         inDescription = false;
         continue;
       }
@@ -222,12 +290,24 @@ export function analyzePRDDeterministic(prdContent) {
         inAcceptanceCriteria = false;
         inVerifiesSection = false;
         inAggregatesSection = false;
+        inDependsOnSection = false;
         // Only continue description accumulation for requirement headers
         // Non-requirement headers (like ## 5. Technical Considerations) stop description
         const isReqHeader = trimmedLine.match(
-          /^#{3,4}\s+(FR-?\d+[a-z]?|NFR-?\d+[a-z]?|US-?\d+|Setup-?\d+|Doc-?\d+|QA-?\d+):?/i,
+          /^#{3,4}\s+(FR-?\d+[a-z]?|NFR-[A-Z0-9]+|US-?\d+|US-INT-\d+|Setup-?\d+|Doc-?\d+|QA-?\d+|TEST-?\d+|REF-?\d+|SPIKE-?\d+|AUDIT-?\d+|DEL-?\d+|ANALYSIS-?\d+):?/i,
         );
         inDescription = !!isReqHeader;
+      }
+
+      // Parse Depends On section entries
+      if (inDependsOnSection && trimmedLine.match(/^-\s+(.+)$/)) {
+        const entry = trimmedLine.replace(/^-\s+/, '').trim();
+        // Extract requirement ID if present (e.g., "FR-001: Addition" or just "FR-001")
+        const idMatch = entry.match(REQ_ID_TOKEN_RE);
+        if (idMatch) {
+          currentReq.explicitDependsOn.push(idMatch[0].toUpperCase());
+        }
+        continue;
       }
 
       // Parse Verifies section entries
@@ -303,7 +383,7 @@ export function analyzePRDDeterministic(prdContent) {
     }
 
     // NEW: Apply semantic classification
-    classifyRequirement(req, requirements);
+    classifyRequirement(req, requirements, systemType);
   }
 
   // Detect dependencies based on requirement references
@@ -333,6 +413,8 @@ export function analyzePRDDeterministic(prdContent) {
 
   return {
     featureName,
+    systemType,
+    route: computeRoute(prdContent, requirements),
     requirements,
     dependencies,
     semanticGraph,
@@ -343,22 +425,219 @@ export function analyzePRDDeterministic(prdContent) {
 }
 
 /**
+ * Deliverable-shape routes for pattern-aware task routing.
+ * Exactly 8 members — pinned by test-pattern-routing.mjs.
+ */
+export const TaskRoute = {
+  ANALYSIS: 'analysis',
+  TEST_AUTHORING: 'test_authoring',
+  REFACTOR: 'refactor',
+  SPIKE: 'spike',
+  DELETION: 'deletion',
+  AUDIT: 'audit',
+  LEGACY_NO_SCOPE: 'legacy_no_scope',
+  NORMAL_CODE: 'normal_code',
+};
+
+// `**Type:**` marker value -> TaskRoute value
+const TYPE_MARKER_ROUTES = {
+  analysis: TaskRoute.ANALYSIS,
+  audit: TaskRoute.AUDIT,
+  test: TaskRoute.TEST_AUTHORING,
+  refactor: TaskRoute.REFACTOR,
+  spike: TaskRoute.SPIKE,
+  deletion: TaskRoute.DELETION,
+};
+
+// Requirement header prefixes (TEST-001, REF-1, SPIKE-2, AUDIT-1, DEL-3, ...)
+// that imply a deliverable shape regardless of target files.
+const HEADER_PREFIX_ROUTES = {
+  test: TaskRoute.TEST_AUTHORING,
+  ref: TaskRoute.REFACTOR,
+  refactor: TaskRoute.REFACTOR,
+  spike: TaskRoute.SPIKE,
+  audit: TaskRoute.AUDIT,
+  del: TaskRoute.DELETION,
+  deletion: TaskRoute.DELETION,
+  analysis: TaskRoute.ANALYSIS,
+};
+
+const REQ_ID_TOKEN_RE = /\b(FR-\d+[a-z]?|NFR-[A-Z0-9]+|US-INT-\d+|US-\d+|SETUP-?\d+|DOC-?\d+|QA-?\d+|TEST-?\d+|REF-?\d+|SPIKE-?\d+|AUDIT-?\d+|DEL-?\d+|ANALYSIS-?\d+)\b/gi;
+
+/**
+ * Extract requirement IDs written inline on the marker line itself, e.g.
+ * `**Depends On:** FR-001, FR-002`. Complements the list-item sections.
+ */
+function parseInlineReqIds(line, req, field) {
+  if (!req) return;
+  const afterMarker = line.replace(/^\s*\*{0,2}[A-Za-z ]+?:?\*{0,2}\s*/, '');
+  const ids = afterMarker.match(REQ_ID_TOKEN_RE);
+  if (!ids) return;
+  for (const id of ids) {
+    const up = id.toUpperCase();
+    if (!req[field].includes(up)) req[field].push(up);
+  }
+}
+
+function routeForTypeMarker(value) {
+  return TYPE_MARKER_ROUTES[String(value || '').toLowerCase().trim()] || null;
+}
+
+/**
+ * Scan lines for explicit shape signals, in precedence order:
+ * 1. `**Type:**` markers, 2. shape-bearing requirement header prefixes
+ * (TEST-001, REF-1, SPIKE-2, AUDIT-1, DEL-3, ...).
+ *
+ * @param {string[]} lines - Content split into lines
+ * @returns {{route: string, reason: string}[]} Signals, in discovery order
+ */
+function scanShapeSignals(lines) {
+  const typeMarkerRe = /^\s*\*{0,2}type:?\*{0,2}\s+([A-Za-z_-]+)/i;
+  const headerPrefixRe = /^#{3,4}\s+([A-Za-z]+)-?\d*\s*:/;
+  const signals = [];
+
+  const push = (route, reason) => {
+    if (route) signals.push({ route, reason });
+  };
+
+  for (const line of lines) {
+    const typeMarker = line.match(typeMarkerRe);
+    if (typeMarker) {
+      push(routeForTypeMarker(typeMarker[1]), `type marker '${typeMarker[1].toLowerCase()}'`);
+    }
+
+    const headerPrefix = line.match(headerPrefixRe);
+    if (headerPrefix) {
+      push(HEADER_PREFIX_ROUTES[headerPrefix[1].toLowerCase()], `header prefix '${headerPrefix[1]}'`);
+    }
+  }
+
+  return signals;
+}
+
+/**
+ * Route a task/PRD markdown snippet to its deliverable shape.
+ *
+ * Reuses analyzePRDDeterministic's requirement model (files, types, ids) —
+ * this is a routing decision layer, not a second parser. Type markers
+ * (`**Type:** ...`) and shape-bearing header prefixes (TEST-001, SPIKE-2, ...)
+ * take precedence; plain FR requirements fall back to target-file heuristics.
+ *
+ * @param {string} content - Raw task/PRD markdown content
+ * @returns {{route: string, reason: string}} TaskRoute value + human reason
+ */
+export function routeTaskPattern(content) {
+  if (typeof content !== 'string' || content.trim() === '') {
+    return { route: TaskRoute.LEGACY_NO_SCOPE, reason: 'empty content treated as unscoped' };
+  }
+
+  const analysis = analyzePRDDeterministic(content);
+  const requirements = analysis.requirements || [];
+
+  // Explicit shape signals (type markers, header prefixes) take precedence.
+  const signals = scanShapeSignals(content.split('\n'));
+
+  // Audit precedence: any audit-shaped requirement routes the whole batch to audit.
+  const auditSignal = signals.find((s) => s.route === TaskRoute.AUDIT);
+  if (auditSignal) return auditSignal;
+
+  if (signals.length > 0) return signals[0];
+
+  const route = computeRoute(content, analysis.requirements || []);
+  const scopedReqs = (analysis.requirements || []).filter(
+    (r) => r.type === 'FR' || r.type === 'NFR' || r.type === 'User Story',
+  );
+  if (scopedReqs.length > 0) {
+    const unscoped = scopedReqs.every((r) => !r.files || r.files.length === 0);
+    if (unscoped) {
+      return {
+        route,
+        reason: `all ${scopedReqs.length} requirement(s) lack explicit target files`,
+      };
+    }
+    const scopedCount = scopedReqs.filter((r) => r.files.length > 0).length;
+    return {
+      route,
+      reason: `requirement(s) carry explicit target files (${scopedCount} scoped)`,
+    };
+  }
+
+  return {
+    route,
+    reason: 'no requirements, type markers, or shape-bearing headers detected',
+  };
+}
+
+/**
+ * Core routing decision shared by routeTaskPattern and
+ * analyzePRDDeterministic's top-level `route` field (which must not recurse
+ * through routeTaskPattern — routeTaskPattern re-analyzes via
+ * analyzePRDDeterministic, so the inverse call would loop forever).
+ */
+function computeRoute(content, requirements) {
+  const signals = scanShapeSignals(content.split('\n'));
+  const auditSignal = signals.find((s) => s.route === TaskRoute.AUDIT);
+  if (auditSignal) return auditSignal.route;
+  if (signals.length > 0) return signals[0].route;
+  const scopedReqs = requirements.filter(
+    (r) => r.type === 'FR' || r.type === 'NFR' || r.type === 'User Story',
+  );
+  if (scopedReqs.length > 0) {
+    const unscoped = scopedReqs.every((r) => !r.files || r.files.length === 0);
+    if (unscoped) return TaskRoute.LEGACY_NO_SCOPE;
+    return TaskRoute.NORMAL_CODE;
+  }
+  return TaskRoute.LEGACY_NO_SCOPE;
+}
+
+/**
  * Classify requirement with task pattern and dependencies
  * This is the core enhancement for type-aware task generation
  */
-function classifyRequirement(req, allRequirements) {
+/**
+ * Type-marker routing override for the classifier: an explicit `**Type:**`
+ * deliverable-shape marker (analysis/audit/test/refactor/spike/deletion) pins
+ * the requirement to direct_task, mirroring the shape-bearing header-prefix
+ * behavior in isDirectTaskShape. Unknown markers (e.g. `**Type:** fr`) leave
+ * classification untouched. Type-marker precedence is documented in the
+ * create-prd SKILL §3.1a — strongest signal wins.
+ */
+function applyTypeMarkerRouting(req) {
+  const route = routeForTypeMarker(req.typeMarker);
+  if (!route) return;
+  req.taskPattern = TaskPattern.DIRECT_TASK;
+  req.needsWorktree = true;
+}
+
+function classifyRequirement(req, allRequirements, systemType = null) {
   // Get list of all FR IDs for reference
   const allFRs = allRequirements.filter(r => r.type === 'FR').map(r => r.originalId);
   const allReqsById = new Map(allRequirements.map(r => [r.originalId, r]));
 
   switch (req.type) {
     case 'FR':
-      // Functional requirements get TDD chains
+      // Functional requirements get TDD chains by default
       req.taskPattern = TaskPattern.TDD_CHAIN;
       req.needsWorktree = true;
       req.dependsOn = ['approvalGate'];
       req.dependencyType = DependencyType.BLOCKS;
-      
+
+      // Shape-aware override: deliverable shape pins the task to a direct task
+      // (no RED→GREEN→REFACTOR chain) when the requirement is shape-bearing.
+      if (isDirectTaskShape(req)) {
+        req.taskPattern = TaskPattern.DIRECT_TASK;
+      } else if (
+        (systemType === 'cli-tool' || systemType === 'analysis' || systemType === 'docs') &&
+        isDocsTreeDeliverable(req)
+      ) {
+        // §0 System Type fallback (routing PRD rule (d)): inside a
+        // cli-tool/analysis/docs campaign, requirements whose targets all
+        // live in the docs tree (verifier scripts alongside the docs count)
+        // are direct deliverables, not TDD chains. Feature PRDs and
+        // code-targeted requirements are untouched (fail-closed to tdd_chain).
+        req.taskPattern = TaskPattern.DIRECT_TASK;
+      }
+
       // Check if this FR provides base for other FRs
       const dependentFRs = allRequirements.filter(r => 
         r.type === 'FR' && 
@@ -474,6 +753,48 @@ function classifyRequirement(req, allRequirements) {
       req.dependsOn = ['approvalGate'];
       req.dependencyType = DependencyType.BLOCKS;
   }
+
+  // Explicit `**Type:**` marker wins over the switch above (§3.1a precedence:
+  // explicit type prefix > target-file shape > System Type > tdd fallback).
+  applyTypeMarkerRouting(req);
+}
+
+/**
+ * Direct-task shape for FRs: a shape-bearing header prefix (TEST-001,
+ * REF-1, SPIKE-2, AUDIT-1, DEL-3, ...) routes to direct_task regardless of
+ * target files; otherwise an FR whose targets are all documentation or all
+ * test files is itself a direct deliverable (no RED→GREEN→REFACTOR chain).
+ * Mixed code+markdown targets keep the default tdd_chain.
+ */
+function isDirectTaskShape(req) {
+  if (/^(TEST|REF|REFACTOR|SPIKE|AUDIT|DEL|DELETION|ANALYSIS)-?\d/i.test(req.originalId)) {
+    return true;
+  }
+  const files = req.files || [];
+  if (files.length === 0) return false;
+  return files.every(isMarkdownTarget) || files.every(isTestTarget);
+}
+
+/**
+ * True when every target file lives in the docs tree or is itself a
+ * markdown/test artifact — used by the System Type fallback so docs-shaped
+ * requirements (e.g. a rubric plus its verifier script under `docs/`) stay
+ * off TDD chains in cli-tool/analysis/docs campaigns.
+ */
+function isDocsTreeDeliverable(req) {
+  const files = req.files || [];
+  if (files.length === 0) return false;
+  return files.every(
+    (f) => /^docs\//.test(f) || isMarkdownTarget(f) || isTestTarget(f),
+  );
+}
+
+function isMarkdownTarget(file) {
+  return /\.mdx?$/.test(file);
+}
+
+function isTestTarget(file) {
+  return /(^|[/\\])(tests?|__tests__)[/\\]|\.test\.|\.spec\./i.test(file);
 }
 
 /**
@@ -1182,9 +1503,19 @@ function validateFileOverlap(requirements) {
   }
 
   // Find files claimed by more than one FR
+  // Find files claimed by more than one FR. Cross-cutting FRs (validate/
+  // check/verify/audit/enforce/guard titles) are exempt: they consume the file
+  // AFTER the foundational FRs (detectCrossCuttingConcerns serializes them via
+  // dependency edges), so parallel worktree merge conflicts cannot occur.
+  const isCrossCutting = new Map(
+    requirements
+      .filter((r) => r.type === 'FR')
+      .map((r) => [r.originalId, /validat|check|verify|audit|enforce|guard/i.test(r.title)]),
+  );
   for (const [file, frIds] of fileToFRs) {
-    if (frIds.length > 1) {
-      errors.push(`  File "${file}" is targeted by multiple FRs: ${frIds.join(', ')}`);
+    const foundational = frIds.filter((id) => !isCrossCutting.get(id));
+    if (foundational.length > 1) {
+      errors.push(`  File "${file}" is targeted by multiple FRs: ${foundational.join(', ')}`);
     }
   }
 

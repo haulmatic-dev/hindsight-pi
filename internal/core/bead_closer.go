@@ -2,16 +2,48 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
+
+// evidenceFatalErr classifies a git evidence-read failure. FAIL-CLOSED only
+// for failures inside a REAL repository whose status genuinely cannot be read
+// (dubious ownership, permission denied — the 2026-10-20 zero-work cascade
+// was a dubious-ownership exit 128 on a mis-rooted worktree). A path that is
+// not a git repository has no evidence to verify by design — legacy fail-open
+// there keeps fixtures, doc-only project dirs and path-resolution closes
+// working (worker_completion fixtures close against /test/test-project).
+func evidenceFatalErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		stderr := strings.ToLower(string(exitErr.Stderr))
+		if strings.Contains(stderr, "not a git repository") {
+			return false
+		}
+		return true
+	}
+	// Non-exit errors (fork/exec): a missing directory is "no evidence
+	// surface"; anything else is an environment fault.
+	msg := strings.ToLower(err.Error())
+	return !strings.Contains(msg, "no such file or directory")
+}
 
 // getSemanticClusterer lazily builds the embedding-based clustering pass on
 // first use (an API key may only be set at close time, and building it
@@ -44,11 +76,13 @@ type BeadCloser struct {
 	isChainMember      func(types.BeadID) bool // reports whether a bead belongs to a registered multi-bead chain
 	retainer           *VerdictRetainer        // nil-safe; Hindsight verdict retention (Shepherd D3)
 	gateRunner         *GateRunner             // nil until SetGateRunner; daemon_owned projects fail closed without it
+	gateDoctor         *GateDoctor             // nil until SetGateDoctor; pi-based verification RED triage
 	retryManager       *RetryManager           // clears retry residue on verified close
 	workerSpawner      *WorkerSpawner          // clears spawn-failure residue on verified close
 	sessionResumePilot *SessionResumePilot     // session-file resume quality metrics
 	semanticClusterer  *semanticClusterer      // nil-safe; FR-020 semantic (embedding) clustering pass
 	semanticOnce       sync.Once
+	prWaitingRec       func(PRWaitingRecord) // nil-safe; PR aging sweep ledger (bead hydra-rrtq)
 }
 
 // SetWorktreeManager enables commit-on-close and singleton integrate-on-close
@@ -75,6 +109,32 @@ func NewBeadCloser(beadsClient BeadsClient, intelligenceHub *IntelligenceHub, pr
 
 // SetEventSink attaches the structured event stream. Nil stays a no-op.
 func (c *BeadCloser) SetEventSink(s *EventSink) { c.events = s }
+
+// SetPRWaitingRecorder installs the PR aging sweep's ledger recorder. Called
+// whenever a close leaves an integration PR open waiting on a human merge.
+// nil = recording disabled (tools, tests without HYDRA_HOME).
+func (c *BeadCloser) SetPRWaitingRecorder(fn func(PRWaitingRecord)) {
+	if c == nil {
+		return
+	}
+	c.prWaitingRec = fn
+}
+
+// recordPRWaitingCapture captures one waiting-on-human-merge PR into the
+// ledger (nil-safe, fail-open).
+func (c *BeadCloser) recordPRWaitingCapture(bead *types.Bead, projectPath, url string) {
+	if c == nil || c.prWaitingRec == nil || bead == nil || url == "" {
+		return
+	}
+	owner := ""
+	if id, err := resolvePublishIdentityFor(projectPath); err == nil {
+		owner = id.Owner
+	}
+	c.prWaitingRec(PRWaitingRecord{
+		BeadID: string(bead.ID), ProjectPath: projectPath,
+		Owner: owner, URL: url, Since: time.Now(),
+	})
+}
 
 // ownerTokenForPublish resolves the bead owner's publish identity for the
 // project and emits the typed identity event (publish_identity_resolved /
@@ -149,6 +209,57 @@ func (c *BeadCloser) retainFailedClose(bead *types.Bead, worker *types.Worker, e
 // The bead stays open and the scheduler retries it with exponential
 // backoff up to 1 hour, then hourly thereafter.  Only code-level
 // failures (placeholder code, build errors, etc.) spawn fix beads.
+
+// closeGateWorktree resolves the bead's chain worktree for close-time gates;
+// "" when the worktree is gone (gates then fall back to the project path).
+// RunVerificationGateForRevalidation reruns the bead's declared verification
+// command in its chain worktree (same resolution as the close-time guard) on
+// behalf of the post-close revalidation sweep. ran=false means there was
+// nothing to run — no declared command, no gate runner, or a runner fault —
+// and the caller must leave the closed-failed label in place (fail-closed:
+// only positive green evidence overturns a failure verdict).
+// worktreePath pins the gate directory when the caller already resolved the
+// correct tree (the quarantine reconciler's scratch checkout of the
+// quarantine branch tip); empty falls back to the close-time resolution.
+func (c *BeadCloser) RunVerificationGateForRevalidation(bead *types.Bead, projectPath, worktreePath string) (passed, ran bool) {
+	cmd, ok := verificationCommandFor(bead)
+	if !ok || c.gateRunner == nil {
+		return false, false
+	}
+	gatePath := projectPath
+	if worktreePath != "" {
+		gatePath = worktreePath
+	} else if wt := closeGateWorktree(c, projectPath, bead); wt != "" {
+		gatePath = wt
+	}
+	a, err := c.gateRunner.RunGate(GateRequest{
+		Project: bead.Project, BeadID: bead.ID.String(), Gate: "verification-command",
+		// Revalidation is a background operation, not a close gate: a full-repo
+		// coverage suite legitimately runs past the 10-minute gate default, and
+		// a timeout would read as RED and keep a truthful verdict from
+		// overturning the stale one.
+		Spec:              GateSpec{Cmd: cmd, Parser: "exit-code", Timeout: 90 * time.Minute},
+		ProjectPath:       projectPath,
+		WorktreePath:      gatePath,
+		AllowMainCheckout: true,
+	})
+	if err != nil {
+		log.Printf("[VerificationCmd] %s: revalidation runner fault (label stands): %v", bead.ID, err)
+		return false, false
+	}
+	return a.Status == GateStatusPassed, true
+}
+
+func closeGateWorktree(c *BeadCloser, projectPath string, bead *types.Bead) string {
+	if c.worktreeManager == nil || c.chainKeyFn == nil {
+		return ""
+	}
+	if wt, ok := c.worktreeManager.ExistingWorktree(projectPath, c.chainKeyFn(*bead)); ok {
+		return wt
+	}
+	return ""
+}
+
 func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) error {
 	projectName := worker.BeadID.Project()
 	repoName := worker.BeadID.Repo()
@@ -252,6 +363,27 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 	// dependents. Only the success/"completed" path is gated; failures are
 	// handled above. When bead lookup failed we cannot verify, so we fall
 	// back to the previous behaviour and close.
+	// Close-time hard gates (FR-002): deterministic checks (executable
+	// acceptance, quarantine contradiction, dependency order) run before the
+	// VerifiedClose round so a gate failure never costs an LLM judge round.
+	if success && reason == "completed" && bead != nil {
+		// Resolve the chain worktree once for every close-time gate: the
+		// executable-acceptance command is repo-relative (npm run test:e2e)
+		// and MUST run where the worker's code and node_modules live.
+		// Passing "" ran it against the main checkout — older package.json,
+		// no node_modules — producing "Missing script"/exit-127 rejections
+		// that escalated six srv-jobfile beads (2026-10-05).
+		gateWt := ""
+		if c.worktreeManager != nil && c.chainKeyFn != nil {
+			if wt, ok := c.worktreeManager.ExistingWorktree(projectPath, c.chainKeyFn(*bead)); ok {
+				gateWt = wt
+			}
+		}
+		if err := c.runCloseHardGates(bead, projectPath, repoName, gateWt); err != nil {
+			return err
+		}
+	}
+
 	if success && reason == "completed" && c.verifiedCloseEnabled() && bead != nil {
 		if err := c.verifyBeforeClose(bead, projectPath, repoName); err != nil {
 			// Rejected: the bead was reopened (or escalated) inside
@@ -266,13 +398,7 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 	// persisted artifact. Gate failure reopens the bead with the parsed
 	// summary + raw log path instead of closing on agent-quoted output.
 	if success && reason == "completed" && bead != nil {
-		gateWt := ""
-		if c.worktreeManager != nil && c.chainKeyFn != nil {
-			if wt, ok := c.worktreeManager.ExistingWorktree(projectPath, c.chainKeyFn(*bead)); ok {
-				gateWt = wt
-			}
-		}
-		if err := c.runDaemonGates(bead, projectName, projectPath, repoName, gateWt); err != nil {
+		if err := c.runDaemonGates(bead, projectName, projectPath, repoName, closeGateWorktree(c, projectPath, bead)); err != nil {
 			return err
 		}
 		// Re-check terminality after the (potentially minutes-long) gate run:
@@ -285,6 +411,14 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			log.Printf("[closeBead] Bead %s closed while gates ran (status: %s); skipping integrate/close", bead.ID, fresh.Status)
 			return nil
 		}
+		// Escape-rate regression budget (NFR-001): the bead's own declared
+		// verification command (metadata test_command / "Test Command:") must
+		// exit 0 before the bead can reach closed-completed through ANY close
+		// path on this success route — verified-close and singleton integrate
+		// both pass through here. Nonzero exit rejects the close (reopen).
+		if err := c.verificationCommandGuard(bead, projectPath); err != nil {
+			return c.handleVerificationRed(bead, projectPath, repoName, err)
+		}
 	}
 
 	// Commit the chain worktree's changes for this bead before closing, and
@@ -296,7 +430,7 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			// Readable, conventional-commit message derived from the bead
 			// (type/title/description/PRD) instead of the bare "bead(id): title".
 			msg := BuildCommitMessage(*bead)
-			if committed, cErr := c.worktreeManager.Commit(wt, msg); cErr != nil {
+			if committed, cErr := c.worktreeManager.CommitBead(wt, msg, string(bead.ID)); cErr != nil {
 				return c.failIntegration(bead, projectPath, repoName, "commit", cErr)
 			} else if committed {
 				log.Printf("[Worktree] committed %s", bead.ID)
@@ -372,9 +506,35 @@ func (c *BeadCloser) Close(worker *types.Worker, success bool, exitCode int) err
 			log.Printf("[closeBead] Failed to add %s label to %s: %v", closedFailedLabel, bead.ID, err)
 		}
 	}
+	// Close-time coherence: a completed close contradicts a pre-existing
+	// closed-failed verdict on the same bead (mqn, 2026-10-16: closed with
+	// reason "completed" while carrying closed-failed — the stale label then
+	// quarantined a 132-bead chain whose PRD validation had passed). A
+	// completed close scrubs the stale verdict and marks it revalidated.
+	if reason == "completed" && bead != nil && c.beadsClient != nil && hasBeadLabel(bead.Labels, closedFailedLabel) {
+		if err := c.beadsClient.RemoveBeadLabels(projectPath, repoName, bead.ID, []string{closedFailedLabel}); err != nil {
+			log.Printf("[closeBead] Failed to scrub stale %s label from %s: %v", closedFailedLabel, bead.ID, err)
+		} else {
+			if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{closedFailedRevalidatedLabel}); err != nil {
+				log.Printf("[closeBead] Failed to add %s label to %s: %v", closedFailedRevalidatedLabel, bead.ID, err)
+			}
+			log.Printf("[closeBead] %s closed completed — scrubbed stale %s label", bead.ID, closedFailedLabel)
+			c.events.EmitRepo(projectPath, Event{Type: "label_revalidated", Project: repoName,
+				Bead: bead.ID.String(), Reason: "completed_close_scrubs_closed_failed"})
+		}
+	}
 	c.events.EmitRepo(projectPath, Event{Type: "bead_closed", Project: repoName,
 		Bead: worker.BeadID.String(), Reason: reason,
 		Fields: map[string]any{"exit_code": exitCode, "success": success}})
+	// Sensor symmetry (resolve): the verified-close sensor's paired resolve
+	// for every verified_close_rejected fire on this bead. Correlation is
+	// deterministic per bead, so fires and resolves pair across restarts.
+	if success && reason == "completed" && c.verifiedCloseEnabled() {
+		c.events.EmitRepo(projectPath, Event{Type: "verified_close_passed", Project: repoName,
+			Bead: worker.BeadID.String(), Reason: "completed",
+			Detail: fmt.Sprintf("bead %s closed verified after validation", worker.BeadID.String()),
+			Fields: map[string]any{"correlation_id": SensorCorrelation("verified-close", worker.BeadID.String())}})
+	}
 
 	if err := c.beadsClient.CloseBead(projectPath, repoName, worker.BeadID, reason); err != nil {
 		return err
@@ -476,12 +636,31 @@ const fixRecursionCappedLabel = "fix-recursion-capped"
 // components (chain verdicts, the Shepherd cron) read.
 const closedFailedLabel = "closed-failed"
 
+// closedFailedRevalidatedLabel marks a bead whose closed-failed verdict was
+// later overturned by positive evidence (a completed close, or a green gate
+// rerun by the post-close revalidation sweep). Audit trail only — the
+// chain verdict keys on closedFailedLabel alone.
+const closedFailedRevalidatedLabel = "closed-failed-revalidated"
+
 // integrationExhaustedLabel marks a bead whose singleton integrate/push
 // failed maxConsecutiveIntegrationFailures times in a row. Like
 // fix-recursion-capped it is a durable cap: every respawn path (scheduler
 // retry queue, DAG ready filter, Charon orphan recovery) must skip beads
 // carrying it until Pan repair or a human clears the label.
 const integrationExhaustedLabel = "integration-exhausted"
+
+// integrationPendingLabel marks a bead whose WORK is complete (close gates
+// and verification passed) but whose integrate/push step failed — typically
+// on a transient remote condition (GitHub API 403, rate limits, org flaps).
+// Instead of reopening the bead to the ready queue — which respawns a FULL
+// LLM worker run (session resume is disabled, so ~11 spawns/45min per bead
+// were burned re-doing finished work on srv-jobfile-65l+5my, 2026-10-02) —
+// the bead stays parked in place and the mechanical integration-retest
+// stage owns the retry. Every respawn path (scheduler retry queue, DAG
+// ready filter, bead discovery, Charon orphan recovery, reconcileOrphanClaim)
+// must skip beads carrying it; the retest stage and Pan repair (via
+// integration-exhausted at the cap) are the only exits.
+const integrationPendingLabel = "integration-pending"
 
 // maxConsecutiveIntegrationFailures caps how many integrate/push failures a
 // bead may accumulate before failIntegration escalates it to the durable
@@ -536,6 +715,10 @@ func extractConflictPaths(detail string) []string {
 // carrying it (2026-09-06: empty-diff churn loop — escalation left the bead
 // bare in_progress, Charon reopened it, it respawned into the same death).
 const escalatedLabel = "escalated"
+
+// panFiledLabel is declared in bead_discovery.go (same package); it mirrors
+// internal/pan.FiledLabel. Charon must not reopen pan-filed beads for orphan
+// recovery (triage beads legitimately sit in_progress without a worker).
 
 // hasBeadLabel reports whether labels contains label.
 func hasBeadLabel(labels []string, label string) bool {
@@ -889,7 +1072,7 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 	}
 	c.emitIntegrationBaseMismatch(projectPath, prBase, prBaseSource)
 	if c.config.PRMergeEnabled() {
-		head := "dogfood/" + string(bead.ID)
+		head := IntegrationBranchPrefix(projectPath) + string(bead.ID)
 		// Duplicate-landing dedup: a racing close attempt may have already
 		// landed this bead's tip via PR (hydra-kf2t, 2026-09-27: two closes
 		// integrated the same singleton seconds apart). Skip when the local
@@ -912,6 +1095,7 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 			if errors.As(err, &pw) {
 				log.Printf("[Output] %s PR open, waiting on human merge: %s", bead.ID, pw.URL)
 				AppendActivity(projectPath, string(bead.ID), "PR open — waiting on human merge: "+pw.URL)
+				c.recordPRWaitingCapture(bead, projectPath, pw.URL)
 				return nil
 			}
 			// Benign race loser: the winning close's PR merge landed the same
@@ -946,8 +1130,14 @@ func (c *BeadCloser) publishAfterIntegrate(projectPath string, bead *types.Bead)
 	}
 	// Non-FF recovery (fetch + merge + one retry) handles the common
 	// divergence case where local is behind origin because a PR merged out
-	// of band — the hydra-7k1 2026-09-16 stranding.
-	pushed, reason := PushBranchWithNonFFRecovery(projectPath, remote, branch)
+	// of band — the hydra-7k1 2026-09-16 stranding. The push embeds the
+	// project owner's token (hydra-k3nb L1): a helper-based push would
+	// silently authenticate as the daemon owner on product repos.
+	token, terr := c.ownerTokenForPublish(projectPath, *bead)
+	if terr != nil {
+		return fmt.Errorf("push %s: publish identity: %w", bead.ID, terr)
+	}
+	pushed, reason := PushBranchWithTokenNonFFRecovery(projectPath, branch, token)
 	if pushed {
 		// Logged only after PushBranch's ls-remote verification confirmed the
 		// remote ref matches the local head — never on command exit alone.
@@ -1012,7 +1202,7 @@ func (c *BeadCloser) publishSingletonViaPR(projectPath string, bead *types.Bead,
 			return nil
 		}
 	}
-	head := "dogfood/" + string(bead.ID)
+	head := IntegrationBranchPrefix(projectPath) + string(bead.ID)
 	token, terr := c.ownerTokenForPublish(projectPath, *bead)
 	if terr != nil {
 		return fmt.Errorf("publish identity: %w", terr)
@@ -1025,6 +1215,7 @@ func (c *BeadCloser) publishSingletonViaPR(projectPath string, bead *types.Bead,
 		if errors.As(err, &pw) {
 			log.Printf("[Output] %s PR-first close: PR open, waiting on human merge: %s", bead.ID, pw.URL)
 			AppendActivity(projectPath, string(bead.ID), "PR open — waiting on human merge: "+pw.URL)
+			c.recordPRWaitingCapture(bead, projectPath, pw.URL)
 			return nil
 		}
 		if isPRNoCommitsBetween(err) {
@@ -1049,15 +1240,77 @@ func (c *BeadCloser) resetIntegrationFailures(beadID string) {
 	c.integMu.Unlock()
 }
 
+// detectRootOwnedGitEntries is the read-only half of the git-ownership
+// guard: when an integrate fails with the root-pollution error signature,
+// stat the checkout's git common dir for uid-0 entries and emit a typed
+// anomaly. The daemon cannot repair (chown needs root) — the systemd
+// timer hydra-git-ownership-guard.timer is the repair path; this detector
+// exists so a stopped timer surfaces as a visible anomaly instead of a
+// silent recurring wedge (adversarial review 2026-11-08, finding 5).
+func (c *BeadCloser) detectRootOwnedGitEntries(bead *types.Bead, projectPath, repoName, stage string) {
+	gitdirOut, err := gitOut(projectPath, "rev-parse", "--git-common-dir")
+	if err != nil {
+		log.Printf("[GitOwnershipDetector] %s: could not resolve git common dir: %v", bead.ID, err)
+		return
+	}
+	gitdir := strings.TrimSpace(gitdirOut)
+	if gitdir == "" || !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(projectPath, gitdir) // rev-parse can return relative
+	}
+	rootCount := 0
+	fs.WalkDir(os.DirFS("/"), strings.TrimPrefix(gitdir, "/"), func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // fail-open: unreadable entries are not proof of pollution
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			if d.IsDir() {
+				return fs.SkipDir // do not descend through symlinked dirs
+			}
+			return nil // do not count symlink entries
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid == 0 {
+			rootCount++
+		}
+		return nil
+	})
+	if rootCount == 0 {
+		log.Printf("[GitOwnershipDetector] %s: root-pollution error signature but no uid-0 entries found in %s (may be sibling module db)", bead.ID, gitdir)
+		return
+	}
+	log.Printf("🚨 [GitOwnershipDetector] %s: %d root-owned entries in %s — operator root-git pollution; repair via hydra-git-ownership-guard.timer or scripts/fix-git-ownership.sh", bead.ID, rootCount, gitdir)
+	if c.events != nil {
+		c.events.EmitRepo(projectPath, Event{Type: "git_root_ownership_pollution",
+			Project: repoName, Bead: string(bead.ID), Reason: "root-owned-git-entries",
+			Detail: fmt.Sprintf("%d root-owned entries in %s (stage %s); daemon cannot chown — root-side sweep required", rootCount, gitdir, stage),
+			Fields: map[string]any{"root_entries": rootCount, "gitdir": gitdir}})
+	}
+}
+
 // failIntegration aborts a close whose integrate/push step failed
-// verification. The bead is left open (reopened when not terminal), a typed
-// integration-failed event carries the exact error, and the worktree is
-// preserved for inspection/retry. Always returns a non-nil error so the
-// caller aborts the close.
+// verification. The bead is parked in place with the integration-pending
+// label (NOT reopened to the ready queue — a reopen respawns a full LLM
+// worker run over already-finished work), a typed integration-failed event
+// carries the exact error, and the worktree is preserved for the retest
+// stage. Always returns a non-nil error so the caller aborts the close.
 func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, stage string, cause error) error {
 	beadID := string(bead.ID)
 	detail := cause.Error()
-	log.Printf("[Integrate] FAILED %s at %s: %s — bead left open, worktree preserved", beadID, stage, detail)
+	log.Printf("[Integrate] FAILED %s at %s: %s — parked integration-pending, worktree preserved", beadID, stage, detail)
+
+	// Root-pollution detector (2026-11-08): the exact git error for
+	// root-owned object-db entries left by operator root-git runs. The
+	// systemd-timer sweep repairs it root-side, but a silently stopped
+	// timer would wedge this class invisibly (timer drift is proven on
+	// this box). Stat the git common dir read-only — the daemon cannot
+	// chown, but it CAN see uid-0 entries and surface a typed anomaly
+	// so the wedge is never silent. Fail-open: detection errors log only.
+	if strings.Contains(detail, "insufficient permission for adding an object to repository database") {
+		c.detectRootOwnedGitEntries(bead, projectPath, repoName, stage)
+	}
 
 	// Contention backoff: parallel same-repo closes merge conflicting
 	// CHANGELOG.md/.gitignore entries within seconds of each other (telematics
@@ -1111,10 +1364,11 @@ func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, st
 	}
 
 	if c.beadsClient != nil {
-		if err := c.beadsClient.UpdateBeadStatus(projectPath, bead.ID, types.StatusOpen); err != nil {
-			log.Printf("[Integrate] Failed to reopen %s: %v", beadID, err)
-		}
-		labels := []string{"integration-failed"}
+		// Park as integration-pending, do NOT reopen to open: the work is
+		// already done and verified; a reopen sends the bead back into the
+		// ready queue and burns a full worker LLM run re-doing it. The
+		// integration-retest stage re-attempts the integrate mechanically.
+		labels := []string{"integration-failed", integrationPendingLabel}
 		if failures >= maxConsecutiveIntegrationFailures {
 			// Cap reached: a plain reopen would respawn the bead into the
 			// same failing integrate forever. The durable hard-park label is
@@ -1144,189 +1398,59 @@ func (c *BeadCloser) failIntegration(bead *types.Bead, projectPath, repoName, st
 // verifyBeforeClose runs the verified-close checks for a completed bead.
 // It returns nil when the bead may close, or a non-nil error (after
 // reopening or escalating the bead) when the close must be aborted.
+// verifyBeforeClose runs the VerifiedClose gate chain for a "completed"
+// close: terminal-state skip, TDD validation, evidence collection (diff +
+// scope + already-integrated heuristics), then the final accept/reject.
+// Rejections go through rejectClose so the reopen/attempt-cap/escalate
+// semantics of the VerifiedClose rounds are preserved.
 func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName string) error {
-	// Terminal beads skip verification entirely: a resurrected close attempt
-	// on an already-closed bead would only find an empty diff and reject.
-	if c.beadsClient != nil {
-		fresh, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID)
-		if err != nil {
-			return fmt.Errorf("[VerifiedClose] cannot verify state of bead %s: %w", bead.ID, err)
-		}
-		if fresh != nil && fresh.Status.IsTerminal() {
-			log.Printf("[VerifiedClose] Bead %s already terminal (%s); skipping verification", bead.ID, fresh.Status)
-			return nil
-		}
+	terminal, err := c.skipIfTerminal(bead, projectPath, repoName)
+	if err != nil {
+		return err
 	}
-	// 1. Blocking TDD validation (only gates TDD-phase beads).
-	if c.shouldRunTDDValidation(bead) && c.validationService != nil {
-		passed, err := c.validationService.TDDChainPasses(*bead, projectPath)
-		if err != nil {
-			log.Printf("[VerifiedClose] TDD verify error for %s (not blocking): %v", bead.ID, err)
-		} else if !passed {
-			return c.rejectClose(bead, projectPath, repoName, "tdd-validation-failed")
-		}
+	if terminal {
+		return nil
+	}
+	if err := c.verifyTDDChain(bead, projectPath, repoName); err != nil {
+		return err
 	}
 
-	// 2. Diff gate + 3. Target-files scope gate. Both gates need the list of
-	//    changed files, so compute it once. Failing to read the working tree
-	//    is logged and treated as "changed" (fail open) for the diff gate.
-	repoPath := c.projectResolver.ResolveRepoPath(bead.Project, repoName, projectPath)
-	if repoPath == "" {
-		repoPath = projectPath
+	repoPath, mainRepoPath, switchedToWorktree := c.resolveEvidenceRepo(bead, projectPath, repoName)
+	// Base resolves from the repo dir only for the multi-repo case (repoPath
+	// is a repo subdir of a non-git project parent). In worktree mode the
+	// evidence lives in the worktree but the integration base is the
+	// PROJECT's base (resolved from the main checkout).
+	baseFrom := projectPath
+	if repoPath != projectPath && !switchedToWorktree {
+		baseFrom = repoPath
 	}
-	mainRepoPath := projectPath
-	switchedToWorktree := false
-	if c.worktreeManager != nil && c.chainKeyFn != nil {
-		if wt, ok := c.worktreeManager.ExistingWorktree(projectPath, c.chainKeyFn(*bead)); ok {
-			repoPath = wt
-			switchedToWorktree = true
-		}
-	}
-
-	// Base for committed-work detection: the deterministic integration base
-	// (config knob or origin default) — NEVER the main checkout's current
-	// branch, which is incidental operator state (telematics 2026-09-29).
-	// Empty in main-checkout mode.
-	base := ""
-	if repoPath != projectPath {
-		b, source, err := ResolveIntegrationBase(c.config, projectPath)
-		if err != nil {
-			return fmt.Errorf("committed-work detection for %s: %w", bead.ID, err)
-		}
-		logIntegrationBaseMismatch(projectPath, b, source)
-		base = b
+	base, baseSource, err := c.closeIntegrationBase(bead, baseFrom, repoPath)
+	if err != nil {
+		return err
 	}
 
 	targets := beadTargetFiles(bead)
 	needDiff := c.config.Validation.RequireDiffOnClose
 	needScope := c.config.Validation.TargetScopeMode() != "off"
 
-	var changed []string
-	var changedErr error
-	if needDiff || needScope {
-		changed, changedErr = changedFilesWithBase(repoPath, base)
-		if changedErr != nil {
-			log.Printf("[VerifiedClose] diff check error for %s (not blocking): %v", bead.ID, changedErr)
-		}
-	}
-
-	// Main-checkout mode (no chain worktree): uncommitted edits are
-	// revertible and have been observed to be reverted AFTER close
-	// acceptance (2026-09-16 nipuna incident: 14 false closes). Only
-	// committed changes since the branch diverged from origin count as
-	// evidence. Unavailable base (no upstream etc.) fails open.
-	if !switchedToWorktree && needDiff && changedErr == nil {
-		base := c.sessionBaseFor(bead.ID.String())
-		if base != "" {
-			// Session-scoped: only commits made after the bead's spawn
-			// count. Pre-existing campaign commits must not satisfy the
-			// gate for a no-work session.
-			if committed, cerr := committedChangesSinceBase(projectPath, base); cerr == nil {
-				changed = committed
-			} else {
-				log.Printf("[VerifiedClose] session-evidence base unavailable for %s (fail open): %v", bead.ID, cerr)
-			}
-		} else if committed, cerr := committedChangesSinceBranchBase(projectPath); cerr == nil {
-			changed = committed
-		} else {
-			log.Printf("[VerifiedClose] committed-evidence base unavailable for %s (fail open): %v", bead.ID, cerr)
-		}
-	}
-
-	// Incident 2jjz8: the agent wrote into the main checkout instead of its
-	// worktree. When we are inspecting a worktree, also collect uncommitted
-	// changes in the main checkout and union them into the diff/scope
-	// evidence. The dirty-main auto-commit already sweeps these files onto
-	// the branch at integration time, so the work is preserved either way.
-	if switchedToWorktree && (needDiff || needScope) {
-		mainChanged, mainErr := changedFiles(mainRepoPath)
-		if mainErr != nil {
-			log.Printf("[VerifiedClose] main-checkout diff check error for %s (not blocking): %v", bead.ID, mainErr)
-		} else if len(mainChanged) > 0 {
-			seen := make(map[string]bool, len(changed))
-			for _, f := range changed {
-				seen[f] = true
-			}
-			for _, f := range mainChanged {
-				if !seen[f] {
-					log.Printf("[VerifiedClose] %s main-checkout leak: %s", bead.ID, f)
-					changed = append(changed, f)
-					seen[f] = true
-				}
-			}
-		}
+	changed, evErr := c.collectCloseEvidence(bead, projectPath, repoPath, mainRepoPath, switchedToWorktree, base, needDiff, needScope)
+	if evErr != nil {
+		// FAIL-CLOSED (2026-10-20 zero-work cascade): a git error in the
+		// evidence read means the work cannot be verified — the close is
+		// rejected (reopen with the retry ladder), never accepted.
+		log.Printf("[VerifiedClose] %s", evErr)
+		return c.rejectClose(bead, projectPath, repoName, "cannot-verify-diff")
 	}
 
 	if needDiff && !hasTargetChanges(changed, targets) {
-		// 5k33p / dy0+ig9hw class: the worker's commits may have been
-		// integrated into the working branch before verified-close ran. The
-		// worktree can be clean while the main checkout already contains the
-		// bead's work. Try a direct ancestry check first (the chain branch tip
-		// is an ancestor of main HEAD after a successful integrate-into-chain),
-		// then fall back to the per-target merge-base heuristic for partial
-		// integrations.
-		alreadyIntegrated := false
-		if switchedToWorktree {
-			baseBranch, baseSource, berr := ResolveIntegrationBase(c.config, projectPath)
-			if berr != nil {
-				log.Printf("[VerifiedClose] %s integration base unresolved, skipping already-integrated heuristic: %v", bead.ID, berr)
-			} else if chainBranch := currentBranch(repoPath); chainBranch != "" {
-				logIntegrationBaseMismatch(projectPath, baseBranch, baseSource)
-				if isAncestor, err := branchIsAncestorOfMain(projectPath, chainBranch); err != nil {
-					log.Printf("[VerifiedClose] ancestry check failed for %s (not blocking): %v", bead.ID, err)
-				} else if isAncestor {
-					alreadyIntegrated = true
-					log.Printf("[VerifiedClose] %s chain branch %s is ancestor of main HEAD; treating as already integrated", bead.ID, chainBranch)
-				}
-
-				if !alreadyIntegrated {
-					mainChanged, mainErr := changedFilesSinceMergeBase(projectPath, baseBranch, chainBranch)
-					if mainErr != nil {
-						log.Printf("[VerifiedClose] already-integrated check failed for %s (not blocking): %v", bead.ID, mainErr)
-					} else if hasTargetChanges(mainChanged, targets) {
-						alreadyIntegrated = true
-						log.Printf("[VerifiedClose] %s targets already integrated on %s; treating as satisfied", bead.ID, baseBranch)
-					}
-				}
-			}
-
-			// Hydra-7k1 2026-09-16: the singleton integrate step merged the
-			// worktree branch into the main checkout and THEN the push was
-			// rejected (non-fast-forward), reopening the bead. From then on the
-			// worktree diff was empty (HEAD is contained in the main checkout via
-			// the merge) while the branch-name checks above could not run at all —
-			// the branch was already deleted, so chainBranch was empty and the
-			// whole block was skipped — so every re-close died empty-diff and the
-			// bead escalated after 3 rounds. The durable test is commit-level and
-			// runs whenever we are inspecting a worktree, branch name or not:
-			// worktree and main checkout share an object database, so worktree
-			// HEAD is resolvable in the main repo and
-			// `merge-base --is-ancestor <sha> HEAD` answers "is the work landed".
-			if !alreadyIntegrated {
-				if headOut, herr := gitOut(repoPath, "rev-parse", "HEAD"); herr == nil {
-					head := strings.TrimSpace(headOut)
-					if head != "" {
-						if isAncestor, aerr := commitIsAncestorOfMain(projectPath, head); aerr != nil {
-							log.Printf("[VerifiedClose] commit-ancestry check failed for %s (not blocking): %v", bead.ID, aerr)
-						} else if isAncestor {
-							alreadyIntegrated = true
-							log.Printf("[VerifiedClose] %s worktree HEAD %s is ancestor of main HEAD (locally integrated, push pending); treating as satisfied", bead.ID, head)
-							c.events.EmitRepo(projectPath, Event{Type: "close-accepted-already-integrated", Project: repoName,
-								Bead: string(bead.ID), Reason: "worktree_head_ancestor_of_main",
-								Detail: fmt.Sprintf("worktree HEAD %s contained in main HEAD; original push failure left origin behind — publisher will land it", head)})
-							AppendActivity(projectPath, string(bead.ID), "close-accepted: work already integrated locally (push pending)")
-						}
-					}
-				}
-			}
-		}
-		if !alreadyIntegrated {
+		if !c.acceptAlreadyIntegrated(bead, projectPath, repoName, repoPath, switchedToWorktree, base, baseSource, targets) {
 			// Pre-close diff gate (duty 2, 2026-09-24 campaign): an empty
 			// target diff is only closable when the worker's HYDRA_VERDICT
 			// self-reports an accepted reason (docs-only, chain-deferred-to-root,
 			// superseded). Empty + no reason => reject as before: reopen with
 			// prior context, never spawn a fix bead.
 			if !c.tryAcceptEmptyClose(bead, repoName, repoPath, changed) {
+				c.emitEmptyDiffCompleted(bead, repoName, repoPath, changed, targets)
 				return c.rejectClose(bead, projectPath, repoName, "empty-diff")
 			}
 			// Docs-only changes sit outside code targets by definition, so the
@@ -1339,19 +1463,322 @@ func (c *BeadCloser) verifyBeforeClose(bead *types.Bead, projectPath, repoName s
 	if needScope {
 		mode := c.config.Validation.TargetScopeMode()
 		if err := c.checkTargetScope(bead, projectPath, repoName, changed, targets, mode); err != nil {
+			c.emitEmptyDiffCompleted(bead, repoName, repoPath, changed, targets)
 			return err
 		}
+	}
+
+	// Adversarial close gate (bounded veto): last gate before acceptance.
+	// Deterministic gates have already passed; the semantic reviewer scores
+	// the diff against the acceptance criteria. Fail-open on its own errors.
+	if err := c.verifyAdversarial(bead, projectPath, repoName, repoPath, base); err != nil {
+		return err
 	}
 
 	c.logCloseEvent(bead, "accepted", "verified", c.validationRetryCount(bead))
 	return nil
 }
 
+// skipIfTerminal reports whether the bead is already terminal (verification
+// skipped entirely: a resurrected close attempt on an already-closed bead
+// would only find an empty diff and reject). Fails closed when the fresh
+// state cannot be read.
+func (c *BeadCloser) skipIfTerminal(bead *types.Bead, projectPath, repoName string) (bool, error) {
+	if c.beadsClient == nil {
+		return false, nil
+	}
+	fresh, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID)
+	if err != nil {
+		return false, fmt.Errorf("[VerifiedClose] cannot verify state of bead %s: %w", bead.ID, err)
+	}
+	if fresh != nil && fresh.Status.IsTerminal() {
+		log.Printf("[VerifiedClose] Bead %s already terminal (%s); skipping verification", bead.ID, fresh.Status)
+		return true, nil
+	}
+	return false, nil
+}
+
+// verifyTDDChain runs blocking TDD validation (only gates TDD-phase beads);
+// a validation-service error is logged and does not block the close.
+func (c *BeadCloser) verifyTDDChain(bead *types.Bead, projectPath, repoName string) error {
+	if !c.shouldRunTDDValidation(bead) || c.validationService == nil {
+		return nil
+	}
+	passed, err := c.validationService.TDDChainPasses(*bead, projectPath)
+	if err != nil {
+		log.Printf("[VerifiedClose] TDD verify error for %s (not blocking): %v", bead.ID, err)
+		return nil
+	}
+	if !passed {
+		return c.rejectClose(bead, projectPath, repoName, "tdd-validation-failed")
+	}
+	return nil
+}
+
+// resolveEvidenceRepo returns the directory whose diff/scope evidence counts
+// for this close (a chain worktree when one exists, else the resolved repo
+// path) plus the main checkout path for leak-union and ancestry checks.
+func (c *BeadCloser) resolveEvidenceRepo(bead *types.Bead, projectPath, repoName string) (repoPath, mainRepoPath string, switchedToWorktree bool) {
+	repoPath = c.projectResolver.ResolveRepoPath(bead.Project, repoName, projectPath)
+	if repoPath == "" {
+		repoPath = projectPath
+	}
+	mainRepoPath = projectPath
+	if c.worktreeManager != nil && c.chainKeyFn != nil {
+		if wt, ok := c.worktreeManager.ExistingWorktree(projectPath, c.chainKeyFn(*bead)); ok {
+			repoPath = wt
+			switchedToWorktree = true
+		}
+	}
+	return repoPath, mainRepoPath, switchedToWorktree
+}
+
+// closeIntegrationBase resolves the deterministic integration base
+// (config knob or origin default) for committed-work detection — NEVER the
+// main checkout's current branch, which is incidental operator state
+// (telematics 2026-09-29). Empty in main-checkout mode.
+func (c *BeadCloser) closeIntegrationBase(bead *types.Bead, baseFromPath, repoPath string) (base, source string, err error) {
+	if repoPath == baseFromPath {
+		return "", "", nil
+	}
+	// Multi-repo projects resolve the base from the REPO directory, never
+	// the project parent: a multi-repo parent has no .beads store AND no git
+	// repo (fms doctrine, nipuna.j 2026-09-30). Resolving against the parent
+	// made every multi-repo close die at "integration base unresolved"
+	// (worker_completion multi-repo fixture, 2026-10-20).
+	// baseFromPath defines the integration base: repo subdir for multi-repo
+	// (parent has no git - fms doctrine), project root otherwise; never the
+	// evidence worktree (its HEAD is the chain branch, not the base).
+	base, source, err = ResolveIntegrationBase(c.config, baseFromPath)
+	if err != nil {
+		return "", "", fmt.Errorf("committed-work detection for %s: %w", bead.ID, err)
+	}
+	logIntegrationBaseMismatch(baseFromPath, base, source)
+	return base, source, err
+}
+
+// collectCloseEvidence gathers the changed-file evidence for the diff and
+// scope gates: the evidence repo's diff against the integration base, with
+// two documented adjustments —
+//   - main-checkout mode: only committed changes since the branch/session
+//     base count (uncommitted edits are revertible; nipuna 2026-09-16),
+//   - worktree mode: uncommitted changes in the main checkout are unioned
+//     in as "main-checkout leaks" (incident 2jjz8; the dirty-main
+//     auto-commit sweeps them onto the branch at integration time).
+//
+// Evidence-read failures are FAIL-CLOSED (2026-10-20 zero-work cascade:
+// hydra-xnk7/r2rl/htq0 closed-verified with exactly zero work because a
+// dubious-ownership exit 128 was logged "not blocking" and nil changed files
+// are treated as "unknown, fail open" by hasTargetChanges): cannot verify
+// evidence == cannot close. Callers must reject the close (reopen with the
+// retry ladder), never accept it.
+func (c *BeadCloser) collectCloseEvidence(bead *types.Bead, projectPath, repoPath, mainRepoPath string, switchedToWorktree bool, base string, needDiff, needScope bool) ([]string, error) {
+	if !needDiff && !needScope {
+		return nil, nil
+	}
+	changed, changedErr := changedFilesWithBase(repoPath, base)
+	if changedErr != nil {
+		log.Printf("[VerifiedClose] diff check error for %s: %v", bead.ID, changedErr)
+	}
+
+	if !switchedToWorktree && needDiff {
+		// Main-checkout mode: uncommitted edits are revertible and have been
+		// observed to be reverted AFTER close acceptance (2026-09-16 nipuna
+		// incident: 14 false closes). Only committed changes since the branch
+		// diverged from origin count as evidence. Unavailable base (no upstream
+		// etc.) fails open.
+		sessionBase := c.sessionBaseFor(bead.ID.String())
+		if sessionBase != "" {
+			// Session-scoped: only commits made after the bead's spawn
+			// count. Pre-existing campaign commits must not satisfy the
+			// gate for a no-work session.
+			if committed, cerr := committedChangesSinceBase(projectPath, sessionBase); cerr == nil {
+				changed = committed
+			} else {
+				log.Printf("[VerifiedClose] session-evidence base unavailable for %s: %v", bead.ID, cerr)
+				if evidenceFatalErr(changedErr) {
+					return nil, fmt.Errorf("[VerifiedClose] cannot verify work for %s: status: %v; session evidence: %v", bead.ID, changedErr, cerr)
+				}
+			}
+		} else if committed, cerr := committedChangesSinceBranchBase(projectPath); cerr == nil {
+			changed = committed
+		} else {
+			log.Printf("[VerifiedClose] committed-evidence base unavailable for %s: %v", bead.ID, cerr)
+			if evidenceFatalErr(changedErr) {
+				return nil, fmt.Errorf("[VerifiedClose] cannot verify work for %s: status: %v; committed evidence: %v", bead.ID, changedErr, cerr)
+			}
+		}
+	} else if changedErr != nil {
+		// Worktree mode: the evidence repo diff is the ONLY evidence for the
+		// work — a git error there is fatal (fail-closed).
+		return nil, fmt.Errorf("[VerifiedClose] cannot read diff evidence for %s in %s: %v", bead.ID, repoPath, changedErr)
+	}
+
+	if switchedToWorktree {
+		var uerr error
+		changed, uerr = unionMainCheckoutLeaks(bead.ID, projectPath, mainRepoPath, changed)
+		if uerr != nil && len(changed) == 0 && evidenceFatalErr(uerr) {
+			return nil, fmt.Errorf("[VerifiedClose] cannot verify work for %s: main-checkout diff unreadable: %v", bead.ID, uerr)
+		}
+	}
+	return changed, nil
+}
+
+// unionMainCheckoutLeaks merges uncommitted main-checkout changes into the
+// collected evidence (incident 2jjz8: the agent wrote into the main checkout
+// instead of its worktree). The dirty-main auto-commit already sweeps these
+// files onto the branch at integration time, so the work is preserved either
+// way. Returns the evidence unchanged when the main checkout is clean or
+// unreadable.
+func unionMainCheckoutLeaks(beadID types.BeadID, projectPath, mainRepoPath string, changed []string) ([]string, error) {
+	mainChanged, mainErr := changedFiles(mainRepoPath)
+	if mainErr != nil {
+		log.Printf("[VerifiedClose] main-checkout diff check error for %s: %v", beadID, mainErr)
+		return changed, mainErr
+	}
+	if len(mainChanged) == 0 {
+		return changed, nil
+	}
+	seen := make(map[string]bool, len(changed))
+	for _, f := range changed {
+		seen[f] = true
+	}
+	for _, f := range mainChanged {
+		if !seen[f] {
+			log.Printf("[VerifiedClose] %s main-checkout leak: %s", beadID, f)
+			changed = append(changed, f)
+			seen[f] = true
+		}
+	}
+	return changed, nil
+}
+
+// acceptAlreadyIntegrated reports whether the bead's work has already landed
+// on the integration base (5k33p / dy0+ig9hw class: the worker's commits may
+// have been integrated before verified-close ran; the worktree can be clean
+// while the main checkout already contains the bead's work). Three
+// escalating checks, all fail open:
+//  1. chain branch tip is an ancestor of main HEAD (full integrate),
+//  2. per-target merge-base heuristic (partial integrations),
+//  3. worktree HEAD commit is an ancestor of main HEAD (locally merged,
+//     push pending).
+func (c *BeadCloser) acceptAlreadyIntegrated(bead *types.Bead, projectPath, repoName, repoPath string, switchedToWorktree bool, base, baseSource string, targets []string) bool {
+	if !switchedToWorktree {
+		return false
+	}
+	if chainBranch := currentBranch(repoPath); chainBranch != "" {
+		logIntegrationBaseMismatch(projectPath, base, baseSource)
+		if c.chainBranchIntegrated(bead, projectPath, base, chainBranch, targets) {
+			return true
+		}
+	}
+	return c.worktreeHEADIntegratedLocally(bead, projectPath, repoName, repoPath)
+}
+
+// chainBranchIntegrated runs the branch-level already-integrated checks:
+// direct ancestry of the chain branch tip in main HEAD, then the per-target
+// merge-base heuristic for partial integrations.
+func (c *BeadCloser) chainBranchIntegrated(bead *types.Bead, projectPath, base, chainBranch string, targets []string) bool {
+	isAncestor, err := branchIsAncestorOfMain(projectPath, chainBranch)
+	if err != nil {
+		log.Printf("[VerifiedClose] ancestry check failed for %s (not blocking): %v", bead.ID, err)
+	} else if isAncestor {
+		log.Printf("[VerifiedClose] %s chain branch %s is ancestor of main HEAD; treating as already integrated", bead.ID, chainBranch)
+		return true
+	}
+
+	mainChanged, mainErr := changedFilesSinceMergeBase(projectPath, base, chainBranch)
+	if mainErr != nil {
+		log.Printf("[VerifiedClose] already-integrated check failed for %s (not blocking): %v", bead.ID, mainErr)
+		return false
+	}
+	if hasTargetChanges(mainChanged, targets) {
+		log.Printf("[VerifiedClose] %s targets already integrated on %s; treating as satisfied", bead.ID, base)
+		return true
+	}
+	return false
+}
+
+// worktreeHEADIntegratedLocally is the durable, commit-level already-
+// integrated test. Hydra-7k1 2026-09-16: the singleton integrate step merged
+// the worktree branch into the main checkout and THEN the push was rejected
+// (non-fast-forward), reopening the bead. From then on the worktree diff was
+// empty (HEAD is contained in the main checkout via the merge) while the
+// branch-name checks could not run at all — the branch was already deleted —
+// so every re-close died empty-diff and the bead escalated after 3 rounds.
+// Worktree and main checkout share an object database, so worktree HEAD is
+// resolvable in the main repo and `merge-base --is-ancestor <sha> HEAD`
+// answers "is the work landed" regardless of branch names.
+func (c *BeadCloser) worktreeHEADIntegratedLocally(bead *types.Bead, projectPath, repoName, repoPath string) bool {
+	headOut, herr := gitOut(repoPath, "rev-parse", "HEAD")
+	if herr != nil {
+		return false
+	}
+	head := strings.TrimSpace(headOut)
+	if head == "" {
+		return false
+	}
+	isAncestor, aerr := commitIsAncestorOfMain(projectPath, head)
+	if aerr != nil {
+		log.Printf("[VerifiedClose] commit-ancestry check failed for %s (not blocking): %v", bead.ID, aerr)
+		return false
+	}
+	if !isAncestor {
+		return false
+	}
+	log.Printf("[VerifiedClose] %s worktree HEAD %s is ancestor of main HEAD (locally integrated, push pending); treating as satisfied", bead.ID, head)
+	c.events.EmitRepo(projectPath, Event{Type: "close-accepted-already-integrated", Project: repoName,
+		Bead: string(bead.ID), Reason: "worktree_head_ancestor_of_main",
+		Detail: fmt.Sprintf("worktree HEAD %s contained in main HEAD; original push failure left origin behind — publisher will land it", head)})
+	AppendActivity(projectPath, string(bead.ID), "close-accepted: work already integrated locally (push pending)")
+	return true
+}
+
 // checkTargetScope handles the target-files scope gate and the target-less
 // warning. It returns a non-nil error only when the configured mode is "block"
 // and an off-scope change is found. Target-less implementation beads that edit
 // non-allowlisted paths are warned but never rejected.
+// redPhaseProductionFiles lists changed files that are production code:
+// not Go test files, not fixtures/testdata, not docs/CHANGELOG. A RED bead
+// touching any of these is doing GREEN's job.
+func redPhaseProductionFiles(changed []string) []string {
+	var prod []string
+	for _, f := range changed {
+		base := filepath.Base(f)
+		switch {
+		case strings.HasSuffix(f, "_test.go"),
+			strings.HasSuffix(f, ".md"),
+			strings.Contains(f, "testdata/"),
+			strings.Contains(f, "test-fixtures/"),
+			strings.HasSuffix(base, ".test.ts"),
+			strings.HasSuffix(base, ".test.js"),
+			strings.HasSuffix(base, ".spec.ts"),
+			strings.HasSuffix(base, ".spec.js"),
+			strings.HasSuffix(base, ".snap"),
+			strings.Contains(f, "__mocks__/"),
+			strings.Contains(f, "__tests__/"):
+			// tests/fixtures/docs — allowed in RED
+		default:
+			prod = append(prod, f)
+		}
+	}
+	return prod
+}
+
 func (c *BeadCloser) checkTargetScope(bead *types.Bead, projectPath, repoName string, changed, targets []string, mode string) error {
+	// RED-phase file-shape check (2026-11-08): a RED bead's diff must be
+	// tests (and fixtures) only. Workers writing implementation files during
+	// RED (moo5/zv1r wrote a 359-line enrichment.go) strand the work: the RED
+	// close gate rejects their passing tests, the chain quarantines, and the
+	// implementation has to be hand-recovered from quarantine. Reject before
+	// that loop starts.
+	if isRedBead(bead) {
+		prod := redPhaseProductionFiles(changed)
+		if len(prod) > 0 {
+			log.Printf("[ScopeGate] bead %s (RED) changed production files: %v", bead.ID, prod)
+			return c.rejectClose(bead, projectPath, repoName, "red-phase production files: "+strings.Join(prod, ", ")+" — RED changes must be *_test.go/fixtures only; implementation belongs to the GREEN bead")
+		}
+	}
 	if len(targets) > 0 {
 		violations := scopeViolations(changed, targets)
 		if len(violations) == 0 {
@@ -1392,6 +1819,9 @@ func (c *BeadCloser) checkTargetScope(bead *types.Bead, projectPath, repoName st
 
 	paths := targetlessWarningPaths(changed)
 	if len(paths) > 0 {
+		if mode == "block" {
+			return c.rejectClose(bead, projectPath, repoName, "non-allowlisted changes on target-less bead: "+strings.Join(paths, ", "))
+		}
 		log.Printf("[ScopeGate] bead %s declared no Target Files but changed non-allowlisted paths: %v", bead.ID, paths)
 	}
 	return nil
@@ -1400,17 +1830,38 @@ func (c *BeadCloser) checkTargetScope(bead *types.Bead, projectPath, repoName st
 // rejectClose reopens a bead that failed verification, or escalates to a
 // human after MaxRounds rejections. It always returns a non-nil error so
 // the caller aborts the close.
-func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason string) error {
+func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason string, stderr ...string) error {
 	beadID := string(bead.ID)
+	closeRejectAttempt := func(prev types.Bead, n int) {
+		if c.beadsClient == nil {
+			return
+		}
+		// Replace the previous attempt label so the ladder holds exactly one
+		// marker (the highest round); RemoveBeadLabels errors are logged, not
+		// fatal — an extra attempt label only over-counts conservatively.
+		for _, l := range prev.Labels {
+			if strings.HasPrefix(l, closeRejectAttemptPrefix) {
+				if err := c.beadsClient.RemoveBeadLabels(projectPath, repoName, bead.ID, []string{l}); err != nil {
+					log.Printf("[VerifiedClose] Failed to remove stale attempt label %q from %s: %v", l, beadID, err)
+				}
+			}
+		}
+		label := fmt.Sprintf("%s%d", closeRejectAttemptPrefix, n)
+		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{label}); err != nil {
+			log.Printf("[VerifiedClose] Failed to label %s with %q: %v", beadID, label, err)
+		}
+	}
 
 	// Never reopen a terminal bead: a second close attempt after a successful
 	// close+integration sees an empty diff and must not resurrect the bead
 	// (2026-08-24/25 resurrection loop: i1g, 5r0, bz5, aga accepted-then-reopened).
+	var fresh *types.Bead
 	if c.beadsClient != nil {
-		fresh, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID)
+		f, err := c.beadsClient.GetBead(projectPath, repoName, bead.ID)
 		if err != nil {
 			return fmt.Errorf("[VerifiedClose] cannot verify state of bead %s before reject: %w", beadID, err)
 		}
+		fresh = f
 		if fresh != nil && fresh.Status.IsTerminal() {
 			log.Printf("[VerifiedClose] Bead %s already terminal (%s); skipping reject (%s)", beadID, fresh.Status, reason)
 			return nil
@@ -1428,20 +1879,35 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		// Stop the reject/reopen loop; flag for a human instead of spinning.
 		c.logCloseEvent(bead, "escalated", reason, currentAttempts)
 		log.Printf("[VerifiedClose] Bead %s rejected %d/%d times (%s); escalating to human", beadID, currentAttempts, maxRounds, reason)
+		// Sensor symmetry (fire): an escalation is a sensor fire; the paired
+		// resolve is verified_close_passed with the same correlation ID.
+		c.events.EmitRepo(projectPath, Event{Type: "verified_close_rejected", Project: repoName,
+			Bead: beadID, Reason: reason,
+			Detail: fmt.Sprintf("verified-close rejected %d/%d times (%s); escalated to human", currentAttempts, maxRounds, reason),
+			Fields: map[string]any{"attempts": currentAttempts, "max_rounds": maxRounds, "correlation_id": SensorCorrelation("verified-close", beadID), "outcome": "escalated"}})
 		if c.beadsClient != nil {
 			if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"needs-human", "verified-close-escalated", escalatedLabel}); err != nil {
 				log.Printf("[VerifiedClose] Failed to label %s for escalation: %v", beadID, err)
+			}
+			if fresh != nil {
+				closeRejectAttempt(*fresh, currentAttempts)
 			}
 		}
 		c.events.EmitRepo(projectPath, Event{Type: "bead.escalated", Project: repoName,
 			Bead: beadID, Reason: reason,
 			Detail: fmt.Sprintf("verified-close rejected %d/%d times (%s); escalated to human, bead left in_progress", currentAttempts, maxRounds, reason),
-			Fields: map[string]any{"attempts": currentAttempts, "max_rounds": maxRounds}})
+			Fields: map[string]any{"attempts": currentAttempts, "max_rounds": maxRounds, "correlation_id": SensorCorrelation("verified-close", beadID), "outcome": "escalated"}})
 		return fmt.Errorf("verified-close: bead %s escalated after %d rejections (%s)", beadID, currentAttempts, reason)
 	}
 
 	c.logCloseEvent(bead, "rejected", reason, currentAttempts+1)
 	log.Printf("[VerifiedClose] Bead %s rejected (%s), round %d/%d — reopening", beadID, reason, currentAttempts+1, maxRounds)
+	// Sensor symmetry (fire): each rejection round is a sensor fire; the
+	// paired resolve (verified_close_passed) carries the same correlation ID.
+	c.events.EmitRepo(projectPath, Event{Type: "verified_close_rejected", Project: repoName,
+		Bead: beadID, Reason: reason,
+		Detail: fmt.Sprintf("verified-close rejected %s (round %d/%d); bead reopened", beadID, currentAttempts+1, maxRounds),
+		Fields: map[string]any{"round": currentAttempts + 1, "correlation_id": SensorCorrelation("verified-close", beadID), "outcome": "reopened"}})
 	if c.validationService != nil && c.validationService.retryManager != nil {
 		c.validationService.retryManager.IncrementValidationRetry(beadID)
 	}
@@ -1452,11 +1918,99 @@ func (c *BeadCloser) rejectClose(bead *types.Bead, projectPath, repoName, reason
 		if err := c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID, []string{"verified-close-reject-" + reason}); err != nil {
 			log.Printf("[VerifiedClose] Failed to label %s: %v", beadID, err)
 		}
+		// Fingerprint tracking: sha256(bead_id + verification command + classification
+		// reason). The classification string (e.g. verification-command-failed) is the
+		// discriminating input — same-classification failures with different stderr
+		// MUST collide so the repeat emits verification_substantive.
+		fp := getVerificationFingerprint(bead, verificationFingerprintSource(reason, stderr))
+		err := c.trackVerificationFingerprint(bead, fp, projectPath, repoName)
+		if err != nil {
+			log.Printf("[VerifiedClose] Failed to track fingerprint for %s: %v", beadID, err)
+		}
+		prev := bead
+		if fresh != nil {
+			prev = fresh
+		}
+		closeRejectAttempt(*prev, currentAttempts+1)
 	}
 	if c.sessionResumePilot != nil {
 		c.sessionResumePilot.RecordReject(hasBeadLabel(bead.Labels, sessionResumedLabel))
 	}
 	return fmt.Errorf("verified-close: bead %s rejected (%s)", beadID, reason)
+}
+
+// gateFingerprintLabelPrefix is the durable label prefix marking a bead whose
+// close-gate rejection fingerprint has been seen at least once.
+const gateFingerprintLabelPrefix = "gate-fp-"
+
+// getVerificationFingerprint computes sha256(bead_id + verification command +
+// classification reason) truncated to 8 hex chars.
+func getVerificationFingerprint(bead *types.Bead, reason string) string {
+	cmd, _ := verificationCommandFor(bead)
+	h := sha256.Sum256([]byte(string(bead.ID) + cmd + reason))
+	return hex.EncodeToString(h[:])[:8]
+}
+
+// trackVerificationFingerprint records the rejection fingerprint durably as
+// a counted gate-fp-<fp8>-<N> label (N replaced each round — a new label is
+// appended because br label add is append-only; readers take the max N).
+// A bare gate-fp-<fp8> label predates the counted form and counts as 1.
+// The first sighting writes N=1; each repeat emits a typed
+// verification_substantive event (count = new N) and appends the next N.
+func (c *BeadCloser) trackVerificationFingerprint(bead *types.Bead, fp, projectPath, repoName string) error {
+	if c.beadsClient == nil {
+		return nil
+	}
+	count := gateFingerprintCount(bead.Labels, fp)
+	if count == 0 {
+		return c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID,
+			[]string{gateFingerprintLabelPrefix + fp + "-1"})
+	}
+	next := count + 1
+	c.events.EmitRepo(projectPath, Event{
+		Type:    "verification_substantive",
+		Project: repoName,
+		Bead:    string(bead.ID),
+		Fields: map[string]any{
+			"bead":        string(bead.ID),
+			"fingerprint": fp,
+			"count":       next,
+		},
+	})
+	return c.beadsClient.UpdateBeadLabels(projectPath, repoName, bead.ID,
+		[]string{gateFingerprintLabelPrefix + fp + "-" + strconv.Itoa(next)})
+}
+
+// gateFingerprintCount returns the durable rejection count recorded for fp
+// among the bead's labels: the highest N among gate-fp-<fp8>-<N> labels;
+// a bare gate-fp-<fp8> label counts as 1; absent counts as 0.
+func gateFingerprintCount(labels []string, fp string) int {
+	max := 0
+	for _, l := range labels {
+		if l == gateFingerprintLabelPrefix+fp {
+			if max < 1 {
+				max = 1
+			}
+			continue
+		}
+		if m := gateFingerprintCountedRe.FindStringSubmatch(l); m != nil && m[1] == fp {
+			if n, err := strconv.Atoi(m[2]); err == nil && n > max {
+				max = n
+			}
+		}
+	}
+	return max
+}
+
+// verificationFingerprintSource selects the input hashed into a close-gate
+// rejection fingerprint: always the classification reason string (e.g.
+// "verification-command-failed"), never the literal stderr — same-classification
+// failures with different output must collide so the repeat is detected as
+// verification_substantive. stderr is accepted for call-site stability and
+// deliberately ignored.
+func verificationFingerprintSource(reason string, stderr []string) string {
+	_ = stderr
+	return reason
 }
 
 // logCloseEvent emits a single structured close-decision line for
@@ -1472,50 +2026,45 @@ func (c *BeadCloser) logCloseEvent(bead *types.Bead, verdict, reason string, att
 // CloseEvent attempt values consistent across accepted, rejected, and
 // escalated paths.
 func (c *BeadCloser) validationRetryCount(bead *types.Bead) int {
-	if c.validationService == nil || c.validationService.retryManager == nil {
-		return 0
+	n := 0
+	if c.validationService != nil && c.validationService.retryManager != nil {
+		n = c.validationService.retryManager.GetValidationRetryCount(string(bead.ID))
 	}
-	return c.validationService.retryManager.GetValidationRetryCount(string(bead.ID))
+	// Durable floor: every verified-close rejection leaves a
+	// verified-close-reject-attempt-N label on the bead (rejectClose writes
+	// it). Count the highest such attempt so a daemon restart or a Charon
+	// orphan reopening — both of which reset the in-memory retry manager —
+	// cannot restart the escalation ladder at zero (ee5r/lkbo/ejsk
+	// 2026-10-04: gate failures cycled across restarts and never reached max
+	// rounds, so nobody was alerted).
+	if d := durableRejectAttempts(bead.Labels); d > n {
+		n = d
+	}
+	return n
 }
 
-// beadTargetFiles extracts a bead's declared target files so the diff
-// check can be scoped. It reads Metadata["files"] then Metadata["target_files"]
-// then a "Files:" line in the description. Returns nil when none are declared
-// (caller then checks the whole repo).
-func beadTargetFiles(bead *types.Bead) []string {
-	if bead == nil {
-		return nil
-	}
-	if bead.Metadata != nil {
-		// Workers and validators populate different keys; reconcile both
-		// so the close-path gate never misses declared targets.
-		for _, key := range []string{"files", "target_files"} {
-			if v, ok := bead.Metadata[key]; ok && strings.TrimSpace(v) != "" {
-				return splitFileList(v)
+// durableRejectAttempts returns the highest N found among labels of the form
+// verified-close-reject-attempt-N (0 when none are present).
+func durableRejectAttempts(labels []string) int {
+	max := 0
+	for _, l := range labels {
+		if s, ok := strings.CutPrefix(l, closeRejectAttemptPrefix); ok {
+			if n, err := strconv.Atoi(s); err == nil && n > max {
+				max = n
 			}
 		}
 	}
-	for _, line := range strings.Split(bead.Description, "\n") {
-		l := strings.TrimSpace(line)
-		if strings.HasPrefix(strings.ToLower(l), "files:") {
-			return splitFileList(l[len("files:"):])
-		}
-	}
-	return nil
+	return max
 }
 
-func splitFileList(s string) []string {
-	var out []string
-	for _, p := range strings.FieldsFunc(s, func(r rune) bool {
-		return r == ',' || r == ';' || r == ' ' || r == '\t'
-	}) {
-		p = strings.TrimSpace(p)
-		if p != "" && !strings.EqualFold(p, "TBD") {
-			out = append(out, p)
-		}
-	}
-	return out
-}
+// closeRejectAttemptPrefix is the durable per-attempt escalation ladder
+// label written by rejectClose (one label per round, replaced each round).
+const closeRejectAttemptPrefix = "verified-close-reject-attempt-"
+
+// beadTargetFiles moved to beadfiles_adoption.go: the close path resolves
+// target files through the shared internal/beadfiles resolver (plus
+// sibling-test expansion) so validator-side and close-side lists cannot
+// drift.
 
 // SetSourceIndex wires the bead->store provenance index (index consulted
 // after the worker's own ProjectPath, before config name matching).
@@ -1541,4 +2090,32 @@ func (c *BeadCloser) sessionBaseFor(beadID string) string {
 	c.sessionMu.Lock()
 	defer c.sessionMu.Unlock()
 	return c.sessionBase[beadID]
+}
+
+// handleVerificationRed implements the Gate-Doctor triage for verification RED.
+// It classifies the failure family using the LLM gate doctor (if available) and
+// performs the bounded action. Bounds: only repair (rerun-once), file fix-bead
+// (code-broken), or comment + escalate. It never edits gates/tests.
+func (c *BeadCloser) handleVerificationRed(bead *types.Bead, projectPath, repoName string, err error) error {
+	if c.gateDoctor == nil {
+		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed", err.Error())
+	}
+	action := c.gateDoctor.Triage(context.Background(), bead.ID.String(), bead.Title, "verification-command", 1, err.Error())
+	switch action.Class {
+	case GateClassEnvironment:
+		// repair + rerun once. We don't auto-rerun to avoid infinite loops in
+		// the shell context, but we label and return a retry rejection.
+		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-environment", err.Error())
+	case GateClassCodeBroken:
+		c.gateDoctor.FileFixBead(projectPath, repoName, bead.ID.String(), "verification-command", 1, err.Error())
+		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed", err.Error())
+	case GateClassStaleGate:
+		// comment + escalate, NEVER edit gate
+		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-stale-gate", err.Error())
+	case GateClassFlaky:
+		// comment + escalate, NEVER edit gate
+		return c.rejectClose(bead, projectPath, repoName, "gate-doctor-flaky", err.Error())
+	default:
+		return c.rejectClose(bead, projectPath, repoName, "verification-command-failed", err.Error())
+	}
 }

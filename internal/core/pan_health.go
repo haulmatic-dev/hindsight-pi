@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -38,6 +39,13 @@ import (
 // before the health digest flags a publisher wedge (Pan-detectable).
 const unpublishedWedgeAge = 15 * time.Minute
 
+// ProjectKey is the exported canonical park-namespace key (hydra-6tfb): the
+// scheduler's campaignParked looks parks up by projectKey(projectPath), which
+// user-namespaces home/<user>/projects/<name> paths to <user>/<name>. The
+// operator API must store under the SAME key or its parks are silently
+// ignored by the scheduler.
+func ProjectKey(path string) string { return projectKey(path) }
+
 func projectKey(path string) string {
 	parts := strings.Split(filepath.Clean(path), string(filepath.Separator))
 	for i := 0; i+2 < len(parts); i++ {
@@ -54,15 +62,45 @@ func projectKey(path string) string {
 // one unreadable store or repo must not blind the whole scan.
 func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 	digest := pan.HealthDigest{}
+	// Process-hygiene sensors (Charon tick snapshots, 2026-10-20 incident):
+	// zero-token stalls and rogue pi processes are host anomalies carrying
+	// their repair verbs so a Pan judgment can dispatch the kill explicitly.
+	if o.orphanJanitor != nil {
+		for _, r := range o.orphanJanitor.ZeroTokenStallReport() {
+			frag := fmt.Sprintf("%s@pid%d", r.BeadID, r.PID)
+			digest.ZeroTokenStalls = append(digest.ZeroTokenStalls, frag)
+			digest.HostAnomalies = append(digest.HostAnomalies,
+				fmt.Sprintf("P0 process hygiene: worker for %s (PID %d) is working with tokens_so_far=0 — the session never completed a turn; repair:kill-stalled-worker %s", r.BeadID, r.PID, r.BeadID))
+		}
+		for _, rp := range o.orphanJanitor.RoguePiReport() {
+			frag := fmt.Sprintf("pid%d(%v)", rp.PID, rp.Age.Round(time.Hour))
+			digest.RoguePis = append(digest.RoguePis, frag)
+			digest.HostAnomalies = append(digest.HostAnomalies,
+				fmt.Sprintf("P0 process hygiene: rogue pi PID %d (%s, cgroup %q, age %v) is outside hydra.service and untracked; repair:kill-rogue-pi", rp.PID, rp.Cmdline, rp.Cgroup, rp.Age.Round(time.Minute)))
+		}
+	}
 	if o.beadsClient == nil {
 		return digest
 	}
 
-	// Live worker rows once for the whole scan.
+	// Live worker rows once for the whole scan. A row whose heartbeat is
+	// fresh counts as live regardless of state: a worker finalizing gates
+	// after its row was prematurely marked completed still heartbeats (30s
+	// cadence), and counting that bead as an orphan claim made Pan file a
+	// twin P0 report bead every judgment round (2026-10-02: hydra-l867 row
+	// completed at 02:52:38 while the worker PID ran on until 03:1x). The
+	// threshold mirrors Charon's heartbeatHungAfter (5m).
 	liveByKey := map[string][]registry.WorkerRecord{}
+	completedByBead := map[string]bool{}
 	if o.registryStore != nil {
-		if workers, err := o.registryStore.ListWorkers(registry.StateWorking, registry.StateParked); err == nil {
+		if workers, err := o.registryStore.ListWorkers(registry.StateWorking, registry.StateParked, registry.StateHung, registry.StateCompleted); err == nil {
 			for _, w := range workers {
+				if w.State == registry.StateCompleted {
+					completedByBead[w.BeadID] = true
+					if time.Since(w.LastHeartbeat) >= 5*time.Minute {
+						continue // genuinely finished; not live
+					}
+				}
 				// WorkerRecord.Project is the registered project name; match
 				// by name or path basename (multi-user discovery registers
 				// "<user>/<repo>" while workers carry the plain name).
@@ -85,9 +123,13 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 			degrade.RecordSuccess("pan-store-scan")
 			statusByID := make(map[string]types.BeadStatus, len(beads))
 			depsByID := make(map[string][]string, len(beads))
+			claimsByID := make(map[string]time.Time, len(beads))
+			labelsByID := make(map[string][]string, len(beads))
 			for _, b := range beads {
 				id := b.ID.String()
 				statusByID[id] = b.Status
+				claimsByID[id] = b.UpdatedAt
+				labelsByID[id] = b.Labels
 				if b.Status.IsTerminal() {
 					continue
 				}
@@ -95,7 +137,15 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 				case types.StatusOpen:
 					ph.Open++
 				case types.StatusInProgress:
-					ph.InProgress++
+					// Pan-filed meta beads are filed for human review and never
+					// get a worker; counting them as in_progress inflates
+					// inprog vs workers, which Pan infers as "orphaned claims"
+					// — and each judgment files another pan-filed twin about
+					// the phantom anomaly (self-referential loop, 2026-10-02:
+					// 8 twins on one day). Excluded from the inprog count.
+					if !slices.Contains(b.Labels, pan.FiledLabel) {
+						ph.InProgress++
+					}
 				}
 				for _, d := range b.Dependencies {
 					depsByID[id] = append(depsByID[id], d.String())
@@ -120,6 +170,132 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 			}
 			ph.LiveWorkers = len(live)
 
+			// P0 campaign anomaly: in_progress beads with no live registry
+			// worker (fms 2026-10-01: 6 orphaned claims wedged a 17-bead DAG
+			// ladder for 1h+ with zero live workers and zero progress — same
+			// class as the tb3j fleet-stall rule). Charon's orphan recovery is
+			// the mechanical fix; this anomaly makes the state visible to Pan
+			// so a judgment fires instead of the campaign sitting silent — but
+			// the
+			// worker has claimed but not yet registered (spawn → status update →
+			// registry upsert is not atomic). Counting fresh claims turned a
+			// spawn wave into a self-perpetuating filing loop: each campaign-
+			// anomaly bead Pan filed became itself a new in_progress claim with
+			// no worker yet, re-firing the anomaly and re-filing (hydra
+			// 2026-10-02 02:34–02:48: ctix→qmf7→t2e1→yz8z in 13 min, every one
+			// a false alarm — all claims had live workers on recheck). A claim
+			// within orphanClaimDigestGrace is skipped; Charon's recovery already
+			// applies the same 5m grace before any destructive reopen.
+			const orphanClaimDigestGrace = 5 * time.Minute
+			for id, st := range statusByID {
+				if st != types.StatusInProgress {
+					continue
+				}
+				if age := time.Since(claimsByID[id]); age >= 0 && age < orphanClaimDigestGrace {
+					continue // fresh claim: worker may not have registered yet
+				}
+				// Human-escalated beads (verified-close rejected 3/3 → escalated
+				// to human, bead left in_progress) never get a worker until a
+				// human or a Pan clear-escalation repair acts. Counting them as
+				// orphaned claims re-fired the P0 anomaly for exactly the beads
+				// the escalation gate already owns (hydra 2026-10-02 07:5x:
+				// bxzr/1h4v/wiu6/cxpf — tdd-validation-failed escalations,
+				// workers had completed normally). Excluded; escalation_ttl
+				// (overseer.escalation_ttl) owns the aging.
+				if slices.Contains(labelsByID[id], "escalated") {
+					continue
+				}
+				// Integration-pending beads (work complete, integrate failed,
+				// parked in place for the retest stage) sit in_progress with no
+				// worker by design — counting them re-fired the P0 orphan-claim
+				// anomaly every digest round while the retest stage owned them.
+				if slices.Contains(labelsByID[id], integrationPendingLabel) {
+					continue
+				}
+				// Pan-filed beads are campaign/triage filings, not pipeline work:
+				// each filing is itself an in_progress claim that may sit waiting
+				// for spawn or for its close gates long past the 5m grace. Counting
+				// them as orphaned claims re-fired the P0 anomaly for the filings
+				// the anomaly itself created (hydra 2026-10-06: 9 twin filings in
+				// 25 min, all counting the previous filings' claims), a
+				// self-referential loop on top of the 2026-10-02 inprog twin loop.
+				// Excluded; the file-bead cap owns their lifecycle.
+				if slices.Contains(labelsByID[id], pan.FiledLabel) {
+					continue
+				}
+				orphaned := true
+				for _, w := range live {
+					if w.BeadID == id {
+						orphaned = false
+						break
+					}
+				}
+				// A bead whose close gates are running is not an orphan: the
+				// worker finished and the close path (build/lint/test gates,
+				// verified-close judge) is in flight. Counting it re-fired the
+				// P0 campaign anomaly across sweeps while the DAG was actually
+				// progressing (hydra 2026-10-06: 6 beads mid-close, workers
+				// exited 0 minutes earlier, Charon correctly left them — the
+				// digest kept filing orphan twins). Same probe Charon uses.
+				if orphaned && o.gateRoot != "" && GateCloseInProgress(o.gateRoot, project.Name, id) {
+					continue
+				}
+				// A bead whose registry row is state=completed is not an orphan
+				// even after the heartbeat goes stale: the worker exited through
+				// the normal completion path (gates finished, verdict recorded)
+				// and the scheduler's respawn backoff owns the requeue. Counting
+				// the bead during that backoff window re-fired the P0 campaign
+				// anomaly every sweep while Charon and the retry queue were
+				// already cycling the ladder (hydra 2026-10-06 13:4x: 15 beads
+				// between attempts — gate-reject churn + red/discovery chains —
+				// every one with a completed row, pan filed a twin per round).
+				// A genuine orphan is a bead whose row is still working/hung with
+				// a stale heartbeat (worker died mid-run) — that case stays.
+				if orphaned && completedByBead[id] {
+					continue
+				}
+				if orphaned {
+					ph.OrphanClaims++
+				}
+			}
+			if ph.OrphanClaims > 0 {
+				ph.Anomalies = append(ph.Anomalies, fmt.Sprintf(
+					"P0 campaign anomaly: %d in_progress bead(s) with no live registry worker (orphaned claims wedging the DAG ladder)", ph.OrphanClaims))
+			}
+
+			// Gate deaths with no escalation (ee5r/lkbo/ejsk 2026-10-04
+			// 15:45-16:17 UTC: three beads died at daemon gates in one window
+			// and nobody was alerted). Two views, one rule — a gate death must
+			// reach Pan within a digest tick:
+			//   gatefailed: non-terminal beads carrying gate-failed that never
+			//     reached the escalation ladder (no escalated/needs-human label) —
+			//     a worker died or stalled before the retry cap could fire.
+			//   closedfail: beads closed-failed inside closedFailedDigestWindow —
+			//     terminal, so every other counter skips them, yet the death is
+			//     recent and unaudited.
+			const closedFailedDigestWindow = 4 * time.Hour
+			for id, labels := range labelsByID {
+				escalatedOrHuman := slices.Contains(labels, "escalated") || slices.Contains(labels, "needs-human")
+				if !escalatedOrHuman && slices.Contains(labels, "gate-failed") {
+					if st := statusByID[id]; !st.IsTerminal() {
+						ph.GateFailedOpen++
+					}
+				}
+				if slices.Contains(labels, "closed-failed") {
+					if age := time.Since(claimsByID[id]); age >= 0 && age < closedFailedDigestWindow {
+						ph.ClosedFailedRecent++
+					}
+				}
+			}
+			if ph.GateFailedOpen > 0 {
+				ph.Anomalies = append(ph.Anomalies, fmt.Sprintf(
+					"P0 campaign anomaly: %d bead(s) marked gate-failed with no escalation — gate deaths sitting silent (worker never re-attempted close)", ph.GateFailedOpen))
+			}
+			if ph.ClosedFailedRecent > 0 {
+				ph.Anomalies = append(ph.Anomalies, fmt.Sprintf(
+					"P0 campaign anomaly: %d bead(s) closed-failed in the last 4h — recent gate deaths, no escalation fired", ph.ClosedFailedRecent))
+			}
+
 			// Chained-parallel: live-worker pairs whose beads are dep-related
 			// (either direction). The c36 blast signature.
 			for i := 0; i < len(live); i++ {
@@ -133,6 +309,14 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 
 			ph.StrandedWorktrees = countStrandedWorktrees(target, statusByID)
 			ph.UnintegratedBranches = countWTBranches(target)
+
+			// Pan-filed cap saturation: filing is suppressed until an open
+			// pan-filed bead closes. Stable wording (no counts) so the digest
+			// does not churn Pan judgments.
+			if _, capHit := o.panCapHits.Load(target); capHit {
+				ph.Anomalies = append(ph.Anomalies,
+					"pan-filed cap saturated: filing suppressed until an open pan-filed bead closes")
+			}
 
 			if ph.ChainedParallel > 0 {
 				ph.Anomalies = append(ph.Anomalies, fmt.Sprintf(
@@ -160,6 +344,20 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 	}
 	sort.Slice(digest.Projects, func(i, j int) bool { return digest.Projects[i].Key < digest.Projects[j].Key })
 	collectDiskWatermark(&digest, o.diskStatPath, o.diskWatermarkPct)
+	if digest.DiskUsedPct > 0 {
+		path := o.diskStatPath
+		if path == "" {
+			path = "/"
+		}
+		wm := o.diskWatermarkPct
+		if wm <= 0 {
+			wm = defaultDiskWatermarkPct
+		}
+		if o.diskCleanup == nil {
+			o.diskCleanup = &diskCleanupGuard{}
+		}
+		o.diskCleanup.maybeCleanup(path, digest.DiskUsedPct, wm)
+	}
 	// FR-032: snapshot fail-open degradation counters; degraded subsystems
 	// (0% success over the window) surface in the digest like host anomalies.
 	for _, st := range degrade.Snapshot() {
@@ -167,6 +365,10 @@ func (o *Overseer) collectHealthDigest() pan.HealthDigest {
 			digest.Degradations = append(digest.Degradations, st.String())
 		}
 	}
+	// Stamp freshness for the file-bead premise gate (jm2 class): a filing
+	// decision built on a digest older than panFilingDigestStaleAge is
+	// refused at filing time.
+	o.panDigestAt.Store(time.Now().UnixNano())
 	return digest
 }
 
@@ -200,11 +402,14 @@ func collectDiskWatermark(d *pan.HealthDigest, path string, watermark int) {
 	if err := syscall.Statfs(path, &fs); err != nil {
 		return // fail open
 	}
-	total := fs.Blocks * uint64(fs.Bsize)
-	if total == 0 {
+	// Used% is block-based: fs.Blocks and fs.Bfree are both in fs.Bsize blocks.
+	// (The 2026-10-06 incident mixed a byte-scaled total with a block count and
+	// reported a constant ~99% on every filesystem, re-firing the disk-99%
+	// campaign anomaly fleet-wide.)
+	if fs.Blocks == 0 {
 		return
 	}
-	usedPct := int(((total - fs.Bfree) * 100) / total)
+	usedPct := int(((fs.Blocks - fs.Bfree) * 100) / fs.Blocks)
 	d.DiskUsedPct = usedPct
 	if usedPct >= watermark {
 		d.HostAnomalies = append(d.HostAnomalies, fmt.Sprintf(
@@ -321,21 +526,125 @@ func (o *Overseer) scanTargetByKey(key string) (string, bool) {
 	return "", false
 }
 
+// panFilingDigestStaleAge caps how old the digest backing a file-bead
+// decision may be at filing time. Pan judgments run seconds behind digest
+// collection, so a much older digest means the finding may rest on stale
+// state — and acting on stale state is exactly how ajantha-srv-jobfile-jm2
+// got filed (2026-10-05 04:01Z) claiming "no worktree, no worker" when the
+// worktree existed and the worker had been live minutes earlier.
+const panFilingDigestStaleAge = 15 * time.Minute
+
+// panDigestAt is the unix-nano timestamp of the last collectHealthDigest
+// run (0 = never run / unknown → fail-open, no staleness gate).
+
+// emitPanFilingSkipped records a typed event when a filing is refused on a
+// re-verified stale premise. Fail-open: a broken sink never blocks filing.
+func (o *Overseer) emitPanFilingSkipped(projectPath, beadID, reason string) {
+	if o.eventSink == nil {
+		return
+	}
+	o.eventSink.EmitRepo(projectPath, Event{
+		Type:    "pan_bead_filed_skipped",
+		Project: filepath.Base(projectPath),
+		Bead:    beadID,
+		Reason:  "premise_stale",
+		Fields:  map[string]any{"reason": reason},
+	})
+}
+
+// verifyPanFilingPremise re-probes live state before a wedge bead is filed.
+// Returns a reason string ("" = premise holds, filing may proceed):
+//   - digest_stale: the digest the judgment was built on is older than
+//     panFilingDigestStaleAge (or never collected) — premises may be stale;
+//   - source_resolved: the judgment source bead is now terminal — wedge gone;
+//   - worker_live: the source bead has a live registry worker (fresh
+//     heartbeat, <5m, same liveness rule as the digest) — a live worker is
+//     mid-flight, not a silent wedge.
+//
+// Fail-open: any probe error means "cannot prove the premise false" and lets
+// the filing proceed — a genuine wedge must stay visible.
+func (o *Overseer) verifyPanFilingPremise(projectPath, beadID string) string {
+	if at := o.panDigestAt.Load(); at != 0 {
+		if age := time.Since(time.Unix(0, at)); age > panFilingDigestStaleAge {
+			return "digest_stale"
+		}
+	}
+	if pan.IsPseudoBeadID(beadID) {
+		return "" // no real source bead to re-probe
+	}
+	if o.beadsClient == nil {
+		return ""
+	}
+	bead, err := o.beadsClient.GetBead(projectPath, "", types.BeadID(beadID))
+	if err != nil || bead == nil {
+		return "" // fail-open: cannot prove resolved
+	}
+	if bead.Status.IsTerminal() {
+		return "source_resolved"
+	}
+	if o.registryStore != nil {
+		if rec, ok, err := o.registryStore.GetWorker(beadID); err == nil && ok {
+			live := rec.State == registry.StateWorking || time.Since(rec.LastHeartbeat) < 5*time.Minute
+			if live {
+				return "worker_live"
+			}
+		}
+	}
+	return ""
+}
+
 // filePanBead implements the FR-022 bead-filing actuator daemon-side: it
-// enforces the per-project cap of MaxOpenFiledBeadsPerProject open
-// "pan-filed" beads, then creates the improvement bead.
+// re-verifies live state (jm2 guard), then enforces the per-project cap of
+// MaxOpenFiledBeadsPerProject non-terminal (open or in_progress) "pan-filed"
+// beads, then creates the improvement bead. Counting only open beads let the
+// cap be bypassed whenever a filed bead was claimed (goes straight to
+// in_progress) before the next filing.
+
+// panFileSigTTL is the dedupe window for pan-filed wedge signatures: within
+// it, one normalized-signature finding files exactly one bead per project,
+// even if the earlier bead was closed or its cap slot freed. (PR #232)
+var panFileSigTTL = time.Hour
+
+// panFiledBeadsPerProject returns the effective per-project open pan-filed
+// cap: the shepherd.pan.max_filed_beads_per_project knob when set, else the
+// DefaultPanFiledBeadsPerProject default (nil-safe for direct constructions
+// in tests). (PR #105)
+func (o *Overseer) panFiledBeadsPerProject() int {
+	if o.config != nil && o.config.Shepherd.Pan.MaxFiledBeadsPerProject > 0 {
+		return o.config.Shepherd.Pan.MaxFiledBeadsPerProject
+	}
+	return DefaultPanFiledBeadsPerProject
+}
+
 func (o *Overseer) filePanBead(projectPath, beadID, title, description string) error {
+	if reason := o.verifyPanFilingPremise(projectPath, beadID); reason != "" {
+		o.emitPanFilingSkipped(projectPath, beadID, reason)
+		return fmt.Errorf("file-bead %s: %w (%s)", beadID, pan.ErrFileBeadPremiseStale, reason)
+	}
 	if o.beadsClient == nil {
 		return fmt.Errorf("file-bead %s: beads client unavailable", beadID)
 	}
+	normTitle := pan.NormalizeReason(strings.TrimSpace(title))
+	sig := projectPath + "|" + normTitle
+	// Time-window dedupe: a signature filed (or deduped) within
+	// panFileSigTTL must not file again, even after the earlier wedge bead
+	// was closed — N blocked beads with one root cause yield ONE wedge bead.
+	now := time.Now()
+	o.panSigMu.Lock()
+	if o.recentPanSigs != nil {
+		if seen, ok := o.recentPanSigs[sig]; ok && now.Sub(seen) < panFileSigTTL {
+			o.panSigMu.Unlock()
+			return fmt.Errorf("file-bead %s: %w (%s)", beadID, pan.ErrFileBeadDuplicate, sig)
+		}
+	}
+	o.panSigMu.Unlock()
 	beads, err := o.beadsClient.ListBeads(projectPath, "")
 	if err != nil {
 		return fmt.Errorf("file-bead %s: list beads: %w", beadID, err)
 	}
 	openFiled := 0
-	normTitle := pan.NormalizeReason(strings.TrimSpace(title))
 	for _, b := range beads {
-		if b.Status != types.StatusOpen {
+		if b.Status.IsTerminal() {
 			continue
 		}
 		isFiled := false
@@ -345,41 +654,81 @@ func (o *Overseer) filePanBead(projectPath, beadID, title, description string) e
 				break
 			}
 		}
-		if !isFiled {
+		// Code-change proposals filed WITHOUT the pan-filed label (promotion
+		// routing below) still count against the cap: they are Pan filings
+		// and the cap exists to bound Pan's filing pressure, not the label.
+		if !isFiled && !isCodeChangeProposal(b.Title, b.Description) {
 			continue
 		}
 		openFiled++
-		// Persistent dedupe: an open pan-filed bead with the same normalized
-		// title already tracks this finding — skip instead of filing a twin
-		// (session-level filedSigs dedupe is lost on daemon restart).
+		// Persistent dedupe: a non-terminal pan-filed bead with the same
+		// normalized title already tracks this finding — skip instead of filing
+		// a twin (session-level filedSigs dedupe is lost on daemon restart).
 		if pan.NormalizeReason(strings.TrimSpace(b.Title)) == normTitle {
+			o.panSigMu.Lock()
+			if o.recentPanSigs == nil {
+				o.recentPanSigs = make(map[string]time.Time)
+			}
+			o.recentPanSigs[sig] = time.Now()
+			o.panSigMu.Unlock()
 			return fmt.Errorf("file-bead %s: %w (%s)", beadID, pan.ErrFileBeadDuplicate, b.ID)
 		}
 	}
-	if openFiled >= pan.MaxOpenFiledBeadsPerProject {
-		return fmt.Errorf("file-bead %s: cap reached (%d open pan-filed beads in project)", beadID, openFiled)
+	if openFiled >= o.panFiledBeadsPerProject() {
+		capVal := o.panFiledBeadsPerProject()
+		o.panCapHits.Store(projectPath, true)
+		if o.eventSink != nil {
+			o.eventSink.EmitRepo(projectPath, Event{
+				Type:    "pan_filed_cap_hit",
+				Project: filepath.Base(projectPath),
+				Bead:    beadID,
+				Reason:  "pan_filed_cap_hit",
+				Fields:  map[string]any{"open": openFiled, "cap": capVal},
+			})
+		}
+		log.Printf("[PanRepair] file-bead %s: cap hit (%d open pan-filed beads, cap %d) in %s — filing suppressed", beadID, openFiled, capVal, projectPath)
+		return fmt.Errorf("file-bead %s: cap reached (%d open pan-filed beads in project, cap %d)", beadID, openFiled, capVal)
+	}
+	labels := []string{pan.FiledLabel}
+	// Promotion path, filing-time shape: a proposal whose text names a hydra
+	// code change is WORK, not human triage — file it as a normal task bead
+	// (no pan-filed label, so discovery and the spawn preflight admit it).
+	// The cap above still applies. Human-triage filings keep the label.
+	routed := "human-triage"
+	if isCodeChangeProposal(title, description) {
+		labels = nil
+		routed = "code-change"
 	}
 	req := types.CreateBeadRequest{
 		Title:       title,
 		Description: description,
 		Type:        "task",
 		Priority:    2,
-		Labels:      []string{pan.FiledLabel},
+		Labels:      labels,
 	}
 	newID, err := o.beadsClient.CreateBead(projectPath, req)
 	if err != nil {
 		return fmt.Errorf("file-bead %s: %w", beadID, err)
 	}
+	// Record the signature only on success (a filer error must leave the
+	// window open so the retry can file).
+	o.panSigMu.Lock()
+	if o.recentPanSigs == nil {
+		o.recentPanSigs = make(map[string]time.Time)
+	}
+	o.recentPanSigs[sig] = time.Now()
+	o.panSigMu.Unlock()
+	o.panCapHits.Delete(projectPath)
 	if o.eventSink != nil {
 		o.eventSink.EmitRepo(projectPath, Event{
-			Type:   "pan_bead_filed",
+			Type:    "pan_bead_filed",
 			Project: filepath.Base(projectPath),
-			Bead:   string(newID),
-			Reason: "pan_filed",
-			Fields: map[string]any{"source": beadID},
+			Bead:    string(newID),
+			Reason:  "pan_filed",
+			Fields:  map[string]any{"source": beadID, "routed": routed},
 		})
 	}
-	log.Printf("[PanRepair] file-bead %s: filed %s in %s", beadID, newID, projectPath)
+	log.Printf("[PanRepair] file-bead %s: filed %s in %s (routed: %s)", beadID, newID, projectPath, routed)
 	return nil
 }
 

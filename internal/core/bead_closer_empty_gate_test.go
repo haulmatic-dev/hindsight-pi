@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -87,6 +88,52 @@ func TestVerifyBeforeClose_DocsOnlyAccepted(t *testing.T) {
 	writeVerdictLog(t, bead.ID.String(), `{"done":true,"summary":"ac met; work was docs-only"}`)
 	if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
 		t.Fatalf("docs-only accepted-empty close should pass, got: %v", err)
+	}
+}
+
+// TestEmitEmptyDiffCompleted pins the mechanical backstop: a done verdict
+// over an empty or target-missing diff emits empty_diff_completed before the
+// close is rejected; a non-done verdict, nil sink, or on-target diff emits
+// nothing.
+func TestEmitEmptyDiffCompleted(t *testing.T) {
+	repo, closer, bead := setupScopeGateTest(t, "block")
+	central := t.TempDir()
+	closer.SetEventSink(NewEventSink(central))
+
+	count := func() int {
+		t.Helper()
+		entries, _ := os.ReadDir(central)
+		n := 0
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".jsonl") {
+				n++
+			}
+		}
+		return n
+	}
+
+	// done verdict + empty diff -> event emitted
+	writeVerdictLog(t, bead.ID.String(), `{"done":true,"summary":"all ac met"}`)
+	before := count()
+	closer.emitEmptyDiffCompleted(bead, "test-project", repo, nil, []string{"x/a.go"})
+	if count() != before+1 {
+		t.Fatal("empty diff with done verdict must emit empty_diff_completed")
+	}
+
+	// non-done verdict -> no event
+	writeVerdictLog(t, bead.ID.String(), `{"done":false,"summary":"blocked"}`)
+	before = count()
+	closer.emitEmptyDiffCompleted(bead, "test-project", repo, nil, []string{"x/a.go"})
+	if count() != before {
+		t.Fatal("non-done verdict must not emit")
+	}
+
+	// done verdict, diff touches target -> no event
+	writeVerdictLog(t, bead.ID.String(), `{"done":true,"summary":"all ac met"}`)
+	before = count()
+	closer.emitEmptyDiffCompleted(bead, "test-project", repo, []string{"x/a.go"}, []string{"x/a.go"})
+	if count() != before {
+		t.Fatal("on-target diff must not emit")
 	}
 }
 

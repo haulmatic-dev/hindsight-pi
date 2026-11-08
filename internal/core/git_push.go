@@ -143,6 +143,29 @@ func PushBranchWithNonFFRecovery(repoPath, remote, branch string) (bool, string)
 	return PushBranch(repoPath, remote, branch)
 }
 
+// PushBranchWithTokenNonFFRecovery is PushBranchWithToken with one
+// non-fast-forward recovery attempt (fetch + merge + retry), mirroring
+// PushBranchWithNonFFRecovery but authenticating every push with the project
+// owner's token. Use this anywhere a publish push would otherwise fall back
+// to the ambient git credential helper (hydra-k3nb L1: the helper serves the
+// daemon owner's PAT, so product repos were pushed as the wrong user).
+func PushBranchWithTokenNonFFRecovery(repoPath, branch, token string) (bool, string) {
+	pushed, reason := PushBranchWithToken(repoPath, branch, token)
+	if pushed || !IsProtectedBranchRejection(reason) || !strings.Contains(strings.ToLower(reason), "non-fast-forward") {
+		return pushed, reason
+	}
+	if _, err := gitOut(repoPath, "fetch", "origin", branch); err != nil {
+		log.Printf("[Push] non-FF recovery fetch origin/%s failed (not blocking): %v", branch, err)
+		return pushed, reason
+	}
+	if _, err := gitOut(repoPath, "merge", "--no-edit", "FETCH_HEAD"); err != nil {
+		_, _ = gitOut(repoPath, "merge", "--abort")
+		log.Printf("[Push] non-FF recovery merge of origin/%s failed (not blocking): %v", branch, err)
+		return pushed, reason
+	}
+	return PushBranchWithToken(repoPath, branch, token)
+}
+
 // PushBranchWithToken pushes branch from repoPath to the repo's origin,
 // authenticating with the given personal access token (the project owner's).
 // It resolves origin, injects the token into a one-shot HTTPS URL (never

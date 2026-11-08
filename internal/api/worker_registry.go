@@ -54,11 +54,13 @@ func RegisterWorkerRegistryRoutes(v1 *gin.RouterGroup, getStore func() *registry
 			TokensCacheRead:     rep.TokensCacheRead,
 			TokensCacheCreation: rep.TokensCacheCreation,
 			TokensOutput:        rep.TokensOutput,
+			TurnsSoFar:          rep.TurnsSoFar,
 			ParkSince:           rep.ParkSince,
 			ParkWakeAt:          rep.ParkWakeAt,
 			ParkReason:          rep.ParkReason,
 			NudgeCount:          rep.NudgeCount,
 			WorktreeKey:         rep.WorktreeKey,
+			LastRpcActivity:     rep.LastRpcActivity,
 		}
 		// Upsert preserves the original StartedAt for known workers.
 		if prev, ok, err := store.GetWorker(rep.BeadID); err == nil && ok && !prev.StartedAt.IsZero() {

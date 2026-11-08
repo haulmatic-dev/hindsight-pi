@@ -46,6 +46,14 @@ func BuildCloseSatisfied(o *Overseer) func(beadID string) error {
 			return fmt.Errorf("close_satisfied %s: no gate runner attached (fail closed)", id)
 		}
 
+		// Escape-rate regression budget (NFR-001): a declared verification
+		// command that exits nonzero forbids the satisfied close, whatever
+		// else the description claims. Guard has its own fail-open semantics
+		// for missing runners/runner faults.
+		if err := o.beadCloser.verificationCommandGuard(bead, projectPath); err != nil {
+			return fmt.Errorf("close_satisfied %s: %w", id, err)
+		}
+
 		// Cheap deterministic guard: a ratchet/flip mention requires the durable
 		// artifact to be present before any command runs.
 		if hasRatchetMention(bead.Description) {

@@ -205,6 +205,15 @@ var repairWhitelist = map[string]bool{
 	"clear-hard-park":   true,
 	"clear-escalation":  true,
 	"retry-quarantine":  true,
+	// Process-hygiene kills (2026-10-20 incident): Charon records zero-token
+	// stalls and rogue bare-pi processes; Pan may dispatch the explicit-PID
+	// kill repair (NEVER by PGID — gates share the daemon process group).
+	"kill-stalled-worker": true,
+	"kill-rogue-pi":       true,
+
+	// recover-spawn-cohort is project-scoped but not LLM-invocable yet
+	// (deterministic PrunableWedgeSweep only) — kept out of repairWhitelist
+	// so judgment cannot fire it per-bead (fmsfe-npa 2026-10-02).
 }
 
 // pseudoBeadSuffix marks synthetic project-level candidates (e.g.
@@ -216,9 +225,11 @@ const pseudoBeadSuffix = "-push-pending"
 // bead for human triage instead of mutating fleet state directly.
 const ActFileBead = "file-bead"
 
-// MaxOpenFiledBeadsPerProject caps how many open Pan-filed beads may exist
-// per project at once (FR-022): a repeating observation cannot flood the
-// backlog.
+// MaxOpenFiledBeadsPerProject is the nil-safe fallback for the per-project
+// open pan-filed-bead cap (FR-022). The live cap comes from the config knob
+// shepherd.pan.max_filed_beads_per_project (default
+// DefaultPanFiledBeadsPerProject = 4); configs predating the knob keep this
+// fallback so a nil config never widens the cap silently.
 const MaxOpenFiledBeadsPerProject = 2
 
 // panFiledLabel marks beads filed by Pan via the file-bead actuator; the cap
@@ -230,6 +241,16 @@ const FiledLabel = "pan-filed"
 // exists (persistent cross-session dedupe). The caller must treat this as a
 // benign skip, not a filer failure.
 var ErrFileBeadDuplicate = errors.New("file-bead duplicate: open pan-filed bead with the same normalized title already exists")
+
+// ErrFileBeadPremiseStale signals that the filer re-verified the live state
+// backing the file-bead decision and found the premise no longer true: the
+// judgment source bead has resolved, a live worker reappeared, or the digest
+// the judgment was built on is too old to act on (2026-10-05: srv-jobfile-jm2
+// was filed claiming "no worktree, no worker" while the worktree existed and
+// the worker had been live minutes earlier — the digest snapshot was stale by
+// filing time). The caller must treat this as a benign skip, not a filer
+// failure: keep the signature, a fresh digest re-fires when the wedge returns.
+var ErrFileBeadPremiseStale = errors.New("file-bead premise stale: live state no longer matches the finding")
 
 // NormalizeReason is the exported form of normalizeReason for filers that
 // need to compare titles under the same volatile-stripping rules.
@@ -246,6 +267,7 @@ var reJudgeInterval = 15 * time.Minute
 // one stale webapp-xw3 registration wedged 13 beads).
 var projectScopedRepairs = map[string]bool{
 	"prune-worktree-registration": true,
+	"recover-spawn-cohort":        true,
 	"re-push-integration":         true,
 	"park-campaign":               true,
 	"log-improvement":             true,
@@ -261,6 +283,16 @@ func isAllowedAction(action string) bool {
 	if allowedActions[registry.CommandKind(action)] {
 		return true
 	}
+	name, ok := parseRepairName(action)
+	if !ok {
+		return false
+	}
+	return repairWhitelist[name]
+}
+
+// IsAllowedRepair reports whether "repair:<name>" is in the Pan repair
+// whitelist. Test seam for the repair vocabulary contract.
+func IsAllowedRepair(action string) bool {
 	name, ok := parseRepairName(action)
 	if !ok {
 		return false
@@ -313,6 +345,14 @@ var (
 	volatileDurationRe = regexp.MustCompile(`\d+(?:\.\d+)?(?:d|h|m|s)(?:\d+m?)?\b`)
 	volatileDateTimeRe = regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?`)
 	volatileUnitsRe    = regexp.MustCompile(`\d+\s+(?:seconds?|minutes?|hours?|days?|weeks?)\b`)
+	// Volatile identity noise that made wedge filings look distinct:
+	// filesystem paths (/home/x/projects/foo, worktrees) and bead-ID-like
+	// tokens (hydra-ee5r, fmsfe-090) embedded in blocked reasons.
+	volatilePathRe = regexp.MustCompile(`(?:/|~)[\w./~-]{2,}`)
+	volatileBeadRe = regexp.MustCompile(`(?i)\b[a-z][a-z0-9]{1,14}-[0-9a-z]{2,5}\b`)
+	// Cardinal-number variance ("2 orphaned" vs "3 in_progress", "17 beads")
+	// is likewise non-identity for signature purposes.
+	volatileNumberRe = regexp.MustCompile(`\d+`)
 )
 
 // normalizeReason strips volatile substrings — ages ("94h27m"), timestamps,
@@ -323,6 +363,9 @@ func normalizeReason(reason string) string {
 	r := volatileDateTimeRe.ReplaceAllString(reason, "#")
 	r = volatileDurationRe.ReplaceAllString(r, "#")
 	r = volatileUnitsRe.ReplaceAllString(r, "# units")
+	r = volatilePathRe.ReplaceAllString(r, "#path")
+	r = volatileBeadRe.ReplaceAllString(r, "#id")
+	r = volatileNumberRe.ReplaceAllString(r, "#N")
 	return r
 }
 
@@ -1126,6 +1169,15 @@ func (s *Shepherd) handleFileBead(beadID, payload string) {
 			log.Printf("[Pan] file-bead for %s skipped: %v", beadID, err)
 			return
 		}
+		if errors.Is(err, ErrFileBeadPremiseStale) {
+			// Filer re-verified live state before creating the bead and found
+			// the premise resolved (jm2 class). Benign skip: keep the signature
+			// so this session stops retrying; a fresh digest re-fires if the
+			// wedge returns.
+			s.emitRepairEvent(beadID, ActFileBead, "skipped", "premise stale")
+			log.Printf("[Pan] file-bead for %s skipped: %v", beadID, err)
+			return
+		}
 		// Filer failure (cap, store error) forgets the signature so a later
 		// attempt can retry once the cap frees up.
 		s.filedMu.Lock()
@@ -1451,7 +1503,7 @@ needs a judgment call. For EVERY worker decide exactly one action:
 - "abandon-with-summary": give up gracefully (payload: what was done and what remains)
 - "close_satisfied": the bead's acceptance criteria are already met on the working branch and the worker found nothing to do; close it without a worker. For FIX-AUDIT candidates this closes the redundant fix bead after the satisfied gate re-proves acceptance daemon-side.
 - "file-bead": file an improvement bead for a human to triage (payload: first line = the bead title, remaining lines = the problem description). Use for fleet-level or product-level findings no repair verb covers: shared wedges, push/branch-protection problems, campaign anomalies. Deduplicated per project by signature and capped at 2 open pan-filed beads per project; duplicates are silently skipped.
-- "repair:<name>": execute a whitelisted daemon-side repair (payload ignored). Only for BLOCKED beads with no live worker row. The only valid repair names — the hygiene set — are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park, clear-escalation, retry-quarantine. No other repair:<name> strings exist; if none fit, choose continue, abandon-with-summary, or file-bead.
+- "repair:<name>": execute a whitelisted daemon-side repair (payload ignored). Only for BLOCKED beads with no live worker row. The only valid repair names — the hygiene set — are: repair-worktree, reap-placeholder, reset-retries, repair-bead-store, clear-hard-park, clear-escalation, retry-quarantine, kill-stalled-worker, kill-rogue-pi. No other repair:<name> strings exist; if none fit, choose continue, abandon-with-summary, or file-bead.
 
 Rescue recipes (hard-won; prefer the repair matching the cause):
 - FIX-AUDIT candidates are OPEN auto-fix beads whose original bead closed as failed; each reason carries the close reason, any recorded verdict, and a re-verification status of the original evidence in the inherited worktree. Judge whether a worker still needs to redo the work:
@@ -1460,9 +1512,10 @@ Rescue recipes (hard-won; prefer the repair matching the cause):
   - Re-verification "unknown" → "continue" (keep the fix) unless the fix-bead description clearly shows acceptance already met.
   - Never abandon-with-summary or repair: a FIX-AUDIT candidate.
 - Hard-park labels (worktree-unavailable, integration-exhausted) are durable by design — the scheduler never retries them. Use repair:clear-hard-park when the named cause is plausibly fixed or transient (worktree directory exists, store parses clean, push path repaired). Do not clear a park whose cause is still present.
-- Stale human escalations (BLOCKED, reason mentions "escalated to a human", aging in days, no live worker, no token progress): after roughly two days with no human response the escalation is stale — prefer repair:clear-escalation, which drops the escalated/needs-human labels and re-queues the bead for one scheduler retry (the retry counter is reset, so the bead gets a fair pass; if the same failure recurs, the escalation re-fires and human triage is the next step). If the bead's work is clearly obsolete, abandon-with-summary instead. Escalations younger than ~2 days may still get a human: leave blocked.
-- Many BLOCKED beads with the same reason = a shared wedge. Repairs are per-bead hygiene only now: fix one bead, and file-bead a proposal describing the shared wedge so a human can address the cause.
+- Stale human escalations (BLOCKED, reason mentions "escalated to a human", aging in days, no live worker, no token progress): after roughly two days with no human response the escalation is stale — prefer repair:clear-escalation, which drops the escalated/needs-human labels and re-queues the bead for one scheduler retry (the retry counter is reset, so the bead gets a fair pass; if the same failure recurs, the escalation re-fires and human triage is the next step). If the bead's work is clearly obsolete, abandon-with-summary instead. Escalations younger than ~2 days may still get a human: leave blocked — UNLESS the reason reports the escalation is beyond the configured leaf grace (e.g. "beyond the 1h0m0s leaf grace"): the operator has deliberately shortened the human window for defect-class escalations, so prefer repair:clear-escalation with the same one-fair-retry contract (re-escalates on merit). EXCEPTION — wedged chain heads: when the reason reports WEDGING N dependent bead(s), the escalation is stalling a live dependency chain (the bead stays in_progress with no worker by construction, so orphan recovery cannot touch it and every dependent starves). Prefer repair:clear-escalation as soon as the wedge grace (~1h) has passed — a fresh retry either passes now that the original cause is gone, or re-escalates with fresh evidence; leaving it blocked guarantees the campaign stalls. Only leave a wedged escalation for the human when the failure was clearly substantive (code rejected on merit, not infra). Beads carrying a 'verification_substantive' event must NOT receive 'repair:clear-escalation' — leave for human.
+- Many BLOCKED beads with the same reason = a shared wedge. The deterministic PrunableWedgeSweep already runs ONE project-scoped batch repair (prune-worktree-registration for worktree cohorts, recover-spawn-cohort for spawn-failed cohorts) per sweep tick — do not attempt per-bead repairs for cohort members; fix one bead only if it diverges, and file-bead a proposal describing the shared wedge so a human can address the cause.
 - repair:reset-retries clears the retry counter after the underlying cause is fixed; useless while the cause persists.
+- Orphaned in_progress claims (the digest's orphanclaims counter / "P0 campaign anomaly: N in_progress bead(s) with no live registry worker") are the same P0 class as a fleet stall: the claims wedge the whole DAG ladder and progress is silent zero. The scheduler's orphan-claim reconciliation and Charon recovery are the mechanical fix; if the anomaly persists across judgments, file-bead it for human review naming the wedged bead IDs.
 - repair:repair-bead-store restores a corrupted issues.jsonl from the newest clean backup; pick it when the reason mentions conflict markers or parse errors.
 - Candidates ending in -campaign-anomaly are fleet-level findings from the health digest (their reason carries the anomaly and a compact fleet snapshot). Never abandon or close them — file-bead the finding for human review (payload = title line + proposal). When the right fix is a hydra code change, the proposal should say so. A publisher-wedge anomaly whose reason indicates branch protection, required approvals, or permissions (GH013 rule violations, approval-required, review-team gates) is a HUMAN problem: the proposal must name the human action (approve the PR / adjust the branch rule) and the rules URL when the reason carries one — do not propose automating it.
 - PUSH-PENDING candidates mean commits exist locally but not on origin. Pushing is a human/pipeline action now: if the cause is branch protection, required approvals, or permissions, say so in reasoning and file-bead the proposal naming the human action. Otherwise choose the best judgment you can; never abandon-with-summary or close_satisfied them.

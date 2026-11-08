@@ -67,6 +67,21 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 		}
 	}
 
+	// V8 heap cap for every node process in the worker tree (pi + jest)
+	// (hydra-3ocq). Inherits through pi's children; an operator-set
+	// NODE_OPTIONS always wins.
+	heapMB := b.config.Overseer.WorkerNodeHeapMB
+	hasNodeOpts := false
+	for _, e := range baseEnv {
+		if strings.HasPrefix(e, "NODE_OPTIONS=") {
+			hasNodeOpts = true
+			break
+		}
+	}
+	if heapMB > 0 && !hasNodeOpts {
+		baseEnv = append(baseEnv, fmt.Sprintf("NODE_OPTIONS=--max-old-space-size=%d", heapMB))
+	}
+
 	env := append(baseEnv,
 		"HYDRA_WORKER=true",
 		// Skip Pi's startup network operations (provider-list fetch). That
@@ -95,6 +110,10 @@ func (b *WorkerEnvBuilder) Build(bead types.Bead, projectPath string, agentType 
 		fmt.Sprintf("HYDRA_RETRY_COUNT=%d", retryCount),
 		fmt.Sprintf("HYDRA_BEAD_TITLE=%s", bead.Title),
 		fmt.Sprintf("HYDRA_BEAD_DESCRIPTION=%s", bead.Description),
+		// Worktree scratch dir (outside the worktree tree; pruned with the
+		// worktree) — tools like mongodb-memory-server (MONGOMS_TMPDIR-style)
+		// write scratch artifacts where teardown pruning can find them.
+		fmt.Sprintf("%s=%s", scratchEnvVar, worktreeScratchDirFor(projectPath, string(bead.ID))),
 	)
 
 	// Daemon registry API: workers self-report state and poll shepherd

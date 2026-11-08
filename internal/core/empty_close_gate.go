@@ -121,6 +121,30 @@ func acceptedEmptyReason(v *emptyGateVerdict, changed []string) string {
 	return ""
 }
 
+// emitEmptyDiffCompleted is the mechanical backstop (thok-class false
+// closure, 2026-10-01): fires when a bead whose worker claimed a done
+// verdict is about to be rejected because the branch diff is empty or
+// touches none of the declared target files. Fail-open: nil verdict or nil
+// event sink emits nothing. The close itself is still rejected by the
+// caller — this only makes the false closure observable in the event
+// stream.
+func (c *BeadCloser) emitEmptyDiffCompleted(bead *types.Bead, repoName, repoPath string, changed, targets []string) {
+	if c.events == nil {
+		return
+	}
+	v := extractEmptyGateVerdict(workersLogDir(), bead.ID.String())
+	if v == nil || !v.Done {
+		return
+	}
+	empty := len(changed) == 0 || (len(targets) > 0 && !hasTargetChanges(changed, targets))
+	if !empty {
+		return
+	}
+	c.events.EmitRepo(repoPath, Event{Type: "empty_diff_completed", Project: repoName,
+		Bead: string(bead.ID), Reason: "empty-diff-with-done-verdict",
+		Detail: "worker claimed done but the branch diff is empty or misses every declared target file — likely false closure"})
+}
+
 // tryAcceptEmptyClose consults the worker's HYDRA_VERDICT for an
 // accepted-empty reason when the diff gate would otherwise reject. Returns
 // true (and logs/annotates) when the close may proceed despite the empty

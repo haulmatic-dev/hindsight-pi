@@ -3,12 +3,49 @@ package core
 import (
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
+
+// gitTestProject returns a REAL committed git repo so the fail-closed
+// verified-close diff check can verify evidence (akn8 follow-up: legacy
+// fixtures used the fake /test/test-project path, now rejected).
+func initGitRepoAt(t *testing.T, parent, name string) string {
+	t.Helper()
+	repo := parent + "/" + name
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-b", "main")
+	git("config", "user.email", "test@example.com")
+	git("config", "user.name", "Test")
+	cmd := exec.Command("sh", "-c", "echo x > file.txt && git add file.txt && git commit -m init")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+	return repo
+}
+
+func gitTestProject(t *testing.T) string {
+	t.Helper()
+	repo := initGitRepo(t)
+	writeAndCommit(t, repo, "README.md", "# test project\n")
+	return repo
+}
 
 // mockCmd simulates an exec.Cmd for testing worker monitoring
 type mockCmd struct {
@@ -100,10 +137,45 @@ func (m *enhancedMockBeadsClient) CloseBead(projectPath, repoName string, beadID
 // setupWorkerCompletionTest creates an overseer configured for worker completion testing
 func setupWorkerCompletionTest(t *testing.T) (*Overseer, *enhancedMockBeadsClient, []types.Project) {
 	t.Helper()
+	// Named dirs: the mock beads client keys stores by filepath.Base(path),
+	// so repos MUST be named test-project / multi-project for ListBeads to
+	// find the beads (random TempDir names starve the DAG -> nil nodes).
+	repo := initGitRepoAt(t, t.TempDir(), "test-project")
+	multiRoot := filepath.Join(t.TempDir(), "multi-project")
+	if err := os.MkdirAll(multiRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, multiRoot, "backend")
+	initGitRepoAt(t, multiRoot, "frontend")
+
+	// Deterministic close evidence: verified-close requires at least one
+	// changed file in the evidence repo (status scan; the committed-evidence
+	// probe fails open — fixture repos have no origin upstream). Upstream
+	// this was satisfied only by the graphify indexer's async `graphify
+	// update` dropping untracked files into the repos mid-test (and after
+	// it — the TempDir RemoveAll race that disabling graphify fixes), so
+	// the evidence is now written explicitly, before any close.
+	writeCloseEvidence := func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "close-evidence.txt"), []byte("close evidence\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCloseEvidence(repo)
+	writeCloseEvidence(filepath.Join(multiRoot, "backend"))
+	writeCloseEvidence(filepath.Join(multiRoot, "frontend"))
 
 	config := DefaultConfig()
 	config.Overseer.MaxWorkers = 4
 	config.Overseer.DefaultRetries = 3
+	// These tests assert worker-completion behavior, not the intelligence
+	// layer. DefaultConfig enables graphify, and closeBead fires
+	// QueueRepoIndexing -> Refresh, whose goroutine writes graphify-out/ into
+	// the test's TempDir AFTER the test body returns and races TempDir's
+	// RemoveAll cleanup ("unlinkat ...: directory not empty" flake in
+	// TestWorkerCompletion_ConcurrentCompletions). The indexer is only
+	// constructed when Graphify.Enabled, so disable it here; the hub itself
+	// stays non-nil and every consumer nil-checks GraphifyIndexer().
+	config.Intelligence.Graphify.Enabled = false
 
 	overseer := NewOverseer(config)
 
@@ -113,12 +185,12 @@ func setupWorkerCompletionTest(t *testing.T) (*Overseer, *enhancedMockBeadsClien
 	testProjects := []types.Project{
 		{
 			Name: "test-project",
-			Path: "/test/test-project",
+			Path: repo,
 			Type: types.RepoTypeSingle,
 		},
 		{
 			Name: "multi-project",
-			Path: "/test/multi-project",
+			Path: multiRoot,
 			Type: types.RepoTypeMulti,
 			Repos: []types.Repo{
 				{Name: "backend", Path: "backend"},
@@ -140,6 +212,7 @@ func setupWorkerCompletionTest(t *testing.T) (*Overseer, *enhancedMockBeadsClien
 // TestWorkerCompletion_SuccessfulCompletion tests that a successful worker completion
 // properly closes the bead with "completed" status
 func TestWorkerCompletion_SuccessfulCompletion(t *testing.T) {
+	repo := gitTestProject(t)
 	overseer, mockBeads, _ := setupWorkerCompletionTest(t)
 
 	// Create a test bead
@@ -160,7 +233,7 @@ func TestWorkerCompletion_SuccessfulCompletion(t *testing.T) {
 		AgentType:   types.AgentOrchestrator,
 		StartTime:   time.Now().Add(-30 * time.Second),
 		Status:      "running",
-		ProjectPath: "/test/test-project",
+		ProjectPath: repo,
 	}
 
 	// Register worker as active
@@ -188,12 +261,12 @@ func TestWorkerCompletion_SuccessfulCompletion(t *testing.T) {
 	if attempt.reason != "completed" {
 		t.Errorf("Expected reason 'completed', got '%s'", attempt.reason)
 	}
-	if attempt.projectPath != "/test/test-project" {
+	if attempt.projectPath != repo {
 		t.Errorf("Expected projectPath '/test/test-project', got '%s'", attempt.projectPath)
 	}
 
 	// Verify the bead status was updated in the mock
-	updatedBead, _ := mockBeads.GetBead("/test/test-project", "", "test-project-123")
+	updatedBead, _ := mockBeads.GetBead(repo, "", "test-project-123")
 	if updatedBead == nil {
 		t.Fatal("Updated bead not found")
 	}
@@ -205,6 +278,7 @@ func TestWorkerCompletion_SuccessfulCompletion(t *testing.T) {
 // TestWorkerCompletion_FailedCompletion tests that a failed worker completion
 // properly closes the bead with "failed" status
 func TestWorkerCompletion_FailedCompletion(t *testing.T) {
+	repo := gitTestProject(t)
 	overseer, mockBeads, _ := setupWorkerCompletionTest(t)
 
 	// Create a test bead
@@ -225,7 +299,7 @@ func TestWorkerCompletion_FailedCompletion(t *testing.T) {
 		AgentType:   types.AgentOrchestrator,
 		StartTime:   time.Now().Add(-30 * time.Second),
 		Status:      "running",
-		ProjectPath: "/test/test-project",
+		ProjectPath: repo,
 	}
 
 	// Register worker as active
@@ -251,7 +325,7 @@ func TestWorkerCompletion_FailedCompletion(t *testing.T) {
 	}
 
 	// Verify the bead status was updated
-	updatedBead, _ := mockBeads.GetBead("/test/test-project", "", "test-project-456")
+	updatedBead, _ := mockBeads.GetBead(repo, "", "test-project-456")
 	if updatedBead == nil {
 		t.Fatal("Updated bead not found")
 	}
@@ -263,6 +337,8 @@ func TestWorkerCompletion_FailedCompletion(t *testing.T) {
 // TestWorkerCompletion_ProjectPathResolution tests that closeBead correctly
 // resolves the project path from various sources
 func TestWorkerCompletion_ProjectPathResolution(t *testing.T) {
+	_, _, projSetup := setupWorkerCompletionTest(t)
+	repo, multiRoot := projSetup[0].Path, projSetup[1].Path
 	tests := []struct {
 		name         string
 		worker       *types.Worker
@@ -275,9 +351,9 @@ func TestWorkerCompletion_ProjectPathResolution(t *testing.T) {
 			worker: &types.Worker{
 				ID:          "test-project-001",
 				BeadID:      "test-project-001",
-				ProjectPath: "/test/test-project",
+				ProjectPath: repo,
 			},
-			expectedPath: "/test/test-project",
+			expectedPath: repo,
 			expectedRepo: "",
 			description:  "Should use project path from worker record",
 		},
@@ -286,9 +362,9 @@ func TestWorkerCompletion_ProjectPathResolution(t *testing.T) {
 			worker: &types.Worker{
 				ID:          "multi-project/backend-002",
 				BeadID:      "multi-project/backend-002",
-				ProjectPath: "/test/multi-project",
+				ProjectPath: multiRoot,
 			},
-			expectedPath: "/test/multi-project",
+			expectedPath: multiRoot,
 			expectedRepo: "backend",
 			description:  "Should extract repo from BeadID for multi-repo projects",
 		},
@@ -299,7 +375,7 @@ func TestWorkerCompletion_ProjectPathResolution(t *testing.T) {
 				BeadID:      "test-project-003",
 				ProjectPath: "", // Empty, should trigger fallback
 			},
-			expectedPath: "/test/test-project",
+			expectedPath: "",
 			expectedRepo: "",
 			description:  "Should fall back to searching projects when worker has no path",
 		},
@@ -307,7 +383,10 @@ func TestWorkerCompletion_ProjectPathResolution(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			overseer, mockBeads, _ := setupWorkerCompletionTest(t)
+			overseer, mockBeads, proj := setupWorkerCompletionTest(t)
+			if tt.expectedPath == "" {
+				tt.expectedPath = proj[0].Path
+			}
 
 			// Create bead for the worker
 			bead := types.Bead{
@@ -344,6 +423,7 @@ func TestWorkerCompletion_ProjectPathResolution(t *testing.T) {
 
 // TestWorkerCompletion_CloseErrorHandling tests handling of close errors
 func TestWorkerCompletion_CloseErrorHandling(t *testing.T) {
+	repo := gitTestProject(t)
 	overseer, mockBeads, _ := setupWorkerCompletionTest(t)
 
 	// Create a test bead
@@ -366,7 +446,7 @@ func TestWorkerCompletion_CloseErrorHandling(t *testing.T) {
 		AgentType:   types.AgentOrchestrator,
 		StartTime:   time.Now(),
 		Status:      "running",
-		ProjectPath: "/test/test-project",
+		ProjectPath: repo,
 	}
 
 	// Attempt to close - should return error
@@ -383,6 +463,7 @@ func TestWorkerCompletion_CloseErrorHandling(t *testing.T) {
 
 // TestWorkerCompletion_DependencyErrorDetection tests detection of dependency-related close failures
 func TestWorkerCompletion_DependencyErrorDetection(t *testing.T) {
+	repo := gitTestProject(t)
 	overseer, mockBeads, _ := setupWorkerCompletionTest(t)
 
 	// Create test beads with dependencies
@@ -414,7 +495,7 @@ func TestWorkerCompletion_DependencyErrorDetection(t *testing.T) {
 		AgentType:   types.AgentOrchestrator,
 		StartTime:   time.Now(),
 		Status:      "running",
-		ProjectPath: "/test/test-project",
+		ProjectPath: repo,
 	}
 
 	// Attempt to close B - should detect dependency error
@@ -432,6 +513,7 @@ func TestWorkerCompletion_DependencyErrorDetection(t *testing.T) {
 
 // TestWorkerCompletion_RetryTrackingOnFailure tests that failed workers are tracked for retry
 func TestWorkerCompletion_RetryTrackingOnFailure(t *testing.T) {
+	repo := gitTestProject(t)
 	overseer, mockBeads, _ := setupWorkerCompletionTest(t)
 
 	// Create a test bead
@@ -451,7 +533,7 @@ func TestWorkerCompletion_RetryTrackingOnFailure(t *testing.T) {
 		AgentType:   types.AgentOrchestrator,
 		StartTime:   time.Now(),
 		Status:      "running",
-		ProjectPath: "/test/test-project",
+		ProjectPath: repo,
 	}
 
 	// Record initial retry count
@@ -489,6 +571,7 @@ func TestWorkerCompletion_RetryTrackingOnFailure(t *testing.T) {
 
 // TestWorkerCompletion_ClearRetryOnSuccess tests that retry state is cleared on successful completion
 func TestWorkerCompletion_ClearRetryOnSuccess(t *testing.T) {
+	repo := gitTestProject(t)
 	overseer, mockBeads, _ := setupWorkerCompletionTest(t)
 
 	// Create a test bead
@@ -508,7 +591,7 @@ func TestWorkerCompletion_ClearRetryOnSuccess(t *testing.T) {
 		AgentType:   types.AgentOrchestrator,
 		StartTime:   time.Now(),
 		Status:      "running",
-		ProjectPath: "/test/test-project",
+		ProjectPath: repo,
 	}
 
 	// Record some retries first
@@ -530,6 +613,7 @@ func TestWorkerCompletion_ClearRetryOnSuccess(t *testing.T) {
 
 // TestWorkerCompletion_ActiveWorkerRemoval tests that workers are removed from active map on completion
 func TestWorkerCompletion_ActiveWorkerRemoval(t *testing.T) {
+	repo := gitTestProject(t)
 	overseer, mockBeads, _ := setupWorkerCompletionTest(t)
 
 	// Create a test bead
@@ -549,7 +633,7 @@ func TestWorkerCompletion_ActiveWorkerRemoval(t *testing.T) {
 		AgentType:   types.AgentOrchestrator,
 		StartTime:   time.Now(),
 		Status:      "running",
-		ProjectPath: "/test/test-project",
+		ProjectPath: repo,
 	}
 
 	// Add worker to active workers
@@ -654,6 +738,7 @@ func TestWorkerCompletion_ImmediateScheduleTrigger(t *testing.T) {
 
 // TestWorkerCompletion_StatusTransitions tests the status transitions during worker lifecycle
 func TestWorkerCompletion_StatusTransitions(t *testing.T) {
+	repo := gitTestProject(t)
 	overseer, mockBeads, _ := setupWorkerCompletionTest(t)
 
 	bead := types.Bead{
@@ -673,7 +758,7 @@ func TestWorkerCompletion_StatusTransitions(t *testing.T) {
 		AgentType:   types.AgentOrchestrator,
 		StartTime:   time.Now(),
 		Status:      "running",
-		ProjectPath: "/test/test-project",
+		ProjectPath: repo,
 	}
 
 	// Initial status: running
@@ -705,6 +790,7 @@ func TestWorkerCompletion_StatusTransitions(t *testing.T) {
 
 // TestWorkerCompletion_ConcurrentCompletions tests handling of concurrent worker completions
 func TestWorkerCompletion_ConcurrentCompletions(t *testing.T) {
+	repo := gitTestProject(t)
 	overseer, mockBeads, _ := setupWorkerCompletionTest(t)
 
 	// Create multiple independent beads
@@ -737,7 +823,7 @@ func TestWorkerCompletion_ConcurrentCompletions(t *testing.T) {
 				AgentType:   types.AgentOrchestrator,
 				StartTime:   time.Now(),
 				Status:      "running",
-				ProjectPath: "/test/test-project",
+				ProjectPath: repo,
 			}
 
 			// Add small delay to increase chance of concurrency issues
@@ -798,6 +884,7 @@ func TestWorkerCompletion_UnknownProject(t *testing.T) {
 
 // TestWorkerCompletion_MultipleCloseAttempts tests that multiple close attempts are tracked
 func TestWorkerCompletion_MultipleCloseAttempts(t *testing.T) {
+	repo := gitTestProject(t)
 	overseer, mockBeads, _ := setupWorkerCompletionTest(t)
 
 	bead := types.Bead{
@@ -816,7 +903,7 @@ func TestWorkerCompletion_MultipleCloseAttempts(t *testing.T) {
 		AgentType:   types.AgentOrchestrator,
 		StartTime:   time.Now(),
 		Status:      "running",
-		ProjectPath: "/test/test-project",
+		ProjectPath: repo,
 	}
 
 	// First attempt - inject temporary error

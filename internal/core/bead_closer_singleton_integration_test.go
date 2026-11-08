@@ -217,8 +217,11 @@ func TestBeadCloser_IntegrateErrorFailsClose(t *testing.T) {
 	if fresh.Status.IsTerminal() {
 		t.Fatalf("bead %s closed despite integrate failure (status %s)", beadID, fresh.Status)
 	}
-	if fresh.Status != types.StatusOpen {
-		t.Fatalf("bead %s status = %s, want %s (reopened)", beadID, fresh.Status, types.StatusOpen)
+	if fresh.Status != types.StatusInProgress {
+		t.Fatalf("bead %s status = %s, want %s (parked integration-pending, NOT reopened)", beadID, fresh.Status, types.StatusInProgress)
+	}
+	if !hasBeadLabel(fresh.Labels, integrationPendingLabel) {
+		t.Fatalf("bead %s missing %q label after integrate failure (labels=%v)", beadID, integrationPendingLabel, fresh.Labels)
 	}
 
 	// Worktree preserved for inspection.

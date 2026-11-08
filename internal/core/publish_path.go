@@ -32,6 +32,22 @@ const (
 	// ClassTransient means network/auth flake (DNS, timeout, refused,
 	// auth failure). Recoverable by backoff; publish locally + retry queue.
 	ClassTransient PublishPathClass = "TRANSIENT"
+	// ClassNotFound means the remote URL no longer resolves to an
+	// accessible repository (renamed/moved/deleted, or the push credential
+	// lacks visibility). Not transient — retrying against the same URL
+	// can never succeed; publishing stays parked local + loud until a
+	// human repairs the remote or the credential. Observed fleet-wide
+	// 2026-10-01: 2,371 "Repository not found" failures over 8h while a
+	// repo transfer flapped between orgs (hydra-4yuw).
+	ClassNotFound PublishPathClass = "NOT_FOUND"
+	// ClassCredential means the push credential itself is invalid or
+	// expired ("Invalid username or token", "Password authentication is
+	// not supported"). Not transient — retrying with the same token
+	// can never succeed; a human must rotate the PAT. Observed 903
+	// consecutive attempts in 12h on srv-telematics (2026-10-02) because
+	// a stale token was classified TRANSIENT and retried every publish
+	// tick with no backoff.
+	ClassCredential PublishPathClass = "CREDENTIAL"
 	// ClassUnknown means unrecognized failure text. Fail closed: treat
 	// like transient (park local + loud) until a human classifies it.
 	ClassUnknown PublishPathClass = "UNKNOWN"
@@ -59,10 +75,20 @@ func ClassifyPushFailure(stderr string) PublishPathClass {
 		"remote rejected"):
 		return ClassProtected
 	case hasAnySubstr(lower,
+		"repository not found", "fatal: repository",
+		"does not appear to be a git repository",
+		"not a git repository"):
+		return ClassNotFound
+	case hasAnySubstr(lower,
+		"invalid username or token",
+		"password authentication is not supported",
+		"authentication failed",
+		"permission denied (publickey)"):
+		return ClassCredential
+	case hasAnySubstr(lower,
 		"could not resolve host", "connection refused",
 		"connection reset", "timed out", "timeout",
 		"temporary failure", "network is unreachable",
-		"authentication failed", "permission denied (publickey)",
 		"ssh: connect", "tls", "early eof", "rpc failed",
 		"terminal prompts disabled"):
 		return ClassTransient
@@ -134,7 +160,10 @@ func ResolvePublishPath(class PublishPathClass, owned, tier1 bool) PublishAction
 		return ActCreatePR
 	case ClassStale:
 		return ActRebaseRetry
-	case ClassTransient, ClassUnknown:
+	case ClassTransient, ClassUnknown, ClassNotFound, ClassCredential:
+		// NOT_FOUND parks like TRANSIENT (local commit + loud event) but
+		// carries its own class so the fleet can tell "credential/repo
+		// access problem, human must fix" apart from "retry after backoff".
 		return ActParkLocalLoud
 	default:
 		return ActParkLocalLoud

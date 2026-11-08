@@ -76,6 +76,12 @@ func (s *EventSink) Emit(ev Event) Event {
 	if s == nil {
 		return ev
 	}
+	if s.now == nil {
+		// Zero-value sink (e.g. constructed in tests as &EventSink{}): neutral
+		// stub — nothing is persisted anywhere.
+		s.now = func() time.Time { return time.Time{} }
+		s.centralDir = ""
+	}
 	if ev.Time == "" {
 		ev.Time = s.now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
 	}
@@ -132,6 +138,15 @@ func (s *EventSink) appendLocked(path string, line []byte) {
 	}
 	defer f.Close()
 	_, _ = fmt.Fprintf(f, "%s\n", line)
+}
+
+// SensorCorrelation derives the deterministic correlation ID shared by a
+// sensor's fire and resolve events. The ID is scoped per sensor and per
+// object (usually a bead ID), so the daily rollup can pair fires with
+// resolutions and compute per-sensor fire/resolve rates without a
+// long-lived in-memory registry surviving restarts.
+func SensorCorrelation(sensor, object string) string {
+	return sensor + ":" + object
 }
 
 // ReadEvents parses a JSONL event file, skipping blank and undecodable lines —

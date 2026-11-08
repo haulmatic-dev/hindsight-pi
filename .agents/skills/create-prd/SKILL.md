@@ -24,9 +24,19 @@ Design for compiler certainty.
 
 ## Execution Rules
 
+- Follow `doctrine.md` (same directory) at every phase — it distills the
+  anti-drift and grounding rules this skill enforces.
+
 - Execute all phases sequentially without asking for confirmation
 - Ask clarifying questions only if ambiguity blocks deterministic generation (max 3)
 - Never overwrite an existing PRD — increment version suffix instead
+- **Amendments edit normative text in place.** When updating a PRD, change the
+  section that is wrong and add a dated inline note (`_Amended YYYY-MM-DD:_`).
+  Never leave the superseded instruction standing with a contradicting footnote
+  below it — the task-breakdown analyzer and most human readers consume the
+  normative text first, and a stale instruction followed by "actually, no"
+  produces beads for the wrong thing (observed 2026-10-13: §6 pre-push hook
+  instruction superseded only by footnote).
 - All requirement IDs must be stable and deterministic
 
 ---
@@ -73,6 +83,31 @@ subagent:
 
 Aggregate results into `researchContext` before Phase 3.
 
+### Repo-State Verification (mandatory, before drafting)
+
+Research agents report what the code does; this step verifies what the repo
+**is** — every factual claim the PRD will rely on. A PRD decays like a cache:
+the repo moves after anyone touches it, and a claim that was true at authoring
+is a landmine at breakdown time (observed 2026-10-13: PRD cited a jest.config.ts
+that never existed, a 52-spec baseline that was actually 73, and a missing
+node_modules that would have failed every worker instantly).
+
+Verify, with commands, before writing:
+
+1. **Cited paths exist** — every file/dir the PRD names (`ls`/`test -e`).
+2. **Cited tools work** — every command in acceptance criteria runs
+   (`node_modules/.bin/jest` present? `npm run test:cov` defined?).
+3. **Counts re-measured, never copied** — file counts, spec counts, coverage
+   baselines: run the measurement, date it (`_measured YYYY-MM-DD_`).
+4. **Referenced work actually landed** — "X was done by PR1 of plan Y" requires
+   the artifact to exist on the target branch, not just the PR to be merged.
+5. **Nothing already in flight** — `git branch -a` for branches matching the
+   planned work; existing partial work changes scope.
+
+Record results in a `## Verified Facts` section near the top of the PRD:
+each entry is a claim + the command that proves it + the date. Anything that
+cannot be verified is written as an explicit **Assumption**, never as fact.
+
 ### Failure Policy
 
 - **Partial failure:** Continue with available context. Mark gaps explicitly in
@@ -105,6 +140,85 @@ generation.
 > compiler supports stub generation from `Exports`. If it does not, omit these
 > two fields and use `Reads From` alone. `Reads From` is always required when
 > a runtime dependency exists.
+
+> Parser notes (task-breakdown/analyzer.mjs, verified by test-shape-classification.mjs):
+> - `**Depends On:**` accepts BOTH list form (`- FR-001` lines below the marker)
+>   and inline form (`**Depends On:** FR-001, FR-002` on the same line).
+> - `**Reads From:**` entries are read-only dependencies — they are NOT write
+>   targets and never trigger the file-overlap rule.
+> - Never write placeholder glyphs (`—`, `none`) into `**Target Files:**` —
+>   they parse as filenames. Omit the field entirely when a requirement has no
+>   file targets (verification gates, aggregation stories).
+
+#### 3.1a Task-Pattern Classification (producer contract)
+
+The task-breakdown analyzer assigns every requirement an execution pattern
+(`taskPattern`) before scheduling. Classification is deterministic and uses
+four signals in strict precedence — strongest signal wins, weaker signals apply
+only when no stronger one is present:
+
+1. **Explicit Type prefix** — a requirement whose `**Type:**` field names a
+   pattern directly (any of the five System Type enum values, see level 3) is
+   honored verbatim.
+2. **target-file shape** — the file extensions/paths in `**Target Files:**`
+   infer the pattern (e.g. `.tsx` → web component work, `_test.go` → RED test
+   pattern).
+3. **System Type enum** — the PRD-level `**System Type:** backend-api | web-app
+   | cli-tool | library | full-stack` supplies the default pattern for the
+   whole document (backend vs. frontend surface rules).
+4. tdd_chain — when no stronger signal applies, the requirement falls back
+   to the standard TDD chain (RED → GREEN → REFACTOR → SYNTAX).
+
+> Keep the four levels in this exact order: the analyzer mirrors it, and the
+> pinned contract tests in `internal/prdcontract` fail on documentation drift.
+> Level 1 always exists so an author can override any inference explicitly.
+### 3.1a Execution-Type Producer Contract
+
+The task compiler (task-breakdown) must classify every requirement into an
+execution type. The producer (create-prd) declares enough signal for that
+classification to be deterministic. This section IS the contract; a consumer
+must not guess.
+
+**System Type enum — exactly five values.** A requirement may declare its
+system placement with a `**System Type:** value` line:
+
+| Value | Meaning |
+|-------|---------|
+| `library` | Internal code consumed in-process (Go package, JS module) |
+| `cli` | Command-line tool or binary the user invokes directly |
+| `api` | Service surface exposed over a protocol (REST, gRPC, GraphQL) |
+| `application` | End-user app or system composed of the above |
+| `ops` | Deployment, cron, infra, or operational unit (systemd unit, CI job, config) |
+
+No other values are valid. When the field is absent the consumer falls through
+the precedence order below — omission is legal, but an *invalid* value is a
+lint error (see `tools/prd-lint`).
+
+**Chain prefixes — exactly five.** The TDD chain phases carried on
+requirement/bead titles:
+
+| Prefix | Phase | Meaning |
+|--------|-------|---------|
+| `RED:` | 1 | Tests only — proves the gap, fails green |
+| `GREEN:` | 2 | Minimal implementation to pass the RED tests |
+| `REFACTOR:` | 3 | Cleanup without behavior change |
+| `SYNTAX:` | 4 | Build/lint/syntax verification closure |
+| `FIX:` | repair | Retry of a failed chain phase |
+
+**Classification precedence (strict order):**
+
+1. **Prefix** — an explicit title prefix (`RED:`/`GREEN:`/`REFACTOR:`/`SYNTAX:`/`FIX:`)
+   wins outright.
+2. **Target-file shape** — no prefix, but every target file is a test file
+   (`*_test.go`, `*.test.ts`, `test_*`) → test-only execution.
+3. **System Type** — a valid enum value maps to its execution pattern
+   (`library`/`api` → implementation chain; `ops` → configuration task; etc.).
+4. **tdd_chain** — nothing else applies → full RED→GREEN→REFACTOR→SYNTAX chain.
+
+A consumer MUST evaluate the layers in this order and stop at the first hit.
+`**Type:**` values (`fr`, `us-light`, `us-heavy`, `us-integration`,
+`nfr-verification`, `nfr-config`) are structural, not execution types — they
+feed layer 3 alongside System Type, never override it.
 
 ---
 
@@ -174,6 +288,14 @@ and modifying each file (test-writing, refactors, migrations). Estimate
 2. **Flip FR** — one terminal FR, `Depends On` all slices, tiny scope: flip
    the ratchet/config entry and run the module-wide gate ONCE. Module-wide
    numbers move only here.
+
+**Density-weighted slicing** (ordering rule, learned 2026-10 from
+srv-data-harbour: file-class slices left `services/` at 43% while `dto/` sat
+at 95%): order and size slices by risk density — complexity × churn × branch
+load — not by file class. Services, workflows, algorithms and high-branch
+files come FIRST and get their own slices; dto/type/constant boilerplate comes
+last, is batched, or is excluded via the config's ignore list. A module may
+never satisfy its threshold by averaging dense files against boilerplate.
 
 **Exotic-environment separation:** work requiring test infrastructure the repo
 has not used before (e.g. Temporal `TestWorkflowEnvironment`, a DB harness)
@@ -329,7 +451,44 @@ on a correct implementation and (b) fail on a plausible incorrect implementation
 If a buggy version of the code could satisfy all ACs, the ACs are underspecified.
 Coverage percentage is a proxy metric — fault detection is the real criterion.
 
+**Testing doctrine** (mandatory for FRs that add or modify logic):
+
+1. **Per-FR scoped coverage, enforced at GREEN — never end-loaded.** Every
+   logic-bearing FR carries an AC asserting coverage on **its own Target
+   Files**, executed by the chain's own verification command (e.g. `jest
+   --coverage --collectCoverageFrom=<targets>` thresholds on the touched
+   files; `go test -coverprofile` with per-package function coverage). A
+   campaign-final verification gate may RE-assert but never be the first
+   place coverage is measured. Enforcement lag is how srv-data-harbour ended
+   with 584 per-file breaches discovered only at the terminal FR
+   (2026-10-22).
+2. **No aggregate or averaged thresholds.** An AC may not say "overall / All
+   files / average ≥ X%" or let one module's surplus cover another's deficit.
+   Every threshold names its exact scope (file, directory, or path key) and
+   its semantics marker: `**per-file: true**` (a glob key — jest applies it
+   per matching FILE) or `**aggregate: true**` (a directory/global key).
+   Globs without markers fail PRD lint (`R10-coverage-semantics`).
+3. **Depth scales with density.** Hotspots (high branch/complexity/churn)
+   carry higher, branch-focused bars (e.g. ≥85 with branches ≥ the statements
+   bar); trivial code may sit under a lower bar or the exclusion list. State
+   the tier per Target File group when the campaign's bar varies.
+
 ---
+
+### 3.5b Machine-Checkable State Claims
+
+When a PRD must state something about the repo (a file exists, a tool is
+installed, a baseline number), write the claim WITH the command that verifies
+it, so breakdown-time tooling can re-assert it:
+
+✅ `node_modules/.bin/jest` exists (verify: `test -x node_modules/.bin/jest`)
+✅ Baseline spec count: 73 (verify: `find src -name '*.spec.ts' | wc -l`,
+   measured 2026-10-13 — re-measure at breakdown, do not trust this number)
+❌ "The integration plan already moved the jest config" (unverifiable claim
+   about another effort's output)
+
+Numbers the repo can re-measure must be re-measured at execution time; the
+PRD value is a dated snapshot, not ground truth.
 
 ### 3.6 Requirement Types
 
@@ -757,6 +916,24 @@ Increment suffix if exists: `-v2`, `-v3`. Never overwrite.
 
 Create `docs/PRDs/` if it does not exist.
 
+**Compilation pre-check (mandatory, added 2026-10-18):** before reporting
+success, run the task-breakdown analyzer against the saved PRD and fix until
+it passes — a PRD that cannot compile has failed its purpose, whatever its
+prose quality:
+
+```bash
+node <task-breakdown-skill-dir>/cli.mjs <prd-path> --validate
+```
+
+- exit 0 required. Both failure modes seen in the wild (2026-10-18,
+  srv-data-harbour): `0 requirements` (PRD written in prose style with no
+  `### FR-*`/`### NFR-*` headers — task-breakdown reported `success: true`
+  with an empty skeleton chain) and `target file overlap` (one file claimed
+  by two FRs — forbidden by the DRYAD single-owner rule).
+- If a shared config file (`package.json` jest block, etc.) must change at
+  different lifecycle points, consolidate those changes into ONE terminal FR
+  (single owner) that runs after its inputs — never list the file in two FRs.
+
 **Report:**
 
 ```
@@ -772,6 +949,7 @@ Requirements:
 Same-file chains:    {n chains} — {list files involved}
 Parallel groups:     {n groups}
 File conflicts:      0
+Compilation pre-check (task-breakdown --validate): PASS
 
 Compiler stub support: YES | NO
   YES → Exports/Consumes active, parallel RED chains enabled

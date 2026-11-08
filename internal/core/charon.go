@@ -5,7 +5,6 @@ import (
 	"log"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -53,6 +52,14 @@ type Charon struct {
 	maxWorkers              int                      // pool size ceiling for phantom-slot deadlock detection
 	events                  *EventSink               // structured event stream; nil-safe
 	deadlockScans           int                      // consecutive scans seeing active>=max and zero live PIDs
+	escalatedWedgeMu        sync.Mutex               // guards escalatedWedgeLast
+	escalatedWedgeLast      map[string]time.Time     // bead → last orphan_escalated_wedged event (cooldown; the skip path logs every sweep otherwise — 378 lines for 2 beads in one morning, 2026-10-05)
+	gateRoot                string                   // gate artifact root ($HYDRA_HOME) for the close-in-progress probe; empty = probe disabled
+	orphanWatchMu           sync.Mutex
+	orphanWatch             map[string]orphanWatchEntry // reopened beads awaiting a resolve event (sensor symmetry)
+	psRunner                func() ([]byte, error)      // process-table source for the reparented-worktree sweep; nil = ps(1)
+	killFn                  func(pid int) error         // injectable process kill for tests; nil = killProcess
+	hygiene                 *processHygiene             // process-hygiene sensors (zero-token stalls, rogue pi); nil = legacy behavior
 }
 
 // JanitorStats tracks cleanup statistics
@@ -96,6 +103,35 @@ func (j *Charon) SetMaxWorkers(n int) { j.maxWorkers = n }
 
 // SetEventSink attaches the structured event stream. Nil stays a no-op.
 func (j *Charon) SetEventSink(s *EventSink) { j.events = s }
+
+func (j *Charon) SetGateRoot(root string) { j.gateRoot = root }
+
+// beadCloseInProgress reports whether the bead's close is currently running
+// daemon gates — including queued behind the per-project gate lock, since the
+// artifact is written BEFORE the lock wait (gate_runner.go: artifact-first).
+// Without this probe, a long sibling gate (go test ./... on a shared repo)
+// holds the close past the orphan grace and Charon respawns a duplicate
+// worker mid-close (hydra-kf2t 2026-09-27, hydra-mo66 2026-10-06).
+// Conservative: artifact status=running + live writer PID + started within
+// 45m. Anything stale/dead falls through to normal recovery.
+func (j *Charon) beadCloseInProgress(beadID string) bool {
+	if j.gateRoot == "" {
+		return false
+	}
+	// Gate artifacts are keyed by project name; Charon scans across all
+	// projects for the bead, so try the shared probe per artifact project dir.
+	matches, err := filepath.Glob(filepath.Join(j.gateRoot, "gates", "*", beadID))
+	if err != nil {
+		return false
+	}
+	for _, dir := range matches {
+		project := filepath.Base(filepath.Dir(dir))
+		if GateCloseInProgress(j.gateRoot, project, beadID) {
+			return true
+		}
+	}
+	return false
+}
 
 // recordKillRetry counts a Charon kill against the bead's retry budget so
 // the spawn gate (RetryExhaustedError) stops the kill/respawn cycle.
@@ -163,6 +199,8 @@ func NewCharon(beadsClient *beads.Client, workerTracker *WorkerTracker, workerTi
 		heartbeatHungAfter: 5 * time.Minute,  // Stale registry heartbeat → hung worker
 		stopChan:           make(chan struct{}),
 		stats:              JanitorStats{},
+		orphanWatch:        make(map[string]orphanWatchEntry),
+		hygiene:            &processHygiene{rogueEmitted: map[int]bool{}},
 	}
 }
 
@@ -325,7 +363,7 @@ func (j *Charon) performCleanup() {
 			if j.getProjects != nil {
 				for _, project := range j.getProjects() {
 					for _, target := range repoScanTargets(project) {
-						ReconcileOrphanedWorktrees(NewWorktreeManager(), target, active, j.terminalBeadChecker(target))
+						ReconcileOrphanedWorktrees(NewWorktreeManager(), target, active, j.terminalBeadChecker(target), j.events)
 					}
 				}
 			}
@@ -400,6 +438,28 @@ func (j *Charon) performCleanup() {
 	// PIDs for two consecutive scans, reap stale phantom slots.
 	if reaped := j.checkAndReapPoolDeadlock(); reaped > 0 {
 		log.Printf("[Charon] 🧹 Pool deadlock reaper removed %d phantom slots", reaped)
+	}
+
+	// Reparented-worktree sweep: worker death (SIGKILL, OOM, crash) leaves
+	// its Pi/node/jest children reparented to PID 1 (observed live: 20+ node
+	// processes, ~9G RSS, all with .hydra-worktrees in their cmdline and PPID
+	// 1). A reparented process is a leak by construction — no live parent can
+	// own it — so kill its whole process group. Runs BEFORE the
+	// no-tracked-workers early return: an idle daemon is exactly when this
+	// residue accumulates.
+	if killed := j.sweepReparentedWorktreeProcesses(); killed > 0 {
+		log.Printf("[Charon] 🧹 Killed %d process group(s) reparented to PID 1 from dead worktree processes", killed)
+	}
+
+	// Process-hygiene sensors (2026-10-20 incident): both must run BEFORE the
+	// no-tracked-workers early return — an idle fleet is exactly when a
+	// zero-token stall (fresh heartbeats, zero ever-tokens) and a rogue bare-pi
+	// process survive unnoticed.
+	if stalls := j.detectZeroTokenStalls(); len(stalls) > 0 {
+		log.Printf("[Charon] 🧯 %d worker(s) in zero-token stall (working, tokens_so_far=0, age>15m) — surfaced to Pan (repair:kill-stalled-worker)", len(stalls))
+	}
+	if rogues := j.scanRoguePis(); len(rogues) > 0 {
+		log.Printf("[Charon] 🚨 %d rogue pi process(es) outside hydra.service (age>2h) — surfaced to Pan (repair:kill-rogue-pi)", len(rogues))
 	}
 
 	if len(liveWorkers) == 0 {
@@ -808,6 +868,17 @@ func (j *Charon) collectProjects() []types.Project {
 //
 // Without this recovery, a single stuck in_progress bead blocks all downstream beads
 // whose DAG depends on it, indefinitely stalling the swarm.
+// orphanWatchEntry records one sensor fire awaiting its resolve: a reopened
+// orphan bead whose terminal fate is not yet observable. The resolve
+// (orphan_recovered) is emitted with the same correlation ID when the bead
+// next reaches a terminal status, completing the fire/resolve pair for the
+// daily rollup.
+type orphanWatchEntry struct {
+	projectPath string
+	repo        string
+	correlation string
+}
+
 func (j *Charon) recoverOrphanInProgressBeads() int {
 	if j.orphanBeadGrace <= 0 {
 		return 0
@@ -818,6 +889,35 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 	// without a .beads/ folder would silently skip all projects.
 	projects := j.collectProjects()
 	grace := j.orphanBeadGrace
+
+	// Sensor symmetry (resolve): check previously reopened beads for a
+	// terminal outcome and emit orphan_recovered with the fire's correlation
+	// ID. GetBead-based so closed beads (excluded from ListBeads) resolve too.
+	j.orphanWatchMu.Lock()
+	watched := make(map[string]orphanWatchEntry, len(j.orphanWatch))
+	for id, e := range j.orphanWatch {
+		watched[id] = e
+	}
+	j.orphanWatchMu.Unlock()
+	for beadIDStr, e := range watched {
+		if j.beadsClient == nil {
+			break
+		}
+		fresh, err := j.beadsClient.GetBead(e.projectPath, e.repo, types.BeadID(beadIDStr))
+		if err != nil || fresh == nil {
+			continue // fail-open: keep watching, no event noise
+		}
+		if fresh.Status.IsTerminal() {
+			if j.events != nil {
+				j.events.Emit(Event{Type: "orphan_recovered", Reason: string(fresh.Status),
+					Detail: fmt.Sprintf("reopened orphan bead %s reached terminal status %s", beadIDStr, fresh.Status),
+					Fields: map[string]any{"bead": beadIDStr, "project": e.projectPath, "correlation_id": e.correlation}})
+			}
+			j.orphanWatchMu.Lock()
+			delete(j.orphanWatch, beadIDStr)
+			j.orphanWatchMu.Unlock()
+		}
+	}
 
 	liveWorkers := j.workerTracker.GetRunningWorkers()
 	recovered := 0
@@ -856,6 +956,14 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 					continue
 				}
 
+				// A close running daemon gates is not an orphan: the worker is
+				// done but the bead stays in_progress for the whole gate run +
+				// any wait behind the per-project gate lock.
+				if j.beadCloseInProgress(beadIDStr) {
+					log.Printf("[Charon] bead %s close in progress (gate artifact running); leaving in_progress", beadIDStr)
+					continue
+				}
+
 				j.stats.OrphanInProgressBeads++
 
 				// Fail-closed on the destructive decision: without a usable timestamp we
@@ -888,12 +996,23 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 					}
 					continue
 				}
+				// A pan-filed bead is a campaign/triage filing, not a pipeline bead:
+				// it legitimately sits in_progress while awaiting spawn or close
+				// gates, and reopening it just respawns the same triage task in a
+				// loop (hydra 2026-10-06: charon_orphan_reopened hydra-2a3f, a
+				// pan-filed pseudo-anomaly filing, minutes after its worker had
+				// completed normally). Excluded — the file-bead cap owns retries.
+				if hasBeadLabel(fresh.Labels, panFiledLabel) {
+					log.Printf("[OrphanRetry] bead %s carries the %q label (pan-filed triage bead); skipping reopen", beadIDStr, panFiledLabel)
+					continue
+				}
 				// An escalated bead is parked for a human by design (verified-close
 				// rejected it at max attempts). It is in_progress with no worker by
 				// definition — reopening it would respawn the exact death the
 				// escalation stopped (2026-09-06 empty-diff churn loop).
 				if hasBeadLabel(fresh.Labels, escalatedLabel) {
 					log.Printf("[OrphanRetry] bead %s carries the %q label (escalated to human); skipping reopen", beadIDStr, escalatedLabel)
+					j.emitEscalatedWedgeEvent(target, beadIDStr, fresh)
 					continue
 				}
 				// A worktree-unavailable bead was hard-parked by a fail-closed spawn:
@@ -904,9 +1023,21 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 					log.Printf("[OrphanRetry] bead %s carries the %q label (integration failures capped); skipping reopen", beadIDStr, integrationExhaustedLabel)
 					continue
 				}
+				if hasBeadLabel(fresh.Labels, integrationPendingLabel) {
+					// Work complete, integrate failed; the retest stage owns the
+					// retry — orphan reopen would respawn a full worker redo.
+					log.Printf("[OrphanRetry] bead %s carries the %q label (integration pending; retest stage owns retry); skipping reopen", beadIDStr, integrationPendingLabel)
+					continue
+				}
 				// resurrected the shared-checkout corruption path, 2026-09-11/12).
 				if hasBeadLabel(fresh.Labels, worktreeUnavailableLabel) {
 					log.Printf("[OrphanRetry] bead %s carries the %q label (worktree hard-parked); skipping reopen", beadIDStr, worktreeUnavailableLabel)
+					continue
+				}
+				// A git-ownership bead was hard-parked by a fail-closed spawn: git
+				// refused the repo; reopening would respawn into the same refusal.
+				if hasBeadLabel(fresh.Labels, gitOwnershipLabel) {
+					log.Printf("[OrphanRetry] bead %s carries the %q label (git-ownership hard-parked); skipping reopen", beadIDStr, gitOwnershipLabel)
 					continue
 				}
 
@@ -930,12 +1061,22 @@ func (j *Charon) recoverOrphanInProgressBeads() int {
 					}
 				}
 				if j.events != nil {
+					// Sensor symmetry (fire): corr pairs this fire with the
+					// orphan_recovered resolve once the bead reaches a terminal
+					// status (tracked in j.orphanWatch).
+					corr := SensorCorrelation("orphan-retry", beadIDStr)
 					j.events.Emit(Event{
 						Type:   "charon_orphan_reopened",
 						Reason: "dead_worker",
 						Detail: fmt.Sprintf("reopened orphan in_progress bead %s (no live worker)", beadIDStr),
-						Fields: map[string]any{"bead": beadIDStr, "project": project.Path},
+						Fields: map[string]any{"bead": beadIDStr, "project": project.Path, "correlation_id": corr},
 					})
+					// Sensor symmetry (fire): corr pairs this fire with the
+					// orphan_recovered resolve once the bead reaches a terminal
+					// status (tracked in j.orphanWatch).
+					j.orphanWatchMu.Lock()
+					j.orphanWatch[beadIDStr] = orphanWatchEntry{projectPath: target, correlation: corr}
+					j.orphanWatchMu.Unlock()
 				}
 			}
 		}
@@ -964,9 +1105,14 @@ func (j *Charon) beadHasLiveWorker(beadID string, liveWorkers map[int]string) bo
 	}
 	if j.registryStore != nil {
 		if row, ok, err := j.registryStore.GetWorker(beadID); err == nil && ok &&
-			time.Since(row.LastHeartbeat) < j.heartbeatHungAfter {
+			row.State == registry.StateWorking &&
+			time.Since(row.LastHeartbeat) < j.heartbeatHungAfter &&
+			row.PID > 0 && j.isProcessRunning(row.PID) {
 			return true
 		}
+		// A non-working or dead-PID row is residue, not a live worker —
+		// without this check a stale row suppressed orphan recovery for
+		// minutes (srv-jobfile-dh0, 2026-10-06).
 	}
 	return false
 }
@@ -1088,17 +1234,21 @@ func (j *Charon) isProcessRunning(pid int) bool {
 	return err == nil
 }
 
-// killProcess kills a process by PID
-func (j *Charon) killProcess(pid int) error {
-	// Try graceful termination first (SIGTERM)
-	var cmd *exec.Cmd
-	if runtime.GOOS == "darwin" {
-		cmd = exec.Command("kill", "-15", strconv.Itoa(pid))
-	} else {
-		cmd = exec.Command("kill", "-15", strconv.Itoa(pid))
+// killPID is the kill seam: injectable in tests, real killProcess otherwise.
+func (j *Charon) killPID(pid int) error {
+	if j.killFn != nil {
+		return j.killFn(pid)
 	}
+	return j.killProcess(pid)
+}
 
-	if err := cmd.Run(); err != nil {
+// killProcess kills a process by PID: SIGTERM (graceful), 5s grace, then
+// SIGKILL. Direct syscalls, not kill(1): the syscall error is inspectable
+// (syscall.EPERM → the rogue-pi repair's root-owned escalation class); the
+// external kill(1) collapsed every failure to "exit status 1" and lost the
+// reason.
+func (j *Charon) killProcess(pid int) error {
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		log.Printf("[Charon] SIGTERM failed for PID %d: %v", pid, err)
 	}
 
@@ -1109,14 +1259,7 @@ func (j *Charon) killProcess(pid int) error {
 	if j.isProcessRunning(pid) {
 		log.Printf("[Charon] PID %d still running after SIGTERM, using SIGKILL", pid)
 
-		// Force kill (SIGKILL)
-		if runtime.GOOS == "darwin" {
-			cmd = exec.Command("kill", "-9", strconv.Itoa(pid))
-		} else {
-			cmd = exec.Command("kill", "-9", strconv.Itoa(pid))
-		}
-
-		if err := cmd.Run(); err != nil {
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 			return fmt.Errorf("SIGKILL failed: %w", err)
 		}
 	}
@@ -1226,4 +1369,120 @@ func (j *Charon) isSystemProcess(comm string) bool {
 	}
 
 	return systemProcesses[name]
+}
+
+// escalatedWedgeCooldown caps how often the orphan_escalated_wedged event
+// fires per bead: the escalated-skip path runs every sweep (~1min) for the
+// whole life of an escalation, which produced 378 identical log lines for 2
+// beads in one morning (srv-jobfile 8bj/djq, 2026-10-05).
+const escalatedWedgeCooldown = 15 * time.Minute
+
+// emitEscalatedWedgeEvent reports an escalated orphan in_progress bead that
+// Charon deliberately will not reopen. Escalation leaves the bead
+// in_progress with no worker by construction, so this skip is the bead's
+// steady state until a human (or Pan's clear-escalation) resolves it; the
+// shepherd event-stream contract requires that decision to be a typed event,
+// not only a log line. Cooldown-limited per bead; fail-open.
+func (j *Charon) emitEscalatedWedgeEvent(projectPath, beadID string, b *types.Bead) {
+	if j.events == nil {
+		return
+	}
+	j.escalatedWedgeMu.Lock()
+	if j.escalatedWedgeLast == nil {
+		j.escalatedWedgeLast = make(map[string]time.Time)
+	}
+	last, seen := j.escalatedWedgeLast[beadID]
+	if seen && time.Since(last) < escalatedWedgeCooldown {
+		j.escalatedWedgeMu.Unlock()
+		return
+	}
+	j.escalatedWedgeLast[beadID] = time.Now()
+	j.escalatedWedgeMu.Unlock()
+
+	age := time.Duration(0)
+	if !b.UpdatedAt.IsZero() {
+		age = time.Since(b.UpdatedAt).Round(time.Minute)
+	}
+	j.events.EmitRepo(projectPath, Event{
+		Type:   "orphan_escalated_wedged",
+		Reason: "escalated_orphan",
+		Detail: fmt.Sprintf("escalated bead %s orphaned in_progress for %v (no live worker); Charon will not reopen — resolution belongs to a human or Pan repair:clear-escalation", beadID, age),
+		Fields: map[string]any{"bead": beadID, "project": filepath.Base(projectPath), "age": age.String()},
+	})
+}
+
+// sweepReparentedWorktreeProcesses kills the process group of any process
+// whose command line references a hydra worktree (.hydra-worktrees/...) and
+// whose parent is PID 1 — i.e. it was reparented because its worker (or Pi)
+// died without cleanup. PDEATHSIG covers the direct child of the worker;
+// this sweep covers everything further down the tree (node, jest, pytest)
+// that reparents only after ITS parent dies. Fail-open: a ps failure skips
+// the sweep, and a candidate is never touched without a provable PGID.
+// kill may be nil in tests that only want the parse behavior.
+func (j *Charon) sweepReparentedWorktreeProcesses() int {
+	return j.sweepReparentedWorktreeProcs(j.listProcsTable(), nil)
+}
+
+func (j *Charon) listProcsTable() string {
+	if j.psRunner != nil {
+		out, err := j.psRunner()
+		if err != nil {
+			return "" // fail-open
+		}
+		return string(out)
+	}
+	out, err := exec.Command("ps", "-e", "-o", "pid,ppid,pgid,args").Output()
+	if err != nil {
+		return "" // fail-open
+	}
+	return string(out)
+}
+
+// parseReparentedWorktreeProcs extracts (pid, pgid) of worktree-referencing
+// processes reparented to PID 1. Requires the pgid column so the whole group
+// dies, not just the reparented PID.
+func parseReparentedWorktreeProcs(table string) []int {
+	var pgids []int
+	seen := map[int]bool{}
+	for _, line := range strings.Split(table, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(fields[0])
+		ppid, err2 := strconv.Atoi(fields[1])
+		pgid, err3 := strconv.Atoi(fields[2])
+		if err1 != nil || err2 != nil || err3 != nil {
+			continue
+		}
+		if ppid != 1 || pid <= 1 {
+			continue
+		}
+		if !strings.Contains(strings.Join(fields[3:], " "), ".hydra-worktrees/") {
+			continue
+		}
+		if pgid == syscall.Getpgrp() || seen[pgid] { // never touch the daemon's own group
+			continue
+		}
+		seen[pgid] = true
+		pgids = append(pgids, pgid)
+	}
+	return pgids
+}
+
+func (j *Charon) sweepReparentedWorktreeProcs(table string, kill func(pgid int)) int {
+	var n int
+	for _, pgid := range parseReparentedWorktreeProcs(table) {
+		n++
+		if kill != nil {
+			kill(pgid)
+			continue
+		}
+		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+			log.Printf("[Charon] reparented-worktree sweep: kill -%d failed (fail-open): %v", pgid, err)
+		} else {
+			log.Printf("[Charon] reparented-worktree sweep: SIGKILL process group %d", pgid)
+		}
+	}
+	return n
 }

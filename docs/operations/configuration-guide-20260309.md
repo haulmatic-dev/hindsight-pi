@@ -314,6 +314,41 @@ intelligence:
 
 **Purpose**: Cache LLM responses to reduce costs and improve speed.
 
+#### `skill_induction`
+
+**Type**: `object`  
+**Default**: disabled  
+**Description**: Mine successful worker execution transcripts
+(`$TMPDIR/hydra-executions/*.json`, written by `cmd/worker`) into candidate
+Pi skills via an OpenAI-compatible LLM call, deduped against the shared
+skill library (`{pi.config_dir}/skills`, read-only). Candidates land in a
+staging dir (`$HYDRA_HOME/skill-candidates`) — NEVER in the shared config;
+promotion is a human-reviewed PR. Enabled daemon runs a background loop on
+`interval`; `hydra induce-skills` runs one manual pass regardless of
+`enabled`.
+
+```yaml
+intelligence:
+  skill_induction:
+    enabled: true
+    interval: 6h
+    model: kimi-k2            # required when enabled
+    provider: kimi            # or openai + base_url for a router
+    api_key_env: KIMI_API_KEY
+    max_candidates_per_run: 3 # budget per pass
+    similarity_threshold: 0.6 # Jaccard dedup bar vs existing skills
+```
+
+**Knobs**: `executions_dir`, `candidates_dir`, `skills_dir` (default
+`{pi.config_dir}/skills`), `max_processed_per_run` (LLM-call cap, default
+10), `min_transcript_chars` (default 2000), `max_prompt_chars` (default
+40000), `max_attempts` (LLM retries per file, default 3).
+
+**Purpose**: Fleet learns from its own successful runs — the skills module
+of ScholarEvolve (arXiv:2609.40169): induction, curation, then free
+retrieval (Pi already loads skills by trigger description). Fail-open: a
+missing key or provider error logs and disables, never blocks the daemon.
+
 ### 5. MCP Configuration
 
 #### `enabled`

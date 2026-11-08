@@ -106,10 +106,10 @@ func TestDAGBuilderRecordsAbsoluteRepoPath(t *testing.T) {
 
 	beadID := types.BeadID("projects-hydra-repro/" + repoName + "-u1i")
 	bead := types.Bead{
-		ID:       beadID,
-		Project:  project.Name,
-		Repo:     repoName,
-		Status:   types.StatusOpen,
+		ID:      beadID,
+		Project: project.Name,
+		Repo:    repoName,
+		Status:  types.StatusOpen,
 	}
 
 	client := newMockBeadsClient()

@@ -59,6 +59,7 @@ type WorkerRecord struct {
 	ParkWakeAt          time.Time
 	ParkReason          string
 	NudgeCount          int
+	TurnsSoFar          int64
 	ExitCode            int
 	CompletedAt         time.Time
 	// WorktreeKey is the chain worktree key (hydra/wt-<key>) the worker was
@@ -67,6 +68,12 @@ type WorkerRecord struct {
 	// registration (2026-09-16: chain timeout unregistered the chain and the
 	// sweep deleted a live worker's worktree mid-run).
 	WorktreeKey string
+
+	// LastRpcActivity is the worker's most recent rpc-stream event (turn
+	// usage or extension notification). Charon's zero-token stall classifier
+	// requires no rpc activity in the last rpcActivityWindow before flagging,
+	// so an active-but-token-silent worker is never killed mid-turn.
+	LastRpcActivity time.Time
 }
 
 // Command is one queued instruction for a worker.
@@ -110,8 +117,10 @@ CREATE TABLE IF NOT EXISTS workers (
   park_wake_at   TEXT,
   park_reason    TEXT NOT NULL DEFAULT '',
   nudge_count    INTEGER NOT NULL DEFAULT 0,
+  turns_so_far   INTEGER NOT NULL DEFAULT 0,
   exit_code      INTEGER NOT NULL DEFAULT 0,
-  completed_at   TEXT
+  completed_at   TEXT,
+  last_rpc_activity TEXT
 );
 CREATE TABLE IF NOT EXISTS commands (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,12 +166,17 @@ func Open(path string) (*Store, error) {
 // idempotent and fail-open: missing columns are added; duplicate attempts are
 // ignored by SQLite.
 func migrateRegistry(db *sql.DB) error {
+	if err := ensureDailyUsageTable(db); err != nil {
+		return err
+	}
 	cols := []string{
 		"tokens_fresh INTEGER NOT NULL DEFAULT 0",
 		"tokens_cache_read INTEGER NOT NULL DEFAULT 0",
 		"tokens_cache_creation INTEGER NOT NULL DEFAULT 0",
 		"tokens_output INTEGER NOT NULL DEFAULT 0",
 		"worktree_key TEXT NOT NULL DEFAULT ''",
+		"turns_so_far INTEGER NOT NULL DEFAULT 0",
+		"last_rpc_activity TEXT",
 	}
 	for _, c := range cols {
 		if _, err := db.Exec("ALTER TABLE workers ADD COLUMN " + c); err != nil {
@@ -259,16 +273,17 @@ func (s *Store) UpsertWorker(rec WorkerRecord) error {
 	defer func() { _ = tx.Rollback() }()
 
 	var prevPID int
-	_ = tx.QueryRow(`SELECT pid FROM workers WHERE bead_id=?`, rec.BeadID).Scan(&prevPID)
+	var prevState string
+	_ = tx.QueryRow(`SELECT pid, state FROM workers WHERE bead_id=?`, rec.BeadID).Scan(&prevPID, &prevState)
+	wasCompleted := prevState == string(StateCompleted)
 
 	_, err = tx.Exec(`
 INSERT INTO workers (bead_id, pid, pgid, project, started_at, last_heartbeat,
   state, pi_session_id, err_status, err_type, err_message, tokens_so_far,
   tokens_fresh, tokens_cache_read, tokens_cache_creation, tokens_output,
   park_since, park_wake_at, park_reason, nudge_count, exit_code, completed_at,
-  worktree_key)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,
-  ?,?,?,?,?,?,?,?,?,?,?)
+  worktree_key, last_rpc_activity, turns_so_far)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(bead_id) DO UPDATE SET
   pid=excluded.pid, pgid=excluded.pgid, project=excluded.project,
   started_at=excluded.started_at, last_heartbeat=excluded.last_heartbeat,
@@ -283,16 +298,24 @@ ON CONFLICT(bead_id) DO UPDATE SET
   park_wake_at=excluded.park_wake_at, park_reason=excluded.park_reason,
   nudge_count=excluded.nudge_count, exit_code=excluded.exit_code,
   completed_at=excluded.completed_at,
-  worktree_key=CASE WHEN excluded.worktree_key != '' THEN excluded.worktree_key ELSE workers.worktree_key END`,
+  worktree_key=CASE WHEN excluded.worktree_key != '' THEN excluded.worktree_key ELSE workers.worktree_key END,
+  turns_so_far=excluded.turns_so_far,
+  last_rpc_activity=CASE WHEN excluded.last_rpc_activity != '' THEN excluded.last_rpc_activity ELSE workers.last_rpc_activity END`,
 		rec.BeadID, rec.PID, rec.PGID, rec.Project,
 		marshalTime(rec.StartedAt), marshalTime(rec.LastHeartbeat),
 		string(rec.State), rec.PiSessionID, rec.ErrStatus, rec.ErrType,
 		rec.ErrMessage, rec.TokensSoFar, rec.TokensFresh, rec.TokensCacheRead,
 		rec.TokensCacheCreation, rec.TokensOutput, marshalTime(rec.ParkSince),
 		marshalTime(rec.ParkWakeAt), rec.ParkReason, rec.NudgeCount,
-		rec.ExitCode, marshalTime(rec.CompletedAt), rec.WorktreeKey)
+		rec.ExitCode, marshalTime(rec.CompletedAt), rec.WorktreeKey,
+		marshalTime(rec.LastRpcActivity), rec.TurnsSoFar)
 	if err != nil {
 		return fmt.Errorf("upsert worker %s: %w", rec.BeadID, err)
+	}
+
+	if wasCompleted && rec.State != StateCompleted {
+		// Re-registration over a completed row is a rerun; record it durably.
+		_ = mergeWorkerUsage(tx, time.Now().UTC().Format("2006-01-02"), rec, 1)
 	}
 
 	if prevPID != 0 && prevPID != rec.PID {
@@ -328,6 +351,12 @@ func (s *Store) ReapGhosts(cutoff time.Time) (int, error) {
 		return 0, fmt.Errorf("reap ghosts begin: %w", err)
 	}
 	defer tx.Rollback()
+
+	// Persist each doomed row's token usage before deletion so spend trends
+	// survive the prune (daily rollup is additive, fail-open best effort).
+	for _, rec := range reapCandidates(tx, `SELECT `+workerCols+` FROM workers WHERE state != ? AND last_heartbeat < ?`, StateCompleted, cutoff.Format(timeFmt)) {
+		_ = mergeWorkerUsage(tx, usageDay(rec), rec, 0)
+	}
 
 	rows, err := tx.Query(
 		`SELECT bead_id FROM workers WHERE state != ? AND last_heartbeat < ?`,
@@ -466,6 +495,13 @@ func (s *Store) ReapStale(cutoff time.Time) (int, error) {
 	}
 	defer tx.Rollback()
 
+	// Persist doomed rows' token usage into the daily rollup before deleting
+	// them; otherwise completions older than the retention window vanish and
+	// spend trends become unmeasurable.
+	for _, rec := range reapCandidates(tx, `SELECT `+workerCols+` FROM workers WHERE state=? OR last_heartbeat < ?`, StateCompleted, cutoff.Format(timeFmt)) {
+		_ = mergeWorkerUsage(tx, usageDay(rec), rec, 0)
+	}
+
 	rows, err := tx.Query(
 		`SELECT bead_id FROM workers WHERE state=? OR last_heartbeat < ?`,
 		StateCompleted, cutoff.Format(timeFmt))
@@ -520,18 +556,18 @@ const workerCols = `bead_id, pid, pgid, project, started_at, last_heartbeat,
   state, pi_session_id, err_status, err_type, err_message, tokens_so_far,
   tokens_fresh, tokens_cache_read, tokens_cache_creation, tokens_output,
   park_since, park_wake_at, park_reason, nudge_count, exit_code, completed_at,
-  worktree_key`
+  worktree_key, last_rpc_activity, turns_so_far`
 
 func scanWorker(row *sql.Rows) (WorkerRecord, error) {
 	var rec WorkerRecord
-	var started, heartbeat, parkSince, parkWake, completed interface{}
+	var started, heartbeat, parkSince, parkWake, completed, rpcActivity interface{}
 	var state string
 	err := row.Scan(&rec.BeadID, &rec.PID, &rec.PGID, &rec.Project,
 		&started, &heartbeat, &state, &rec.PiSessionID, &rec.ErrStatus,
 		&rec.ErrType, &rec.ErrMessage, &rec.TokensSoFar, &rec.TokensFresh,
 		&rec.TokensCacheRead, &rec.TokensCacheCreation, &rec.TokensOutput,
 		&parkSince, &parkWake, &rec.ParkReason, &rec.NudgeCount,
-		&rec.ExitCode, &completed, &rec.WorktreeKey)
+		&rec.ExitCode, &completed, &rec.WorktreeKey, &rpcActivity, &rec.TurnsSoFar)
 	if err != nil {
 		return rec, err
 	}
@@ -541,6 +577,7 @@ func scanWorker(row *sql.Rows) (WorkerRecord, error) {
 	rec.ParkSince = scanTime(parkSince)
 	rec.ParkWakeAt = scanTime(parkWake)
 	rec.CompletedAt = scanTime(completed)
+	rec.LastRpcActivity = scanTime(rpcActivity)
 	return rec, nil
 }
 
@@ -654,6 +691,19 @@ func (s *Store) ConsumeCommand(id int64) error {
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("consume command %d: already consumed or missing", id)
+	}
+	return nil
+}
+
+// MarkCompletedWithReason moves a worker to the terminal state with an
+// explicit err_message provenance (e.g. "orphan-reaped" for rows reconciled
+// by the spawn-path duplicate check).
+func (s *Store) MarkCompletedWithReason(beadID string, exitCode int, reason string) error {
+	_, err := s.db.Exec(
+		`UPDATE workers SET state='completed', exit_code=?, completed_at=?, err_message=? WHERE bead_id=?`,
+		exitCode, time.Now().UTC().Format(timeFmt), reason, beadID)
+	if err != nil {
+		return fmt.Errorf("mark completed %s: %w", beadID, err)
 	}
 	return nil
 }

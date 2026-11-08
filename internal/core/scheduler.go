@@ -144,6 +144,20 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 		readyMap[string(bead.ID)] = bead
 	}
 
+	// Human gates and container beads must never reach the spawn loop.
+	// Discovery sources can return them even when the DAG filter does not,
+	// and the retry loop below can resurrect them from the DAG, so strip
+	// them up front.
+	filteredReady := readyBeads[:0]
+	for _, bead := range readyBeads {
+		if isNonExecutableBeadType(bead.Type) {
+			delete(readyMap, string(bead.ID))
+			continue
+		}
+		filteredReady = append(filteredReady, bead)
+	}
+	readyBeads = filteredReady
+
 	// Retry state now survives a spawn, so a bead being worked on right now is
 	// still in the snapshot. Queueing it would race a second worker against the
 	// live one for the same bead — the spawner would refuse it, and that refusal
@@ -165,6 +179,19 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 			continue
 		}
 
+		// Human gates and container beads are never worker-executed. Drop any
+		// retry residue for them so they do not leak through to the spawn loop
+		// and burn worker turns (approval-gate parking beads were spawned from
+		// the retry queue and "completed" by workers, releasing whole
+		// campaigns — webapp-c36, 2026-09-16).
+		if bead, exists := readyMap[beadID]; exists && isNonExecutableBeadType(bead.Type) {
+			o.retryManager.ClearRetry(beadID)
+			delete(readyMap, beadID)
+			readyBeads = removeBeadByID(readyBeads, beadID)
+			log.Printf("[Retry] Dropped retry state for human/container bead %s (already in ready set)", beadID)
+			continue
+		}
+
 		if !o.retryManager.ShouldRetry(beadID, maxRetries) {
 			// The bead has exhausted its retry budget (or is in cooldown).
 			// If the DAG also thinks it is ready, stop the scheduler from
@@ -181,6 +208,19 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 					delete(readyMap, beadID)
 					readyBeads = removeBeadByID(readyBeads, beadID)
 				}
+				continue
+			}
+			// Orphaned-claim reconciliation: a bead whose worker claimed it
+			// (in_progress) and then exhausted retries (or died) without ever
+			// closing is invisible to the DAG scheduler (not ready) AND blocks
+			// all dependents (not closed) — the fms campaign wedged 6 repair
+			// beads this way for 1h+ (2026-10-01). When the retry budget is
+			// exhausted, the bead is not actively worked, has no live registry
+			// worker, and carries no hard-park label, the claim is stale:
+			// reset it to open and clear the retry entry so the scheduler gets
+			// one fair retry instead of a permanent DAG wedge.
+			if count, _, _, _ := o.retryManager.RetryInfo(beadID); count >= maxRetries {
+				s.reconcileOrphanClaim(beadID, count)
 			}
 			continue
 		}
@@ -192,6 +232,11 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 		count, _, _, _ := o.retryManager.RetryInfo(beadID)
 
 		if bead, err := s.getBeadFromDAG(beadID); err == nil {
+			if isNonExecutableBeadType(bead.Type) {
+				o.retryManager.ClearRetry(beadID)
+				log.Printf("[Retry] Dropped retry state for human/container bead %s", beadID)
+				continue
+			}
 			if hasBeadLabel(bead.Labels, escalatedLabel) {
 				// The bead was escalated to a human after max close rejections.
 				// Retry entries from earlier worker failures must not resurrect
@@ -199,12 +244,13 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 				log.Printf("[Retry] Bead %s carries the %q label (escalated to human); skipping retry queue", beadID, escalatedLabel)
 				continue
 			}
-			if hasBeadLabel(bead.Labels, worktreeUnavailableLabel) {
+			if hasBeadLabel(bead.Labels, worktreeUnavailableLabel) || hasBeadLabel(bead.Labels, gitOwnershipLabel) {
 				// Hard-parked: the chain worktree could not be created and the
-				// spawn failed closed. Retrying would hit the same failure and,
-				// worse, past behavior silently ran the worker in the shared main
-				// checkout (2026-09-11/12 corruption incidents). Wait for a human.
-				log.Printf("[Retry] Bead %s carries the %q label (worktree hard-parked); skipping retry queue", beadID, worktreeUnavailableLabel)
+				// spawn failed closed (or git refused the repo on ownership
+				// grounds). Retrying would hit the same failure and, worse, past
+				// behavior silently ran the worker in the shared main checkout
+				// (2026-09-11/12 corruption incidents). Wait for a human.
+				log.Printf("[Retry] Bead %s carries a hard-park label (worktree/git-ownership); skipping retry queue", beadID)
 				continue
 			}
 			if hasBeadLabel(bead.Labels, integrationExhaustedLabel) {
@@ -214,6 +260,13 @@ func (s *Scheduler) getRetryEligibleBeads(readyBeads []types.Bead) []types.Bead 
 				// same failing integrate ~95x (ag6i, 2026-09-27). Pan repair or a
 				// human clears the label.
 				log.Printf("[Retry] Bead %s carries the %q label (integration hard-parked); skipping retry queue", beadID, integrationExhaustedLabel)
+				continue
+			}
+			if hasBeadLabel(bead.Labels, integrationPendingLabel) {
+				// Work complete, integrate/push failed; the mechanical retest
+				// stage owns the retry. Respawning a full worker here re-does
+				// finished LLM work (srv-jobfile 403 loop, 2026-10-02).
+				log.Printf("[Retry] Bead %s carries the %q label (integration pending; retest stage owns retry); skipping retry queue", beadID, integrationPendingLabel)
 				continue
 			}
 			readyBeads = append(readyBeads, bead)
@@ -272,6 +325,74 @@ func (s *Scheduler) emitRetryExhausted(bead types.Bead, attempts int) {
 	}
 }
 
+// reconcileOrphanClaim resets an orphaned in_progress claim on a retry-exhausted
+// bead: the worker that claimed it gave up (or died) without ever closing, so
+// the bead is invisible to the scheduler (not ready) AND blocks all dependents
+// (not closed). Requires: retry budget exhausted, no in-memory active worker,
+// no live registry worker, and no hard-park label. The bead is reset to open
+// and its retry entry cleared (one fair retry), and a typed `orphan_claim_reset`
+// event is emitted. All failures fail open (log + leave the bead as-is).
+func (s *Scheduler) reconcileOrphanClaim(beadID string, attempts int) {
+	o := s.overseer
+	if o.workerSpawner.HasLiveRegistryWorker(beadID) {
+		return
+	}
+	bead, err := s.getBeadFromDAG(beadID)
+	if err != nil {
+		return // not in DAG (terminal or removed) — nothing to reconcile
+	}
+	if bead.Status != types.StatusInProgress {
+		return
+	}
+	for _, label := range []string{escalatedLabel, worktreeUnavailableLabel, integrationExhaustedLabel, integrationPendingLabel, gitOwnershipLabel} {
+		if hasBeadLabel(bead.Labels, label) {
+			return // hard-parked by design; Pan repair or a human clears it
+		}
+	}
+	projectPath := ""
+	if o.beadAnalyzer != nil {
+		projectPath = o.beadAnalyzer.FindProjectPath(&bead)
+	}
+	if projectPath == "" {
+		log.Printf("[OrphanClaim] no project path for %s; cannot reconcile", beadID)
+		return
+	}
+	if err := o.beadsClient.UpdateBeadStatus(projectPath, bead.ID, types.StatusOpen); err != nil {
+		log.Printf("[OrphanClaim] failed to reset orphaned in_progress bead %s to open: %v", beadID, err)
+		return
+	}
+	o.retryManager.ClearRetry(beadID)
+	log.Printf("[OrphanClaim] reset orphaned in_progress bead %s to open after %d exhausted attempts (no live worker)", beadID, attempts)
+	s.emitOrphanClaimReset(bead, attempts, projectPath)
+}
+
+// emitOrphanClaimReset writes a single structured event when an orphaned
+// in_progress claim is reset to open. Emitted once per bead per exhaustion.
+func (s *Scheduler) emitOrphanClaimReset(bead types.Bead, attempts int, projectPath string) {
+	beadID := string(bead.ID)
+	o := s.overseer
+	lastWorker := "unknown"
+	if o.workerSpawner != nil {
+		if w, ok := o.workerSpawner.LastWorkerForBead(beadID); ok && w != "" {
+			lastWorker = w
+		}
+	}
+	ev := Event{
+		Type:    "orphan_claim_reset",
+		Reason:  "orphan_claim_reset",
+		Project: string(bead.Project),
+		Bead:    beadID,
+		Detail: fmt.Sprintf("Bead %s sat in_progress with no live worker after %d exhausted attempts; reset to open for a fair retry (last worker: %s)",
+			beadID, attempts, lastWorker),
+		Fields: map[string]any{"bead": beadID, "last_worker": lastWorker, "attempts": attempts},
+	}
+	if o.beadCloser != nil && o.beadCloser.events != nil {
+		o.beadCloser.events.EmitRepo(projectPath, ev)
+	} else {
+		log.Printf("[OrphanClaim] %s", ev.Detail)
+	}
+}
+
 // removeBeadByID returns a copy of beads with the given bead ID removed.
 func removeBeadByID(beads []types.Bead, beadID string) []types.Bead {
 	filtered := make([]types.Bead, 0, len(beads))
@@ -314,6 +435,12 @@ func (s *Scheduler) Tick() error {
 	// outage cannot be undone by outcome volume alone, because the cut is what
 	// suppresses outcome volume — so the clock has to drive it.
 	o.concurrencyGovernor.MaybeRecover()
+
+	// Memory throttle feedback: memory.high reclaims without killing, so no OOM
+	// event ever reaches the outcome window (2026-10-15 incident). Probe the
+	// daemon cgroup's PSI/memory.high regime each tick and scale down when the
+	// workers are being throttled. Fail-open: unreadable cgroup = no signal.
+	o.concurrencyGovernor.MaybeScaleDownForMemoryPressure()
 
 	// Get active worker count
 	o.workerMutex.RLock()
@@ -480,6 +607,9 @@ func (s *Scheduler) Tick() error {
 		// in the registry (2026-09-21).
 		if o.campaignParked(bead) {
 			log.Printf("⏸️  Skipping retry of bead %s: campaign parked (Pan)", bead.ID)
+			// Make the park durable at the bead level: attach the PARK-GATE
+			// label to every non-terminal member (hydra-gcip).
+			o.campaignParkSweepBead(&bead)
 			continue
 		}
 
@@ -525,6 +655,7 @@ func (s *Scheduler) Tick() error {
 		// campaigns (webapp-c36, 2026-09-16).
 		lt := strings.ToLower(strings.TrimSpace(bead.Type))
 		if lt == "approval-gate" || lt == "approval" || lt == "epic" || isHoldBead(bead) {
+			logContainerTypeSkip(bead)
 			continue
 		}
 
@@ -738,6 +869,7 @@ func (s *Scheduler) SpawnWorkersForNodes(nodes []*Node, maxSlots int) int {
 		// Campaign park: Pan may have frozen the whole project campaign.
 		if o.campaignParked(node.Bead) {
 			log.Printf("⏸️  Skipping bead %s: campaign parked (Pan)", node.Bead.ID)
+			o.campaignParkSweepBead(&node.Bead)
 			continue
 		}
 		if !s.ShouldSpawnWorker(node) {
@@ -767,16 +899,8 @@ func (s *Scheduler) ShouldSpawnWorker(node *Node) bool {
 	if o.isBeadRunning(beadID) {
 		return false
 	}
-	if node.Bead.Type == "approval-gate" {
-		log.Printf("Skipping approval gate: %s", beadID)
-		return false
-	}
-	if node.Bead.Type == "approval" {
-		log.Printf("Skipping approval bead (waiting for user approval): %s", beadID)
-		return false
-	}
-	if node.Bead.Type == "epic" {
-		log.Printf("Skipping epic (organizational): %s", beadID)
+	if isNonExecutableBeadType(node.Bead.Type) {
+		log.Printf("Skipping non-executable bead (type: %s): %s", node.Bead.Type, beadID)
 		return false
 	}
 	// HOLD gates are dependencies, not work. This is the spawn funnel —
@@ -790,4 +914,14 @@ func (s *Scheduler) ShouldSpawnWorker(node *Node) bool {
 		return false
 	}
 	return true
+}
+
+// logContainerTypeSkip emits the skip line for the retry-spawn loop's
+// container-type filter. Every other skip in that loop logs; this one was
+// silent, which turned a fully-filtered tick into an undiagnosable freeze
+// (2026-10-21, 05:37–05:52 UTC: 28 br-ready → filters → 3 spawnable →
+// nothing, with no trace of WHY the 3 vanished). Extracted so tests can
+// assert the log emission (no silent continues in the retry spawn loop).
+func logContainerTypeSkip(bead types.Bead) {
+	log.Printf("⏸️  Skipping container-type bead in retry path (type %q, gate closed via operator not worker): %s", bead.Type, bead.ID)
 }

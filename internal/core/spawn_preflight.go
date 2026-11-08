@@ -15,11 +15,18 @@ package core
 // never reach a worker.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
+	"github.com/haulmatic-dev/hydra/internal/logx"
 	"github.com/haulmatic-dev/hydra/pkg/types"
 )
 
@@ -64,6 +71,151 @@ func (o *Overseer) spawnPreflightBead(bead types.Bead, projectPath string) error
 			Reason: fmt.Sprintf("non-executable type %q", bead.Type)}
 	}
 
+	// pan-filed beads are human-triage filings from Pan's file-bead actuator
+	// (hydra-bldo): a worker must never execute them.
+	if hasBeadLabel(bead.Labels, panFiledLabel) {
+		o.emitSpawnPreflightBlocked(projectPath, "spawn_blocked_human_triage", bead,
+			"bead is pan-filed (human triage), not worker-executable work")
+		return &SpawnSuppressedError{BeadID: beadIDStr,
+			Reason: "pan-filed human-triage bead"}
+	}
+
+	return nil
+}
+
+// spawnPreflightStoreOwnership blocks the spawn funnel when the project's
+// .beads store is owned by a uid other than the daemon's (bug hydra-6g4u).
+// br's fsqlite WAL layer uid-locks its namespace sidecars: a store written by
+// the daemon (uid 999) can never be opened interactively by the repo owner
+// ("fsqlite refused its namespace sidecar ... owned by uid 999"), and vice
+// versa. Remedy per the bead's option (a): the daemon stops managing
+// user-owned repos — it refuses to spawn work into them (fail-closed,
+// auto-resume if ownership is later corrected) instead of deepening the
+// cross-uid churn. The probe itself fails open: a missing store or an
+// unreadable path must not stall the fleet.
+var daemonUID = func() int { return os.Geteuid() }
+
+// storeOwnerUID reports the owning uid of <projectPath>/.beads.
+// missing=false signals the store does not exist (nothing to guard).
+func storeOwnerUID(projectPath string) (uid int, missing bool, err error) {
+	storeDir := filepath.Join(projectPath, ".beads")
+	fi, err := os.Stat(storeDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, true, nil
+		}
+		return 0, false, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false, fmt.Errorf("store dir %s: not a unix stat_t", storeDir)
+	}
+	return int(st.Uid), false, nil
+}
+
+// maxOffendingStorePaths caps how many foreign-owned paths the preflight
+// warning names (FR-005: name actual offending paths instead of a generic
+// store-wide string).
+const maxOffendingStorePaths = 3
+
+// offendingStorePathsDetail returns " [.beads/x: uid N ...]" naming up to
+// maxOffendingStorePaths paths under <projectPath>/.beads owned by a uid
+// different from daemon's. Errors are swallowed (fail-open): the
+// generic store-wide detail already carries the diagnosis.
+func offendingStorePathsDetail(projectPath string, daemon int) string {
+	storeDir := filepath.Join(projectPath, ".beads")
+	entries, err := os.ReadDir(storeDir)
+	if err != nil {
+		return ""
+	}
+	parts := make([]string, 0, maxOffendingStorePaths)
+	for _, e := range entries {
+		if len(parts) >= maxOffendingStorePaths {
+			break
+		}
+		fi, err := e.Info()
+		if err != nil {
+			// Fail open for individual entry info errors.
+			continue
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok {
+			continue // Not Unix system stat, cannot determine ownership
+		}
+		ownerUID := int(st.Uid)
+		if ownerUID == daemon {
+			continue // Owned by the daemon itself, not foreign
+		}
+		// Found a foreign-owned path, record it.
+		parts = append(parts, fmt.Sprintf(".beads/%s: uid %d", e.Name(), ownerUID))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " [offending: " + strings.Join(parts, ", ") + "]"
+}
+
+// storeOwnershipDetail assembles the cross-uid diagnosis: the generic
+// store-wide string (who owns the store, who runs the daemon) plus the
+// offending-path breakdown from offendingStorePathsDetail.
+func storeOwnershipDetail(projectPath string, storeUID, daemon int) string {
+	return fmt.Sprintf(".beads store owned by uid %d, daemon runs as uid %d — cross-uid store; writes may hit fsqlite sidecar uid-lock (hydra-6g4u)%s",
+		storeUID, daemon, offendingStorePathsDetail(projectPath, daemon))
+}
+
+func (o *Overseer) spawnPreflightStoreOwnership(bead types.Bead, projectPath string) error {
+	if projectPath == "" {
+		return nil
+	}
+	daemon := daemonUID()
+	uid, missing, err := storeOwnerUID(projectPath)
+	if err != nil {
+		// Probe error ≠ proof of foreign ownership: fail open.
+		log.Printf("[Spawn] %s store-ownership preflight probe error (fail-open, spawning): %v", bead.ID, err)
+		return nil
+	}
+	if missing || uid == daemon {
+		return nil
+	}
+	// 2026-10-13: downgraded from fail-closed to fail-open. The uid-mismatch
+	// heuristic blocked every spawn into user-owned repos (event
+	// spawn_blocked_store_ownership, srv-smart-engine wedge) even though the
+	// daemon demonstrably reads foreign stores fine (br list/show as hydra on
+	// ajantha's store) and workers already execute as the repo owner via su.
+	// The hydra-6g4u sidecar uid-lock is a WRITE hazard; gating all spawns on
+	// ownership alone was a false-positive sensor. Keep the typed event for
+	// visibility; let real write failures surface at the write site.
+
+	// Store-ownership preflight precision: run a br probe to see if the
+	// daemon can actually read the foreign store. A successful probe (exit 0)
+	// means cross-uid reads work, so the warning is downgraded to debug-only
+	// (no typed event, no spawn churn). A failing probe keeps today's warn +
+	// event, naming the actual offending paths (up to 3).
+	probeErr := brListProbe(projectPath)
+	detail := storeOwnershipDetail(projectPath, uid, daemon)
+	if probeErr == nil {
+		logx.Debugf("[Spawn] %s store-ownership preflight (fail-open, spawning): %s", bead.ID, detail)
+		return nil
+	}
+	log.Printf("[Spawn] %s store-ownership preflight WARN (fail-open, spawning): %s", bead.ID, detail)
+	o.emitSpawnPreflightBlocked(projectPath, "spawn_warn_store_ownership", bead, detail)
+	return nil
+}
+
+// brListProbe runs `br list --json --limit 1` inside projectPath to verify the
+// daemon can actually READ the store before warning about cross-uid writes.
+// A successful probe (exit 0) means cross-uid reads work; a failure (or a
+// missing br binary, which is not proof of a broken store) returns the error.
+// Tests can substitute a fake `br` on PATH for this probe. It fails open by
+// contract: callers treat probe errors as "unverified", never as blockers.
+func brListProbe(projectPath string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "br", "list", "--json", "--limit", "1")
+	cmd.Dir = projectPath
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("br list probe: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
 
@@ -92,6 +244,54 @@ func (o *Overseer) spawnPreflightPublishIdentity(bead types.Bead, projectPath st
 	o.emitSpawnPreflightBlocked(projectPath, "spawn_blocked_identity_missing", bead, err.Error())
 	return &SpawnSuppressedError{BeadID: bead.ID.String(),
 		Reason: "owner publish identity unresolved (auto-resumes when PAT lands)"}
+}
+
+// spawnPreflightBeadClaims runs the deterministic payload drift-check on the
+// bead description. Claims are parsed from the machine-checkable claim
+// convention in the description; a `hard:` claim that fails its verify
+// refuses the spawn (fail-closed product gate), a soft claim failure only
+// warns via a typed event. Zero claims is a no-op (backward compatible).
+// Probe tooling failures (timeout, shell-not-found) are classified unknown
+// and fail open.
+func (o *Overseer) spawnPreflightBeadClaims(bead types.Bead, projectPath string) error {
+	var sink *EventSink
+	if o.beadCloser != nil {
+		sink = o.beadCloser.events
+	}
+	checker := newBeadClaimChecker(sink, claimCheckRunner)
+	update := func(labels []string) error {
+		if o.beadsClient == nil {
+			return nil
+		}
+		return o.beadsClient.UpdateBeadLabels(projectPath, "", bead.ID, labels)
+	}
+	if checker.checkBeadClaimsWithCache(&bead, projectPath, update) {
+		return nil
+	}
+	return &SpawnSuppressedError{
+		BeadID: bead.ID.String(),
+		Reason: "hard claim failed: payload drift-check refused spawn",
+	}
+}
+
+// spawnPreflightGitAccess blocks the spawn funnel when the daemon user
+// (hydra) cannot run git in the project repo because git rejects the
+// repository's ownership (exit 128 "dubious ownership"). Fail-closed with
+// auto-resume: the bead is re-checked next tick once a human fixes trust.
+func (o *Overseer) spawnPreflightGitAccess(bead types.Bead, projectPath string) error {
+	if projectPath == "" || !isGitWorktree(projectPath) {
+		return nil
+	}
+	if err := gitAccessProbe(projectPath); err == nil {
+		return nil
+	} else if !isDubiousOwnershipError(err) {
+		log.Printf("[Spawn] %s git access probe failed open: %v", bead.ID, err)
+		return nil
+	}
+	o.emitSpawnPreflightBlocked(projectPath, "spawn_blocked_git_ownership", bead,
+		gitOwnershipRemediation(projectPath))
+	return &SpawnSuppressedError{BeadID: bead.ID.String(),
+		Reason: "git ownership rejected for project repo (human must set safe.directory)"}
 }
 
 // emitSpawnPreflightBlocked writes a typed, repo-mirrored event whenever the

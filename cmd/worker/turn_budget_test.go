@@ -75,7 +75,7 @@ func TestBuildPiPrompt_TurnBudgetBlock(t *testing.T) {
 	if !strings.Contains(p, "~300 turns") {
 		t.Errorf("prompt budget not rendered, got: %q", p)
 	}
-	if !strings.Contains(p, "You have used N of ~300 turns") {
-		t.Errorf("prompt missing dynamic reminder note")
+	if !strings.Contains(p, "Track your own count") {
+		t.Errorf("prompt missing self-tracking note")
 	}
 }

@@ -109,8 +109,8 @@ func TestFailIntegration_EscalatesToExhaustedAtCap(t *testing.T) {
 			t.Fatalf("failIntegration must always return a non-nil error (attempt %d)", i)
 		}
 		got, _ := mock.GetBead(repo, "webapp", "webapp-9ah")
-		if got == nil || got.Status != types.StatusOpen {
-			t.Fatalf("attempt %d: bead must be reopened (open), got %+v", i, got)
+		if got == nil || got.Status != types.StatusInProgress {
+			t.Fatalf("attempt %d: bead must stay parked in place (in_progress, NOT reopened to open), got %+v", i, got)
 		}
 		exhausted := hasBeadLabel(got.Labels, integrationExhaustedLabel)
 		if i < maxConsecutiveIntegrationFailures && exhausted {
@@ -121,6 +121,9 @@ func TestFailIntegration_EscalatesToExhaustedAtCap(t *testing.T) {
 		}
 		if !hasBeadLabel(got.Labels, "integration-failed") {
 			t.Fatalf("attempt %d: integration-failed label missing, labels=%v", i, got.Labels)
+		}
+		if !hasBeadLabel(got.Labels, integrationPendingLabel) {
+			t.Fatalf("attempt %d: integration-pending label missing, labels=%v", i, got.Labels)
 		}
 	}
 }

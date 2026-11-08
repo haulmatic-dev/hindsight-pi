@@ -380,12 +380,13 @@ type CacheStats struct {
 
 // ContextEnrichment represents enriched context for a bead
 type ContextEnrichment struct {
-	BeadID     types.BeadID       `json:"bead_id"`
-	Query      string             `json:"query"`
-	Memories   []hindsight.Memory `json:"memories"`
-	FromCache  bool               `json:"from_cache"`
-	QueryTime  time.Duration      `json:"query_time"`
-	EnrichedAt time.Time          `json:"enriched_at"`
+	BeadID       types.BeadID           `json:"bead_id"`
+	Query        string                 `json:"query"`
+	Memories     []hindsight.Memory     `json:"memories"`
+	MentalModels []hindsight.MentalModel `json:"mental_models,omitempty"`
+	FromCache    bool                   `json:"from_cache"`
+	QueryTime    time.Duration          `json:"query_time"`
+	EnrichedAt   time.Time              `json:"enriched_at"`
 }
 
 // EnrichBeadContext queries Hindsight and returns enriched context for a bead.

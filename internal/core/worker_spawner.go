@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/registry"
@@ -235,9 +236,45 @@ func (s *WorkerSpawner) HasLiveRegistryWorker(beadID string) bool {
 	return live
 }
 
+// LastWorkerForBead returns the PID of the most recent registry row for the
+// bead (the worker that last claimed it), if any. Used by the scheduler's
+// orphan-claim reconciliation to attribute the stale claim in typed events.
+func (s *WorkerSpawner) LastWorkerForBead(beadID string) (string, bool) {
+	if s.registryStore == nil {
+		return "", false
+	}
+	rec, ok, err := s.registryStore.GetWorker(beadID)
+	if err != nil || !ok {
+		return "", false
+	}
+	return fmt.Sprintf("pid:%d", rec.PID), true
+}
+
+// deadRowGrace is how long a non-terminal registry row's heartbeat may be
+// stale before a dead-PID row is treated as residue and reconciled at spawn
+// time. Mirrors Charon's heartbeatHungAfter (5m): a fresh heartbeat covers
+// PID-reuse and the window where the worker already called reporter.Stop but
+// the process has not exited yet.
+const deadRowGrace = 5 * time.Minute
+
+// processAlive reports whether a PID still has a live process (signal 0 probe).
+func spawnProbeAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
+}
+
 // isRegistryWorkerLive reports whether a non-terminal worker row exists in
 // the daemon's registry. Parked rows are treated as live workers that block
 // respawn, unless the park is older than parkedRespawnTimeout.
+//
+// A row whose heartbeat is stale AND whose PID is dead (or unset) is residue
+// from a worker that died before reporting terminal state (kill/panic before
+// reporter.Stop). Without this check every respawn attempt fails "worker
+// already exists" until Charon's hourly ghost reap — the spawn-failed cohort
+// wedge (2026-10-06). Such a row is reconciled to terminal (orphan-reaped)
+// here so the retry succeeds on this very spawn attempt.
 func (s *WorkerSpawner) isRegistryWorkerLive(beadID string) (bool, error) {
 	if s.registryStore == nil {
 		return false, nil
@@ -251,6 +288,18 @@ func (s *WorkerSpawner) isRegistryWorkerLive(beadID string) (bool, error) {
 		return false, nil
 	}
 	if rec.State.Terminal() {
+		return false, nil
+	}
+	// Parked rows keep their own timeout semantics below; never reconcile a
+	// parked row here — park liveness is a scheduler decision.
+	if rec.State != registry.StateParked &&
+		(time.Since(rec.LastHeartbeat) > deadRowGrace) &&
+		(rec.PID <= 0 || !spawnProbeAlive(rec.PID)) {
+		log.Printf("[WorkerSpawner] reconciling dead-PID stale-heartbeat registry row for %s (pid=%d, heartbeat age %v) as orphan-reaped", beadID, rec.PID, time.Since(rec.LastHeartbeat))
+		if merr := s.registryStore.MarkCompletedWithReason(beadID, -1, "orphan-reaped"); merr != nil {
+			log.Printf("[WorkerSpawner] orphan-reap mark for %s failed (fail-closed: row stays blocking): %v", beadID, merr)
+			return true, nil
+		}
 		return false, nil
 	}
 	if rec.State == registry.StateParked {
@@ -333,10 +382,18 @@ func (s *WorkerSpawner) Spawn(bead types.Bead) (err error) {
 		return fmt.Errorf("worker limit reached: %d/%d workers active", activeCount, maxWorkers)
 	}
 
+	// The placeholder owns the slot for the duration of the spawn attempt, so
+	// carry the same identity fields a real worker will have: observers that
+	// snapshot activeWorkers while a spawn is in flight must still see which
+	// bead/project/user the slot belongs to (multi-user attribution gate).
+	projectPath := s.beadAnalyzer.FindProjectPath(&bead)
 	placeholderWorker := &types.Worker{
-		ID:        beadIDStr,
-		Status:    "spawning",
-		StartTime: time.Now(),
+		ID:          beadIDStr,
+		BeadID:      bead.ID,
+		Status:      "spawning",
+		StartTime:   time.Now(),
+		ProjectPath: projectPath,
+		Username:    s.findUserForProject(projectPath),
 	}
 	s.activeWorkers[beadIDStr] = placeholderWorker
 	s.workerMutex.Unlock()
@@ -491,6 +548,13 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 		// pre-check so EnsureWorktree's signature stays unchanged.
 		_, existed := s.worktreeManager.ExistingWorktree(projectPath, key)
 		if wt, wtErr := s.worktreeManager.EnsureWorktree(projectPath, key); wtErr != nil {
+			// Git-ownership refusal (exit 128 "dubious ownership", fmsfe wedge):
+			// a distinct failure class, NOT generic worktree-unavailable — the
+			// fix is a one-line human safe.directory command, so Pan's filing
+			// must carry it instead of "fix the worktree".
+			if isDubiousOwnershipError(wtErr) {
+				return nil, noteSpawnGitOwnership(s.eventSink, s.beadsClient, projectPath, bead, wtErr)
+			}
 			// Fail closed, ALWAYS — never silently downgrade isolation by running
 			// the worker in the shared (main) checkout. Observed 2026-09-11/12:
 			// fallback workers committed merge-conflict markers into
@@ -576,6 +640,10 @@ func (s *WorkerSpawner) SpawnInternal(bead types.Bead) (*types.Worker, error) {
 	}
 
 	log.Printf("[Worker] Process started with PID %d for bead %s", cmd.Process.Pid, beadIDStr)
+
+	// Per-worker memory containment (hydra-3ocq): a runaway worker (jest heap
+	// spike) must kill only itself, not the daemon + fleet. Fail-open.
+	s.confineWorkerToCgroup(cmd.Process.Pid, beadIDStr)
 
 	// Stream worker output to a per-bead file to keep the daemon log lean. The
 	// full firehose (Pi reasoning, tool output, Hindsight recalls) lands in
@@ -881,23 +949,45 @@ func (s *WorkerSpawner) ensureContextPack(bead types.Bead, projectPath string) {
 	if len(chain.AllBeadIDs) == 0 {
 		return
 	}
-	if len(chain.AllBeadIDs) > maxPackChainMembers {
-		log.Printf("[ContextPack] chain has %d members (> %d); skipping pack for %s", len(chain.AllBeadIDs), maxPackChainMembers, bead.ID)
-		return
+	// Cap the per-spawn chain scan on NON-TERMINAL members: terminal beads
+	// (completed/closed/failed) contribute nothing to the pack (no digest,
+	// no terms) but each costs a `br show`. Fetch members to classify them;
+	// the fetched beads also feed the digest/term collection below.
+	cfg := ContextPackConfig{}
+	if s.config != nil {
+		cfg = s.config.ContextPack
 	}
-
-	// One pass over chain members: collect titles for requirement terms and
-	// find any member already carrying a parseable pack.
-	var existing *ContextPack
-	var terms []string
-	var titles []string
+	cap := cfg.MaxChainMembersOrDefault()
+	members := make([]types.Bead, 0, len(chain.AllBeadIDs))
+	nonTerminal := 0
 	for _, id := range chain.AllBeadIDs {
 		b, err := s.beadsClient.GetBead(projectPath, bead.Repo, id)
 		if err != nil || b == nil {
 			continue
 		}
+		members = append(members, *b)
+		if !b.Status.IsTerminal() {
+			nonTerminal++
+		}
+	}
+	if nonTerminal > cap {
+		log.Printf("[ContextPack] chain has %d members (%d non-terminal > %d); skipping pack for %s",
+			len(chain.AllBeadIDs), nonTerminal, cap, bead.ID)
+		return
+	}
+
+	// One pass over the fetched members: collect titles for requirement
+	// terms and find any member already carrying a parseable pack.
+	var existing *ContextPack
+	var terms []string
+	var titles []string
+	var digests []PackMemberDigest
+	for i := range members {
+		b := members[i]
+		id := b.ID
 		terms = append(terms, RequirementTermsForBead(b.Title)...)
 		titles = append(titles, b.Title)
+		digests = append(digests, PackMemberDigest{ID: id, Digest: "- " + string(id) + ": " + b.Title})
 		if existing == nil {
 			if p, err := ParseContextPack(b.AgentContext); err == nil && p != nil {
 				existing = p
@@ -918,6 +1008,7 @@ func (s *WorkerSpawner) ensureContextPack(bead types.Bead, projectPath string) {
 		// at confidence get ONE bounded scout pass (chain-level, not per bead).
 		unmapped := UnmappedRequirements(titles, pack.Files, PackScoutConfidenceThreshold)
 		pack.Files = s.scoutUnmapped(bead, projectPath, unmapped, pack.Files)
+		s.applyPackDigestBudget(pack, bead, digests)
 		log.Printf("[ContextPack] built pack for chain of %s (base_sha=%s, gates=%d, anchors=%d)",
 			bead.ID, pack.BaseSHA, len(pack.GateCommands), len(pack.Files))
 		s.writePackToChain(chain, projectPath, bead, pack, "pack_created")
@@ -935,11 +1026,36 @@ func (s *WorkerSpawner) ensureContextPack(bead types.Bead, projectPath string) {
 		if len(reScout) > 0 {
 			refreshed.Files = s.scoutUnmapped(bead, projectPath, reScout, refreshed.Files)
 		}
+		s.applyPackDigestBudget(refreshed, bead, digests)
 		log.Printf("[ContextPack] refreshed pack for chain of %s (base_sha %s → %s, dropped %d anchors)",
 			bead.ID, existing.BaseSHA, refreshed.BaseSHA, len(dropped))
 		s.writePackToChain(chain, projectPath, bead, refreshed, "pack_refreshed")
 	default:
 		log.Printf("[ContextPack] pack for chain of %s still fresh (base_sha=%s)", bead.ID, existing.BaseSHA)
+	}
+}
+
+// packTokenBudget returns the configured pack token budget (default when unset).
+func (s *WorkerSpawner) packTokenBudget() int {
+	if s.config == nil {
+		return DefaultMaxPackTokens
+	}
+	return s.config.ContextPack.MaxPackTokensOrDefault()
+}
+
+// applyPackDigestBudget attaches member digests and trims them to the token
+// budget, emitting one pack_trimmed event when any digest is elided.
+func (s *WorkerSpawner) applyPackDigestBudget(pack *ContextPack, bead types.Bead, digests []PackMemberDigest) {
+	pack.MemberDigests = digests
+	elided := ApplyPackTokenBudget(pack, s.packTokenBudget(), bead.ID)
+	if len(elided) == 0 {
+		return
+	}
+	log.Printf("[ContextPack] pack for %s over token budget: elided %d member digests", bead.ID, len(elided))
+	if s.eventSink != nil {
+		s.eventSink.Emit(Event{Type: "pack_trimmed", Project: bead.Project, Bead: string(bead.ID),
+			Reason: "budget",
+			Detail: fmt.Sprintf("elided_count=%d budget=%d", len(elided), s.packTokenBudget())})
 	}
 }
 

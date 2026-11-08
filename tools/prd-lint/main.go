@@ -36,8 +36,10 @@ type LintResult struct {
 }
 
 var (
-	headingRe = regexp.MustCompile(`^#{2,3}\s+((?:FR|US|NFR)[-A-Za-z0-9]*-?\d*)\b`)
-	idRe      = regexp.MustCompile(`\b((?:FR|US|NFR)[-A-Za-z0-9]*-?\d*)\b`)
+	headingRe   = regexp.MustCompile(`^#{2,3}\s+((?:FR|US|NFR)[-A-Za-z0-9]*-?\d*)\b`)
+	idRe        = regexp.MustCompile(`\b((?:FR|US|NFR)[-A-Za-z0-9]*-?\d*)\b`)
+	covThreshRe = regexp.MustCompile(`(?i)coverage\s*>=?\s*\d+\s*%`)
+	covExemptRe = regexp.MustCompile(`^<!--\s*coverage-threshold:\s*exempt\s*-->$`)
 )
 
 const usage = "Usage: prd-lint <prd.md> [--json]"
@@ -104,10 +106,14 @@ type line struct {
 	num  int
 }
 
+// reqBlock is one requirement section: its heading identity, body lines,
+// and whether a `<!-- coverage-threshold: exempt -->` marker appeared
+// immediately before the heading.
 type reqBlock struct {
 	id          string
 	headingLine int
 	lines       []line
+	covExempt   bool
 }
 
 func lintContent(name string, content string) LintResult {
@@ -165,9 +171,19 @@ func filterCodeBlocks(rawLines []string) []line {
 	return active
 }
 
+// isExemptMarker reports whether the line is exactly the
+// `<!-- coverage-threshold: exempt -->` marker (after trimming).
+func isExemptMarker(text string) bool {
+	return covExemptRe.MatchString(strings.TrimSpace(text))
+}
+
 func parseBlocks(activeLines []line) []reqBlock {
+	// The exemption marker binds to the next requirement heading, so it is
+	// tracked pending in headless interlude text and consumed (or reset by
+	// any other non-blank line) when the block opens.
 	var blocks []reqBlock
 	var current *reqBlock
+	pendingExempt := false
 	for _, l := range activeLines {
 		m := headingRe.FindStringSubmatch(l.text)
 		if m != nil {
@@ -179,9 +195,19 @@ func parseBlocks(activeLines []line) []reqBlock {
 				id:          id,
 				headingLine: l.num,
 				lines:       []line{},
+				covExempt:   pendingExempt,
 			}
+			pendingExempt = false
 			continue
 		}
+		if strings.TrimSpace(l.text) == "" {
+			continue
+		}
+		if isExemptMarker(l.text) {
+			pendingExempt = true
+			continue
+		}
+		pendingExempt = false
 		if current != nil {
 			current.lines = append(current.lines, l)
 		}
@@ -249,6 +275,19 @@ func checkBlock(b reqBlock) []Violation {
 		})
 	}
 
+	if st, ok := systemType(b.lines); ok && !isValidSystemType(st) {
+		violations = append(violations, Violation{
+			Rule:    "R9-system-type",
+			ID:      b.id,
+			Line:    b.headingLine,
+			Message: fmt.Sprintf("invalid System Type %q: must be one of library, cli, api, application, ops", st),
+		})
+	}
+
+	if st, ok := coverageThreshold(b); ok {
+		violations = append(violations, st)
+	}
+
 	if strings.HasPrefix(typ, "us-") && !hasAggregatesSection(b.lines) {
 		violations = append(violations, Violation{
 			Rule:    "R6-aggregates",
@@ -278,6 +317,53 @@ func checkBlock(b reqBlock) []Violation {
 	}
 
 	return violations
+}
+
+// coverageThreshold reports the R10-coverage-threshold violation when a
+// block states a coverage percentage threshold without carrying the
+// `<!-- coverage-threshold: exempt -->` marker.
+func coverageThreshold(b reqBlock) (Violation, bool) {
+	if !covThreshRe.MatchString(blockText(b.lines)) || b.covExempt {
+		return Violation{}, false
+	}
+	return Violation{
+		Rule:    "R10-coverage-threshold",
+		ID:      b.id,
+		Line:    b.headingLine,
+		Message: "states a coverage threshold without a `<!-- coverage-threshold: exempt -->` marker (coverage-threshold semantics)",
+	}, true
+}
+
+// blockText joins a block's body lines into one string for whole-block
+// pattern checks such as coverage-threshold detection.
+func blockText(lines []line) string {
+	parts := make([]string, 0, len(lines))
+	for _, l := range lines {
+		parts = append(parts, l.text)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func isValidSystemType(v string) bool {
+	switch v {
+	case "library", "cli", "api", "application", "ops":
+		return true
+	}
+	return false
+}
+
+// systemType extracts the optional **System Type:** metadata line value.
+// The value may carry a parenthetical qualifier ("library (internal Go)"),
+// so only the first whitespace-separated token is the enum value.
+func systemType(lines []line) (string, bool) {
+	re := regexp.MustCompile(`^\*\*System Type:\*\*\s*(\S+)`)
+	for _, l := range lines {
+		m := re.FindStringSubmatch(l.text)
+		if m != nil {
+			return strings.TrimSpace(m[1]), true
+		}
+	}
+	return "", false
 }
 
 func blockType(b reqBlock) string {

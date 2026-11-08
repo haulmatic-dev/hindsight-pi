@@ -96,7 +96,9 @@ func CollectOpenDogfoodPRs(ctx context.Context, run GhRunner, dir string) ([]PR,
 	}
 	var prs []PR
 	for _, e := range entries {
-		if !strings.HasPrefix(e.Head.Ref, "dogfood/") {
+		// Hydra-owned integration branches: dogfood/ (daemon-owned repos) or
+		// hydra/ (user-owned product repos) — hydra-tvfd.
+		if !strings.HasPrefix(e.Head.Ref, "dogfood/") && !strings.HasPrefix(e.Head.Ref, "hydra/") {
 			continue
 		}
 		p := PR{Number: e.Number, Title: e.Title, Branch: e.Head.Ref,

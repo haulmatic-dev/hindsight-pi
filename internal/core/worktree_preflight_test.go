@@ -1,9 +1,9 @@
 package core
 
 import (
-	"github.com/haulmatic-dev/hydra/pkg/types"
 	"context"
 	"errors"
+	"github.com/haulmatic-dev/hydra/pkg/types"
 	"os"
 	"path/filepath"
 	"strings"

@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -14,8 +15,16 @@ import (
 type ResourceMonitor struct {
 	maxCPUUsage    float64 // Maximum allowed CPU usage (0-100)
 	maxMemoryUsage float64 // Maximum allowed memory usage (0-100)
-	maxProcPercent float64 // Maximum allowed process count percentage (0-100)
-	checkInterval  time.Duration
+	// minMemAvailableMB is an absolute MemAvailable floor: a spawn is refused
+	// while the host has less than this much memory available (hydra-3ocq —
+	// the 2026-10-15 OOM kills left no room between worker peaks and the
+	// kernel OOM killer). <=0 disables. Probe errors fail open.
+	minMemAvailableMB int
+	maxProcPercent    float64 // Maximum allowed process count percentage (0-100)
+	checkInterval     time.Duration
+	// memAvailableFn is the MemAvailable probe (test seam). Default reads
+	// /proc/meminfo directly (no sh(1) round-trip).
+	memAvailableFn func() (int, error)
 }
 
 // NewResourceMonitor creates a new resource monitor
@@ -30,7 +39,48 @@ func NewResourceMonitor(maxCPU, maxMemory float64, maxProcPercent ...float64) *R
 		maxMemoryUsage: maxMemory,
 		maxProcPercent: procPercent,
 		checkInterval:  5 * time.Second,
+		memAvailableFn: readMemAvailableMB,
 	}
+}
+
+// SetMinMemAvailableMB sets the absolute MemAvailable spawn floor in MB.
+// Values <= 0 disable the check. Must be called before CanSpawnWorker use.
+func (rm *ResourceMonitor) SetMinMemAvailableMB(mb int) { rm.minMemAvailableMB = mb }
+
+// SetMemAvailableProbe replaces the MemAvailable probe (test seam).
+func (rm *ResourceMonitor) SetMemAvailableProbe(fn func() (int, error)) { rm.memAvailableFn = fn }
+
+// readMemAvailableMB returns MemAvailable from /proc/meminfo in MB.
+
+// defaultMinMemAvailableMB is the default absolute MemAvailable spawn floor
+// (2.5G — hydra-3ocq's "refuse spawn under 2.5G" guidance).
+const defaultMinMemAvailableMB = 2500
+
+// readMemAvailableMB returns MemAvailable from /proc/meminfo in MB.
+// Falls back to MemFree+Buffers+Cached on kernels without MemAvailable.
+func readMemAvailableMB() (int, error) {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, fmt.Errorf("read /proc/meminfo: %w", err)
+	}
+	fields := map[string]int{}
+	for _, line := range strings.Split(string(data), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		if v, perr := strconv.Atoi(parts[1]); perr == nil {
+			fields[strings.TrimSuffix(parts[0], ":")] = v
+		}
+	}
+	avail := fields["MemAvailable"]
+	if avail == 0 {
+		avail = fields["MemFree"] + fields["Buffers"] + fields["Cached"]
+	}
+	if avail <= 0 {
+		return 0, fmt.Errorf("no usable MemAvailable/MemFree fields in /proc/meminfo")
+	}
+	return avail / 1024, nil // kB -> MB
 }
 
 // getCPUUsage returns current CPU usage percentage using standard Unix commands
@@ -147,48 +197,52 @@ func (rm *ResourceMonitor) getMemoryUsage() (float64, error) {
 	return mem, nil
 }
 
-// getProcessCount returns the current number of processes running
+// getProcessCount returns the current number of processes running.
+// /proc is read natively (no subprocess): at the process ceiling itself,
+// sh/ls/grep/wc cannot fork and the probe would fail open — exactly the
+// `fork/exec ... resource temporarily unavailable` wedge this guard exists
+// to prevent (hydra-s8f0). /proc works without any fork.
 func (rm *ResourceMonitor) getProcessCount() (int, error) {
-	var cmd *exec.Cmd
-
-	if runtime.GOOS == "darwin" {
-		// macOS: count processes using ps
-		cmd = exec.Command("sh", "-c", "ps ax | wc -l")
-	} else {
-		// Linux: count processes in /proc
-		cmd = exec.Command("sh", "-c", "ls /proc | grep -E '^[0-9]+$' | wc -l")
-	}
-
-	output, err := cmd.Output()
+	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return 0, fmt.Errorf("failed to get process count: %w", err)
 	}
-
-	countStr := strings.TrimSpace(string(output))
-	count, err := strconv.Atoi(countStr)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse process count '%s': %w", countStr, err)
+	count := 0
+	for _, e := range entries {
+		if _, perr := strconv.Atoi(e.Name()); perr == nil {
+			count++
+		}
 	}
-
 	return count, nil
 }
 
-// getProcessLimit returns the maximum number of processes allowed (ulimit -u)
+// getProcessLimit returns the maximum number of processes allowed.
+// /proc/self/limits is read natively (no subprocess) — same EAGAIN rationale
+// as getProcessCount.
 func (rm *ResourceMonitor) getProcessLimit() (int, error) {
-	// ulimit is a shell builtin — must invoke via bash (sh/dash may not support -u)
-	cmd := exec.Command("bash", "-c", "ulimit -u")
-	output, err := cmd.Output()
+	data, err := os.ReadFile("/proc/self/limits")
 	if err != nil {
 		return 0, fmt.Errorf("failed to get process limit: %w", err)
 	}
 
-	limitStr := strings.TrimSpace(string(output))
-	limit, err := strconv.Atoi(limitStr)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse process limit '%s': %w", limitStr, err)
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "Max processes") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			return 0, fmt.Errorf("failed to parse process limit: malformed line %q", line)
+		}
+		if fields[3] == "unlimited" {
+			return -1, nil
+		}
+		limit, err := strconv.Atoi(fields[3])
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse process limit '%s': %w", fields[3], err)
+		}
+		return limit, nil
 	}
-
-	return limit, nil
+	return 0, fmt.Errorf("failed to parse process limit: no Max processes line in /proc/self/limits")
 }
 
 // CanSpawnWorker checks if system resources allow spawning a new worker
@@ -234,6 +288,21 @@ func (rm *ResourceMonitor) CanSpawnWorker() bool {
 		if memPercent > rm.maxMemoryUsage*0.9 {
 			log.Printf("[ResourceMonitor] Warning: Memory high - %.1f%% (Limit: %.1f%%)",
 				memPercent, rm.maxMemoryUsage)
+		}
+	}
+
+	// Absolute MemAvailable floor (hydra-3ocq): refuse to add a worker while
+	// the host is close to the OOM/swap-storm zone, even when the percentage
+	// check above passes (percentage is relative to total, not to free headroom).
+	if rm.minMemAvailableMB > 0 {
+		availMB, err := rm.memAvailableFn()
+		if err != nil {
+			log.Printf("[ResourceMonitor] Failed to read MemAvailable: %v", err)
+			// fail open — the probe being broken must not stop the fleet
+		} else if availMB < rm.minMemAvailableMB {
+			log.Printf("[ResourceMonitor] MemAvailable %dMB below floor %dMB, blocking worker spawn (OOM guard)",
+				availMB, rm.minMemAvailableMB)
+			return false
 		}
 	}
 

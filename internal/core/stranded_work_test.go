@@ -122,6 +122,29 @@ func TestDetectStrandedWork_DetectsTerminalBead(t *testing.T) {
 	}
 }
 
+func TestDetectStrandedWork_NonePresent(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	projectPath := gitInitRepo(t)
+
+	beads := newMockBeadsClient()
+	sink := NewEventSink(t.TempDir())
+
+	// No hydra/wt-* branches at all: the none-present path must return no
+	// units and emit no events (AC: none-present evidence class).
+	units := DetectStrandedWork(nil, projectPath, nil, nil, beads, sink)
+	if len(units) != 0 {
+		t.Fatalf("clean repo must yield no stranded units, got %v", units)
+	}
+	if ev := readEventsOfType(t, sink, "worktree_stranded"); len(ev) != 0 {
+		t.Fatalf("clean repo must emit no worktree_stranded events, got %v", ev)
+	}
+	if ev := readEventsOfType(t, sink, "stranded_conflict"); len(ev) != 0 {
+		t.Fatalf("clean repo must emit no stranded_conflict events, got %v", ev)
+	}
+}
+
 func TestDetectStrandedWork_DedupByLabel(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
@@ -242,6 +265,15 @@ func TestIntegrateStrandedRepair_Conflict(t *testing.T) {
 	}
 	if len(readEventsOfType(t, sink, "stranded_conflict")) != 1 {
 		t.Fatal("expected one stranded_conflict event")
+	}
+	// AC: event payload includes the quarantine branch name when present.
+	conflictEv := readEventsOfType(t, sink, "stranded_conflict")
+	qbField, ok := conflictEv[0].Fields["quarantine_branch"].(string)
+	if !ok || qbField == "" {
+		t.Fatalf("stranded_conflict event fields %v missing non-empty quarantine_branch", conflictEv[0].Fields)
+	}
+	if qbField != "hydra/quarantine/"+key {
+		t.Fatalf("quarantine_branch = %q, want %q", qbField, "hydra/quarantine/"+key)
 	}
 	got, _ := os.ReadFile(filepath.Join(projectPath, "shared.txt"))
 	if string(got) != "main content\n" {

@@ -19,8 +19,9 @@ type mockResponse struct {
 
 // mockExecutor implements CLIExecutor for testing
 type mockExecutor struct {
-	responses map[string]mockResponse
-	calls     []struct {
+	responses      map[string]mockResponse
+	responseQueues map[string][]mockResponse
+	calls          []struct {
 		Name string
 		Args []string
 	}
@@ -30,7 +31,8 @@ type mockExecutor struct {
 // NewMockExecutor creates a new mock executor
 func NewMockExecutor() *mockExecutor {
 	return &mockExecutor{
-		responses: make(map[string]mockResponse),
+		responses:      make(map[string]mockResponse),
+		responseQueues: make(map[string][]mockResponse),
 		calls: make([]struct {
 			Name string
 			Args []string
@@ -44,6 +46,15 @@ func (m *mockExecutor) AddResponse(name string, args []string, output []byte, er
 	m.responses[key] = mockResponse{Output: output, Err: err}
 }
 
+// AddResponses queues mock responses for a specific command, consumed in
+// order across repeated invocations of the same command (falls back to the
+// single-shot map once the queue drains). Needed when one invocation key is
+// hit twice (e.g. br show for skip-type verification then terminality check).
+func (m *mockExecutor) AddResponses(name string, args []string, resp ...mockResponse) {
+	key := m.key(name, args)
+	m.responseQueues[key] = append(m.responseQueues[key], resp...)
+}
+
 // Execute implements CLIExecutor
 func (m *mockExecutor) Execute(name string, arg ...string) ([]byte, error) {
 	m.calls = append(m.calls, struct {
@@ -52,6 +63,11 @@ func (m *mockExecutor) Execute(name string, arg ...string) ([]byte, error) {
 	}{Name: name, Args: arg})
 
 	key := m.key(name, arg)
+	if q := m.responseQueues[key]; len(q) > 0 {
+		resp := q[0]
+		m.responseQueues[key] = q[1:]
+		return resp.Output, resp.Err
+	}
 	if resp, ok := m.responses[key]; ok {
 		return resp.Output, resp.Err
 	}
@@ -826,21 +842,21 @@ func TestCloseBead_RetriesWithForceOnSkipped(t *testing.T) {
 	// First call: skipped due to open children.
 	skippedOutput := []byte("Warning: Skipped test-bead-123: parent issue has 1/1 open children (use --force to close anyway)\n")
 	mockExec.AddResponse("br", []string{"close", "test-bead-123", "-r", "completed"}, skippedOutput, nil)
-
-	// Second call (force retry): succeeds, returns the closed bead JSON.
-	closedBeadJSON := []byte(`[{"id":"test-bead-123","status":"closed","title":"Test"}]`)
+	// Skip-path type verification then terminality verify: same key twice.
+	mockExec.AddResponses("br", []string{"show", "test-bead-123", "--json"},
+		mockResponse{Output: []byte(`[{"id":"test-bead-123","status":"open","issue_type":"task","title":"Test"}]`)},
+		mockResponse{Output: []byte(`[{"id":"test-bead-123","status":"closed","title":"Test"}]`)})
 	mockExec.AddResponse("br", []string{"close", "test-bead-123", "-r", "completed", "--force"}, []byte("✓ Closed test-bead-123\n"), nil)
-	mockExec.AddResponse("br", []string{"show", "test-bead-123", "--json"}, closedBeadJSON, nil)
 
 	err := client.CloseBead("hydra", "", "test-bead-123", "completed")
 	if err != nil {
 		t.Fatalf("expected nil after force retry, got: %v", err)
 	}
 
-	// Verify both calls happened (initial + force).
+	// Verify all calls happened (initial + type verify + force + terminality verify).
 	calls := mockExec.GetCalls()
-	if len(calls) != 3 {
-		t.Errorf("expected 3 calls (initial + force close + verify), got %d", len(calls))
+	if len(calls) != 4 {
+		t.Errorf("expected 4 calls (initial + type verify + force close + verify), got %d", len(calls))
 	}
 	foundForce := false
 	for _, call := range calls {
@@ -865,11 +881,13 @@ func TestCloseBead_ForceRetryOnBlockedOutput(t *testing.T) {
 	// First call: blocked by other bead.
 	blockedOutput := []byte("bead test-bead-123 blocked by: other-bead:open\n")
 	mockExec.AddResponse("br", []string{"close", "test-bead-123", "-r", "completed"}, blockedOutput, nil)
+	mockExec.AddResponse("br", []string{"show", "test-bead-123", "--json"}, []byte(`[{"id":"test-bead-123","status":"open","issue_type":"task","title":"Test"}]`), nil)
 
 	// Second call (force retry): succeeds.
-	closedBeadJSON := []byte(`[{"id":"test-bead-123","status":"closed","title":"Test"}]`)
+	mockExec.AddResponses("br", []string{"show", "test-bead-123", "--json"},
+		mockResponse{Output: []byte(`[{"id":"test-bead-123","status":"open","issue_type":"task","title":"Test"}]`)},
+		mockResponse{Output: []byte(`[{"id":"test-bead-123","status":"closed","title":"Test"}]`)})
 	mockExec.AddResponse("br", []string{"close", "test-bead-123", "-r", "completed", "--force"}, []byte("✓ Closed\n"), nil)
-	mockExec.AddResponse("br", []string{"show", "test-bead-123", "--json"}, closedBeadJSON, nil)
 
 	err := client.CloseBead("hydra", "", "test-bead-123", "completed")
 	if err != nil {
@@ -1169,11 +1187,12 @@ func TestCloseBead_NonZeroExitSkip_ForceRetries(t *testing.T) {
 		Stdout:  string(skippedOutput),
 		Err:     &exec.ExitError{},
 	})
+	mockExec.AddResponses("br", []string{"show", "test-bead-ex3", "--json"},
+		mockResponse{Output: []byte(`[{"id":"test-bead-ex3","status":"open","issue_type":"task","title":"Test"}]`)},
+		mockResponse{Output: []byte(`[{"id":"test-bead-ex3","status":"closed","title":"Test"}]`)})
 
 	// Second call (force retry): succeeds.
-	closedBeadJSON := []byte(`[{"id":"test-bead-ex3","status":"closed","title":"Test"}]`)
 	mockExec.AddResponse("br", []string{"close", "test-bead-ex3", "-r", "completed", "--force"}, []byte("✓ Closed test-bead-ex3\n"), nil)
-	mockExec.AddResponse("br", []string{"show", "test-bead-ex3", "--json"}, closedBeadJSON, nil)
 
 	if err := client.CloseBead("hydra", "", "test-bead-ex3", "completed"); err != nil {
 		t.Fatalf("expected nil after force retry on nonzero-exit skip, got: %v", err)
@@ -1235,5 +1254,54 @@ func TestCloseBead_AlreadyClosedWording_IdempotentSuccess(t *testing.T) {
 				t.Error("already-closed wording must not trigger a force retry")
 			}
 		}
+	}
+}
+
+// TestCloseBead_EpicOpenChildrenSkip_RefusesForceClose verifies the
+// srv-jobfile master-epic fix (2026-10): when compile-time epic-child
+// dependency links fail (br single-parent constraint), the DAG and the
+// epic-close guard see a vacuously-empty child set, CloseReadyEpics proposes
+// the close, and the only remaining protection is br's own open-children
+// skip. closeBeadOnce must refuse to --force through that skip for epics.
+func TestCloseBead_EpicOpenChildrenSkip_RefusesForceClose(t *testing.T) {
+	mockExec := NewMockExecutor()
+	client := NewClientWithExecutor(mockExec)
+
+	skippedOutput := []byte("Warning: Skipped proj-epic: parent issue has 33/33 open children (use --force to close anyway)\n")
+	mockExec.AddResponse("br", []string{"close", "proj-epic", "-r", "completed"}, skippedOutput, nil)
+	mockExec.AddResponse("br", []string{"show", "proj-epic", "--json"}, []byte(`[{"id":"proj-epic","status":"open","issue_type":"epic","title":"Master epic"}]`), nil)
+
+	err := client.CloseBead("proj", "", "proj-epic", "completed")
+	if err == nil {
+		t.Fatal("expected loud refusal for epic open-children skip, got nil")
+	}
+	if !strings.Contains(err.Error(), "refusing to force-close epic") {
+		t.Errorf("expected refusal wording, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "open children") {
+		t.Errorf("expected br skip wording preserved, got: %v", err)
+	}
+	for _, call := range mockExec.GetCalls() {
+		for _, arg := range call.Args {
+			if arg == "--force" {
+				t.Error("epic close must never force through an open-children skip")
+			}
+		}
+	}
+}
+
+// TestCloseBead_EpicAlreadyClosedWording_IdempotentSuccess: an exit-3
+// ambiguous skip on an epic that is actually terminal must still succeed
+// (the terminality check covers it without any --force).
+func TestCloseBead_EpicExit3AmbiguousSkip_TerminalVerifyPasses(t *testing.T) {
+	mockExec := NewMockExecutor()
+	client := NewClientWithExecutor(mockExec)
+
+	mockExec.AddResponse("br", []string{"close", "proj-epic", "-r", "completed"}, []byte("already closed or skipped\n"),
+		&CLIError{Command: "br", Args: []string{"close", "proj-epic", "-r", "completed"}, Err: &exec.ExitError{}})
+	mockExec.AddResponse("br", []string{"show", "proj-epic", "--json"}, []byte(`[{"id":"proj-epic","status":"closed","issue_type":"epic","title":"Master epic"}]`), nil)
+
+	if err := client.CloseBead("proj", "", "proj-epic", "completed"); err != nil {
+		t.Fatalf("expected nil for terminal epic, got: %v", err)
 	}
 }

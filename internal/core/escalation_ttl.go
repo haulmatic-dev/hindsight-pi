@@ -35,6 +35,21 @@ type EscalationTTLScanner struct {
 	interval    time.Duration // scan cadence
 	events      *EventSink    // nil-safe
 	stopChan    chan struct{}
+	// hasLiveWorker reports whether a bead has a live registry worker. Nil
+	// means "unknown": in_progress beads are then skipped (fail-closed),
+	// preserving the pre-2026-10-05 behavior.
+	hasLiveWorker func(beadID string) bool
+}
+
+// SetLiveWorkerFunc injects the liveness probe. Without it the scanner's
+// in_progress skip was a blanket status test, and escalated beads are
+// in_progress BY CONSTRUCTION (verified-close parks them with no worker), so
+// the scanner never demoted a single bead since 2026-09-29 — dead code until
+// the srv-jobfile stall exposed it (2026-10-05). With the probe, only an
+// in_progress bead with a genuinely live worker is skipped; orphaned
+// escalations age out as designed.
+func (s *EscalationTTLScanner) SetLiveWorkerFunc(fn func(beadID string) bool) {
+	s.hasLiveWorker = fn
 }
 
 // NewEscalationTTLScanner creates the scanner. ttl <= 0 disables demotion
@@ -86,35 +101,47 @@ func (s *EscalationTTLScanner) run() {
 }
 
 // scan demotes every non-terminal bead whose `escalated` label has aged past
-// the TTL. in_progress beads are skipped: a live worker may legitimately be
-// finishing under the escalation stay, and demoting mid-flight would race
-// the close path.
+// the TTL. An in_progress bead with a live worker is skipped: it may
+// legitimately be finishing under the escalation stay, and demoting
+// mid-flight would race the close path. in_progress WITHOUT a live worker is
+// the normal post-escalation state and ages normally.
 func (s *EscalationTTLScanner) scan() {
 	now := time.Now()
 	demoted := 0
 	for _, project := range s.getProjects() {
-		beads, err := s.beadsClient.ListBeads(project.Path, "")
-		if err != nil {
-			// Fail-open: a listing failure must never block scheduling.
-			log.Printf("[EscalationTTL] listing beads for %s failed (fail open): %v", project.Name, err)
-			continue
-		}
-		for _, b := range beads {
-			if b.Status.IsTerminal() || b.Status == types.StatusInProgress {
+		for _, target := range repoScanTargets(project) {
+			beads, err := s.beadsClient.ListBeads(target, "")
+			if err != nil {
+				// Fail-open: a listing failure must never block scheduling.
+				log.Printf("[EscalationTTL] listing beads for %s failed (fail open): %v", project.Name, err)
 				continue
 			}
-			if !hasBeadLabel(b.Labels, escalatedLabel) {
-				continue
+			for _, b := range beads {
+				if b.Status.IsTerminal() {
+					continue
+				}
+				if !hasBeadLabel(b.Labels, escalatedLabel) {
+					continue
+				}
+				// in_progress + live worker = finishing under the stay: do not
+				// race the close path. in_progress + NO live worker = the normal
+				// post-escalation state; age it like any other. Without a
+				// liveness probe, keep the historical fail-closed skip.
+				if b.Status == types.StatusInProgress {
+					if s.hasLiveWorker == nil || s.hasLiveWorker(b.ID.String()) {
+						continue
+					}
+				}
+				if now.Sub(b.UpdatedAt) <= s.ttl {
+					continue
+				}
+				if err := s.demote(target, b); err != nil {
+					log.Printf("[EscalationTTL] demotion failed for %s (fail open): %v", b.ID, err)
+					continue
+				}
+				demoted++
+				log.Printf("[EscalationTTL] ⏳ Demoted stale escalation on %s (age %v > TTL %v); bead is ready again", b.ID, now.Sub(b.UpdatedAt).Round(time.Minute), s.ttl)
 			}
-			if now.Sub(b.UpdatedAt) <= s.ttl {
-				continue
-			}
-			if err := s.demote(project.Path, b); err != nil {
-				log.Printf("[EscalationTTL] demotion failed for %s (fail open): %v", b.ID, err)
-				continue
-			}
-			demoted++
-			log.Printf("[EscalationTTL] ⏳ Demoted stale escalation on %s (age %v > TTL %v); bead is ready again", b.ID, now.Sub(b.UpdatedAt).Round(time.Minute), s.ttl)
 		}
 	}
 	if demoted > 0 {
