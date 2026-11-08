@@ -22,6 +22,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 
 ### Documentation
+- FR-004 discovery doc (`docs/discovery/turn-telemetry-fr004-rinq.md`): verified zero turn_end observability in the worker runtime, mapped the staged RED surface (turn_telemetry stub, registry TurnsSoFar, turn-report tool) and pinned the GREEN contract for `worker_turns` close events — no code change.
 - Junk signature package (`internal/junksig`) SYNTAX round verified: 10/10 tests PASS, build/vet/gofmt clean, exported APIs documented — no edits required.
 
 ### Fixed
