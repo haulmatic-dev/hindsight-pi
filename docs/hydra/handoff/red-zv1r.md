@@ -18,6 +18,7 @@
 - `gofmt -l cmd/worker/enrichment*.go` — clean (after gofmt -w).
 - `go test ./cmd/worker/ -run 'Enrich' -count=1` — PASS exit 0 (all 8 skip loudly: "RED: brownfield enrichment contract not yet implemented (set ENRICH_ENFORCE=1 to enforce)").
 - `ENRICH_ENFORCE=1 go test ./cmd/worker/ -run 'TestEnrich' -count=1` — FAIL 8/8 for the RIGHT reason: every failure quotes `RED: brownfield enrichment contract not yet implemented (set ENRICH_ENFORCE=1 to fail; enrichmentImplemented=false)` — missing feature, not a compile error.
+- COVERAGE (measured, phase-specific AC): `go test ./cmd/worker/ -run 'Enrich' -count=1 -coverprofile=/tmp/enrich-cov.out -covermode=atomic` — `coverage: 0.0% of statements`; `go tool cover -func`: enrichment.go `enrichAgentArgv 0.0% / enrichBeadClaims 0.0% / enrichDefaultBudgetTokens 0.0%`. 0.0% is the CORRECT RED-state result — the inert stub is only reachable under ENRICH_ENFORCE=1 (tests gate on the missing feature before touching it). GREEN must re-measure with the flag flipped and report the real number.
 
 ## Contract GREEN must implement
 - Flip `enrichmentImplemented = true`; set `enrichDefaultAgentRunner` (detached text-mode Pi: `--no-extensions --no-session`, prompt via stdin, captured stdout — pan.RunPi pattern); implement `enrichAgentArgv`, `enrichDefaultBudgetTokens` (reads `context_pack.max_pack_tokens` config, default `internal/core.DefaultMaxPackTokens`).
@@ -25,4 +26,4 @@
 
 ## Open edges for the next phase
 - Discovery A1 adjudication still open: `chainContextMaxPerFile = 1500` truncates a 40k-token enrich doc at pickup — default proposal (a) exempt `enrich-*.md` from the cap. GREEN should implement or explicitly reject in the handoff.
-- Coverage for new code must be measured and reported by GREEN (`go test ./cmd/worker/ -run 'Enrich' -coverprofile`).
+- Coverage for new code must be re-measured and reported by GREEN with `enrichmentImplemented = true` (`go test ./cmd/worker/ -run 'Enrich' -coverprofile`).
