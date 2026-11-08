@@ -156,6 +156,14 @@ func enrichBeadClaims(bead types.Bead, projectPath, worktreePath string, run enr
 	}
 
 	targets := extractTargetFiles(bead)
+	if len(targets) == 0 {
+		// Nothing to scope the subagent to: enrichment is scoped to the
+		// bead's target files ONLY. Without targets an unscoped run would
+		// cost tokens against the whole repo and (worse) hijack the
+		// HYDRA_PI_PATH the enclosing rpc session configured.
+		log.Printf("[Enrich] %s: no target files — enrichment skipped, zero tokens", beadID)
+		return nil, "", nil
+	}
 	if len(targets) > 0 {
 		base, _, err := core.ResolveIntegrationBase(nil, projectPath)
 		if err != nil {
