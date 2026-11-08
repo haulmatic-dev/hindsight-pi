@@ -12,8 +12,8 @@
 - `gofmt -l` on bead_claims.go / bead_claims_cache_test.go / spawn_preflight.go / overseer.go — clean.
 - Placeholder grep (`// TODO|// FIXME|// Placeholder`) over the three target files — 0 hits; bead_claims.go 339 lines, test 340, non-empty.
 - Doc comments verified on the claim-cache surface: `claimVerifyTimeout`, `claimEventRecorder`, `claimCacheImplemented`, `claimCheckRunner`, `claimHeadProbe`, cache label convention comment block (bead_claims.go:19–78).
-- `go build ./...` — FAIL, but ONLY in `cmd/worker` from a concurrent strand's UNCOMMITTED `cmd/worker/enrichment.go` (+338/−37, `enrichment.go:166:4: undefined: log`, `280:2: declared and not used: removed`). Not this chain's file (chain scope = internal/core); `internal/core` itself compiles and its suite is green. Left untouched per smallest-change discipline — the enrichment strand will fix its own file.
+- `go build ./...` — initially FAIL from a concurrent strand's mid-edit uncommitted `cmd/worker/enrichment.go` (`enrichment.go:166:4: undefined: log`, `280:2: declared and not used: removed`); the enrichment strand resolved it within the same session — re-run `go build ./...` — PASS, BUILD_RC=0.
 
 ## Open edges for the next phase
-- Concurrent enrichment.go dirty state must be resolved by its owning strand before any gate that runs `go build ./...` passes.
+- Concurrent-strand `cmd/worker/*` dirty files belong to their owning strands; verify build state at gate time, not mid-session.
 - Cached path <5ms wall bound asserted by TestClaimCache_WarmCacheSameBaseSHA_ReusesWithoutProbes (passes).
