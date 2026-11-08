@@ -67,5 +67,5 @@ Known importer traps (learned the hard way, all fixed in the pipeline code): met
 1. **Extractor** (Phase-2 #3): graphify `graph.json` + OpenAPI → connectivity facts. Import path proven twice; needs fact templates + service catalog + CI wiring.
 2. **Supersession pass** (Phase-1.3 remainder): corrective facts for the broader fixed-bug set — stale-but-unique facts still serve as current (e.g. the duplicate-worker history pre-fix).
 3. Pan-cluster dedupe (×6 "Pan is a shepherd…") — same 1.4 procedure.
-4. **Remote access**: API key + Tailscale/proxy for the team; extension is hardened, exposure is the remaining work.
+4. **Remote access**: design landed — SSH-tunnel transport (per-user keys, zero server exposure) + the server's built-in MCP endpoint for Claude Code/Cursor. Setup and operator checklist: `docs/operations/remote-memory-access.md`. Remaining: bank hardening (MCP allowlist + audit log), `setup-remote-memory.sh` kit, first laptop test.
 5. **GCS backup** (nightly `pg_dump` + restic plan approved) — **the 29 GB DB is still single-copy**; blocked on bucket + service-account key.
