@@ -219,6 +219,14 @@ func (r *stateReporter) SetRpcActivity() {
 	r.mu.Unlock()
 }
 
+// TurnsSoFar returns the last reported agent-turn count (rpc turn_end
+// events); used by the close path after the rpc session is torn down.
+func (r *stateReporter) TurnsSoFar() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.rep.TurnsSoFar
+}
+
 // SetTurns updates the reported agent-turn count (rpc turn_end events) so
 // the registry shows turns_so_far alongside tokens_so_far (FR-004).
 func (r *stateReporter) SetTurns(n int64) {

@@ -305,9 +305,7 @@ func (t *rpcTurn) handleLine(line string, stdin io.Writer) bool {
 		if eventType == "turn_end" {
 			// Turn telemetry (FR-004): count each observed agent turn and
 			// forward the count to the heartbeat reporter.
-			t.mu.Lock()
-			t.turns++
-			t.mu.Unlock()
+			t.incrementTurns()
 			t.forwardTurns()
 		}
 		msg, _ := event["message"].(map[string]any)

@@ -31,6 +31,15 @@ type workerTurnsRecord struct {
 	Fields  map[string]any `json:"fields,omitempty"`
 }
 
+// incrementTurns counts one observed agent turn (turn_end event) and returns
+// the running count.
+func (t *rpcTurn) incrementTurns() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.turns++
+	return t.turns
+}
+
 // turnCount returns the number of agent turns (turn_end events) observed so
 // far in this rpc session.
 func (t *rpcTurn) turnCount() int {
@@ -51,6 +60,7 @@ func (t *rpcTurn) forwardTurns() {
 // deriveBeadPhase derives the TDD-chain phase reported in the worker_turns
 // event from the bead title prefix (RED:/GREEN:/REFACTOR:/SYNTAX: markers use
 // the phase name; anything else is "implement").
+// shimmy
 func deriveBeadPhase(title string) string {
 	for _, p := range []string{"RED:", "GREEN:", "REFACTOR:", "SYNTAX:"} {
 		if strings.HasPrefix(title, p) {
@@ -67,9 +77,7 @@ func sessionTurns() int {
 	if activeReporter == nil {
 		return 0
 	}
-	activeReporter.mu.Lock()
-	defer activeReporter.mu.Unlock()
-	return int(activeReporter.rep.TurnsSoFar)
+	return int(activeReporter.TurnsSoFar())
 }
 
 // emitWorkerTurnsEvent writes the typed worker_turns event {bead, turns,
