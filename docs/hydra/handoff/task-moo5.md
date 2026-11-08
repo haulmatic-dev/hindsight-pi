@@ -25,3 +25,8 @@
 ## Open edges for the next phase
 - `worker_turns` events are not yet emitted by the worker/daemon (grep: 0 producer hits); the tool's data source only exists once a future bead wires the report into the close path or worker exit. GREEN for this bead should implement the tool + tests only; emission wiring is a separate concern.
 - `days` pinned only for 7; boundary semantics (inclusive "today" vs strictly older-than-days) is implied by the test (30-day-old excluded), GREEN may choose inclusive-window.
+
+## Re-entry (hydra-moo5): lint gate status
+- Daemon lint gate had FAILED: `internal/core/bead_claims_cache_test.go:153:40: expected '(', found proofsAndRefreshesCache`.
+- VERIFIED self-resolved on this worktree HEAD (e529071e): `grep -r proofsAndRefreshesCache internal/core` → 0 hits; `go vet ./internal/core/` clean (no output); `go test ./tools/turn-report/ -count=1` → ok 0.003s. Concurrent strand fixed its own file. No repair diff needed; this session is docs-only because the deliverable commits (bc03e41e, 2b573817) already contain the RED suite and the gate breakage belonged to a sibling strand.
+
