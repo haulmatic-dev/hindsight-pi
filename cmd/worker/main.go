@@ -1570,6 +1570,14 @@ func executeWithPi(
 		return result, fmt.Errorf("failed to start pi: %w", err)
 	}
 
+	// Brownfield subagent enrichment (FR-003): scoped to the bead's target
+	// files, fire once per bead, committed handoff doc feeds the
+	// loadChainContext injection below. Fail-open: an enrichment error never
+	// blocks the bead.
+	if _, _, enrichErr := enrichBeadClaims(bead, projectPath, cmd.Dir, enrichDefaultAgentRunner); enrichErr != nil {
+		log.Printf("[Enrich] %s: enrichment failed (non-blocking): %v", bead.ID, enrichErr)
+	}
+
 	// Frozen chain handoffs from prior phases live on the integration branch
 	// this worktree was cut from; embed them so this phase builds on verified
 	// outcomes instead of re-deriving them (prefix-stability programme #2).
