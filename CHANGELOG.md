@@ -44,6 +44,12 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 - Documentation: SYNTAX handoff for junk signature package (task-p3mqz) — verify-only, package already conformant (10/10 tests, build/vet/gofmt clean). SYNTAX handoff for junk signature package (task-p3mqz) — verify-only, package already conformant (10/10 tests, build/vet/gofmt clean).
 
 
+### Fixed
+- **br CLI invocations now run with an isolated per-call `TMPDIR`.** br's fsqlite WAL layer stages files under fixed names in `$TMPDIR` (`beads.db`, `bd-beads.json`, `beads.db-fsqlite-ns-gate`, ...); any two concurrent br processes — even against different stores — collided on those names, producing cross-store WAL phantom writes and `SYNC_CONFLICT` lockouts (observed 2026-10-07: hydra fix beads phantom-duplicated into srv-jobfile's WAL, store unreadable for hours, 15-29 leaked `.br-wal-index-*` dirs per store). The daemon's beads executor now gives every invocation a private `TMPDIR` (created and removed per call). Operators should also sweep stale `/tmp/beads*` staging debris after incidents.
+
+### Changed
+- **Post-close sweeper refactor** (`internal/core/postclose_sweep.go`): eligibility folded into `sweepableCommand(bead)`, reopen comment body extracted to `reopenCommentBody`, event types named (`evPostCloseNeedsHuman`/`evPostCloseReopened`); added `BenchmarkPostCloseSweepVerifyBead` (~84 ns/op, 0 allocs). Behavior-preserving; TestPostCloseSweep suite passes.
+
 ### Documentation
 - FR-005 discovery doc (`docs/discovery/turn-report-extractor-discovery-u0kc.md`): verified the staged turn-report RED surface (inert stub + 9-test TURN_REPORT_ENFORCE suite, red skip-loud green / enforce red proven), pinned nearest-rank percentiles + round-up-to-10-of-p90 comment-only `turn_budgets:` contract for GREEN, and flagged the chain blocker — cmd/worker's RED test imports the nonexistent `internal/types` package. No code change. (`docs/discovery/turn-telemetry-fr004-rinq.md`): verified zero turn_end observability in the worker runtime, mapped the staged RED surface (turn_telemetry stub, registry TurnsSoFar, turn-report tool) and pinned the GREEN contract for `worker_turns` close events — no code change.
 - Junk signature package (`internal/junksig`) SYNTAX round verified: 10/10 tests PASS, build/vet/gofmt clean, exported APIs documented — no edits required.
