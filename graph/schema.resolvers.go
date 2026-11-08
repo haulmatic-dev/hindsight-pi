@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -386,7 +387,23 @@ func (r *mutationResolver) CancelWorker(ctx context.Context, id string) (bool, e
 }
 
 // ForceCompleteBead is the resolver for the forceCompleteBead field.
+//
+// DISABLED (reliability review v2, S1, 2026-11-09): this mutation ran NO
+// close gates — it called Overseer.CloseBead -> validationService.CloseBead
+// (end-of-chain PRD validation only), so any agent with HYDRA_API_URL
+// could force-complete its own bead around every hard gate, verified-close
+// round, and daemon gate. Workers receive HYDRA_API_URL for heartbeats.
+// No operator tooling references this mutation (verified: docs and skills
+// use the br CLI). Operators close beads with `br close`.
 func (r *mutationResolver) ForceCompleteBead(ctx context.Context, id string, reason *string) (*model.Bead, error) {
+	log.Printf("[API] forceCompleteBead REFUSED (disabled 2026-11-09, S1): id=%s reason=%q", id, derefString(reason))
+	return nil, fmt.Errorf("forceCompleteBead is disabled: it bypassed every close gate; operators use `br close`")
+}
+
+// forceCompleteBeadDisabled is the retained original implementation path,
+// unreachable from the resolver, kept for reference until the schema field
+// is regenerated out.
+func forceCompleteBeadDisabled(ctx context.Context, r *mutationResolver, id string, reason *string) (*model.Bead, error) {
 	if r.Overseer == nil {
 		return nil, fmt.Errorf("overseer not initialized")
 	}
@@ -659,4 +676,11 @@ func stableSort(beads []*model.Bead, less func(i, j int) bool) {
 // stringPtr returns a pointer to the given string
 func stringPtr(s string) *string {
 	return &s
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

@@ -190,9 +190,23 @@ func PublishRepo(m *WorktreeManager, projectPath, token string, prMerge bool, ac
 		// branchAheadOfRemote back to true with a NEW tip and re-publishes.
 		if mark := prWaitingMark(projectPath, branch); mark != "" {
 			if tip, terr := localBranchTip(projectPath, branch); terr == nil && tip == mark {
-				return false, "pr awaiting human merge"
+				// N3 (reliability review v2, 2026-11-09): the mark is a local
+				// memo and never validated against GitHub — a PR CLOSED
+				// UNMERGED wedged the publisher on "awaiting human merge"
+				// forever (live: PR #488, five backoff cycles). Before
+				// skipping, confirm an OPEN PR still exists for the branch;
+				// none (merged-and-deleted or closed-unmerged) clears the
+				// mark and republishes. Fail-open on the gh probe (a
+				// transient gh failure keeps waiting — the human path).
+				if openPRStillExists(projectPath, branch, token) {
+					return false, "pr awaiting human merge"
+				}
+				log.Printf("[Publish] %s/%s: waiting mark tip matches but no open PR remains (closed/merged) — clearing mark and republishing", projectPath, branch)
+				clearPRWaiting(projectPath, branch)
+				// fall through to republish
+			} else {
+				clearPRWaiting(projectPath, branch) // tip advanced since the wait was recorded
 			}
-			clearPRWaiting(projectPath, branch) // tip advanced since the wait was recorded
 		}
 		publishEvents.EmitRepo(projectPath, Event{Type: "publish_pr_invoked", Project: filepath.Base(projectPath),
 			Detail: "PublishViaPR invoked for " + branch + " via " + feature,
@@ -1062,4 +1076,24 @@ func defaultAutoPRGhCreate(repoPath, base, head, title, body, token string) (str
 		}
 	}
 	return "", fmt.Errorf("no PR URL in gh output: %s", strings.TrimSpace(string(out)))
+}
+
+// openPRStillExists reports whether at least one OPEN pull request exists
+// for the branch in the repository at projectPath. Fail-open (returns true)
+// on gh errors so a transient probe failure keeps the designed wait instead
+// of spamming duplicate PRs.
+func openPRStillExists(projectPath, branch, token string) bool {
+	env := os.Environ()
+	if token != "" {
+		env = append(env, "GH_TOKEN="+token)
+	}
+	list := exec.Command("gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number", "--limit", "1")
+	list.Dir = projectPath
+	list.Env = env
+	out, err := list.CombinedOutput()
+	if err != nil {
+		log.Printf("[Publish] open-PR probe failed for %s/%s (assuming open, fail-open): %v\n%s", projectPath, branch, err, strings.TrimSpace(string(out)))
+		return true
+	}
+	return strings.Contains(string(out), "number")
 }

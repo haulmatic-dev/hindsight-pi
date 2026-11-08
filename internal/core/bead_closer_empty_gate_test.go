@@ -2,6 +2,9 @@ package core
 
 import (
 	"os"
+
+	"github.com/haulmatic-dev/hydra/pkg/types"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -146,25 +149,39 @@ func TestVerifyBeforeClose_EmptyDiffNoReasonRejects(t *testing.T) {
 }
 
 func TestVerifyBeforeClose_EmptyDiffAcceptedReason(t *testing.T) {
-	repo, closer, bead := setupScopeGateTest(t, "block")
-	writeVerdictLog(t, bead.ID.String(), `{"done":true,"summary":"no code change required; chain-deferred-to-root"}`)
+	repo, closer, _ := setupScopeGateTest(t, "block")
+	// E1 (2026-11-09): the token must NAME a chain root, and the daemon
+	// verifies it exists and is open. Real-shape bead ID (E1 derives the
+	// reference namespace from it); named root seeded OPEN so the
+	// reference resolves.
+	bead := &types.Bead{
+		ID:       "scope-test-ab12",
+		Title:    "Test bead",
+		Project:  "test-project",
+		Metadata: map[string]string{"files": "x/a.go"},
+	}
+	base, berr := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	if berr != nil {
+		closer.SetSessionBase(string(bead.ID), "HEAD")
+	} else {
+		closer.SetSessionBase(string(bead.ID), strings.TrimSpace(string(base)))
+	}
+	if mc, ok := closer.beadsClient.(*mockBeadsClient); ok {
+		// The mock ListBeads filters by filepath.Base(projectPath); match it.
+		mc.beads["scope-test-9zz9"] = types.Bead{ID: "scope-test-9zz9", Project: filepath.Base(repo), Status: types.StatusOpen}
+	}
+	writeVerdictLog(t, bead.ID.String(), `{"done":true,"summary":"chain-deferred-to-root: root scope-test-9zz9 owns the implementation"}`)
 	if err := closer.verifyBeforeClose(bead, repo, ""); err != nil {
 		t.Fatalf("accepted-empty reason close should pass, got: %v", err)
 	}
 }
 
-func TestIsDocPath(t *testing.T) {
-	yes := []string{"README.md", "docs/x/y.txt", "a/b.NOTES.mdx"}
-	no := []string{"x/a.go", "docs.md.go", "main.go.bak", "mdd.tx"}
-	for _, p := range yes {
-		if !isDocPath(p) {
-			t.Errorf("isDocPath(%q) = false, want true", p)
-		}
-	}
-	for _, p := range no {
-		if isDocPath(p) {
-			t.Errorf("isDocPath(%q) = true, want false", p)
-		}
+// Non-hydra project reference (review-round-1 blocker regression guard).
+func TestVerifyEmptyCloseReference_NonHydraProject(t *testing.T) {
+	c := &BeadCloser{}
+	// No resolver/client: verification must fail closed, never crash.
+	if c.verifyEmptyCloseReference(&types.Bead{ID: "srv-telematics-ab12", Project: "srv-telematics"}, "repo", "superseded by srv-telematics-cd34", acceptedEmptySuperseded) {
+		t.Error("nil client must fail closed, not accept")
 	}
 }
 

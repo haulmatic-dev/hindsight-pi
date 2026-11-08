@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"strings"
 	"context"
 	"testing"
 	"time"
@@ -441,9 +442,9 @@ func TestForceCompleteBead_EmptyID(t *testing.T) {
 		t.Error("Expected error for empty bead ID")
 	}
 
-	expectedErrMsg := "bead ID cannot be empty"
-	if err != nil && err.Error() != expectedErrMsg {
-		t.Errorf("Expected error message '%s', got '%s'", expectedErrMsg, err.Error())
+	expectedErrMsg := "forceCompleteBead is disabled"
+	if err != nil && !strings.Contains(err.Error(), expectedErrMsg) {
+		t.Errorf("Expected error message containing '%s', got '%s'", expectedErrMsg, err.Error())
 	}
 
 	if result != nil {
@@ -478,9 +479,9 @@ func TestForceCompleteBead_ProjectNotFound(t *testing.T) {
 		t.Error("Expected error when project not found")
 	}
 
-	expectedErrMsg := "project not found: hydra"
-	if err != nil && err.Error() != expectedErrMsg {
-		t.Errorf("Expected error message '%s', got '%s'", expectedErrMsg, err.Error())
+	expectedErrMsg := "forceCompleteBead is disabled"
+	if err != nil && !strings.Contains(err.Error(), expectedErrMsg) {
+		t.Errorf("Expected error message containing '%s', got '%s'", expectedErrMsg, err.Error())
 	}
 
 	if result != nil {
@@ -497,9 +498,9 @@ func TestForceCompleteBead_NilOverseer(t *testing.T) {
 		t.Error("Expected error when overseer is nil")
 	}
 
-	expectedErrMsg := "overseer not initialized"
-	if err != nil && err.Error() != expectedErrMsg {
-		t.Errorf("Expected error message '%s', got '%s'", expectedErrMsg, err.Error())
+	expectedErrMsg := "forceCompleteBead is disabled"
+	if err != nil && !strings.Contains(err.Error(), expectedErrMsg) {
+		t.Errorf("Expected error message containing '%s', got '%s'", expectedErrMsg, err.Error())
 	}
 
 	if result != nil {

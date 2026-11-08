@@ -45,6 +45,8 @@ type Charon struct {
 	heartbeatHungAfter      time.Duration            // stale registry heartbeat → hung worker
 	maxBeadTokens           int64                    // soft cap: steer + Pan candidate (0 = disabled); hard backstop = 2x
 	panArbiter              func(beadID string) bool // fresh Pan continue verdict = stay of execution
+	stayMu                  sync.Mutex               // guards stayCount (P1c)
+	stayCount               map[string]int           // bead → Pan continues that stayed the hard kill (cap 2)
 	steeredMu               sync.Mutex
 	steeredAt               map[string]time.Time     // bead → last budget steer (rate limit)
 	retryManager            *RetryManager            // Charon kills consume retry budget (else infra-classified free respawns loop)
@@ -682,8 +684,17 @@ func (j *Charon) shouldKillAsStuck(record *WorkerRecord, now time.Time) (kill bo
 			// to Pan (maybeBudgetSteer). A fresh Pan continue verdict stays
 			// the kill — converging work must be allowed to finish.
 			if j.maxBeadTokens > 0 && row.State == registry.StateWorking && row.TokensFresh > 2*j.maxBeadTokens {
+				// P1c (reliability review v2, 2026-11-09): stays are bounded —
+				// at most 2 Pan continues may hold the kill, and no stay above
+				// 3x the cap (an absolute ceiling a "converging" worker can
+				// never legitimately cross). Uncapped stays let a cheap model
+				// undo a deterministic budget limit forever.
 				if j.panArbiter != nil && j.panArbiter(record.BeadID) {
-					return false, fmt.Sprintf("over hard backstop (fresh=%d > %d, total=%d) but Pan continued recently — stay of execution", row.TokensFresh, 2*j.maxBeadTokens, row.TokensSoFar)
+					if allow, n := stayAllowed(j.stayCountOf(record.BeadID), row.TokensFresh, j.maxBeadTokens); allow {
+						j.stayCountInc(record.BeadID)
+						return false, fmt.Sprintf("over hard backstop (fresh=%d > %d, total=%d) but Pan continued recently — stay of execution %d/2", row.TokensFresh, 2*j.maxBeadTokens, row.TokensSoFar, n)
+					}
+					return true, fmt.Sprintf("token budget hard backstop exceeded (fresh=%d > %d) and Pan stay cap (2) or 3x ceiling reached — kill", row.TokensFresh, 2*j.maxBeadTokens)
 				}
 				return true, fmt.Sprintf("token budget hard backstop exceeded (fresh=%d > %d, total=%d)", row.TokensFresh, 2*j.maxBeadTokens, row.TokensSoFar)
 			}
@@ -1485,4 +1496,31 @@ func (j *Charon) sweepReparentedWorktreeProcs(table string, kill func(pgid int))
 		}
 	}
 	return n
+}
+
+// stayAllowed is the P1c stay-cap decision: at most 2 stays per bead, and
+// no stay above 3x the soft cap (absolute ceiling).
+func stayAllowed(staysSoFar int, fresh, maxBeadTokens int64) (allowed bool, stayNumber int) {
+	if fresh > 3*maxBeadTokens {
+		return false, 0
+	}
+	if staysSoFar >= 2 {
+		return false, 0
+	}
+	return true, staysSoFar + 1
+}
+
+func (j *Charon) stayCountOf(beadID string) int {
+	j.stayMu.Lock()
+	defer j.stayMu.Unlock()
+	return j.stayCount[beadID]
+}
+
+func (j *Charon) stayCountInc(beadID string) {
+	j.stayMu.Lock()
+	defer j.stayMu.Unlock()
+	if j.stayCount == nil {
+		j.stayCount = make(map[string]int)
+	}
+	j.stayCount[beadID]++
 }

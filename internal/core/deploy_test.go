@@ -17,13 +17,13 @@ func TestClassifyTier1(t *testing.T) {
 	}{
 		{[]string{"README.md"}, "tier-1"},
 		{[]string{"docs/architecture/shepherd.md", "config.yaml"}, "tier-1"},
-		{[]string{"internal/hindsight/client_test.go"}, "tier-1"},
+		{[]string{"internal/hindsight/client_test.go"}, "tier-1g"}, // D1: verification code always human-review
 		{[]string{"internal/core/deploy.go"}, "tier-1g"},
 		{[]string{"cmd/worker/main.go"}, "tier-1g"},
 		{[]string{"scripts/verify-deploy.sh"}, "tier-1g"},
 		{[]string{"README.md", "internal/core/deploy.go"}, "tier-1g"}, // any doubt -> human
 		{[]string{""}, "tier-1g"},
-		{[]string{"internal/hindsight/client.go"}, "tier-1"},
+		{[]string{"internal/hindsight/client.go"}, "tier-1g"}, // D1
 	}
 	for _, c := range cases {
 		if got := ClassifyTier1(c.paths); got != c.want {

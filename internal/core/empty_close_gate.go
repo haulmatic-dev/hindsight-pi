@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -155,6 +156,21 @@ func (c *BeadCloser) tryAcceptEmptyClose(bead *types.Bead, repoName, changedRepo
 	if reason == "" {
 		return false
 	}
+	// E1 (reliability review v2, 2026-11-09): superseded and
+	// chain-deferred-to-root were accepted on the worker's word alone —
+	// an agent could close its own bead by typing the token. Now the
+	// summary must NAME a bead, and the daemon verifies it:
+	//   superseded             → the named superseder is CLOSED (its work
+	//                            landed or was adjudicated);
+	//   chain-deferred-to-root → the named chain root EXISTS and is OPEN
+	//                            (someone still owns the deferred work).
+	// Unverifiable or absent references reject the close as before.
+	if reason == acceptedEmptySuperseded || reason == acceptedEmptyChainDeferredRoot {
+		if !c.verifyEmptyCloseReference(bead, repoName, v.Summary, reason) {
+			log.Printf("[VerifiedClose] Bead %s empty-diff reason %q FAILED reference verification — rejecting", bead.ID, reason)
+			return false
+		}
+	}
 	log.Printf("[VerifiedClose] Bead %s empty diff accepted via self-reported reason %q", bead.ID, reason)
 	c.logCloseEvent(bead, "accepted", "empty-diff/"+reason, c.validationRetryCount(bead))
 	AppendActivity(changedRepoPath, string(bead.ID), "close-accepted: empty diff with accepted reason "+reason)
@@ -164,4 +180,105 @@ func (c *BeadCloser) tryAcceptEmptyClose(bead *types.Bead, repoName, changedRepo
 			Detail: "verified-close accepted empty diff: worker verdict self-reported accepted reason " + reason})
 	}
 	return true
+}
+
+// beadRefPrefix strips the trailing suffix from a bead ID to get its
+// project (or project/repo) prefix: "hydra-q1nxj" → "hydra",
+// "srv-telematics/fe-ab12" → "srv-telematics/fe". Suffixes are 3-6 chars
+// (fix_cause.go beadIDTokenRe documents 3-5; 6 tolerated).
+func beadRefPrefix(id types.BeadID) string {
+	s := string(id)
+	if i := strings.LastIndexAny(s, "-/"); i > 0 && i >= len(s)-7 && i < len(s)-1 {
+		if suffix := s[i+1:]; isBeadSuffix(suffix) {
+			return s[:i]
+		}
+	}
+	return ""
+}
+
+func isBeadSuffix(s string) bool {
+	if len(s) < 3 || len(s) > 6 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// beadRefPatternFor builds the reference pattern for a given project prefix
+// (e.g. "srv-telematics/fe-(ab12)" — quoted prefix + 3-6 char suffix).
+// Anchoring on the bead's OWN prefix avoids both English-word collisions
+// and the hydra-only assumption that broke every other project (review
+// round 1 blocker).
+func beadRefPatternFor(prefix string) *regexp.Regexp {
+	return regexp.MustCompile(regexp.QuoteMeta(prefix) + `-([a-z0-9]{3,6})\b`)
+}
+
+// verifyEmptyCloseReference checks the bead NAMED in an accepted empty-close
+// summary. The reference must use the SAME project prefix as the closing
+// bead (derived from its own ID — fleet projects differ, hydra- only was a
+// review-round-1 blocker). Returns true when the reference resolves and
+// satisfies the reason's contract; false rejects the close (fail-closed —
+// an unresolvable claim is exactly the trust problem E1 exists to close).
+func (c *BeadCloser) verifyEmptyCloseReference(bead *types.Bead, repoName, summary, reason string) bool {
+	prefix := beadRefPrefix(bead.ID)
+	if prefix == "" {
+		return false // cannot derive a reference namespace — reject
+	}
+	m := beadRefPatternFor(prefix).FindStringSubmatch(strings.ToLower(summary))
+	if m == nil {
+		return false // token without a same-project bead reference
+	}
+	suffix := m[1]
+	if suffix == strings.ToLower(strings.TrimPrefix(strings.ToLower(string(bead.ID)), strings.ToLower(prefix)+"-")) {
+		return false // naming ITSELF is not a reference
+	}
+	if c.projectResolver == nil {
+		return false
+	}
+	projectPath := c.projectResolver.ResolveProjectPath(bead)
+	if projectPath == "" {
+		return false
+	}
+	if c.beadsClient == nil {
+		return false
+	}
+	beads, err := c.beadsClient.ListBeads(projectPath, repoName)
+	if err != nil {
+		return false
+	}
+	// Exact-length suffix match first (wrong-bead tiebreak: two beads may
+	// share a short tail, e.g. -9zz9 and -x9zz9); HasSuffix fallback for
+	// any remaining shape.
+	var ref *types.Bead
+	for i := range beads {
+		id := strings.ToLower(string(beads[i].ID))
+		if strings.HasSuffix(id, "-"+suffix) && len(suffix) == len(id)-1-strings.LastIndexAny(id, "-/") {
+			ref = &beads[i]
+			break
+		}
+	}
+	if ref == nil {
+		for i := range beads {
+			if strings.HasSuffix(strings.ToLower(string(beads[i].ID)), "-"+suffix) {
+				ref = &beads[i]
+				break
+			}
+		}
+	}
+	if ref == nil {
+		return false
+	}
+	switch reason {
+	case acceptedEmptySuperseded:
+		return ref.Status.IsTerminal() // superseder's work concluded
+	case acceptedEmptyChainDeferredRoot:
+		// The root owns the deferred work while open or in_progress (a
+		// root mid-run still owns it; strict-open rejected live roots).
+		return ref.Status == types.StatusOpen || ref.Status == types.StatusInProgress
+	}
+	return false
 }

@@ -251,6 +251,11 @@ func (d *Tier1Deployer) rollback() error {
 var tier1gPathPrefixes = []string{
 	"internal/core/", "cmd/", "internal/api/", "internal/registry/",
 	"internal/beads/", "internal/worktree", "internal/pan/",
+	// Reliability review v2 D1 (2026-11-09): verification code and tooling
+	// must never auto-merge — hydra could weaken its own gates without a
+	// human. Test-only diffs are also human-review (tamper guard class).
+	"internal/validation/", "internal/security/", "internal/hindsight/",
+	"tools/",
 	"scripts/", ".github/", "Makefile", "go.mod", "go.sum",
 }
 

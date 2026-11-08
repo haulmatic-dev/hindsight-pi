@@ -403,6 +403,28 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				if o.retryManager == nil {
 					return fmt.Errorf("reset-retries: no retry manager")
 				}
+				// Reliability review v2 P1b (2026-11-09): Pan could reset a
+				// bead's retry budget indefinitely (observed live on ppd3).
+				// One automated reset per bead, stamped as a label; further
+				// resets need the human-approved-pan-repair label.
+				rid := types.BeadID(beadID)
+				pp := projectPathForID(rid)
+				if pp == "" {
+					return fmt.Errorf("reset-retries: project path unresolved for %s — refusing (the one-shot guard cannot stamp its mark)", beadID)
+				}
+				if b, err := o.beadsClient.GetBead(pp, rid.Repo(), rid); err == nil && b != nil {
+					if hasBeadLabel(b.Labels, "retries-reset") && !hasBeadLabel(b.Labels, "human-approved-pan-repair") {
+						return fmt.Errorf("reset-retries: %s already had one automated reset (retries-reset label) — repeated failures need human triage or the human-approved-pan-repair label", beadID)
+					}
+					if !hasBeadLabel(b.Labels, "retries-reset") {
+						// Fail-closed on the stamp (review amendment): an
+						// unstamped mark means unlimited resets — the exact
+						// hole this guard closes.
+						if err := o.beadsClient.UpdateBeadLabels(pp, rid.Repo(), rid, []string{"retries-reset"}); err != nil {
+							return fmt.Errorf("reset-retries: stamping retries-reset on %s failed (refusing to reset unstamped): %w", beadID, err)
+						}
+					}
+				}
 				prev := o.retryManager.ResetRetryCount(beadID)
 				log.Printf("[PanRepair] reset-retries for %s (previous fault count: %d)", beadID, prev)
 				return nil
@@ -491,6 +513,16 @@ func (s *ServiceStarter) Start(ctx context.Context) error {
 				// spec-decided:<x>) must not be wiped by an automated reset.
 				if refusal := clearEscalationRefusalFor(*bead); refusal != "" {
 					return fmt.Errorf("%s", refusal)
+				}
+				// Reliability review v2 P1a (2026-11-09): the "substantive
+				// failure must not receive clear-escalation" rule lived only in
+				// Pan's prompt. Enforce in code: a bead with a REPEATED gate
+				// fingerprint (gate-fp-*-N, N>=2) has failed verification
+				// multiple times on the same defect — an automated reset just
+				// burns another worker run. Human override: the
+				// human-approved-pan-repair label (operator-set via br).
+				if maxFp := maxGateFpRepeat(bead.Labels); maxFp >= 2 && !hasBeadLabel(bead.Labels, "human-approved-pan-repair") {
+					return fmt.Errorf("clear-escalation: %s has a repeated gate fingerprint (x%d) — substantive failure; human triage required (or set human-approved-pan-repair)", beadID, maxFp)
 				}
 				var toClear []string
 				escLabels := map[string]bool{escalatedLabel: true, "needs-human": true, "verified-close-escalated": true}
@@ -1015,4 +1047,21 @@ func staleSpawnFailure(spawner *WorkerSpawner, beadID string, since time.Time) b
 		return true
 	}
 	return !since.IsZero() && time.Since(since) > spawnFailureTTL
+}
+
+// maxGateFpRepeat returns the highest repeat count N across gate-fp-<fp8>-<N>
+// labels on a bead (0 when none). The close path appends these labels per
+// identical rejection; N>=2 means the same deterministic failure fired twice.
+func maxGateFpRepeat(labels []string) int {
+	best := 0
+	for _, l := range labels {
+		if !strings.HasPrefix(l, "gate-fp-") {
+			continue
+		}
+		parts := strings.Split(l, "-")
+		if n, err := strconv.Atoi(parts[len(parts)-1]); err == nil && n > best {
+			best = n
+		}
+	}
+	return best
 }
