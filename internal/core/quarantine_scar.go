@@ -3,15 +3,11 @@ package core
 // quarantine_scar.go — FR-001 "Completion-time scar scrub in the chain
 // worktree" (quarantine-truth PRD, docs/PRDs/quarantine-truth-prd-20261108.md).
 //
-// RED-phase inert stub. scarScrubImplemented=false keeps every contract test
-// in quarantine_scar_test.go skipping loudly by default; set
-// QUARANTINE_SCAR_ENFORCE=1 to fail loudly when the behavior is still missing.
-// GREEN replaces these bodies with the real scrub: async (the completion
-// detector's callback must return immediately), junk-safe dirty-worktree
-// commit, member verification or shared-suite fallback, re-decide, then
-// integrate-or-quarantine — with an in-memory marker cleared via defer+recover
-// and 3h wall-clock cap, plus restart recovery for persisted
-// scrub-in-progress registry entries.
+// The scrub is asynchronous (the completion detector's callback must return
+// immediately): junk-safe dirty-worktree commit, member verification or
+// shared-suite fallback, re-decide, then integrate-or-quarantine — with an
+// in-memory marker cleared via defer+recover and a 3h wall-clock cap, plus
+// restart recovery for persisted scrub-in-progress registry entries.
 
 import (
 	"fmt"
@@ -122,6 +118,18 @@ var scarScrubPanicFallback func(o *Overseer, key string)
 // left uncommitted by the pre-verdict commit. Seam for tests.
 var scarJunkPath = junksig.IsJunkPath
 
+// chainKeyOf resolves the chain worktree key for a ChainInfo (the explicit
+// WorktreeKey when present, else the root bead ID).
+func chainKeyOf(ci *ChainInfo) string {
+	if ci == nil {
+		return ""
+	}
+	if ci.WorktreeKey != "" {
+		return ci.WorktreeKey
+	}
+	return ci.RootBeadID.String()
+}
+
 // chainScarScrubber performs the scrub → re-decide → quarantine-or-integrate
 // pass for one chain completion event.
 type chainScarScrubber struct {
@@ -147,11 +155,7 @@ func (s *chainScarScrubber) run(event ChainCompletedEvent, branch string) scarDe
 	if s == nil || s.hooks == nil || ci == nil {
 		return s.quarantineNow(event, branch)
 	}
-	project := ci.ProjectPath
-	key := ci.WorktreeKey
-	if key == "" {
-		key = ci.RootBeadID.String()
-	}
+	project, key := ci.ProjectPath, chainKeyOf(ci)
 	if branch == "" && s.hooks.worktreeBranchOf != nil {
 		branch = s.hooks.worktreeBranchOf(project, key)
 	}
@@ -300,11 +304,7 @@ func (s *chainScarScrubber) quarantineNow(event ChainCompletedEvent, branch stri
 	if s != nil && s.hooks != nil && s.hooks.quarantine != nil {
 		ci := event.ChainInfo
 		if ci != nil {
-			project := ci.ProjectPath
-			key := ci.WorktreeKey
-			if key == "" {
-				key = ci.RootBeadID.String()
-			}
+			project, key := ci.ProjectPath, chainKeyOf(ci)
 			if branch == "" && s.hooks.worktreeBranchOf != nil {
 				branch = s.hooks.worktreeBranchOf(project, key)
 			}
@@ -318,6 +318,17 @@ func (s *chainScarScrubber) quarantineNow(event ChainCompletedEvent, branch stri
 
 // scarScrubMarkers is the in-flight marker set, keyed by chain worktree key.
 var scarScrubMarkers sync.Map
+
+// scarClaim claims the chain key's marker if no scrub is in flight; true
+// means this caller owns the marker (a duplicate completion caller loses).
+func scarClaim(key string) bool {
+	_, exists := scarScrubMarkers.Load(key)
+	if exists {
+		return false
+	}
+	_, loaded := scarScrubMarkers.LoadOrStore(key, true)
+	return !loaded
+}
 
 // scarMarkerGuarded runs fn with the chain key's scrub marker set; the marker
 // is cleared via defer and a panic is recovered into a quarantine decision
@@ -353,15 +364,11 @@ func bossEvents(o *Overseer) *EventSink {
 }
 
 // launchScarScrub is the completion-callback entry point: returns
-// immediately after marking the chain in flight, launching the scrub
-// goroutine under scarMarkerGuarded. The marker is set synchronously so the
-// scrub body (and the duplicate-completion guard) always observes it.
-// launchScarScrub is the completion-callback entry point: returns
-// immediately after marking the chain in flight, launching the scrub
-// goroutine under scarMarkerGuarded. The marker is set synchronously so the
-// Unwired hooks (no production taints probe / panic fallback installed) mean
-// the overseer never went through wireScarScrubHooks — fail closed to the
-// legacy immediate quarantine so a failed chain never silently integrates.
+// immediately after claiming the chain's in-flight marker, launching the
+// scrub goroutine under scarMarkerGuarded. Unwired hooks (no production
+// taints probe / panic fallback installed) mean the overseer never went
+// through wireScarScrubHooks — fail closed to the legacy immediate
+// quarantine so a failed chain never silently integrates.
 func launchScarScrub(o *Overseer, event ChainCompletedEvent, branch string) {
 	ci := event.ChainInfo
 	if ci == nil || ci.ProjectPath == "" {
@@ -375,10 +382,9 @@ func launchScarScrub(o *Overseer, event ChainCompletedEvent, branch string) {
 	if key == "" {
 		key = ci.RootBeadID.String()
 	}
-	if scarScrubActive(nil, key) {
+	if !scarClaim(key) {
 		return // a scrub is already in flight for this chain
 	}
-	scarScrubMarkers.Store(key, true)
 	go func() {
 		dec := scarMarkerGuarded(o, key, func() scarDecision {
 			return newChainScarScrubber(o, bossEvents(o), defaultScrubHooks()).run(event, branch)
@@ -395,10 +401,7 @@ func scarLegacyQuarantine(o *Overseer, event ChainCompletedEvent, branch string)
 	if o == nil || ci == nil {
 		return
 	}
-	project, key := ci.ProjectPath, ci.WorktreeKey
-	if key == "" {
-		key = ci.RootBeadID.String()
-	}
+	project, key := ci.ProjectPath, chainKeyOf(ci)
 	if o.worktreeManager == nil {
 		log.Printf("[Worktree] chain %s: worktree manager unavailable, quarantine skipped", key)
 		return
@@ -429,11 +432,7 @@ func scarAfterScrub(o *Overseer, event ChainCompletedEvent, dec scarDecision) {
 	if o == nil || ci == nil {
 		return
 	}
-	project := ci.ProjectPath
-	key := ci.WorktreeKey
-	if key == "" {
-		key = ci.RootBeadID.String()
-	}
+	project, key := ci.ProjectPath, chainKeyOf(ci)
 	if dec == scarSkipped && o.worktreeManager != nil {
 		branch := ci.WorktreeBranch
 		if branch == "" {
@@ -630,8 +629,7 @@ func wireScarScrubHooks(o *Overseer) {
 		return o.worktreeManager.IntegrateBranchAndRemove(projectPath, key, branch)
 	}
 	h.quarantine = func(projectPath, key, branch string) (string, error) {
-		qBranch, err := scarQuarantineChain(o, projectPath, key, branch)
-		return qBranch, err
+		return scarQuarantineChain(o, projectPath, key, branch)
 	}
 	h.addLabels = func(projectPath string, id types.BeadID, labels []string) error {
 		if o.beadsClient == nil {
