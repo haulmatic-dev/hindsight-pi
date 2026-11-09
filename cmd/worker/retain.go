@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/haulmatic-dev/hydra/internal/degrade"
 )
@@ -43,16 +46,56 @@ func buildRetainContent(result *ExecutionResult) string {
 	if result == nil {
 		return ""
 	}
+	var b strings.Builder
+	// Fix-retention hook LEADS with the commits this worker landed so
+	// extraction derives "fixed by <sha>" corrective facts automatically —
+	// the stale-as-current asymmetry (incidents retained, fixes not) dies
+	// here. Leading also preserves the failure-evidence-at-tail invariant
+	// of sanitizeForRetain below.
+	b.WriteString(strings.TrimLeft(collectFixCommits(), "\n"))
 	if result.Verdict != nil {
-		if b, err := json.Marshal(result.Verdict); err == nil {
-			content := "HYDRA_VERDICT: " + string(b)
+		if v, err := json.Marshal(result.Verdict); err == nil {
+			content := "HYDRA_VERDICT: " + string(v)
 			if len(content) > retainVerdictCap {
 				content = content[:retainVerdictCap]
 			}
-			return content
+			b.WriteString(content)
+		} else {
+			b.WriteString(sanitizeForRetain(result.Output))
 		}
+	} else {
+		b.WriteString(sanitizeForRetain(result.Output))
 	}
-	return sanitizeForRetain(result.Output)
+	return b.String()
+}
+
+// collectFixCommits lists the most recent commits from the worktree the
+// worker executed in (cwd). Fail-open: no git, no commits, or a dirty
+// mid-rebase state returns "" — retention must never fail on this.
+func collectFixCommits() string {
+	out, err := execGitLog()
+	if err != nil || strings.TrimSpace(out) == "" {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) > 10 {
+		lines = lines[:10]
+	}
+	var b strings.Builder
+	b.WriteString("\n\nFIX_COMMITS:\n")
+	for _, l := range lines {
+		b.WriteString("- " + strings.TrimSpace(l) + "\n")
+	}
+	return b.String()
+}
+
+func execGitLog() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "log", "--oneline", "--no-decorate", "-n", "10")
+	cmd.Dir = "."
+	out, err := cmd.Output()
+	return string(out), err
 }
 
 // sanitizeForRetain strips extraction-hostile noise from raw output:

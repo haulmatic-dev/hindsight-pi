@@ -562,10 +562,17 @@ func (c *Client) buildRetainRequest(memory *ExecutionMemory) map[string]interfac
 		"success":    fmt.Sprintf("%v", memory.ExecutionResult.Success),
 	}
 
-	// Build tags from bead metadata
-	tags := []string{"coding-brain", "execution", memory.BeadMetadata.Type}
+	// Build tags from bead metadata + fix-retention taxonomy: status tag
+	// makes corrective facts filterable (status:fixed feeds supersession),
+	// domain:execution aligns with the bank taxonomy.
+	tags := []string{"coding-brain", "execution", memory.BeadMetadata.Type, "domain:execution"}
 	if memory.BeadMetadata.Project != "" {
 		tags = append(tags, memory.BeadMetadata.Project)
+	}
+	if memory.ExecutionResult.Success {
+		tags = append(tags, "status:fixed")
+	} else {
+		tags = append(tags, "status:failed")
 	}
 
 	return map[string]interface{}{

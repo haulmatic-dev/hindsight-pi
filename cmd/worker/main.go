@@ -2554,8 +2554,9 @@ A turn ending without this block is treated as unfinished and you will be re-pro
 		for _, c := range stableByContentHash(contents) {
 			promptParts = append(promptParts, "- "+c)
 		}
-	} else if hindsightContext != nil {
-		// Memory service was reachable but returned nothing for this bead:
+	} else {
+		// No memories were pre-loaded for this bead (service down, or recall
+		// returned nothing): one discretionary search is still worth a turn
 		// one discretionary search is still worth a turn (moved here from the
 		// frozen head 2026-11-09 — the old unconditional mandate made workers
 		// re-search terms the daemon had already injected, double-spending

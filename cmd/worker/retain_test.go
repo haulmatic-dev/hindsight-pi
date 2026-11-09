@@ -56,7 +56,8 @@ func TestBuildRetainContent_FallbackTailBiasedCap(t *testing.T) {
 	tail := "FAIL: TestRegistry expected 1 got 2"
 	result := &ExecutionResult{Output: head + strings.Repeat("filler\n", 2000) + tail}
 	content := buildRetainContent(result)
-	if len(content) > retainSanitizedCap+64 {
+	// commits block (~300-600B) + capped sanitized output
+	if len(content) > retainSanitizedCap+64+len(collectFixCommits()) {
 		t.Errorf("sanitized content exceeds cap: %d", len(content))
 	}
 	if !strings.HasSuffix(content, tail) {
@@ -68,7 +69,10 @@ func TestBuildRetainContent_NilAndEmpty(t *testing.T) {
 	if got := buildRetainContent(nil); got != "" {
 		t.Errorf("nil result = empty content, got %q", got)
 	}
-	if got := buildRetainContent(&ExecutionResult{}); got != "" {
-		t.Errorf("empty result = empty content, got %q", got)
+	// Non-nil empty result in a git repo still carries the FIX_COMMITS block
+	// (fix-retention hook, now leading); outside git it's empty — both fine.
+	got := buildRetainContent(&ExecutionResult{})
+	if got != "" && !strings.HasPrefix(got, "FIX_COMMITS") {
+		t.Errorf("empty result = commits-leading or empty, got %q", got[:min(len(got), 30)])
 	}
 }
