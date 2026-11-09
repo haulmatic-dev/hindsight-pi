@@ -166,3 +166,19 @@ npm run typecheck
 npm test
 HINDSIGHT_BASE_URL=http://<your-hindsight-host>:8888 npm run smoke
 ```
+
+## Upstream sync policy
+
+This is a fork of `walodayeet/pi-hindsight` (npm: `@walodayeet/hindsight-pi`),
+carrying org-specific hardening (timeout fail-open guards, async flush, bank
+existence checks). When upstream releases:
+
+1. `git fetch upstream && git rebase upstream/main` (resolve conflicts in
+   `extensions/` — our changes are in `client.ts`, `index.ts`, `commands.ts`)
+2. `npx vitest run && npm run typecheck` — both must pass
+3. PR the rebased branch; admin-merge after CI
+4. If upstream lands the same fix independently (as happened with the
+   timeout guards), skip our duplicate commit — upstream wins
+
+Never force-push main; always PR. The `haulmatic-dev` org is the source of
+truth for the fleet (`settings.json` references this repo).
