@@ -166,7 +166,7 @@ func (c *BeadCloser) tryAcceptEmptyClose(bead *types.Bead, repoName, changedRepo
 	//                            (someone still owns the deferred work).
 	// Unverifiable or absent references reject the close as before.
 	if reason == acceptedEmptySuperseded || reason == acceptedEmptyChainDeferredRoot {
-		if !c.verifyEmptyCloseReference(bead, repoName, v.Summary, reason) {
+		if !c.verifyEmptyCloseReference(bead, repoName, changedRepoPath, v.Summary, reason) {
 			log.Printf("[VerifiedClose] Bead %s empty-diff reason %q FAILED reference verification — rejecting", bead.ID, reason)
 			return false
 		}
@@ -217,13 +217,25 @@ func beadRefPatternFor(prefix string) *regexp.Regexp {
 	return regexp.MustCompile(regexp.QuoteMeta(prefix) + `-([a-z0-9]{3,6})\b`)
 }
 
-// verifyEmptyCloseReference checks the bead NAMED in an accepted empty-close
-// summary. The reference must use the SAME project prefix as the closing
-// bead (derived from its own ID — fleet projects differ, hydra- only was a
-// review-round-1 blocker). Returns true when the reference resolves and
-// satisfies the reason's contract; false rejects the close (fail-closed —
-// an unresolvable claim is exactly the trust problem E1 exists to close).
-func (c *BeadCloser) verifyEmptyCloseReference(bead *types.Bead, repoName, summary, reason string) bool {
+// verifyEmptyCloseReference checks the reference NAMED in an accepted
+// empty-close summary. Two reference forms, both verified by the daemon:
+//
+//   bead ref (both reasons) — same project prefix as the closing bead
+//     (derived from its own ID; fleet projects differ — hydra- only was a
+//     review-round-1 blocker):
+//       superseded             → named bead is terminal (work concluded)
+//       chain-deferred-to-root → named bead is open or in_progress (root
+//                                still owns the deferred work)
+//
+//   commit ref (superseded only) — a 7-40 hex sha naming the commit that
+//     landed the superseding work; verified as an ancestor of the repo's
+//     HEAD (the work actually landed — review gap: bead-only refs rejected
+//     legitimate "superseded by commit" closes).
+//
+// Returns true when a reference resolves and satisfies the reason's
+// contract; false rejects the close (fail-closed — an unresolvable claim
+// is exactly the trust problem E1 exists to close).
+func (c *BeadCloser) verifyEmptyCloseReference(bead *types.Bead, repoName, changedRepoPath, summary, reason string) bool {
 	prefix := beadRefPrefix(bead.ID)
 	if prefix == "" {
 		return false // cannot derive a reference namespace — reject
@@ -270,6 +282,11 @@ func (c *BeadCloser) verifyEmptyCloseReference(bead *types.Bead, repoName, summa
 		}
 	}
 	if ref == nil {
+		// Commit-sha fallback (superseded only): the superseding work may
+		// have landed as a direct commit with no bead of its own.
+		if reason == acceptedEmptySuperseded {
+			return verifySupersededCommitRef(changedRepoPath, summary)
+		}
 		return false
 	}
 	switch reason {
@@ -281,4 +298,33 @@ func (c *BeadCloser) verifyEmptyCloseReference(bead *types.Bead, repoName, summa
 		return ref.Status == types.StatusOpen || ref.Status == types.StatusInProgress
 	}
 	return false
+}
+
+// commitShaPattern matches abbreviated (7+) and full (40) git SHAs in a
+// summary. 7 is git's default abbreviation floor; words shorter than 7 hex
+// chars are far more likely prose than a sha.
+var commitShaPattern = regexp.MustCompile(`\b([0-9a-f]{7,40})\b`)
+
+// verifySupersededCommitRef accepts a superseded close whose summary names
+// the commit that landed the superseding work: the sha must resolve in the
+// repo AND be an ancestor of HEAD (landed, not just dangling). Fail-closed
+// on any git error or non-ancestor.
+func verifySupersededCommitRef(repoPath, summary string) bool {
+	if repoPath == "" {
+		return false
+	}
+	m := commitShaPattern.FindStringSubmatch(strings.ToLower(summary))
+	if m == nil {
+		return false
+	}
+	sha := m[1]
+	// Resolve first: a non-existent sha errors and fails closed.
+	if _, err := gitOut(repoPath, "rev-parse", "--verify", sha+"^{commit}"); err != nil {
+		return false
+	}
+	// Ancestor of HEAD = the superseding work landed on this branch.
+	if _, err := gitOut(repoPath, "merge-base", "--is-ancestor", sha, "HEAD"); err != nil {
+		return false
+	}
+	return true
 }

@@ -180,7 +180,7 @@ func TestVerifyBeforeClose_EmptyDiffAcceptedReason(t *testing.T) {
 func TestVerifyEmptyCloseReference_NonHydraProject(t *testing.T) {
 	c := &BeadCloser{}
 	// No resolver/client: verification must fail closed, never crash.
-	if c.verifyEmptyCloseReference(&types.Bead{ID: "srv-telematics-ab12", Project: "srv-telematics"}, "repo", "superseded by srv-telematics-cd34", acceptedEmptySuperseded) {
+	if c.verifyEmptyCloseReference(&types.Bead{ID: "srv-telematics-ab12", Project: "srv-telematics"}, "repo", "", "superseded by srv-telematics-cd34", acceptedEmptySuperseded) {
 		t.Error("nil client must fail closed, not accept")
 	}
 }

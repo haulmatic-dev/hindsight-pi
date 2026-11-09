@@ -2,6 +2,7 @@ package core
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -34,7 +35,7 @@ func TestMaxGateFpRepeat(t *testing.T) {
 // superseded without a named bead = unverifiable = reject.
 func TestVerifyEmptyCloseReference_NoReference(t *testing.T) {
 	c := &BeadCloser{}
-	if c.verifyEmptyCloseReference(&types.Bead{ID: "hydra-ab12", Project: "p"}, "repo", "superseded: work done elsewhere", acceptedEmptySuperseded) {
+	if c.verifyEmptyCloseReference(&types.Bead{ID: "hydra-ab12", Project: "p"}, "repo", "", "superseded: work done elsewhere", acceptedEmptySuperseded) {
 		t.Error("summary without a bead reference must be rejected")
 	}
 }
@@ -42,7 +43,7 @@ func TestVerifyEmptyCloseReference_NoReference(t *testing.T) {
 // Naming itself is not a reference.
 func TestVerifyEmptyCloseReference_SelfReference(t *testing.T) {
 	c := &BeadCloser{}
-	if c.verifyEmptyCloseReference(&types.Bead{ID: "hydra-ab12", Project: "p"}, "repo", "superseded by hydra-ab12", acceptedEmptySuperseded) {
+	if c.verifyEmptyCloseReference(&types.Bead{ID: "hydra-ab12", Project: "p"}, "repo", "", "superseded by hydra-ab12", acceptedEmptySuperseded) {
 		t.Error("self-reference must be rejected")
 	}
 }
@@ -120,4 +121,43 @@ func TestBeadRefPrefix(t *testing.T) {
 			t.Errorf("beadRefPrefix(%q) = %q, want %q", tc.id, got, tc.want)
 		}
 	}
+}
+
+// --- E1 commit-sha fallback ---
+
+func TestVerifySupersededCommitRef(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs git")
+	}
+	dir := t.TempDir()
+	run := func(cmd string) {
+		if out, err := exec.Command("bash", "-c", cmd).CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", cmd, err, out)
+		}
+	}
+	run("cd " + dir + " && git init -q && git config user.email t@t && git config user.name t && echo x > f && git add . && git commit -q -m base")
+	out, _ := runOut(t, "cd "+dir+" && git rev-parse HEAD")
+	sha := strings.TrimSpace(out)
+	run("cd " + dir + " && echo y >> f && git add . && git commit -q -m superseder")
+	// Ancestor of HEAD → accept.
+	if !verifySupersededCommitRef(dir, "superseded by commit "+sha) {
+		t.Error("ancestor sha must verify")
+	}
+	// Non-existent sha → reject (fail-closed).
+	if verifySupersededCommitRef(dir, "superseded by commit 1234567deadbeef") {
+		t.Error("unresolvable sha must reject")
+	}
+	// No sha at all → reject.
+	if verifySupersededCommitRef(dir, "superseded by that one commit yesterday") {
+		t.Error("prose without sha must reject")
+	}
+	// Empty repo path → reject.
+	if verifySupersededCommitRef("", "superseded by "+sha) {
+		t.Error("empty repo path must reject")
+	}
+}
+
+func runOut(t *testing.T, cmd string) (string, error) {
+	out, err := exec.Command("bash", "-c", cmd).CombinedOutput()
+	return string(out), err
 }
