@@ -10,6 +10,7 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 ## [Unreleased]
 
 ### Changed
+- Changed: worker memory efficiency + client simplification — (1) the unconditional `hindsight_search` discovery mandate moved from the frozen prompt head to a tail FALLBACK that fires only when the daemon's pre-query injected no memories (workers were double-spending turns re-searching terms already in their prompt; one-time prompt-cache invalidation from the head change). (2) `GetMentalModels` collapses the list→per-model-detail stitch into one `LIST ?detail=content` call (param verified live on 1.2.0; N+1 GETs → 1). *Authored by a Hydra dogfood session.*
 - Adversary close gate now reviews on GLM 5.3 High (llm-router `glm-5.3-high` -> OpenRouter `z-ai/glm-5.3`, $1.40/M output, router cap $2.50/M, sort price) — R3' fix: the verifier no longer runs the same model family that wrote the diffs it reviews. Flash remains the worker volume tier.
 ### Fixed
 - E1 commit-sha references: a `superseded` empty-close may name the commit that landed the superseding work (7-40 hex sha, verified as an ancestor of HEAD) — bead-only references rejected legitimate "superseded by commit" closes.

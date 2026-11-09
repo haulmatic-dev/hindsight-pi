@@ -2409,11 +2409,6 @@ func buildPiPrompt(bead types.Bead, hindsightContext *agents.ContextEnrichment, 
 	// Deterministic discovery directives (session forensics 2026-08-24):
 	// workers never invoked graphify and only rarely ran hindsight_search
 	// because skills are discretionary. Convert the two most valuable
-	// discovery tools into protocol so they cannot be skipped. The per-bead
-	// graphify query line ships in the variable tail (it embeds the title).
-	promptParts = append(promptParts,
-		"DISCOVERY PROTOCOL: at bead start run `hindsight_search` once with this bead's key terms; skip silently if the tool is unavailable.")
-
 	// Workspace guard (incident 2jjz8, 2026-08-24): a worker cd'd out of
 	// its worktree and wrote a spec file into the main checkout. The
 	// dirty-main auto-commit swept it onto the branch, but the worktree was
@@ -2559,6 +2554,14 @@ A turn ending without this block is treated as unfinished and you will be re-pro
 		for _, c := range stableByContentHash(contents) {
 			promptParts = append(promptParts, "- "+c)
 		}
+	} else if hindsightContext != nil {
+		// Memory service was reachable but returned nothing for this bead:
+		// one discretionary search is still worth a turn (moved here from the
+		// frozen head 2026-11-09 — the old unconditional mandate made workers
+		// re-search terms the daemon had already injected, double-spending
+		// turns; discovery forensics 2026-08-24's goal is met by this fallback).
+		promptParts = append(promptParts,
+			"DISCOVERY FALLBACK: no memories were pre-loaded for this bead; run `hindsight_search` once with its key terms (skip silently if unavailable).")
 	}
 
 	// Mental models: living summaries of the bank (validation patterns,

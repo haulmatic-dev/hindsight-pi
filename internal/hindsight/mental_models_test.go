@@ -8,25 +8,21 @@ import (
 )
 
 func TestGetMentalModelsFiltersEmptyContent(t *testing.T) {
-	// The LIST endpoint projects content as empty; real content lives in the
-	// per-model DETAIL endpoint. The client must stitch list -> detail.
+	// LIST with ?detail=content returns content inline (live-verified on
+	// 1.2.0); never-refreshed shells carry empty content and must be filtered.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/v1/default/banks/coding-brain/mental-models" {
-			_, _ = w.Write([]byte(`{"items":[
-				{"id":"mm-1","name":"Has content","content":""},
-				{"id":"mm-2","name":"Never refreshed","content":""}
-			],"total":2,"limit":100,"offset":0}`))
+		if r.URL.Path != "/v1/default/banks/coding-brain/mental-models" {
+			http.NotFound(w, r)
 			return
 		}
-		switch r.URL.Path {
-		case "/v1/default/banks/coding-brain/mental-models/mm-1":
-			_, _ = w.Write([]byte(`{"id":"mm-1","name":"Has content","content":"rule A\nrule B"}`))
-		case "/v1/default/banks/coding-brain/mental-models/mm-2":
-			_, _ = w.Write([]byte(`{"id":"mm-2","name":"Never refreshed","content":""}`))
-		default:
-			http.NotFound(w, r)
+		if r.URL.Query().Get("detail") != "content" {
+			t.Errorf("expected detail=content param, got %q", r.URL.RawQuery)
 		}
+		_, _ = w.Write([]byte(`{"items":[
+			{"id":"mm-1","name":"Has content","content":"rule A"},
+			{"id":"mm-2","name":"Never refreshed","content":""}
+		],"total":2,"limit":100,"offset":0}`))
 	}))
 	defer srv.Close()
 
@@ -35,11 +31,8 @@ func TestGetMentalModelsFiltersEmptyContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMentalModels: %v", err)
 	}
-	if len(models) != 1 {
-		t.Fatalf("want 1 non-empty model, got %d: %+v", len(models), models)
-	}
-	if models[0].Name != "Has content" || models[0].Content != "rule A\nrule B" {
-		t.Fatalf("unexpected model: %+v", models)
+	if len(models) != 1 || models[0].Name != "Has content" || models[0].Content != "rule A" {
+		t.Fatalf("unexpected models: %+v", models)
 	}
 }
 

@@ -799,17 +799,16 @@ type mentalModelsResponse struct {
 	Total int           `json:"total"`
 }
 
-// GetMentalModels lists the bank's mental models (cheap list read, no LLM).
-// NOTE: the LIST endpoint projects `content` (and `trigger`) as empty — real
-// content only comes from the per-model DETAIL endpoint — so this fetches the
-// detail for each listed model (a handful of ~50ms GETs, still no LLM).
-// Models with genuinely empty content (never refreshed) are filtered out.
+// GetMentalModels lists the bank's mental models with full content in ONE
+// call: LIST ?detail=content (param exists since 0.10.x; verified live on
+// 1.2.0 — the default LIST projection returns empty content). Models with
+// genuinely empty content (never refreshed) are filtered out.
 func (c *Client) GetMentalModels(ctx context.Context) ([]MentalModel, error) {
 	if !c.IsEnabled() {
 		return nil, nil
 	}
 
-	url := fmt.Sprintf("%s/v1/default/banks/%s/mental-models", c.baseURL, BankID)
+	url := fmt.Sprintf("%s/v1/default/banks/%s/mental-models?detail=content", c.baseURL, BankID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create mental models request: %w", err)
@@ -837,44 +836,9 @@ func (c *Client) GetMentalModels(ctx context.Context) ([]MentalModel, error) {
 
 	models := make([]MentalModel, 0, len(parsed.Items))
 	for _, m := range parsed.Items {
-		detail, err := c.getMentalModelDetail(ctx, m.ID)
-		if err != nil {
-			// fail-open per model: one bad detail must not drop the rest
-			models = append(models, m) // keep whatever the list knew (likely empty content)
-			continue
-		}
-		if strings.TrimSpace(detail.Content) != "" {
-			models = append(models, detail)
+		if strings.TrimSpace(m.Content) != "" {
+			models = append(models, m)
 		}
 	}
 	return models, nil
-}
-
-// getMentalModelDetail fetches one model with its full content.
-func (c *Client) getMentalModelDetail(ctx context.Context, id string) (MentalModel, error) {
-	url := fmt.Sprintf("%s/v1/default/banks/%s/mental-models/%s", c.baseURL, BankID, id)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return MentalModel{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return MentalModel{}, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return MentalModel{}, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return MentalModel{}, fmt.Errorf("detail %s returned %d", id, resp.StatusCode)
-	}
-	var m MentalModel
-	if err := json.Unmarshal(body, &m); err != nil {
-		return MentalModel{}, err
-	}
-	return m, nil
 }
