@@ -9,6 +9,8 @@ Hydra-authored) MUST add an entry under **Unreleased** — see AGENTS.md
 
 ## [Unreleased]
 
+### Changed
+- Adversary close gate now reviews on GLM 5.3 High (llm-router `glm-5.3-high` -> OpenRouter `z-ai/glm-5.3`, $1.40/M output, router cap $2.50/M, sort price) — R3' fix: the verifier no longer runs the same model family that wrote the diffs it reviews. Flash remains the worker volume tier.
 ### Fixed
 - E1 commit-sha references: a `superseded` empty-close may name the commit that landed the superseding work (7-40 hex sha, verified as an ancestor of HEAD) — bead-only references rejected legitimate "superseded by commit" closes.
 - Wave-1 reliability fixes (review v2, 2026-11-09): `forceCompleteBead` GraphQL mutation hard-disabled (agents could force-complete their own beads around every close gate; no operator tooling used it); Pan's `clear-escalation` refuses beads with repeated gate fingerprints (substantive failures were resettable on prompt-only rules — observed live on ppd3); `reset-retries` is one-shot per bead with a fail-closed stamp (previously unlimited); Charon token-kill stays capped at 2 per bead with an absolute 3× ceiling; empty-close tokens (`superseded`, `chain-deferred-to-root`) now require a named same-project bead reference verified by the daemon (project-prefix derived — not hydra-only; adversarial review caught that blocker); deploy tier-1 human-review list covers verification code (`internal/validation`, `internal/security`, `internal/hindsight`, `tools/`); the publisher validates its PR-waiting memo against GitHub (a PR closed unmerged wedged publishes indefinitely — live on PR #488).
