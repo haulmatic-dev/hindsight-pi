@@ -15,8 +15,10 @@ This document is the hydra-side reference for the shared memory system: what run
 | Pi extension (`haulmatic-dev/hindsight-pi` @ main) | live for workers + manual pi | timeout fail-open guards, async flush (session boundaries never block on extraction) |
 | Daemon pre-query (`internal/hindsight/client.go`) | live | recall per bead (concurrent with spawn), `prefer_observations=true`, `max_tokens=800`, budget low |
 | Mental models (6) | live, auto-refreshing | injected into worker prompts (≤4K chars, list→detail stitch) |
-| **Pipelines** (infra repo): `cass-sync` (nightly 02:30), `hs-ingest` (on demand) | live | see §3 |
+| **Pipelines** (infra repo): `cass-sync` (02:30), `extractor` (02:45), `hs-ingest` (on demand) | live | see §3 — the four-pipeline knowledge split is COMPLETE |
 | **Golden queries** (monthly, 1st, 03:00) | live | 20 probes + 3 dup sentinels; exit-code contract |
+| **dup-scan** (weekly, Sun 02:00) | live | read-only duplicate-cluster detector; M3.1-Flash classifies ambiguous clusters; invalidation stays reviewed-manual |
+| MCP endpoint (`/mcp/coding-brain/`) | live, hardened | 26-tool allowlist (destructive tools denied) + audit log; remote laptops via SSH tunnel (`remote-memory-access.md`) |
 
 Legacy banks (`hydra` — the old split-brain daemon bank, merged then deleted 2026-11-08; `hermes`/`pi`/`default` — stale debris, left in place) are gone or dormant. Nothing writes them.
 
@@ -36,7 +38,7 @@ All pipelines import via the **transfer-archive path** with a **stable document 
 |---|---|---|---|
 | `cass-sync` | CASS playbook → bank | nightly 02:30 | curated rules as tagged facts (deduped — CASS itself was 40% duplicated until `cass-dedupe` ran) |
 | `hs-ingest` | file → bank | on demand (`hs-ingest <file> --service X`) | verbatim chunks, taxonomy tags; NOT `files/retain` (that path produces untagged docs) |
-| *(planned)* extractor | graphify + OpenAPI → bank | CI | service connectivity/contract facts — the remaining Phase-2 build |
+| `extractor` | graph.json + OpenAPI → bank | nightly 02:45 | deterministic code-structure facts: hub symbols, call-pair connectivity, surface area (LLM-free; OpenAPI parser idle until specs exist on this box; `--tombstone` for catalog removals) |
 
 Known importer traps (learned the hard way, all fixed in the pipeline code): metadata must be string-valued; every chunk needs a unique `chunk_index`; per-fact DELETE does not exist (curation is `PATCH state=invalidated`).
 
@@ -64,8 +66,10 @@ Known importer traps (learned the hard way, all fixed in the pipeline code): met
 
 ## 7. Open work
 
-1. **Extractor** (Phase-2 #3): graphify `graph.json` + OpenAPI → connectivity facts. Import path proven twice; needs fact templates + service catalog + CI wiring.
-2. **Supersession pass** (Phase-1.3 remainder): corrective facts for the broader fixed-bug set — stale-but-unique facts still serve as current (e.g. the duplicate-worker history pre-fix).
-3. Pan-cluster dedupe (×6 "Pan is a shepherd…") — same 1.4 procedure.
-4. **Remote access**: design landed — SSH-tunnel transport (per-user keys, zero server exposure) + the server's built-in MCP endpoint for Claude Code/Cursor. Setup and operator checklist: `docs/operations/remote-memory-access.md`. Remaining: bank hardening (MCP allowlist + audit log), `setup-remote-memory.sh` kit, first laptop test.
-5. **GCS backup** (nightly `pg_dump` + restic plan approved) — **the 29 GB DB is still single-copy**; blocked on bucket + service-account key.
+1. **GCS backup** (nightly `pg_dump` + restic plan approved) — **the 29 GB DB is still single-copy**; blocked on bucket + service-account key.
+2. **Supersession pass** (Phase-1.3 remainder): corrective facts for the broader fixed-bug set — stale-but-unique facts still serve as current (e.g. the pre-fix duplicate-worker history).
+3. First laptop test of the remote kit (`setup-remote-memory.sh` + CLAUDE.md protocol block — both landed, untested off-box).
+4. Skills ×2 (tag discipline, fix-retention) + tag-lint cron.
+5. Fix-retention hook — bead completion auto-retains the corrective fact (kills stale-as-current at the source).
+6. Extractor v2 (when srv repos/specs are checked out on this box): OpenAPI endpoint facts live, cross-repo connectivity (needs service catalog + client-call analysis).
+7. dup-scan v2 fixes: M3.1-Flash `reasoning_content` fallback, skip clusters whose signature contains `<bead>` (lifecycle-fact trap).
