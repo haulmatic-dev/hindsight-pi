@@ -1,5 +1,6 @@
 import type { HindsightHandles } from "./client.js";
 import type { RetainMode, WriteFrequency } from "./config.js";
+import { getProjectName, taxonomyTags } from "./retain/tags.js";
 
 const REDACT_PLACEHOLDER = "<REDACTED>";
 const CONTINUED_PREFIX = "[continued] ";
@@ -116,11 +117,15 @@ const META_MEMORY_QUERY_RE = /\b(what memory|what do you remember|what was recal
 const META_MEMORY_CONTENT_RE = /\b(what memory do you have|what was recalled|what got recalled|what was loaded|what got loaded|don't use any tools|do not use any tools|hindsight_context|hidden recalled payload|visible recall state|raw hidden recalled payload|memory context loaded)\b/i;
 const sanitizeTag = (value: string): string => value.toLowerCase().replace(/[^a-z0-9:_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
 const buildRetainTags = (handles: HindsightHandles, bankId: string, kind: "turn-summary" | "explicit", origin: "auto" | "explicit"): string[] => {
+  // Taxonomy tags (plane/kind/tier/source/project) plus constantTags. The
+  // legacy kind:turn-summary / kind:explicit tags became kind:transcript /
+  // kind:lesson; origin: stays for recall filters from before the taxonomy.
   const tags = [
-    "source:pi",
+    ...(handles.config.constantTags ?? []),
+    ...taxonomyTags(handles.config, kind === "explicit" ? "lesson" : "transcript"),
+    `project:${getProjectName(handles.config, process.cwd())}`,
     `workspace:${sanitizeTag(handles.config.workspace)}`,
     `bank:${sanitizeTag(bankId)}`,
-    `kind:${kind}`,
     `origin:${origin}`,
   ];
   return [...new Set(tags.filter((tag) => tag.length > 0))];

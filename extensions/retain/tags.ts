@@ -33,12 +33,26 @@ export const expandTagPlaceholders = (tags: string[] | null | undefined, config:
   return [...new Set(tags.map((tag) => values[tag] ?? tag).filter(Boolean))];
 };
 
+export type TaxonomyKind = "transcript" | "lesson";
+
+/**
+ * Shared memory tag taxonomy (hydra docs/operations/memory-tag-taxonomy.md):
+ * every memory carries plane, kind, tier and source. Everything pi writes is a
+ * developer or agent statement, so tier:claimed. The source is pi unless
+ * constantTags names one (a Hydra worker sets source:hydra-worker).
+ */
+export const taxonomyTags = (config: Pick<HindsightConfig, "constantTags">, kind: TaxonomyKind): string[] => {
+  const source = (config.constantTags ?? []).find((tag) => tag.startsWith("source:")) ?? "source:pi";
+  return ["plane:experience", `kind:${kind}`, "tier:claimed", source];
+};
+
 export const buildAutomaticTags = (config: Pick<HindsightConfig, "constantTags" | "projectName">, ctx: ScopeContext, storeMethod: "auto" | "tool"): string[] => {
   const cwd = cleanPath(ctx.cwd);
   const session = ctx.sessionId || "unknown";
   const parent = ctx.parentId || session;
   return [...new Set([
-    ...config.constantTags,
+    ...(config.constantTags ?? []),
+    ...taxonomyTags(config, storeMethod === "tool" ? "lesson" : "transcript"),
     `session:${session}`,
     `parent:${parent}`,
     `cwd:${cwd}`,
