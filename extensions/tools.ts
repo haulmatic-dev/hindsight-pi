@@ -3,6 +3,7 @@ import { Type } from "@sinclair/typebox";
 import { ensureBank, getBankInfo, getBankInsights, getHandles, type HindsightHandles } from "./client.js";
 import { getRecallMode, type ReasoningLevel, type SearchBudget } from "./config.js";
 import { sessionRetained } from "./meta.js";
+import { getProjectName, taxonomyTags } from "./retain/tags.js";
 
 const sanitizeTag = (value: string): string => value.toLowerCase().replace(/[^a-z0-9:_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
 
@@ -174,13 +175,17 @@ export const registerTools = (pi: ExtensionAPI): void => {
           peer: handles.config.peerName,
           aiPeer: handles.config.aiPeer,
         },
-        tags: [
-          "source:pi",
+        // Taxonomy tags (plane/kind/tier/source/project) plus constantTags;
+        // origin:explicit stays so recall filters from before the taxonomy
+        // still find explicit saves.
+        tags: [...new Set([
+          ...(handles.config.constantTags ?? []),
+          ...taxonomyTags(handles.config, "lesson"),
+          `project:${getProjectName(handles.config, process.cwd())}`,
           `workspace:${sanitizeTag(handles.config.workspace)}`,
           `bank:${sanitizeTag(handles.bankId)}`,
-          "kind:explicit",
           "origin:explicit",
-        ],
+        ])],
       }], { async: false });
       return {
         content: [{ type: "text", text: `Saved durable memory to ${handles.bankId}.` }],

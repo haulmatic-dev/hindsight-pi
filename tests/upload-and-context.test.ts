@@ -180,6 +180,9 @@ describe("upload helpers", () => {
     expect(outcome && !outcome.skipped && outcome.summary.mode).toBe("saved");
     expect(calls.length).toBeGreaterThan(0);
     expect(calls[0]?.tags).toContain("source:pi");
+    expect(calls[0]?.tags).toEqual(expect.arrayContaining(["plane:experience", "kind:transcript", "tier:claimed", "origin:auto"]));
+    expect(calls[0]?.tags?.some((t: string) => t.startsWith("project:"))).toBe(true);
+    expect(calls[0]?.tags).not.toContain("kind:turn-summary");
     expect(calls[0]?.metadata?.kind).toBe("turn-summary");
   });
 

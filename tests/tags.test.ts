@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAutomaticTags, expandObservationScopes, expandTagPlaceholders, getProjectName } from "../extensions/retain/tags.js";
+import { buildAutomaticTags, expandObservationScopes, expandTagPlaceholders, getProjectName, taxonomyTags } from "../extensions/retain/tags.js";
 
 describe("retain tags and scopes", () => {
   const config = { constantTags: ["harness:pi"], projectName: "stable-project", observationScopes: [["{project}"], ["{cwd}"]] } as any;
@@ -17,7 +17,23 @@ describe("retain tags and scopes", () => {
       "parent:p1",
       "project:stable-project",
       "store_method:auto",
+      "plane:experience",
+      "kind:transcript",
+      "tier:claimed",
+      "source:pi",
     ]));
+  });
+
+  it("tags explicit saves as claimed lessons", () => {
+    expect(buildAutomaticTags(config, ctx, "tool")).toEqual(expect.arrayContaining(["kind:lesson", "tier:claimed"]));
+  });
+
+  it("takes the source from constantTags when one is set (Hydra workers)", () => {
+    const worker = { ...config, constantTags: ["source:hydra-worker"] };
+    const tags = taxonomyTags(worker, "transcript");
+    expect(tags).toContain("source:hydra-worker");
+    expect(tags).not.toContain("source:pi");
+    expect(buildAutomaticTags(worker, ctx, "auto").filter((t) => t.startsWith("source:"))).toEqual(["source:hydra-worker"]);
   });
 
   it("expands observation scopes at queue time", () => {
